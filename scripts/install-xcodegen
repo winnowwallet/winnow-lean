@@ -1,0 +1,28 @@
+#!/bin/bash
+# Install the exact XcodeGen binary audited for CI. Do not replace this with a
+# floating Homebrew install: project generation is part of the release build.
+set -euo pipefail
+
+VERSION="2.46.0"
+ARCHIVE_SHA256="4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
+ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/winnow-xcodegen-$VERSION"
+ARCHIVE="$ROOT/xcodegen.zip"
+
+install -d -m 700 "$ROOT"
+curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+  "https://github.com/yonaskolb/XcodeGen/releases/download/$VERSION/xcodegen.zip" \
+  --output "$ARCHIVE"
+
+actual=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+if [ "$actual" != "$ARCHIVE_SHA256" ]; then
+  echo "XcodeGen archive checksum mismatch: expected $ARCHIVE_SHA256, got $actual" >&2
+  exit 1
+fi
+
+unzip -q -o "$ARCHIVE" -d "$ROOT"
+test -x "$ROOT/xcodegen/bin/xcodegen"
+if [ -n "${GITHUB_PATH:-}" ]; then
+  printf '%s\n' "$ROOT/xcodegen/bin" >> "$GITHUB_PATH"
+else
+  echo "XcodeGen installed at $ROOT/xcodegen/bin/xcodegen"
+fi

@@ -1,0 +1,38 @@
+name: CI
+# The Lean app's checks on every pull request and push to main: the lanes of scripts/ci-lane on WarpBuild
+# (ci-parallel.yml), or one after another on GitHub's hosted macOS for forks and when asked (ci-hosted.yml).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+    inputs:
+      hosted:
+        description: Use the hosted fallback
+        type: boolean
+        default: false
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  hosted:
+    if: inputs.hosted == true || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
+    uses: ./.github/workflows/ci-hosted.yml
+  parallel:
+    if: inputs.hosted != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    uses: ./.github/workflows/ci-parallel.yml
+  validation:
+    if: always()
+    needs: [hosted, parallel]
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          HOSTED: ${{ needs.hosted.result }}
+          PARALLEL: ${{ needs.parallel.result }}
+        run: |
+          [[ "$HOSTED:$PARALLEL" == success:skipped || "$HOSTED:$PARALLEL" == skipped:success ]] || exit 1

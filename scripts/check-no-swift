@@ -1,0 +1,16 @@
+#!/bin/bash
+# The app has no Swift: none in the tree, none compiled, none linked.
+#   scripts/check-no-swift <xcodebuild log> <WinnowLean.app>
+set -euo pipefail
+LOG="${1:?xcodebuild log}"; APP="${2:?WinnowLean.app}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+fail=0
+swift_files=$(git -C "$ROOT" ls-files '*.swift')
+if [ -n "$swift_files" ]; then echo "Swift sources in the tree:"; echo "$swift_files"; fail=1; fi
+compiles=$(grep -c '^SwiftCompile\|^SwiftDriver' "$LOG" || true)
+if [ "$compiles" != 0 ]; then echo "$compiles Swift compile steps in $LOG"; fail=1; fi
+bin="$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+if otool -L "$bin" | grep -i swift; then echo "the app links Swift libraries"; fail=1; fi
+if [ -d "$APP/Frameworks" ] && ls "$APP/Frameworks" | grep -i swift; then echo "the app bundles Swift libraries"; fail=1; fi
+[ "$fail" = 0 ] && echo "no Swift: 0 sources, 0 compile steps, no Swift library linked or bundled"
+exit "$fail"

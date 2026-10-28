@@ -1,0 +1,123 @@
+#!/bin/bash
+# One CI lane of the Lean app, the same on a WarpBuild runner and on GitHub's hosted macOS:
+#
+#   scripts/ci-lane lean|regtest|ios|journey
+#
+# lean     builds Lean/ and LeanApp/ (the build checks every proof) and runs the tests that need no node
+#          and scripts/tests, and holds the imported census list to the app's decoder (census-check)
+# regtest  the tests against a disposable regtest bitcoind: io-test, backend-test, multisig-differential
+# ios      the app for the simulator (Debug, Release) and for devices (Release): no Swift anywhere, and a
+#          Release build ignores test mode's environment
+# journey  the Objective-C UI journeys in the simulator against a regtest fixture (scripts/ci-ui-journey),
+#          then the website's media from them in $CI_RESULTS/media (scripts/prepare-journey-media)
+#
+# Logs and evidence go to $CI_RESULTS (default $RUNNER_TEMP/winnow-lean-ci/<lane>); the lanes that import the
+# census (lean, ios, journey) leave its peers-source.txt there.
+set -euo pipefail
+lane=${1:?lean|regtest|ios|journey}
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export CI_RESULTS="${CI_RESULTS:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/winnow-lean-ci/$lane}"
+mkdir -p "$CI_RESULTS"
+start=$SECONDS
+step() { echo "::group::$1 ($((SECONDS - start)) s)"; }
+endstep() { echo "::endgroup::"; }
+
+# Lean: elan and the toolchain lean-toolchain names (cached by the workflow in ~/.elan)
+source "$ROOT/scripts/install-lean"
+
+bitcoin() {
+  command -v bitcoind >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install bitcoin >/dev/null
+  bitcoind -version | head -1
+}
+
+# census: the newest census's peer list, signature-verified and health-filtered (scripts/import-census), once
+# per lane, so every build in the lane ships the same list; its provenance goes with the lane's evidence
+census() {
+  "$ROOT/scripts/import-census"
+  cp "$ROOT/build/census/peers-source.txt" "$CI_RESULTS/peers-source.txt"
+}
+
+# run <dir> <name> <command...>: one test executable, run in its package's directory (tests read vectors
+# relative to it), its output kept, its verdict the exit code
+run() {
+  local dir=$1 name=$2; shift 2
+  (cd "$ROOT/$dir" && "$@") > "$CI_RESULTS/$name.log" 2>&1 || { tail -60 "$CI_RESULTS/$name.log"; echo "$name failed" >&2; return 1; }
+  grep -E "passed|agreements|disagreements" "$CI_RESULTS/$name.log" | tail -2
+}
+
+case "$lane" in
+  lean)
+    step "lake build Lean (every proof is checked here)"
+    (cd "$ROOT/Lean" && lake build && lake build multisig-test ledger-test silent-payment-test io-test multisig-differential)
+    endstep
+    step "lake build LeanApp"
+    (cd "$ROOT/LeanApp" && lake build && lake build records-test multisig-app-test ledger-transport-test backend-test)
+    endstep
+    step "census: import, and the app's decoder on the shipped list"
+    census
+    (cd "$ROOT/Lean" && lake build census-check)
+    "$ROOT/Lean/.lake/build/bin/census-check" "$ROOT/build/census/peers.json" | tee "$CI_RESULTS/census-check.log"
+    CENSUS_CHECK="$ROOT/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s "$ROOT/scripts/tests" -v \
+      > "$CI_RESULTS/scripts-tests.log" 2>&1 || { tail -60 "$CI_RESULTS/scripts-tests.log"; echo "scripts/tests failed" >&2; exit 1; }
+    tail -3 "$CI_RESULTS/scripts-tests.log"
+    endstep
+    step "tests"
+    run Lean multisig-test .lake/build/bin/multisig-test
+    run Lean ledger-test .lake/build/bin/ledger-test
+    run Lean silent-payment-test .lake/build/bin/silent-payment-test
+    run LeanApp records-test .lake/build/bin/records-test
+    run LeanApp multisig-app-test .lake/build/bin/multisig-app-test
+    run LeanApp ledger-transport-test .lake/build/bin/ledger-transport-test
+    endstep
+    ;;
+  regtest)
+    bitcoin
+    step "lake build"
+    (cd "$ROOT/Lean" && lake build io-test multisig-differential)
+    (cd "$ROOT/LeanApp" && lake build backend-test)
+    endstep
+    step "tests against regtest"
+    run Lean io-test .lake/build/bin/io-test
+    run LeanApp backend-test .lake/build/bin/backend-test
+    run Lean multisig-differential .lake/build/bin/multisig-differential --cases "${MULTISIG_CASES:-6}"
+    endstep
+    ;;
+  ios)
+    export DERIVED_DATA="${DERIVED_DATA:-$CI_RESULTS/DerivedData}"
+    census
+    export IMPORT_CENSUS=0
+    P="$DERIVED_DATA/Build/Products"
+    step "Debug, simulator"
+    BUILD_LOG="$CI_RESULTS/debug-iossim.log" "$ROOT/scripts/build-ios" Debug iossim
+    "$ROOT/scripts/check-no-swift" "$CI_RESULTS/debug-iossim.log" "$P/Debug-iphonesimulator/WinnowLean.app"
+    endstep
+    step "Release, simulator"
+    BUILD_LOG="$CI_RESULTS/release-iossim.log" "$ROOT/scripts/build-ios" Release iossim
+    "$ROOT/scripts/check-no-swift" "$CI_RESULTS/release-iossim.log" "$P/Release-iphonesimulator/WinnowLean.app"
+    "$ROOT/scripts/verify-release-no-test-mode" "$P/Release-iphonesimulator/WinnowLean.app" \
+      "$P/Debug-iphonesimulator/WinnowLean.app"
+    endstep
+    step "Release, devices (unsigned)"
+    BUILD_LOG="$CI_RESULTS/release-ios.log" "$ROOT/scripts/build-ios" Release ios
+    "$ROOT/scripts/check-no-swift" "$CI_RESULTS/release-ios.log" "$P/Release-iphoneos/WinnowLean.app"
+    endstep
+    ;;
+  journey)
+    bitcoin
+    census
+    export IMPORT_CENSUS=0
+    step "UI journeys"
+    UI_JOURNEY_OUT="$CI_RESULTS/journey" DERIVED_DATA="$CI_RESULTS/DerivedData" "$ROOT/scripts/ci-ui-journey"
+    endstep
+    step "website media"
+    # without ffmpeg the recording (well over 25 MiB) would be left out of the media
+    command -v ffmpeg >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg >/dev/null \
+      || echo "::warning::no ffmpeg; the website media will have no video"
+    python3 -m unittest discover -s "$ROOT/scripts/tests"
+    rm -rf "$CI_RESULTS/media"
+    "$ROOT/scripts/prepare-journey-media" "$CI_RESULTS/journey" "$CI_RESULTS/media"
+    endstep
+    ;;
+  *) echo "lane: lean, regtest, ios or journey" >&2; exit 2 ;;
+esac
+echo "$lane lane passed in $((SECONDS - start)) s"

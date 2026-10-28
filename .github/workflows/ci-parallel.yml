@@ -1,0 +1,166 @@
+name: Parallel validation
+# One WarpBuild runner per lane of scripts/ci-lane; `validation` requires every lane.
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  # Lean builds (every proof) and the tests that need no node
+  lean:
+    runs-on: warp-macos-26-arm64-12x
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore the Lean toolchain and builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.elan
+            Lean/.lake
+            LeanApp/.lake
+          key: lean-warp-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-${{ hashFiles('Lean/**/*.lean', 'LeanApp/**/*.lean', '!**/.lake/**') }}
+          restore-keys: |
+            lean-warp-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-
+      - name: lean lane
+        run: scripts/ci-lane lean
+      - name: Preserve lean evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lane-lean-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/winnow-lean-ci/lean/*.log
+            ${{ runner.temp }}/winnow-lean-ci/lean/peers-source.txt
+            ${{ runner.temp }}/winnow-lean-ci/lean/journey/
+            !${{ runner.temp }}/winnow-lean-ci/lean/journey/fixture/
+            !${{ runner.temp }}/winnow-lean-ci/lean/DerivedData/
+          if-no-files-found: warn
+          retention-days: 14
+  # Tests against a disposable regtest bitcoind
+  regtest:
+    runs-on: warp-macos-26-arm64-12x
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore the Lean toolchain and builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.elan
+            Lean/.lake
+            LeanApp/.lake
+          key: lean-warp-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-${{ hashFiles('Lean/**/*.lean', 'LeanApp/**/*.lean', '!**/.lake/**') }}
+          restore-keys: |
+            lean-warp-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-
+      - name: regtest lane
+        run: scripts/ci-lane regtest
+      - name: Preserve regtest evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lane-regtest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/winnow-lean-ci/regtest/*.log
+            ${{ runner.temp }}/winnow-lean-ci/regtest/journey/
+            !${{ runner.temp }}/winnow-lean-ci/regtest/journey/fixture/
+            !${{ runner.temp }}/winnow-lean-ci/regtest/DerivedData/
+          if-no-files-found: warn
+          retention-days: 14
+  # The app for the simulator and devices: no Swift, Release ignores test mode
+  ios:
+    runs-on: warp-macos-26-arm64-12x
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore the Lean toolchain and builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.elan
+            Lean/.lake
+            LeanApp/.lake
+          key: lean-warp-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-${{ hashFiles('Lean/**/*.lean', 'LeanApp/**/*.lean', '!**/.lake/**') }}
+          restore-keys: |
+            lean-warp-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-
+      - name: ios lane
+        run: scripts/ci-lane ios
+      - name: Preserve ios evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lane-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/winnow-lean-ci/ios/*.log
+            ${{ runner.temp }}/winnow-lean-ci/ios/peers-source.txt
+            ${{ runner.temp }}/winnow-lean-ci/ios/journey/
+            !${{ runner.temp }}/winnow-lean-ci/ios/journey/fixture/
+            !${{ runner.temp }}/winnow-lean-ci/ios/DerivedData/
+          if-no-files-found: warn
+          retention-days: 14
+  # The Objective-C UI journeys against a regtest fixture
+  journey:
+    runs-on: warp-macos-26-arm64-12x
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore the Lean toolchain and builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.elan
+            Lean/.lake
+            LeanApp/.lake
+          key: lean-warp-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-${{ hashFiles('Lean/**/*.lean', 'LeanApp/**/*.lean', '!**/.lake/**') }}
+          restore-keys: |
+            lean-warp-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-
+      - name: journey lane
+        run: scripts/ci-lane journey
+      - name: Publish the website's media
+        # scripts/prepare-journey-media's screenshots, browser video and journey-provenance.json, which the
+        # website (winnowwallet/website, scripts/fetch-journey-media) takes from main's newest successful run
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: journey-media
+          path: ${{ runner.temp }}/winnow-lean-ci/journey/media/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+      - name: Preserve journey evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lane-journey-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/winnow-lean-ci/journey/*.log
+            ${{ runner.temp }}/winnow-lean-ci/journey/peers-source.txt
+            ${{ runner.temp }}/winnow-lean-ci/journey/journey/
+            !${{ runner.temp }}/winnow-lean-ci/journey/journey/fixture/
+            !${{ runner.temp }}/winnow-lean-ci/journey/DerivedData/
+          if-no-files-found: warn
+          retention-days: 14
+  validation:
+    if: always()
+    needs: [lean, regtest, ios, journey]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every lane
+        env:
+          LEAN: ${{ needs.lean.result }}
+          REGTEST: ${{ needs.regtest.result }}
+          IOS: ${{ needs.ios.result }}
+          JOURNEY: ${{ needs.journey.result }}
+        run: |
+          [[ "$LEAN:$REGTEST:$IOS:$JOURNEY" == success:success:success:success ]]

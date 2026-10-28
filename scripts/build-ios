@@ -1,0 +1,54 @@
+#!/bin/bash
+# Build the Lean app for iOS from a clean checkout: Lake builds WinnowApp (and fetches the pinned ElmLean),
+# ElmLean's ios_lean_sources.sh gathers the generated C, prints the Objective-C shell and retargets Lean's
+# runtime, XcodeGen writes the project, and xcodebuild builds it.
+#
+#   scripts/build-ios <Debug|Release> [iossim|ios] [xcodebuild args...]
+#
+# iossim (default) builds for the simulator (ad-hoc signed); ios builds for devices, unsigned unless the
+# extra arguments say otherwise. PREPARE_ONLY=1 stops before xcodebuild (release.yml archives itself).
+# IMPORT_CENSUS (below) says when the census list is imported again.
+# The xcodebuild log is written to $BUILD_LOG (default LeanApp/ios/build/xcodebuild-<config>-<platform>.log).
+set -euo pipefail
+CONFIG="${1:?Debug or Release}"; PLATFORM="${2:-iossim}"; shift $(( $# < 2 ? $# : 2 ))
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$ROOT/LeanApp"
+OUT="$APP/ios/build"
+case "$PLATFORM" in
+  iossim) DEST="generic/platform=iOS Simulator" ;;
+  ios) DEST="generic/platform=iOS" ;;
+  *) echo "platform: iossim or ios" >&2; exit 2 ;;
+esac
+(cd "$APP" && lake build WinnowApp)
+# the census list the app ships (project.yml bundles it), verified and health-filtered by import-census:
+# CI (CI=true) and Release builds import the newest census, other builds only when the list is missing;
+# IMPORT_CENSUS=1 always imports, IMPORT_CENSUS=0 keeps an existing list
+case "${IMPORT_CENSUS-}" in
+  1) IMPORT=1 ;;
+  0) IMPORT=0 ;;
+  "") if [ "${CI:-}" = true ] || [ "$CONFIG" = Release ]; then IMPORT=1; else IMPORT=0; fi ;;
+  *) echo "IMPORT_CENSUS: 0 or 1" >&2; exit 2 ;;
+esac
+[ -f "$ROOT/build/census/peers.json" ] || IMPORT=1
+if [ "$IMPORT" = 1 ]; then "$ROOT/scripts/import-census"; fi
+# ios_lean_sources.sh reuses retargeted libraries newer than the toolchain's, whatever platform they were
+# retargeted to: start over when the platform changes
+mkdir -p "$OUT/lib"
+[ "$(cat "$OUT/lib/.platform" 2>/dev/null)" = "$PLATFORM" ] || rm -f "$OUT/lib/"*.a
+"$APP/.lake/packages/elmlean/framework/native/scripts/ios_lean_sources.sh" "$APP" WinnowApp "$OUT" "$PLATFORM"
+echo "$PLATFORM" > "$OUT/lib/.platform"
+if command -v xcodegen >/dev/null; then XCODEGEN=xcodegen
+else
+  "$ROOT/scripts/install-xcodegen" >/dev/null
+  XCODEGEN="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/winnow-xcodegen-2.46.0/xcodegen/bin/xcodegen"
+fi
+(cd "$APP/ios" && "$XCODEGEN" generate --quiet)
+[ "${PREPARE_ONLY:-0}" = 1 ] && exit 0
+SIGNING=()
+[ "$PLATFORM" = ios ] && [ $# -eq 0 ] && SIGNING=(CODE_SIGNING_ALLOWED=NO)
+LOG="${BUILD_LOG:-$OUT/xcodebuild-$CONFIG-$PLATFORM.log}"
+set -o pipefail
+xcodebuild -project "$APP/ios/WinnowLean.xcodeproj" -scheme WinnowLean -configuration "$CONFIG" \
+  -destination "$DEST" -derivedDataPath "${DERIVED_DATA:-$OUT/DerivedData}" ${SIGNING[@]+"${SIGNING[@]}"} "$@" build \
+  > "$LOG" 2>&1 || { tail -40 "$LOG"; exit 1; }
+grep -E '^\*\* BUILD' "$LOG" | tail -1
