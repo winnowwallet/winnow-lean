@@ -149,6 +149,8 @@ def configure (keys : StoreKeyVault) (path : Option System.FilePath) (network : 
     IO (SignerStore × OpenResult) := do
   let empty : SignerStore := { path, network }
   let some p := path | return (empty, .missing)
+  -- a store the Swift app left is set aside and starts empty; if that fails, it reads as damage below
+  discard <| ((storeSeal keys).setAsideSwiftEra network p).run
   unless ← fileExists p do return (empty, .missing)
   let attempt : RM (Array SignerRecord) := do
     let data ← boundedRead p maximumFileBytes (SignerStorageError.invalidState "signer file too large").toRecords

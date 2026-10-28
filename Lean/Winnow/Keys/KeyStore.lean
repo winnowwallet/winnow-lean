@@ -105,6 +105,11 @@ structure KeyStore (m : Type → Type) [Monad m] where
   /-- Brings a secret stored by an earlier version up to the store's current protection; whether
   anything changed. Stores with one notion of protection have nothing to do. -/
   upgradeProtection : String → ExceptT KeyStoreError m Bool := fun _ => pure false
+  /-- The item under `id` as stored, whatever wrote it (the Swift app kept raw bytes where this one keeps
+  text); none if absent. Stores that hold only secrets have none to show. -/
+  loadBytes : String → ExceptT KeyStoreError m (Option ByteArray) := fun _ => pure none
+  /-- Keeps `bytes` under `id` as they are; `alreadyExists` if occupied. -/
+  storeBytes : ByteArray → String → ExceptT KeyStoreError m Unit := fun _ id => throw (.alreadyExists id)
 
 /-- The contents of an in-memory store. Swift dictionary keys compare by canonical equivalence, so IDs
 are kept in NFD. -/

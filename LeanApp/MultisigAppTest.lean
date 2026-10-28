@@ -1666,10 +1666,117 @@ def pureTests : List (String × IO Unit) :=
   , ("testPlainCreateAndJoinWording", testPlainCreateAndJoinWording)
   , ("testTheBuilderStartsAtAnyTwoMembers", testTheBuilderStartsAtAnyTwoMembers) ]
 
+/-! ## Stores the Swift app left (`StoreSeal.setAsideSwiftEra`) -/
+
+/-- The Keychain as the shell shows it: every item is bytes; `load` answers text items only, so the Swift
+app's raw store key reads as absent, as `keychain.get` answers it no `value`; `loadBytes` sees every item.
+A second item under a taken account fails as `SecItemAdd` does. -/
+def shellLikeKeychain (ref : IO.Ref (Std.HashMap String ByteArray)) : Keys.KeyStore IO where
+  store secret id := do
+    if let some b := (← ref.get)[id]? then
+      throw (if (String.fromUTF8? b).isSome then .alreadyExists id else .keychain (-25299))
+    ref.modify (·.insert id secret.serialized)
+  load id := do
+    let some b := (← ref.get)[id]? | throw (.notFound id)
+    let some t := String.fromUTF8? b | throw (.notFound id)
+    match Keys.WalletSecret.parse t.toUTF8 with | .ok s => pure s | .error e => throw e
+  delete id := ref.modify (·.erase id)
+  loadBytes id := do return (← ref.get)[id]?
+  storeBytes b id := do
+    if (← ref.get).contains id then throw (.alreadyExists id)
+    ref.modify (·.insert id b)
+
+/-- A raw 32-byte key that is not UTF-8, as the Swift app's are in practice. -/
+def swiftKey : IO ByteArray := do return (← IO.getRandomBytes 32).set! 0 0xFF
+
+/-- What the Swift app left for `store`: its raw key in the Keychain and the file sealed under it. -/
+def leaveSwiftStore (ref : IO.Ref (Std.HashMap String ByteArray)) (store : String) (payload : ByteArray)
+    (path : System.FilePath) : IO (ByteArray × ByteArray) := do
+  let key ← swiftKey
+  ref.modify (·.insert s!"{accountPrefix}{store}.signet" key)
+  let file := SealedStoreFile.sealed payload store signet key
+  IO.FS.writeBinFile path file
+  return (key, file)
+
+/-- An upgraded phone: the Swift app's multisig accounts, signers and people are set aside, file and key,
+and each store starts empty and takes changes, where before it read as damage and refused them (Pair a
+Ledger: "Winnow could not safely read its signers"). -/
+def testSwiftEraStoresAreSetAsideAndStartEmpty : IO Unit := do
+  let ref ← IO.mkRef ({} : Std.HashMap String ByteArray)
+  let keys := StoreKeyVault.ofKeyStore (shellLikeKeychain ref)
+  let a ← twoOfTwo
+  let record := recordOf a #[← coin a 80_000]
+  let url ← tempFile "multisig.json"
+  let (key, file) ← leaveSwiftStore ref MultisigStore.storeName (MultisigStore.encode #[record]) url
+  let (store, opened) ← S.open keys (some url)
+  check "swift-era multisig: opens as a new store" (opened == .missing && !(← store.ref.get).isDamaged)
+  check "swift-era multisig: no accounts" ((← store.all).isEmpty)
+  let aside := url.withFileName "multisig.swift-era.json"
+  check "swift-era multisig: the file is set aside unchanged"
+    (!(← url.pathExists) && (← aside.pathExists) && (← IO.FS.readBinFile aside) == file)
+  let held ← ref.get
+  check "swift-era multisig: the key is kept beside, not deleted"
+    (held["store-key.swift-era.multisig.signet"]? == some key && !held.contains "store-key.multisig.signet")
+  need "swift-era multisig: an account can be added" (store.restore #[record])
+  let (reopened, again) ← S.open keys (some url)
+  check "swift-era multisig: the new store reopens loaded" (again == .loaded && (← reopened.all) == #[record])
+  check "swift-era multisig: its key is this app's" ((← ref.get)["store-key.multisig.signet"]?.map (·.size) != some 32)
+  check "swift-era multisig: the set-aside file is left alone" ((← IO.FS.readBinFile aside) == file)
+
+  let signersURL ← tempFile "signers.json"
+  discard <| leaveSwiftStore ref SignerStore.storeName (SignerStore.encode #[]) signersURL
+  let (signers, signersOpened) ← SignerStore.configure keys (some signersURL) signet
+  check "swift-era signers: opens as a new store" (signersOpened == .missing && !signers.isDamaged)
+  check "swift-era signers: set aside" (← (signersURL.withFileName "signers.swift-era.json").pathExists)
+  let bob ← keyExpression (← masters)[2]!
+  let added ← (signers.addKeys keys writeAtomically "Bob" #[bob] "local-bob" 0).run
+  check "swift-era signers: a signer can be saved" added.toBool
+
+  let peopleURL ← tempFile "people.json"
+  discard <| leaveSwiftStore ref PeopleStore.storeName (PeopleStore.encode #[] #[]) peopleURL
+  let (people, peopleOpened) ← PeopleStore.configure keys (some peopleURL) signet
+  check "swift-era people: opens as a new store" (peopleOpened == .missing && !people.isDamaged)
+  check "swift-era people: set aside" (← (peopleURL.withFileName "people.swift-era.json").pathExists)
+
+/-- A set-aside stopped after the key moved and before the file did finishes at the next open. -/
+def testAnInterruptedSetAsideFinishes : IO Unit := do
+  let ref ← IO.mkRef ({} : Std.HashMap String ByteArray)
+  let keys := StoreKeyVault.ofKeyStore (shellLikeKeychain ref)
+  let url ← tempFile "multisig.json"
+  let (key, file) ← leaveSwiftStore ref MultisigStore.storeName (MultisigStore.encode #[]) url
+  ref.modify fun m => (m.erase "store-key.multisig.signet").insert "store-key.swift-era.multisig.signet" key
+  let (store, opened) ← S.open keys (some url)
+  check "interrupted: opens as a new store" (opened == .missing && !(← store.ref.get).isDamaged)
+  let aside := url.withFileName "multisig.swift-era.json"
+  check "interrupted: the file is set aside" (!(← url.pathExists) && (← IO.FS.readBinFile aside) == file)
+
+/-- Only the Swift app's key is set aside: a store this app sealed whose file was changed still reads as
+damage, and its file and key stay where they are. -/
+def testATamperedFileUnderThisAppsKeyIsStillDamage : IO Unit := do
+  let ref ← IO.mkRef ({} : Std.HashMap String ByteArray)
+  let keys := StoreKeyVault.ofKeyStore (shellLikeKeychain ref)
+  let a ← twoOfTwo
+  let url ← tempFile "multisig.json"
+  let (store, _) ← S.open keys (some url)
+  need "seal a store" (store.restore #[recordOf a #[← coin a 80_000]])
+  let sealed ← IO.FS.readBinFile url
+  let tampered := sealed.set! (sealed.size - 2) (sealed[sealed.size - 2]! ^^^ 0x01)
+  IO.FS.writeBinFile url tampered
+  let before ← ref.get
+  let (_, opened) ← S.open keys (some url)
+  check "tampered: reads as damage" (match opened with | .damaged _ => true | _ => false)
+  check "tampered: the file stays" ((← IO.FS.readBinFile url) == tampered &&
+    !(← (url.withFileName "multisig.swift-era.json").pathExists))
+  check "tampered: the key stays" ((← ref.get)["store-key.multisig.signet"]? == before["store-key.multisig.signet"]? &&
+    !(← ref.get).contains "store-key.swift-era.multisig.signet")
+
 /-! ## main -/
 
 def storeTests : List (String × IO Unit) :=
-  [ ("testBackupPreservesAccountsAndRejectsChangedOwnership", testBackupPreservesAccountsAndRejectsChangedOwnership)
+  [ ("testSwiftEraStoresAreSetAsideAndStartEmpty", testSwiftEraStoresAreSetAsideAndStartEmpty)
+  , ("testAnInterruptedSetAsideFinishes", testAnInterruptedSetAsideFinishes)
+  , ("testATamperedFileUnderThisAppsKeyIsStillDamage", testATamperedFileUnderThisAppsKeyIsStillDamage)
+  , ("testBackupPreservesAccountsAndRejectsChangedOwnership", testBackupPreservesAccountsAndRejectsChangedOwnership)
   , ("testBackupCarriesPendingAccountPayments", testBackupCarriesPendingAccountPayments)
   , ("testPaymentsSpendsAndRollbacks", testPaymentsSpendsAndRollbacks)
   , ("testARollbackKeepsTheInputsOfAFallenSpendReserved", testARollbackKeepsTheInputsOfAFallenSpendReserved)

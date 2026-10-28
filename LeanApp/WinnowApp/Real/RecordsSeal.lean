@@ -208,6 +208,10 @@ structure StoreKeyVault where
   establishKey : String → RM ByteArray
   /-- Forgets the key for `account` (only to undo an `establishKey` whose first sealed write failed). -/
   discardKey : String → RM Unit
+  /-- The item under `account` as stored, in any format; none if absent (the in-memory vault has none). -/
+  rawKey : String → RM (Option ByteArray) := fun _ => pure none
+  /-- Keeps `bytes` under `account` as they are, unless something is already there. -/
+  keepRaw : String → ByteArray → RM Unit := fun _ _ => pure ()
 
 def keyBytes : Nat := 32
 def accountPrefix : String := "store-key."
@@ -225,7 +229,8 @@ def StoreKeyVault.inMemory (ref : IO.Ref (Std.HashMap String ByteArray)) : Store
 /-- The vault over the Keys area's `KeyStore` (the Keychain capability on iOS): the key for account `a`
 is the secret stored under `store-key.<a>`, carried as `.masterKey <64 lowercase hex>`. The Swift app
 keeps the raw 32 bytes in its Keychain item instead, so a Keychain item is not shared between the two
-apps; the files are. -/
+apps; the files are. A Swift item reads as no key here (it is not text); `rawKey` sees it, and
+`StoreSeal.setAsideSwiftEra` moves it and its file out of the way. -/
 def StoreKeyVault.ofKeyStore (ks : Keys.KeyStore IO) : StoreKeyVault where
   key a := do
     match ← RM.io (ks.load (accountPrefix ++ a)).run with
@@ -248,6 +253,16 @@ def StoreKeyVault.ofKeyStore (ks : Keys.KeyStore IO) : StoreKeyVault where
     match ← RM.io (ks.delete (accountPrefix ++ a)).run with
     | .ok () => pure ()
     | .error (.notFound _) => pure ()
+    | .error (.keychain s) => throw (.keyVault (.keychain s))
+    | .error _ => throw (.keyVault .malformedKey)
+  rawKey a := do
+    match ← RM.io (ks.loadBytes (accountPrefix ++ a)).run with
+    | .ok b => pure b
+    | .error (.keychain s) => throw (.keyVault (.keychain s))
+    | .error _ => throw (.keyVault .malformedKey)
+  keepRaw a bytes := do
+    match ← RM.io (ks.storeBytes bytes (accountPrefix ++ a)).run with
+    | .ok () | .error (.alreadyExists _) => pure ()
     | .error (.keychain s) => throw (.keyVault (.keychain s))
     | .error _ => throw (.keyVault .malformedKey)
 
@@ -365,5 +380,42 @@ def uuidString : IO String := do
   let h := (hex b).toUpper
   let part (i n : Nat) := ((h.drop i).take n).toString
   return s!"{part 0 8}-{part 8 4}-{part 12 4}-{part 16 4}-{part 20 12}"
+
+/-! ## Stores the Swift app left -/
+
+def swiftEraPrefix : String := "swift-era."
+
+/-- `<stem>.swift-era.<ext>` beside `path`, or `<stem>.swift-era-<n>.<ext>` if that is taken. -/
+def swiftEraPath (path : System.FilePath) : IO System.FilePath := do
+  let stem := path.fileStem.getD "store"
+  let ext := path.extension.map ("." ++ ·) |>.getD ""
+  for n in [1:1000] do
+    let suffix := if n == 1 then "" else s!"-{n}"
+    let candidate := path.withFileName s!"{stem}.swift-era{suffix}{ext}"
+    unless ← fileExists candidate do return candidate
+  throw (IO.userError s!"no free name beside {path}")
+
+/-- Sets aside a store the Swift app left, so this app starts it empty instead of locking it. The Swift
+app sealed its file under a raw 32-byte Keychain key, which this app reads as no key, so the file would
+read as damage and refuse every change. The key moves to `swift-era.<account>` and the file to
+`<stem>.swift-era.json` beside it; neither is read again or deleted. A key this app wrote is text, never
+32 bytes, so its stores are left alone and a damaged file under one still reads as damage. Each step can
+be repeated, so a set-aside interrupted between the key and the file finishes at the next open. Whether
+anything was set aside. -/
+def StoreSeal.setAsideSwiftEra (s : StoreSeal) (network : Tx.BitcoinNetwork) (path : System.FilePath) : RM Bool := do
+  let account := s.account network
+  let aside := swiftEraPrefix ++ account
+  match ← s.keys.rawKey account with
+  | some raw =>
+    unless raw.size == keyBytes do return false
+    match ← s.keys.rawKey aside with
+    | none => s.keys.keepRaw aside raw
+    | some k => unless k == raw do throw (.keyVault (.alreadyEstablished aside))
+    s.keys.discardKey account
+  | none =>
+    unless ← RM.io (fileExists path) do return false
+    if (← s.keys.rawKey aside).isNone then return false
+  if ← RM.io (fileExists path) then RM.io (IO.FS.rename path (← swiftEraPath path))
+  return true
 
 end WinnowApp.RecordsReal

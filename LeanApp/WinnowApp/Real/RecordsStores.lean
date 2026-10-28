@@ -212,6 +212,8 @@ def configure (keys : StoreKeyVault) (path : Option System.FilePath) (network : 
     (writeData : WriteData := writeAtomically) : IO (PeopleStore × OpenResult) := do
   let empty : PeopleStore := { path, network }
   let some p := path | return (empty, .missing)
+  -- a store the Swift app left is set aside and starts empty; if that fails, it reads as damage below
+  discard <| (({ store := storeName, keys } : StoreSeal).setAsideSwiftEra network p).run
   unless ← fileExists p do return (empty, .missing)
   let attempt : RM (PeopleStore × Bool) := do
     let data ← boundedRead p maximumFileBytes (.people (.invalidState "people file too large"))

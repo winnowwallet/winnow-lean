@@ -11,7 +11,9 @@ ElmLean's native shell (its capabilities, framework/lean/ElmShell/Capabilities.l
 
 * `KeyStore IO` (KeychainStore.swift's contract): the wallet secret's account is the wallet ID under
   the service `org.btc-swift.wallet` (the shell's `service` argument). `store` refuses an occupied ID
-  (`alreadyExists`), a missing item is `notFound`, an unreadable one `malformedSecret`. The shell's
+  (`alreadyExists`), a missing item is `notFound`, an unreadable one `malformedSecret`. An item that is
+  not UTF-8 text (the Swift app's raw store keys) answers no `value`, so it reads as `notFound`;
+  `loadBytes` / `storeBytes` see and keep such items as raw bytes (`hex`). The shell's
   item is `WhenUnlockedThisDeviceOnly`; it does not add Winnow's user-presence flag (the app asks for
   device authentication before every read instead).
 * `HttpFetch`: one request, with its `Accept` header. The shell follows same-host redirects itself
@@ -51,6 +53,16 @@ def shellKeyStore (ask : Ask) (service : String := walletService) : KeyStore IO 
     | _ => throw (.notFound id)
   delete id := do
     let r ← (askNow ask "keychain.delete" (Json.mkObj (keyArgs service id)) : IO Json)
+    unless (r.getObjValAs? Bool "ok").toOption.getD false do throw (.keychain (status r))
+  loadBytes id := do
+    let r ← (askNow ask "keychain.get" (Json.mkObj (keyArgs service id ++ [("hex", Json.bool true)])) : IO Json)
+    match r.getObjVal? "hex" with
+    | .ok (.str h) => match ofHex? h with | some b => pure (some b) | none => throw .malformedSecret
+    | _ => pure none
+  storeBytes bytes id := do
+    let existing ← (askNow ask "keychain.get" (Json.mkObj (keyArgs service id ++ [("hex", Json.bool true)])) : IO Json)
+    if let .ok (.str _) := existing.getObjVal? "hex" then throw (.alreadyExists id)
+    let r ← (askNow ask "keychain.set" (Json.mkObj (keyArgs service id ++ [("hex", Json.str (hex bytes))])) : IO Json)
     unless (r.getObjValAs? Bool "ok").toOption.getD false do throw (.keychain (status r))
 
 /-- The `http.get` capability as the routed client's fetch; a SOCKS gateway goes as
