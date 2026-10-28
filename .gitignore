@@ -1,0 +1,28 @@
+.build/
+build/
+DerivedData/
+WinnowApp.xcodeproj/
+# The Lean app's Xcode project is generated from LeanApp/ios/project.yml; Lake's build output
+LeanApp/ios/WinnowLean.xcodeproj/
+.lake/
+*.xcuserstate
+.DS_Store
+
+# Xcode leftovers that land outside build/ when a derived-data path is overridden
+xcuserdata/
+.swiftpm/
+*.hmap
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+*.ipa
+
+# Signing material. An embedded.mobileprovision already ships inside every
+# .xcarchive; these rules catch one exported anywhere else.
+*.mobileprovision
+*.p12
+*.cer
+*.certSigningRequest
+
+# Local Python checks
+__pycache__/
