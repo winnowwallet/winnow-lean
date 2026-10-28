@@ -99,7 +99,7 @@ targets:
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         # as upstream: the iPad app also runs on Apple silicon Macs ("Designed for iPad"); no Mac Catalyst build
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES
-  # The UI journeys (Objective-C XCUITest, UITests/): run by scripts/ci-ui-journey against a regtest fixture.
+  # The UI journeys (Objective-C XCUITest, UITests/): run by scripts/ui-journeys (CI: ElmLean ui-tests with scripts/ui-fixture) against a regtest fixture.
   WinnowLeanUITests:
     type: bundle.ui-testing
     platform: iOS

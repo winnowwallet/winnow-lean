@@ -1,5 +1,5 @@
 // The Lean app's UI journeys, in the simulator against the regtest node `backend-test --fixture` left
-// running (scripts/ci-ui-journey). Each launches the app in test mode with a fresh pinned seed, so a reused
+// running (scripts/ui-journeys, scripts/ui-fixture). Each launches the app in test mode with a fresh pinned seed, so a reused
 // node never shows an earlier run's coins, and checks what the app shows against what the node holds.
 #import <XCTest/XCTest.h>
 #import "WLCoreSigner.h"

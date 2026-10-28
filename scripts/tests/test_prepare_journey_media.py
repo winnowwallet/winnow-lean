@@ -80,6 +80,9 @@ class PrepareTests(unittest.TestCase):
                                     lambda name: self.real_which(name) if name in self.tools else None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # the run's result bundle: every test passed, and each screenshot was attached by the first test
+        self.bundle(TESTS)
+        self.attachments([("testCreateReceiveSendConfirm", n, 1.0, d) for n, d in self.shots.items()])
 
     def patch(self, name, value):
         patcher = mock.patch.object(media, name, value)
@@ -93,7 +96,7 @@ class PrepareTests(unittest.TestCase):
     def manifest(self):
         return json.loads((self.out / media.MANIFEST).read_text())
 
-    def test_log_only_run_writes_a_version_2_manifest(self):
+    def test_a_run_writes_a_version_2_manifest(self):
         (self.journey / "journey.mp4").write_bytes(mp4(1206, 2622, 12.5, padding=1000))
         self.run_prepare()
         evidence = self.manifest()
@@ -110,7 +113,7 @@ class PrepareTests(unittest.TestCase):
             data = (self.out / "screenshots" / f"{shot['name']}.png").read_bytes()
             self.assertEqual(shot["sha256"], hashlib.sha256(data).hexdigest())
             self.assertEqual((shot["width"], shot["height"]), (4, 8))
-            self.assertIsNone(shot["test"])
+            self.assertEqual(shot["test"], "testCreateReceiveSendConfirm")
         # no ffmpeg: a recording under 25 MiB is copied, its size and duration read from the MP4 itself
         video = evidence["video"]
         self.assertEqual((video["width"], video["height"], video["duration_seconds"]), (1206, 2622, 12.5))
@@ -119,7 +122,9 @@ class PrepareTests(unittest.TestCase):
         self.assertNotIn("video_omitted", evidence)
 
     def test_a_failed_test_fails_the_run(self):
-        (self.journey / "xcodebuild.log").write_text(log(TESTS + [("testShippedCensus", "failed", "3.0")], False))
+        failed = TESTS + [("testShippedCensus", "failed", "3.0")]
+        (self.journey / "xcodebuild.log").write_text(log(failed, False))
+        self.bundle(failed)
         with self.assertRaisesRegex(media.Failure, "not every test passed: testShippedCensus failed"):
             self.run_prepare()
 
@@ -131,6 +136,16 @@ class PrepareTests(unittest.TestCase):
     def test_an_invalid_screenshot_fails(self):
         (self.journey / "screenshots/03-receive.png").write_bytes(b"not a png")
         with self.assertRaisesRegex(media.Failure, "03-receive.png: not a PNG"):
+            self.run_prepare()
+
+    def test_a_run_without_its_result_bundle_fails(self):
+        self.patch("bundle_results", lambda path: None)
+        with self.assertRaisesRegex(media.Failure, "no result bundle results"):
+            self.run_prepare()
+
+    def test_a_run_whose_attachments_cannot_be_exported_fails(self):
+        self.patch("bundle_attachments", lambda bundle, into: None)
+        with self.assertRaisesRegex(media.Failure, "no result bundle attachments"):
             self.run_prepare()
 
     def test_media_output_must_be_empty(self):

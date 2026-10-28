@@ -27,7 +27,8 @@ static NSDictionary *WLReadJSON(NSString *path) {
     NSString *path = configured.length ? configured : [home stringByAppendingPathComponent:@".winnow-lean-ui.json"];
     NSDictionary *config = WLReadJSON(path);
     _fixtureDir = config[@"fixture"];
-    _bitcoinCli = config[@"bitcoinCli"] ?: @"/opt/homebrew/bin/bitcoin-cli";
+    _bitcoinCli = config[@"bitcoinCli"];
+    if (!_bitcoinCli.length) [NSException raise:@"WLHost" format:@"%@ names no bitcoinCli", path];
     _backendTest = config[@"backendTest"] ?: @"";
     _screenshotDir = config[@"screenshots"];
     NSDictionary *fixture = WLReadJSON([_fixtureDir stringByAppendingPathComponent:@"fixture.json"]);
@@ -66,11 +67,14 @@ static NSData *WLDrain(int fd) {
     [all addObjectsFromArray:arguments];
     char **argv = calloc(all.count + 1, sizeof(char *));
     for (NSUInteger i = 0; i < all.count; i++) argv[i] = strdup(all[i].UTF8String);
-    char *envp[] = { NULL };
+    // the child's whole environment: the bitcoin-cli of ui.json, so backend-test talks to the node through
+    // the same pinned Core as the tests
+    char *envp[] = { strdup([@"WINNOW_BITCOIN_CLI=" stringByAppendingString:self.bitcoinCli].UTF8String), NULL };
     pid_t pid = 0;
     int rc = posix_spawn(&pid, path.UTF8String, &actions, &attributes, argv, envp);
     for (NSUInteger i = 0; i < all.count; i++) free(argv[i]);
     free(argv);
+    free(envp[0]);
     posix_spawn_file_actions_destroy(&actions);
     posix_spawnattr_destroy(&attributes);
     close(outPipe[1]);

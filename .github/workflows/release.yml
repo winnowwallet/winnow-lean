@@ -129,7 +129,7 @@ jobs:
 
       - name: Verify the archive's identity, signature and that it has no Swift
         run: |
-          scripts/check-no-swift build-archive.log build/WinnowLean.xcarchive/Products/Applications/WinnowLean.app
+          LeanApp/.lake/packages/elmlean/framework/native/ci/check-no-swift build-archive.log build/WinnowLean.xcarchive/Products/Applications/WinnowLean.app
           scripts/verify-signed-archive build/WinnowLean.xcarchive/Products/Applications/WinnowLean.app
 
       - name: Export the App Store distribution package

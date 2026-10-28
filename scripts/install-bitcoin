@@ -1,0 +1,31 @@
+#!/bin/bash
+# The Bitcoin Core release the regtest tests and the UI journeys run against, downloaded once from
+# bitcoincore.org and checked against its SHA-256 (the release's SHA256SUMS); prints its bin directory.
+# Never whichever bitcoind is on the PATH: the multisig differential and the journeys depend on Core's behaviour.
+#
+#   BITCOIN_BIN="$(scripts/install-bitcoin)"
+set -euo pipefail
+
+VERSION="31.1"
+case "$(uname -m)" in
+  arm64) ARCH=arm64; ARCHIVE_SHA256="16a097c09fbd7eb78b240ce1dae123663ea2e5e377cfd6a951e71e227e23cf2f" ;;
+  x86_64) ARCH=x86_64; ARCHIVE_SHA256="bc506958d0f387c1ea770bdc7c7192a505fa645ff62cabcc7761fa7eb89e867e" ;;
+  *) echo "install-bitcoin: no Bitcoin Core release pinned for $(uname -m)" >&2; exit 1 ;;
+esac
+NAME="bitcoin-$VERSION-$ARCH-apple-darwin.tar.gz"
+ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/winnow-bitcoin-$VERSION"
+ARCHIVE="$ROOT/$NAME"
+BIN="$ROOT/bitcoin-$VERSION/bin"
+
+verified() { [ -f "$ARCHIVE" ] && [ "$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')" = "$ARCHIVE_SHA256" ]; }
+
+if ! verified; then
+  install -d -m 700 "$ROOT"
+  curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+    "https://bitcoincore.org/bin/bitcoin-core-$VERSION/$NAME" --output "$ARCHIVE"
+  verified || { echo "Bitcoin Core archive checksum mismatch: expected $ARCHIVE_SHA256" >&2; rm -f "$ARCHIVE"; exit 1; }
+  rm -rf "$ROOT/bitcoin-$VERSION"
+fi
+[ -x "$BIN/bitcoind" ] || tar -xzf "$ARCHIVE" -C "$ROOT"
+test -x "$BIN/bitcoind" && test -x "$BIN/bitcoin-cli"
+printf '%s\n' "$BIN"

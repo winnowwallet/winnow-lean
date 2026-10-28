@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Turn one ci-ui-journey output into the media the website publishes, with its provenance.
+"""Turn one UI-journeys output into the media the website publishes, with its provenance.
 
   scripts/prepare-journey-media <journey-out> <media-out> [--run-url URL] [--sha SHA] [--branch NAME]
 
-<journey-out> is a scripts/ci-ui-journey output directory ($UI_JOURNEY_OUT). <media-out> must not exist
+<journey-out> is a UI-journeys output directory (scripts/ui-journeys' $UI_OUT, CI's $CI_RESULTS/journey). <media-out> must not exist
 or be empty; it receives the website's layout:
 
   screenshots/<name>.png      every checkpoint, validated as PNG
@@ -11,8 +11,8 @@ or be empty; it receives the website's layout:
   journey-provenance.json     version 2: the run, the source, the device, each test's result and seconds,
                               each screenshot's test, size and SHA-256, the video's, and the network
 
-Results come from the result bundle (xcrun xcresulttool) and xcodebuild.log, which must agree; the script
-fails when any test did not pass. Each screenshot is attributed to the first test that captured it (a
+Results come from the result bundle (xcrun xcresulttool) and xcodebuild.log, both required, which must agree;
+the script fails when either is missing or any test did not pass. Each screenshot is attributed to the first test that captured it (a
 screenshot several tests capture is taken from that test's attachment in the result bundle). Without ffmpeg
 the recording is copied when it is already under 25 MiB; otherwise the manifest says why there is no video.
 """
@@ -130,15 +130,12 @@ def results(journey):
     bundle_path = journey / "journey.xcresult"
     bundle = bundle_results(bundle_path) if bundle_path.is_dir() else None
     if bundle is None:
-        print("note: no result bundle results (xcresulttool or journey.xcresult missing); using xcodebuild.log",
-              file=sys.stderr)
-        tests, device = log["tests"], None
-    else:
-        tests, device = bundle["tests"], bundle["device"]
-        logged = {(t["name"], t["result"]) for t in log["tests"]}
-        if logged and logged != {(t["name"], t["result"]) for t in tests}:
-            raise Failure("xcodebuild.log and the result bundle disagree about the tests: "
-                          f"{sorted(logged)} vs {sorted((t['name'], t['result']) for t in tests)}")
+        raise Failure("no result bundle results (journey.xcresult, read with xcresulttool)")
+    tests, device = bundle["tests"], bundle["device"]
+    logged = {(t["name"], t["result"]) for t in log["tests"]}
+    if logged and logged != {(t["name"], t["result"]) for t in tests}:
+        raise Failure("xcodebuild.log and the result bundle disagree about the tests: "
+                      f"{sorted(logged)} vs {sorted((t['name'], t['result']) for t in tests)}")
     if not tests:
         raise Failure("no test results in the result bundle or xcodebuild.log")
     if len({t["name"] for t in tests}) != len(tests):
@@ -188,28 +185,26 @@ def screenshots(journey, media, tests, scratch):
         raise Failure("screenshot names must be lowercase letters, digits and hyphens: " + ", ".join(bad))
     bundle = journey / "journey.xcresult"
     exported = bundle_attachments(bundle, scratch) if bundle.is_dir() else None
-    shots = captures(exported, scratch) if exported is not None else None
-    if shots is None:
-        print("note: no result bundle attachments; screenshots are not attributed to tests", file=sys.stderr)
+    if exported is None:
+        raise Failure("no result bundle attachments (journey.xcresult, exported with xcresulttool)")
+    shots = captures(exported, scratch)
     passed = {t["name"] for t in tests}
     (media / "screenshots").mkdir(parents=True)
     entries = []
     for name in names:
         source = folder / f"{name}.png"
         png_size(source)
-        test = None
-        if shots is not None:
-            taken = shots.get(name)
-            if not taken:
-                raise Failure(f"{name}.png is not an attachment of any test in the result bundle")
-            on_disk = digest(source)
-            if on_disk not in {digest(file) for _, _, file in taken}:
-                raise Failure(f"{name}.png matches none of the result bundle's captures of it")
-            # the first capture tells the story in order; the file on disk is the last test's
-            _, test, source = taken[0]
-            if test not in passed:
-                raise Failure(f"{name}.png was captured by {test}, which is not among the passing tests")
-            png_size(source)
+        taken = shots.get(name)
+        if not taken:
+            raise Failure(f"{name}.png is not an attachment of any test in the result bundle")
+        on_disk = digest(source)
+        if on_disk not in {digest(file) for _, _, file in taken}:
+            raise Failure(f"{name}.png matches none of the result bundle's captures of it")
+        # the first capture tells the story in order; the file on disk is the last test's
+        _, test, source = taken[0]
+        if test not in passed:
+            raise Failure(f"{name}.png was captured by {test}, which is not among the passing tests")
+        png_size(source)
         target = media / "screenshots" / f"{name}.png"
         shutil.copyfile(source, target)
         width, height = png_size(target)
@@ -356,7 +351,7 @@ def identity(args):
 
 
 def device(journey, bundle_device):
-    """The simulator: the result bundle's model and OS, with ci-ui-journey's record of the model it chose."""
+    """The simulator: the result bundle's model and OS, with the record of the model ui-tests chose."""
     chosen = {}
     config = journey / "ui.json"
     if config.is_file():
@@ -407,14 +402,14 @@ def prepare(journey, media, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("journey", type=Path, help="a scripts/ci-ui-journey output directory")
+    parser.add_argument("journey", type=Path, help="a UI-journeys output directory (scripts/ui-journeys)")
     parser.add_argument("media", type=Path, help="where the website's media and manifest go")
     parser.add_argument("--run-url", help="the CI run (default: from GITHUB_* in Actions)")
     parser.add_argument("--sha", help="the tested commit (default: the checkout's HEAD)")
     parser.add_argument("--branch", help="the tested branch (default: GITHUB_HEAD_REF or GITHUB_REF_NAME in "
                         "Actions, else the checkout's)")
     parser.add_argument("--network", default="regtest",
-                        help="the Bitcoin network the journeys paid on (ci-ui-journey's fixture: regtest)")
+                        help="the Bitcoin network the journeys paid on (scripts/ui-fixture: regtest)")
     args = parser.parse_args(argv)
     try:
         evidence = prepare(args.journey, args.media, args)

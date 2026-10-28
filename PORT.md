@@ -279,8 +279,10 @@ Upstream's Swift tests, UI tests and workflows went with the Swift code; their L
   the wallet (one "Moved to …" row) and pays from it on the Send tab with the Ledger signing in the
   collection step. Both passed on a throwaway iOS 27 simulator against `backend-test --fixture`. Differences from upstream's harness: the node is regtest, not a
   custom signet; Core co-signers are driven by bitcoin-cli from the runner (posix_spawn, as upstream).
-* **CI**: `scripts/ci-lane lean|regtest|ios|journey|mac` on WarpBuild (`ci-parallel.yml`) or hosted macOS
-  (`ci-hosted.yml`), routed by `ci.yml` as upstream routes its lanes. The `ios` lane replaces upstream's
+* **CI** (since 2026-10-28): `ci.yml` calls ElmLean's reusable `ios-app` workflow, which builds the Lean once
+  and caches it, then runs `tests`, `extra` (`scripts/ci-regtest`) and `app` (the iOS builds and the UI
+  journeys) in parallel with live progress, on WarpBuild only (no hosted fallback). Before, `scripts/ci-lane
+  lean|regtest|ios|journey` ran four lanes that each built the Lean. The release check replaces upstream's
   `strings`-based release check, which cannot work here (test mode is compiled into every build and
   switched on only when the shell answers Debug): `verify-release-no-test-mode` launches the Release and
   Debug builds with test mode's environment and requires Debug to start the run and Release to ignore it.

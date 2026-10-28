@@ -94,16 +94,16 @@ lake build backend-test records-test        # Lean toolchain leanprover/lean4:v4
 ./.lake/build/bin/records-test
 cd ..
 scripts/build-ios Debug                      # the app for the simulator, from a clean checkout
-scripts/ci-ui-journey                        # the Objective-C UI journeys against a regtest fixture
+scripts/ui-journeys                          # the Objective-C UI journeys against a regtest fixture
 ```
 
 LeanApp pins the ElmLean framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
-`LeanApp/.lake/packages/elmlean`. `scripts/build-ios <Debug|Release> [iossim|ios]` builds WinnowApp,
-gathers the generated C, prints the Objective-C shell, writes the Xcode project (XcodeGen 2.46.0, from
-`scripts/install-xcodegen`) and builds it. Simulator builds are ad-hoc signed (an unsigned app has no
+`LeanApp/.lake/packages/elmlean`. `scripts/build-ios <Debug|Release> [iossim|ios]` runs ElmLean's
+`framework/native/ci/build-ios` with Winnow's names: it builds WinnowApp, gathers the generated C, prints the
+Objective-C shell, writes the Xcode project (XcodeGen 2.46.0) and builds it. Simulator builds are ad-hoc signed (an unsigned app has no
 Keychain entitlement). `backend-test --fixture <dir>` leaves a funded regtest node running for manual
 simulator runs. Tests find Bitcoin Core through `WINNOW_BITCOIND` / `WINNOW_BITCOIN_CLI`, Homebrew or the
-PATH.
+PATH; CI sets the first two to the pinned release `scripts/install-bitcoin` downloads.
 
 ### UI tests
 
@@ -122,21 +122,22 @@ give them (`Html.identified`, the shell's `accessibilityIdentifier`) and checks 
 - `testSilentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
   receiver (written from the BIP's receiving side) finds, and the receipt shows its address.
 
-`scripts/ci-ui-journey` starts the node, runs them on a throwaway simulator (or `UI_SIMULATOR`) and keeps
-the result bundle, a screen recording, screenshots and the app's test-mode journal.
+`scripts/ui-journeys` runs them as CI does: ElmLean's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`),
+with `scripts/ui-fixture` starting the node before and collecting the app's test-mode journals after; it
+keeps the result bundle, a screen recording, the screenshots and the journals.
 
 ### CI and TestFlight
 
-`.github/workflows/ci.yml` runs the lanes of `scripts/ci-lane` on every pull request and push to main:
-on WarpBuild runners in parallel (`ci-parallel.yml`), or one after another on GitHub's hosted macOS for
-forks and on request (`ci-hosted.yml`):
+`.github/workflows/ci.yml` calls ElmLean's reusable `ios-app` workflow on every pull request and push to
+main, on WarpBuild runners (a fork's pull request gets no CI: push it to a branch here). The Lean is built once and
+cached; the other jobs restore it and run in parallel, and every long step prints its progress as it goes:
 
-| lane | what |
+| job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and runs multisig-test, ledger-test, silent-payment-test, records-test, multisig-app-test, ledger-transport-test |
-| `regtest` | io-test, backend-test and multisig-differential against a disposable regtest bitcoind |
-| `ios` | Debug and Release for the simulator, Release for devices; `check-no-swift` on each; `verify-release-no-test-mode` |
-| `journey` | `scripts/ci-ui-journey` |
+| `build` | builds `Lean/` and `LeanApp/` (every proof) and the test executables; imports the census list once |
+| `tests` | census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, records-test, multisig-app-test, ledger-transport-test |
+| `extra` | `scripts/ci-regtest`: io-test, backend-test and multisig-differential against a disposable regtest bitcoind |
+| `app` | Debug and Release for the simulator and Release for devices, each checked for Swift; `verify-release-no-test-mode`; the UI journeys (`scripts/ui-fixture` as the hooks); the website's media (`scripts/journey-media`) |
 
 `.github/workflows/release.yml`: a `vMAJOR.MINOR.PATCH` tag runs the whole CI, then archives the app as
 `com.btcswift.app` (team 2858MX5336, the identity of the Swift app it replaces), checks the archive and

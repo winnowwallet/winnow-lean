@@ -8,13 +8,11 @@ its limits.
 
 ## Validation
 
-[ci.yml](../workflows/ci.yml) selects one implementation and requires its final
-validation result:
+[ci.yml](../workflows/ci.yml) calls ElmLean's reusable `ios-app` workflow (posix4e/elmlean,
+`.github/workflows/ios-app.yml`): `build` (the Lean, once, cached), then `tests`, `extra` and `app` in
+parallel, on WarpBuild Apple silicon runners. A fork's pull request gets no CI; push it to a branch here.
 
-| Implementation | Selected for | Execution |
-| --- | --- | --- |
-| [Parallel](../workflows/ci-parallel.yml) | Same-repository PRs, main pushes and default manual/nightly/release calls | WarpBuild Apple silicon runners; package, build, units, journey and tailnet lanes |
-| [Hosted](../workflows/ci-hosted.yml) | Fork PRs or manual `hosted=true` | GitHub-hosted `macos-26`; combined build and checks, with no signet journey for forks |
+The rest of this file describes the Swift app's CI and is kept for its history.
 
 Parallel build prepares Debug app/test products once and also checks an ARM64
 Release build. Units and journey download the hash-checked Debug artifact and
