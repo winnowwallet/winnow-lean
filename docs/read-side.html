@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Read Side: How a Private Mobile Bitcoin Wallet Learns What&#x27;s Its Own &mdash; Winnow</title>
+<meta name="description" content="How Winnow finds payments using compact filters, with the privacy and trust limits explained.">
+<link rel="canonical" href="https://winnowwallet.com/read-side">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://winnowwallet.com/read-side">
+<meta property="og:title" content="The Read Side: How a Private Mobile Bitcoin Wallet Learns What&#x27;s Its Own &mdash; Winnow">
+<meta property="og:description" content="How Winnow finds payments using compact filters, with the privacy and trust limits explained.">
+<meta property="og:image" content="https://winnowwallet.com/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The Read Side: How a Private Mobile Bitcoin Wallet Learns What&#x27;s Its Own &mdash; Winnow">
+<meta name="twitter:description" content="How Winnow finds payments using compact filters, with the privacy and trust limits explained.">
+<meta name="twitter:image" content="https://winnowwallet.com/og.png">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar"><div class="bar"><a class="mark" href="/" aria-label="Winnow home">winnow</a><nav class="links" aria-label="Main"><a href="/architecture">How it works</a><a href="https://github.com/winnowwallet/winnow">GitHub ↗</a></nav></div></header>
+<main id="main">
+  <h1 id="the-read-side-how-a-private-mobile-bitcoin-wallet-learns-whats-its-own">The Read Side: How a Private Mobile Bitcoin Wallet Learns What’s Its Own</h1>
+  <p class="lede">Winnow downloads public block filters and checks them against your wallet on the phone. It fetches matching blocks to find payments without sending peers its watch list.</p>
+  <aside class="guide-summary"><p>Clearnet peers still see your IP address, and every peer sees your block requests. Compact filters are not committed by Bitcoin consensus, so a fully eclipsed phone can receive a consistent false view. Recovery starts from a trusted backup’s height rather than searching the whole chain.</p></aside>
+  <nav class="contents" aria-label="On this page"><a href="#bip157158-compact-block-filters-client-side-filtering">Compact filters</a><a href="#honest-weaknesses-of-compact-filters">Limits</a><a href="#bounded-mempool-windows">Pending payments</a><a href="#threat-model-read-path">Threat model</a><a href="#use-case-walkthrough-what-serves-what-and-why">Use cases</a></nav>
+  <p>Numbers marked “approx.” are estimates, not measurements. Historical signet timings remain in <code>screenshots/timings.json</code>; the current journey does not update them.</p>
+  <h2 id="the-problem">1. The problem</h2>
+  <p>A Bitcoin wallet is, at its core, a holder of private keys plus the ability to answer four questions about the chain:</p>
+  <ol type="1">
+  <li><strong>“What’s mine?”</strong> — which transaction outputs are spendable by my keys. From this follows everything the wallet displays (balance, history) and everything it needs to sign (the UTXOs, their amounts, and their scriptPubKeys — required inputs to the BIP341 signature hash).</li>
+  <li><strong>“Where’s the tip?”</strong> — the current block height, so “confirmed” can mean something.</li>
+  <li><strong>“What fee should I pay?”</strong> — fee-market information.</li>
+  <li><strong>“Did my transaction get out, and did it get mined?”</strong> — broadcast and confirmation tracking.</li>
+  </ol>
+  <p>Question 1 is the entire difficulty, and the reason is structural: <strong>the Bitcoin P2P protocol has no address index.</strong> Full nodes validate every transaction but do not maintain a queryable mapping from addresses or scripts to transactions. There is no <code>getbalance(address)</code> message on the wire. So for a light client, someone has to scan the blockchain on the wallet’s behalf. The design question of this paper is: <em>who scans, what do they learn, and what does it cost?</em></p>
+  <p>Every realistic answer falls into one of two families:</p>
+  <ul>
+  <li><strong>A server scans for you.</strong> You hand the server your addresses (or extended public keys); it queries its index and returns your history. Fast and cheap — and the server learns, and can log, every address you care about, linkable to your IP address.</li>
+  <li><strong>Your phone scans for itself.</strong> The phone downloads a compact per-block summary (a <em>filter</em>), checks it locally against its own scripts, and downloads a full block only when a filter indicates the block contains its transactions. Nobody learns anything — but the phone does the work and the bandwidth.</li>
+  </ul>
+  <p>This paper walks through every realistic mechanism in both families, with honest cost/privacy/trust accounting, then walks the actual use cases of this product and concludes which mechanism serves each one — and why the answer, for this product, is client-side scanning by default, with a server only ever as an explicit, warned, user-initiated opt-in.</p>
+  <p><strong>Scope note:</strong> Winnow is a <em>fresh-wallet</em> product. Wallets are created new in the app; a new wallet has no history, so scanning runs <em>forward</em> from the moment of creation. Existing wallets may be imported <strong>only with their history included</strong> — the user supplies an export bundle (descriptor/keys + known transactions and UTXOs + a last-known height) from their previous wallet software, and the app verifies and updates that history by scanning filters forward from the bundle’s height. There is no historical back-scan machinery at all: catch-up cost is proportional to how stale the bundle is, and a bundle exported at the tip costs nothing. This constraint — chosen deliberately — is what makes the pure-P2P answer not merely acceptable but cheap. The bundle format, the verification algorithm, and what a lying file can still do are specified in <a href="/import">import</a>, not here.</p>
+  <hr />
+  <h2 id="the-candidate-mechanisms">2. The candidate mechanisms</h2>
+<details><summary>Other ways to find payments</summary>
+  <h3 id="full-node-on-the-phone">2.1 Full node on the phone</h3>
+  <p>Run Bitcoin Core (or equivalent) on the device: download and validate every block.</p>
+  <ul>
+  <li><strong>Cost:</strong> the full chain is several hundred GB and growing (exact current size depends on date and pruning; even pruned, initial block download must <em>process</em> the entire history — days of CPU and hundreds of GB of transfer). Ruled out for a phone by bandwidth, storage, battery, and App Store reality. Not discussed further.</li>
+  </ul>
+  <h3 id="central-indexer-esplora-family-apis">2.2 Central indexer (“esplora”-family APIs)</h3>
+  <p>Public servers (e.g. mempool.space, blockstream.info) run a full node plus an address index, and expose REST endpoints: <code>GET /address/{addr}/utxo</code>, <code>GET /address/{addr}/txs</code>, <code>GET /fee-estimates</code>, <code>POST /tx</code>.</p>
+  <ul>
+  <li><strong>Cost to user:</strong> kilobytes per query; instant answers; mempool-stage visibility (unconfirmed transactions appear immediately).</li>
+  <li><strong>What leaks:</strong> <em>everything that matters.</em> The operator sees every address you query, the set of your addresses (wallet fingerprint), your balance, your counterparties, and your IP address linking them together. “We don’t keep logs” is a policy, not a mechanism — the query stream itself is the sensitive data, and it exists the moment you ask.</li>
+  <li><strong>Trust:</strong> you must trust the server’s answers about your history. (Partial mitigation exists: when <em>spending</em>, the BIP341 sighash commits to input amounts, so a server lying about a UTXO’s amount produces an invalid transaction rather than a theft — but a server can still hide payments from you or invent history.)</li>
+  <li><strong>Role in this product:</strong> external website links only. Settings selects mempool.space or a custom Esplora-compatible website. Winnow never queries it for wallet state, fees, or broadcast. A deliberate address/transaction tap shows the exact host and disclosure warning before iOS opens the URL; the website’s answer is not imported as wallet truth.</li>
+  </ul>
+  <h3 id="electrum-protocol">2.3 Electrum protocol</h3>
+  <p>The Electrum server protocol (address scripthash subscriptions over TCP/SSL) is the same shape as §2.2 — a server-side address index queried with your scripthashes — with the same privacy properties: the server learns every scripthash you subscribe to. Noted for completeness; nothing about it improves on §2.2 for this product’s goals.</p>
+  <h3 id="bip37-bloom-filters-and-why-theyre-dead">2.4 BIP37 bloom filters — and why they’re dead</h3>
+  <p>BIP37 (2012) let a light client upload a <em>bloom filter</em> of its keys to a full-node peer, which then forwarded only matching transactions. This is the historically important wrong answer:</p>
+  <ul>
+  <li><strong>Privacy catastrophe.</strong> Bloom filters leak far more than intended: false-positive rates are chosen small, filters for multiple addresses correlate, and an observer (or the peer itself) can statistically extract which addresses are actually yours. The research literature demolished this repeatedly (e.g. Gervais et al., “On the Privacy Provisions of Bloom Filters in Lightweight Bitcoin Clients”, ACSAC 2014).</li>
+  <li><strong>DoS vector.</strong> Serving BIP37 lets any client force a full node to scan entire blocks against arbitrary filters — CPU for free, on demand.</li>
+  <li><strong>Consequence:</strong> Bitcoin Core has served BIP37 to peers only when explicitly enabled since v0.19 (2019); on today’s network it is effectively unavailable. Any design that needs “ask a node about my address” over P2P is a design from 2013.</li>
+  </ul>
+  <p>BIP37 matters here for one reason: it establishes that <strong>server-side matching is inherently leaky</strong>, which is why the modern design inverts it — <em>the data moves to the client, the matching happens on the client.</em></p>
+</details>
+  <h3 id="bip157158-compact-block-filters-client-side-filtering">2.5 BIP157/158 compact block filters (client-side filtering)</h3>
+  <p>This is the inversion, and the mechanism this product uses by default. Mechanics, precisely:</p>
+  <ul>
+  <li><strong>BIP158</strong> defines, for each block, a <em>basic filter</em>: take every output scriptPubKey in the block (excluding OP_RETURN outputs) <strong>and</strong> the scriptPubKeys of all outputs <em>spent</em> by the block’s inputs; hash each with SipHash keyed by the first 16 bytes of the block hash; map into a Golomb-Rice-coded set (GCS) with parameters P=19, M=784931. Result: a per-block data structure of approx. 15–20 KB (recent blocks; smaller for older, emptier blocks) that answers “might script S be in this block?” with <strong>zero false negatives and a false-positive rate the GCS construction leaves tunable in general but the basic filter fixes at 1/784931</strong>.</li>
+  <li><strong>BIP157</strong> wires it into P2P: peers signal <code>NODE_COMPACT_FILTERS</code> (service bit 6); clients request <code>getcfheaders</code> (a 32-byte commitment chain over the filters), <code>getcfcheckpt</code> (checkpoint hashes, for cross-peer comparison), and <code>getcfilters</code> (the filters themselves).</li>
+  <li><strong>Client flow:</strong> the wallet derives its own scriptPubKeys locally → downloads the filter for each new block → checks each filter <em>on the device</em> against its scripts → on a (rare) match, downloads that one full block (<code>getdata</code>) and extracts its transactions. Nothing about the wallet’s keys or addresses is ever transmitted.</li>
+  </ul>
+  <p>Costs, stated plainly:</p>
+  <ul>
+  <li><strong>Block headers</strong> (needed to know the chain and anchor filter headers): exactly 80 bytes per block — approx. 75 MB for the entire historical chain, and <em>zero</em> for a fresh wallet that starts at the tip.</li>
+  <li><strong>Filters, steady state:</strong> ~144 blocks/day × approx. 15–20 KB ≈ <strong>3 MB/day</strong> (approx.) of filter download. A once-daily app open pulls a few MB — comparable to loading a couple of web pages.</li>
+  <li><strong>Matched blocks:</strong> only blocks that actually contain the wallet’s transactions, ~1–2 MB each (exact: block size varies up to 4M weight units). For typical personal use this is rare — days to weeks apart.</li>
+  <li><strong>CPU/battery:</strong> hashing and matching a filter against a watch list of thousands of scripts is milliseconds of work per block on a modern phone. The signet UI suite measured mined→filter-detected at <strong>0.69s</strong> on an iPhone 17 Pro Max simulator (2026-08-17, <code>screenshots/timings.json</code>) — that figure includes mining-propagation and the match, not just GCS lookup, and is a measurement on signet, not a mainnet bandwidth claim.</li>
+  </ul>
+<details><summary>Server privacy designs considered</summary>
+  <h3 id="server-side-privacy-designs-considered-and-why-none-is-the-default">2.6 Server-side privacy designs (considered, and why none is the default)</h3>
+  <p>Since the leak in §2.2/§2.3 is the server observing queries, can we build a <em>server that can’t observe</em>? The candidates:</p>
+  <ul>
+  <li><strong>Self-hosting.</strong> Run your own indexer on your own hardware and query only it. Privacy: excellent (you trust yourself). Cost: hardware, setup, and maintenance — outside this product’s premise of a self-contained mobile client. A user can select that instance for Winnow’s warned external links, but the app still does not make automatic wallet queries.</li>
+  <li><strong>Tor / VPN to a public indexer.</strong> Hides the client’s IP from the operator. The operator still sees — and can correlate and log — the <em>content</em>: the set of addresses, which is itself the wallet fingerprint. Partial mitigation only.</li>
+  <li><strong>Oblivious HTTP (OHTTP, RFC 9458).</strong> A two-party relay/gateway split: the relay sees the client’s IP but not the query; the gateway sees the query but not the IP. This is Apple Private Relay’s architecture and it is genuinely deployable. But the gateway still aggregates the address sets of all users it serves, trust now rests on the relay/gateway non-collusion assumption, and <em>someone must operate both parties</em>. Better than Tor, still a server to trust.</li>
+  <li><strong>TEE + no-logs + ORAM (“enclave esplora”).</strong> Run the indexer inside a hardware enclave (Intel TDX, AMD SEV-SNP, AWS Nitro) with remote attestation, so the operator cannot read queries even with root; use ORAM (Oblivious RAM) inside the enclave so memory-access patterns don’t reveal which addresses are being looked up. Intellectual honesty requires listing the catches:
+  <ul>
+  <li>The enclave boundary ends at the network card: the host still observes client IPs, connection timing, and request sizes — traffic analysis outside the enclave — unless expensive padding/batching is added.</li>
+  <li>TEEs have a decade-long side-channel track record (Spectre-class transient execution, controlled-channel/page-fault attacks against SGX, cache attacks). ORAM addresses one class (access patterns); it does not fix microarchitectural leakage, and ORAM over a multi-GB address index carries a real bandwidth/latency multiplier per query.</li>
+  <li>Remote attestation roots trust in the CPU vendor’s signing infrastructure and in the reproducible-build chain of the enclave image — a <em>different</em> trust assumption, not the absence of one.</li>
+  <li>Someone must procure enclave-capable hardware and operate it forever. “Can it keep no logs and use ORAM?” — yes, approximately, at real cost; but the product question is whether a mobile wallet should depend on anyone’s server at all. For this product: not by default, ever.</li>
+  </ul></li>
+  </ul>
+  <p>The pattern across §2.6: every server-side fix moves or shrinks the trust rather than deleting it, and every one requires operating infrastructure. Client-side filtering (§2.5) is the only mechanism that requires trusting no one with the read path.</p>
+</details>
+  <h3 id="honest-weaknesses-of-compact-filters">2.7 Honest weaknesses of compact filters</h3>
+  <p>Filters win the privacy argument; they lose elsewhere. Said louder than the strengths:</p>
+  <ol type="1">
+  <li><strong>Filters are not consensus-committed.</strong> A malicious peer can serve a filter that <em>omits</em> your transaction (lying by omission), causing the wallet to miss a payment. Mitigation: fetch <code>cfcheckpt</code>/<code>cfheaders</code> from ≥2 independent peers and disconnect peers that disagree — disagreement is detectable, though the protocol cannot by itself prove which peer lied. A future consensus change committing filters to blocks would close this; it does not exist today. Residual risk: a <em>partitioned</em> client (all reachable peers colluding) can be lied to — the standard eclipse-attack caveat for all light clients.</li>
+  <li><strong>Mempool view: bounded by design, not absent.</strong> Filters cover confirmed blocks only, so the steady state is confirmation-time visibility. But the client can open a <strong>bounded mempool window</strong> (§2.8): while the Receive screen is open — i.e., while a payment is actively expected — the app subscribes to full transaction relay and matches locally, so the payment appears as <em>unconfirmed</em> within seconds of broadcast. The window exists only while the screen is open, anything relayed before it opened is missed, and 0-conf is never final against RBF/double-spend — the app says “unconfirmed”, never “received”. A user who wants a second, faster manual check can open an address or transaction at the selected explorer after a warning; Winnow does not consume that answer. (The one answer Winnow does consume is the warned, single-tap “Infer sender” lookup on a received payment, which returns funding addresses only — never balance, history, or identity.)</li>
+  <li><strong>Bandwidth is real, if modest.</strong> ~3 MB/day (approx.) steady state is trivial on Wi-Fi and fine on cellular, but it is not zero, and a phone that hasn’t synced in a month downloads ~100 MB (approx.) of filters to catch up. Mempool windows add ~180 KB/min (approx.) while open — bounded by a screen session.</li>
+  <li><strong>Fee estimation is blind.</strong> Without a persistent mempool view, the wallet cannot see the current fee market — and relayed transactions alone don’t help, since a feerate needs input amounts, which means recursively fetching parent transactions (the bandwidth blowup returns through the back door). Mitigations: BIP133 <code>feefilter</code> messages from peers give the network’s <em>minimum relay fee</em> floor; feerates of transactions in matched blocks give some signal; beyond that, conservative static presets with user override. The result is cruder than any mempool-aware estimator — the price of asking no one. Owned.</li>
+  <li><strong>Fresh-wallet scope is what makes this viable.</strong> Filters are cheap <em>because</em> scanning starts at creation and runs forward. Recovering an old wallet <em>privately from the chain</em> would mean back-scanning gigabytes of historical filters (approx.; multiple GB for a multi-year-old mainnet wallet) — so this product doesn’t do that. Instead, <strong>import requires the history to come with the wallet</strong>. The format and the residual lies a bundle can still tell (omitted old coins, a too-high height) are <a href="/import">import</a>.</li>
+  </ol>
+  <hr />
+  <h3 id="bounded-mempool-windows">2.8 Bounded mempool windows</h3>
+  <p>The refinement that removes §2.7.2’s sting:</p>
+  <ul>
+  <li><strong>What:</strong> a time- and screen-bounded subscription to <em>full transaction relay</em>. The client sets the relay bit in its <code>version</code> handshake for the window’s duration, answers every transaction <code>inv</code> with <code>getdata</code>, and matches the results locally against a watch set (typically the one address currently displayed).</li>
+  <li><strong>Why it’s private:</strong> the watch list stays on the device while the client receives public transaction gossip. Connection timing, request patterns and relay behavior can still reveal information; this does not make a mobile client indistinguishable from a full node.</li>
+  <li><strong>Cost:</strong> ~180 KB/min (approx.: ~5 tx/s × ~600 B) for the duration of the window — a few MB per receive session. Only ever while the relevant screen is open.</li>
+  <li><strong>Used for:</strong> (a) receive-side 0-conf visibility while expecting a payment (“unconfirmed — awaiting confirmation” within seconds of the sender broadcasting); (b) send-side propagation confidence (peers echoing our txid back = the network has it).</li>
+  <li><strong>Still can’t:</strong> fee histograms (feerates need prevout amounts → recursive parent fetches → the bandwidth blowup returns — fee policy lives on <a href="/write-side">the write side</a>); anything relayed before the window opened; safety of unconfirmed funds against RBF/double-spend — which is why the UI never presents 0-conf as final.</li>
+  </ul>
+  <h3 id="threat-model-read-path">2.9 Threat model (read path)</h3>
+  <p>What an adversary can do to <em>this</em> paper’s mechanism, not to keys or broadcast (those are <a href="/mobile">mobile</a> §5 and <a href="/write-side">write-side</a> §8).</p>
+  <div class="table-wrap" role="region" tabindex="0" aria-label="Scrollable table"><table style="width:100%;">
+  <colgroup>
+  <col style="width: 23%" />
+  <col style="width: 12%" />
+  <col style="width: 17%" />
+  <col style="width: 25%" />
+  <col style="width: 21%" />
+  </colgroup>
+  <thead>
+  <tr>
+  <th>Adversary</th>
+  <th>Sees</th>
+  <th>Can do</th>
+  <th>Mitigation</th>
+  <th>Residual</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+  <td>Honest-but-curious peer</td>
+  <td>Your IP; that you are a compact-filter client syncing from height H; the same filter bytes everyone else downloads</td>
+  <td>Log the connection; infer “this IP runs a light client”</td>
+  <td>Nothing about scripts or addresses is sent</td>
+  <td>The connection itself</td>
+  </tr>
+  <tr>
+  <td>Lying-by-omission peer</td>
+  <td>Same</td>
+  <td>Serve a filter that drops your transaction</td>
+  <td><code>getcfcheckpt</code> / <code>getcfheaders</code> from ≥2 peers; disagreement disconnects the minority; each <code>cfilter</code> must reproduce the pinned filter-header chain</td>
+  <td>Disagreement is detectable; <em>which</em> peer lied is not provable</td>
+  </tr>
+  <tr>
+  <td>Fully eclipsed peer set</td>
+  <td>Same, and they agree with each other</td>
+  <td>Show a consistent false filter-header chain, hide payments, or stall the tip</td>
+  <td>Manual peers (Settings) so a user who has a node they trust can skip DNS seeds; seeds themselves resolve over DoH (not on-path UDP) with <code>getaddrinfo</code> fallback, and RFC1918/loopback answers are dropped; headers still need PoW + chainwork</td>
+  <td>A partitioned phone can be lied to — the standard light-client eclipse caveat. DoH removes the unauthenticated-UDP seed rewrite; it does not remove a determined eclipse.</td>
+  </tr>
+  <tr>
+  <td>Network observer (not a peer)</td>
+  <td>Timing, sizes, destination IPs of the outbound pool</td>
+  <td>Infer that this IP is syncing filters from height H</td>
+  <td>No addresses on the wire</td>
+  <td>Height H plus “is a BIP157 client”</td>
+  </tr>
+  </tbody>
+  </table></div>
+  <p>Filters are not consensus-committed. A future soft fork committing the filter header into the block would collapse the first three rows’ residual column (<a href="#consensus-committed-block-filters">§5.1</a>). Until then this table is the honest one.</p>
+  <hr />
+  <h3 id="the-shipped-checkpoint">2.10 The two shortcuts, said plainly</h3>
+  <p>Everything above concerns <em>filters</em>. Headers are the other half, and between them there are exactly two places this wallet does not derive everything for itself. Both are listed here rather than left to be found.</p>
+  <p><strong>One: the chain before the checkpoint.</strong> Validating mainnet from genesis means checking the proof of work on ~963,000 headers — about <strong>8.5 minutes of a phone at full CPU</strong>, and effectively the whole first-launch experience, since filter scanning for a new wallet is a few hundred blocks. By default Winnow starts instead from a checkpoint compiled into the app: a height, that block's 80-byte header, and the cumulative chainwork at that point. Headers after it are validated exactly as before — proof of work, linkage, most-work fork choice, all unchanged.</p>
+  <p><strong>Two: history does not come from the chain.</strong> Filters are cheap because scanning starts at the wallet's creation and runs forward, so recovering an <em>old</em> wallet privately would mean back-scanning gigabytes of historical filters. Winnow does not do that; an imported wallet brings its history with it (<a href="/import">import</a>). That is the same trade in a different place, and §2.7 covers what a bundle can still misstate.</p>
+  <p><strong>The checkpoint adds no new party.</strong> This is the part worth being precise about. The constant ships inside the same signed binary as the code that derives your keys, matches your filters and computes your balance. Anyone able to change the checkpoint is equally able to change any of those — so trusting it is not a further act of trust, it is the one already performed by installing the app. That is a different thing from <em>fetching</em> a checkpoint from a server, which would introduce a party who could serve one value to everybody and another to you. Nothing here is fetched, and every install carries the same value.</p>
+  <p><strong>And a checkpoint is not only a saving — it is also a defence.</strong> A light client with no checkpoint chooses between competing chains on accumulated work alone, which is precisely what a long-range attack exploits: a branch taken near genesis, when difficulty was trivial, can be extended cheaply into something a naive comparison finds plausible. A checkpoint forecloses that entire class. Bitcoin Core shipped checkpoints for the same reason for years. So the honest accounting is not "we gave up verification to be fast" — it is that the shortcut removes one attack while accepting a different, narrower one.</p>
+  <p><strong>What is still verified, and by how many.</strong> Every header after the checkpoint is checked on the device. Filter commitments are cross-checked across several peers. Network-prefix and source diversity reduce concentration, but do not prove independent operators. Tor and I2P names have no prefix, so while clearnet is selected they may not fill every slot, and with only Tor and I2P selected neither overlay may. No peer-address list is bundled. Fresh installs use DNS seeds; saved working peers and signed census downloads provide other candidates. Census validation checks the publisher signature, schema, size, original date (at most seven days old), addresses, duplicate endpoints, clearnet prefix diversity and heights within 100 blocks of the reference tip. Handshakes and reported heights are candidate-selection evidence, not proof of valid filters or chain identity. DNS-only discovery can occupy two of the three default slots under the existing source ceiling.</p>
+  <p><strong>Where candidates come from.</strong> Each release ships the census list of its day, inside the same signed app as the code that uses it, and downloads none. Saved-peer and DNS discovery continue independently. Reset and shuffle peers clears learned and transient state while preserving manual settings and the shipped list, and prefers different automatic peers where possible. Census candidates count as one trust source.</p>
+  <p><strong>Connections.</strong> With clearnet selected, peers, DNS discovery and consented explorer lookups are made directly from the device. Automatic routing, the default, asks Tailscale’s resolver for the user’s own <code>winnow-tor-gateway</code> and <code>winnow-i2p-gateway</code>; when either answers, clearnet is dropped and every peer is reached through a gateway, never dialled directly, and when neither answers the wallet falls back to clearnet. Manual routing without clearnet skips DNS seeds and sends explorer requests through the Tor gateway; I2P alone makes no HTTP request and turns explorer lookups off. The shipped list’s validated onion and I2P entries serve those routes (<a href="https://github.com/winnowwallet/winnow/blob/main/docs/peer-gateways.md">gateway setup</a>). Winnow bundles no Tor or I2P client; the embedded Tor client of 0.6–0.7.0 was removed in 0.7.1 (see the <a href="/roadmap#private-transports">roadmap</a>). Networking stops in the background and is rebuilt in the foreground, or for one bounded check when iOS starts a background task. That check uses the same routing, except that Automatic routing which last reached peers through a gateway skips the check rather than connect directly.</p>
+  <p><strong>What would still go wrong.</strong> If the constant were wrong, the wallet would follow a chain that is not Bitcoin's, and later validation would not notice — every header after a false starting point can be perfectly valid relative to it. What stands behind it: the value carries its provenance in the source, including the tip it was taken from and the command that recomputes it, and the build fails if a chain synced from genesis and a chain synced from the checkpoint ever disagree on tip hash or total chainwork. That test runs through the same loading path the app uses, not a special one.</p>
+  <p><strong>How to turn it off.</strong> Settings → <em>Verify the chain from genesis</em>. On, the app ignores the checkpoint and spends the minutes. Switching rebuilds the stored chain rather than mixing the two, so an install cannot end up half-validated.</p>
+  <hr />
+  <h2 id="use-case-walkthrough-what-serves-what-and-why">3. Use-case walkthrough: what serves what, and why</h2>
+  <div class="table-wrap" role="region" tabindex="0" aria-label="Scrollable table"><table>
+  <colgroup>
+  <col style="width: 5%" />
+  <col style="width: 17%" />
+  <col style="width: 33%" />
+  <col style="width: 42%" />
+  </colgroup>
+  <thead>
+  <tr>
+  <th>#</th>
+  <th>Use case</th>
+  <th>Default mechanism</th>
+  <th>One-sentence rationale</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+  <td>1</td>
+  <td>Fresh wallet, first launch</td>
+  <td>Nothing to scan; record creation height; sync filters forward from tip</td>
+  <td>A new key has no past — the read side starts empty and cheap by construction.</td>
+  </tr>
+  <tr>
+  <td>2</td>
+  <td>Daily open / ongoing sync</td>
+  <td><code>getcfilters</code> for blocks since stored checkpoint (~3 MB/day, approx.), match locally, fetch matched blocks only</td>
+  <td>Client-side matching avoids sending an address watch list. Subsequent block requests, relay traffic and timing can still reveal information.</td>
+  </tr>
+  <tr>
+  <td>3</td>
+  <td>Receiving a payment</td>
+  <td>While the Receive screen is open: mempool window (§2.8) shows the payment as <strong>unconfirmed</strong> within seconds; finality arrives via filter match at block confirmation</td>
+  <td>When you’re actively expecting money, a short full-relay subscription is cheap, private, and exactly as honest as “unconfirmed” implies.</td>
+  </tr>
+  <tr>
+  <td>4</td>
+  <td>Sending</td>
+  <td>UTXOs/amounts/scripts already local from scanning; the rest is <a href="/write-side">the write side</a></td>
+  <td>The read side’s job ends when the coins and their scripts are on the device.</td>
+  </tr>
+  <tr>
+  <td>5</td>
+  <td>Watching a single address</td>
+  <td>One more scriptPubKey in the local match list — same filter stream, zero extra bandwidth</td>
+  <td>The P2P protocol has no per-address query (BIP37 is dead); the granularity is per-block filters regardless of watch-list size.</td>
+  </tr>
+  <tr>
+  <td>6</td>
+  <td>Multisig account (k-of-n)</td>
+  <td>Identical machinery — watch list derived from the account's <code>tr()</code> descriptor</td>
+  <td>An account is just a different set of scripts; the read side doesn’t care. Signing is a PSBT exchange between the signers.</td>
+  </tr>
+  <tr>
+  <td>7</td>
+  <td>Balance &amp; history display</td>
+  <td>Local storage, populated by §2.5 matches</td>
+  <td>After sync, display is a database read — no network at all.</td>
+  </tr>
+  <tr>
+  <td>8</td>
+  <td>“Where’s the tip?”</td>
+  <td>80-byte block headers over P2P (<code>getheaders</code>), PoW + chainwork-checked</td>
+  <td>Headers are the sync clock and the anchor for the filter-header chain.</td>
+  </tr>
+  <tr>
+  <td>9</td>
+  <td>“Did my tx get out?”</td>
+  <td>Peer <code>inv</code> gossip — peers echoing our txid back prove propagation; confirmation observed via filter match</td>
+  <td>Relay acceptance is <a href="/write-side">write-side</a> §7; this paper observes the confirmation.</td>
+  </tr>
+  <tr>
+  <td>10</td>
+  <td>Importing an existing wallet</td>
+  <td>History bundle, verified by forward filter-scan from its height</td>
+  <td>Specified in <a href="/import">import</a>.</td>
+  </tr>
+  <tr>
+  <td>11</td>
+  <td>Optional manual check</td>
+  <td>A warned tap opens an exact address or transaction in an external browser. A separate per-lookup consent discloses a transaction ID and the IP disclosure before requesting funding-address suggestions. Every suggestion requires explicit selection, even if only one exists, and retains unverified provenance. A local name-only label makes no request and cannot send until a destination is attached.</td>
+  <td>Useful while P2P sync catches up, but the explorer learns the exact item and the connection’s IP address. It is a user action, not a fast read path.</td>
+  </tr>
+  </tbody>
+  </table></div>
+  <p>One use case is deliberately <strong>absent</strong> from the default path:</p>
+  <ul>
+  <li><strong>Always-on mempool awareness</strong> (instant notification of <em>unexpected</em> payments, background 0-conf, live fee markets) — all require either a persistent relay subscription (bandwidth/battery cost the product rejects) or a server (privacy cost the product rejects). Bounded windows (§2.8) cover the cases where the user is present and expecting something; everything else waits for confirmation.</li>
+  </ul>
+  <hr />
+  <h2 id="conclusion">4. Conclusion</h2>
+  <p>For a fresh-wallet product, the read side reduces to a steady-state stream of ~3 MB/day (approx.) of compact filters, matched on-device, with full blocks fetched only on hits — plus bounded mempool windows (§2.8) for the moments a user is actively sending or expecting a payment. Winnow does not query a wallet-history server automatically. Discovery services still receive network requests; peers see protocol traffic, and direct connections expose the device’s IP. The costs — confirmation-time visibility for unexpected payments, crude fee estimation, reliance on honest filter peers cross-checked by header comparison — are real, bounded, and stated to the user instead of hidden. Warned explorer links let the user make a one-off disclosure without turning it into wallet infrastructure.</p>
+  <p><strong>v1 on the read side is therefore: block headers + BIP157/158 compact filters + bounded mempool windows, over <code>Network.framework</code>, talking only to full-node peers that signal <code>NODE_COMPACT_FILTERS</code>. Esplora is an external, warned link—not a wallet backend.</strong> The phone those bytes land on, the spend, the vault, and the import are the other papers.</p>
+  <hr />
+<details><summary>Future hardening and validation details</summary>
+  <h2 id="future-hardening">5. Future hardening</h2>
+  <p>Three known paths would strengthen this design further. None is buildable today on this product’s constraints; all are worth stating so the current trade-offs are legible against them.</p>
+  <h3 id="consensus-committed-block-filters">5.1 Consensus-committed block filters</h3>
+  <ul>
+  <li><strong>What:</strong> a soft fork committing each block’s BIP158 filter (or filter header) into the block itself, so a peer serving a wrong filter is <em>provably</em> wrong against the header chain.</li>
+  <li><strong>Fixes:</strong> §2.7.1 outright — lying by omission becomes impossible, not merely detectable-by-disagreement.</li>
+  <li><strong>Costs:</strong> a consensus change; outside anyone’s roadmap control. Until then, multi-peer <code>cfcheckpt</code>/<code>cfheaders</code> comparison is the mitigation.</li>
+  </ul>
+  <h3 id="pow-fraud-proofs">5.2 PoW fraud proofs</h3>
+  <ul>
+  <li><strong>What:</strong> a compact, relayable proof that some block in a chain is invalid, so light clients needn’t accept majority chainwork on faith.</li>
+  <li><strong>Fixes:</strong> the eclipse-amplified trust assumptions that all light clients carry — a partitioned client fed a fabricated chain tip.</li>
+  <li><strong>Costs:</strong> producing or consuming fraud proofs requires validation infrastructure (a script engine, chain state) that this product deliberately does not carry; and full validation on-device means downloading every block (~150–300 MB/day approx. vs. ~3 MB/day of filters) — bandwidth, not storage, is the mobile constraint. Utreexo-style accumulators solve UTXO-set storage; they do not shrink the blocks. If a future revision ever embeds real validation, reusing an existing consensus engine rather than reimplementing one is the only sane path.</li>
+  </ul>
+  <h3 id="utreexo-proof-based-import-verification">5.3 Utreexo proof-based import verification</h3>
+  <ul>
+  <li><strong>What:</strong> with the draft Utreexo peer services (BIP181/182/183, work in progress), a peer could serve a Merkle proof that an imported output is still in the accumulator — i.e., still unspent.</li>
+  <li><strong>Fixes:</strong> the import flow’s one remaining cost — verifying a history bundle by forward-scanning filters from its height (§2.7.5). Proof-based verification is O(1) per UTXO and independent of bundle staleness.</li>
+  <li><strong>Costs:</strong> the BIPs are drafts and no serving network exists. The import-bundle format is versioned, so a <code>proof</code> field can be added non-destructively when the ecosystem arrives.</li>
+  </ul>
+  <hr />
+  <h2 id="appendix-a.-how-the-implementation-is-validated">Appendix A. How the implementation is validated</h2>
+  <p>Nothing in this paper asks to be taken on faith — the code is checked against independent ground truth at every layer:</p>
+  <ul>
+  <li><strong>Official BIP test vectors</strong> for every cryptographic surface: BIP39/32/86 (keys), BIP340 (Schnorr), BIP341 (Taproot tweaks, control blocks, sighash), BIP350 (bech32m), BIP158 (GCS filters, byte-for-byte against real blocks), BIP380 (descriptors).</li>
+  <li><strong>Loopback fake-node tests</strong> for the P2P layer: handshakes, filter sync, lying-filter detection, relay state machine — deterministic, no network.</li>
+  <li><strong>One end-to-end UI test</strong> makes one payment against a private signet node. Core funds the wallet, accepts the transaction, and mines blocks automatically for prompt confirmation in the app. The host records one continuous video; detailed failures stay in focused tests.</li>
+  </ul>
+  <p>Inspect the <a href="https://github.com/winnowwallet/winnow/actions">current test runs and artifacts</a>. The <a href="/recording">payment recording</a> identifies the source and run behind that journey.</p>
+  <hr />
+</details>
+  <h2 id="references">6. References</h2>
+  <ul>
+  <li><a href="https://bips.dev/37/">BIP37: Connection Bloom filtering</a> (and its privacy critique: Gervais et al., ACSAC 2014)</li>
+  <li><a href="https://bips.dev/133/">BIP133: feefilter message</a></li>
+  <li><a href="https://bips.dev/157/">BIP157: Client Side Block Filtering</a></li>
+  <li><a href="https://bips.dev/158/">BIP158: Compact Block Filters for Light Clients</a></li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc9458">RFC 9458: Oblivious HTTP</a></li>
+  <li>Neutrino (lightninglabs/neutrino) — reference BIP157/158 light-client implementation</li>
+  <li><a href="https://bips.dev/341/">BIP341: Taproot</a> · <a href="https://bips.dev/340/">BIP340: Schnorr</a> · <a href="https://bips.dev/86/">BIP86</a> · <a href="https://bips.dev/388/">BIP388</a> · <a href="https://bips.dev/370/">BIP370: PSBTv2</a></li>
+  </ul>
+</main>
+<footer><div class="bar"><nav aria-label="Footer"><a href="/roadmap">Roadmap</a><a href="/privacy">Privacy</a><a href="/recording">Recording</a></nav></div></footer>
+</body>
+</html>
