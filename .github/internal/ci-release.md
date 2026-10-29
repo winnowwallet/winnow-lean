@@ -8,8 +8,9 @@ its limits.
 
 ## Validation
 
-[ci.yml](../workflows/ci.yml) calls ElmLean's reusable `ios-app` workflow (posix4e/elmlean,
-`.github/workflows/ios-app.yml`): `build` (the Lean, once, cached), then `tests`, `extra` and `app` in
+[ci.yml](../workflows/ci.yml) calls LeanNative's reusable `ios-app` workflow
+([LeanNative/leannative](https://github.com/LeanNative/leannative), formerly posix4e/elmlean;
+`.github/workflows/ios-app.yml`), pinned to the commit `LeanApp/lake-manifest.json` pins: `build` (the Lean, once, cached), then `tests`, `extra` and `app` in
 parallel, on WarpBuild Apple silicon runners. A fork's pull request gets no CI; push it to a branch here.
 
 The rest of this file describes the Swift app's CI and is kept for its history.

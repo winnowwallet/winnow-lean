@@ -1,9 +1,11 @@
 name: CI
-# The Lean app's checks on every pull request and push to main, by ElmLean's ios-app workflow: one job builds
+# The Lean app's checks on every pull request and push to main, by LeanNative's ios-app workflow
+# (LeanNative/leannative, formerly posix4e/elmlean; its Lake package is still `elmlean`): one job builds
 # the Lean once (every proof checked) and caches it; `tests`, `extra` (the regtest node) and `app` (the iOS
 # builds and the UI journeys) restore that build and run in parallel, on WarpBuild runners (a fork's pull
-# request gets no CI: push it to a branch here). The ElmLean commit below is the one LeanApp/lake-manifest.json pins; the
-# build job fails if they differ.
+# request gets no CI: push it to a branch here). The LeanNative commit below is the one LeanApp/lake-manifest.json pins; the
+# build job fails if they differ. Actions does not follow repository redirects for reusable workflows, so the
+# owner/repo here is the framework's real home.
 on:
   pull_request:
   push:
@@ -19,9 +21,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   app:
-    uses: posix4e/elmlean/.github/workflows/ios-app.yml@ccbb1b4019275e257a413b017a8347640c30efae # v0.1.0
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@ed2a3bf0814ca9dea65fb368759eff1c9e9b2341
     with:
-      elmlean: ccbb1b4019275e257a413b017a8347640c30efae
+      elmlean: ed2a3bf0814ca9dea65fb368759eff1c9e9b2341
       runs-on: warp-macos-26-arm64-12x
       lean-packages: Lean LeanApp
       build-targets: |

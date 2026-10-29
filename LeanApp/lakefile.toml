@@ -7,12 +7,14 @@ defaultTargets = ["WinnowApp"]
 name = "winnow"
 path = "../Lean"
 
-# ElmLean, pinned: the framework's Lean package (framework/lean) and, beside it, the native shell's C
-# shim and build scripts (framework/native), at .lake/packages/elmlean/framework after `lake update`.
+# LeanNative (formerly ElmLean; its Lake package is still `elmlean`), pinned: the framework's Lean package
+# (framework/lean) and, beside it, the native shell's C shim and build scripts (framework/native), at
+# .lake/packages/elmlean/framework after `lake update`. The same commit is the `uses:` and `elmlean:` of
+# .github/workflows/ci.yml.
 [[require]]
 name = "elmlean"
-git = "https://github.com/posix4e/elmlean.git"
-rev = "ccbb1b4019275e257a413b017a8347640c30efae"
+git = "https://github.com/LeanNative/leannative.git"
+rev = "ed2a3bf0814ca9dea65fb368759eff1c9e9b2341"
 subDir = "framework/lean"
 
 [[lean_lib]]
