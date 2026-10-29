@@ -1,4 +1,5 @@
 import WinnowApp.Real.Peers
+import ElmLean.Native.BackgroundRun
 
 /-! # Background chain checks (`BackgroundSyncScheduler.swift`, AppModel's `runBackgroundSync`, upstream 66c6a48)
 
@@ -8,10 +9,11 @@ routing, peers and checks, at most 2,000 blocks, then networking stops. Foregrou
 background check never run together: the scene becoming active cancels the check first, and a check
 does not start while the scene is active.
 
-`BackgroundSyncRun` completes exactly once, including when iOS expires the task during start-up or the
-app returns to the foreground; it is kept apart from the shell's task so the lifecycle can be tested
-without iOS scheduling it. Expiring cancels the work (and the backend's networking) and waits for it to
-drain; a drained run that expired never reports success. -/
+`BackgroundSyncRun` is LeanNative's `BackgroundRun` with this app's budgets: it completes exactly once,
+including when iOS expires the task during start-up or the app returns to the foreground, and is kept
+apart from the shell's task so the lifecycle can be tested without iOS scheduling it. Expiring cancels the
+work (and the backend's networking) and waits for it to drain; a drained run that expired never reports
+success. The lifecycle's races are the framework's and tested there; RecordsTest keeps this app's cases. -/
 
 namespace WinnowApp.Real
 open Winnow Winnow.IO Winnow.Net
@@ -24,54 +26,24 @@ def backgroundProcessingID : String := "com.btcswift.winnow.chain-processing"
 `.seconds(25)` for refresh). -/
 def backgroundBudgetMs (kind : String) : Nat := if kind == "processing" then 120_000 else 25_000
 
-structure BackgroundSyncRun.State where
-  running : Option (Task (Except IO.Error Unit)) := none
-  started : Bool := false
-  expired : Bool := false
-  finished : Bool := false
-
-/-- `BackgroundSyncRun`. -/
+/-- `BackgroundSyncRun`: LeanNative's `BackgroundRun` (`ElmLean.Native.BackgroundRun`) with the task's budget
+as its deadline. It completes exactly once, including when iOS expires the task during start-up; once
+expired, the work and the backend's cancellation drain before the completion, which then reports no
+success. -/
 structure BackgroundSyncRun where
-  budgetMs : Nat
-  work : IO Bool
-  cancel : IO Unit
-  completion : Bool → IO Unit
-  state : IO.Ref BackgroundSyncRun.State
+  run : ElmLean.Native.BackgroundRun
 
 namespace BackgroundSyncRun
 
 def new (budgetMs : Nat) (work : IO Bool) (cancel : IO Unit) (completion : Bool → IO Unit) : IO BackgroundSyncRun := do
-  return { budgetMs, work, cancel, completion, state := ← IO.mkRef {} }
-
-/-- `finish(_:)`: the completion, once. -/
-def finish (r : BackgroundSyncRun) (success : Bool) : IO Unit := do
-  let go ← r.state.modifyGet fun s => if s.finished then (false, s) else (true, { s with finished := true, running := none })
-  if go then r.completion success
-
-/-- `expire()`: cancel the work and the backend's networking; the completion follows when the work drains. -/
-def expire (r : BackgroundSyncRun) : IO Unit := do
-  let claim ← r.state.modifyGet fun s => if s.finished || s.expired then (none, s) else (some s.running, { s with expired := true })
-  let some running := claim | return
-  if let some t := running then IO.cancel t
-  discard <| IO.asTask (prio := .dedicated) (try r.cancel catch _ => pure ())
+  return ⟨← ElmLean.Native.BackgroundRun.new
+    { work, cancel, completion := fun o => completion o.success, deadline := .after budgetMs }⟩
 
 /-- `start()`: the work, and the deadline that expires it. A second start does nothing. -/
-def start (r : BackgroundSyncRun) : IO Unit := do
-  let go ← r.state.modifyGet fun s => if s.started || s.finished then (false, s) else (true, { s with started := true })
-  if !go then return
-  let t ← IO.asTask (prio := .dedicated) do
-    if (← r.state.get).expired then r.finish false; return
-    let ok ← try r.work catch _ => pure false
-    r.finish (ok && !(← r.state.get).expired)
-  r.state.modify fun s => if s.finished then s else { s with running := some t }
-  discard <| IO.asTask (prio := .dedicated) do
-    let deadline := (← IO.monoMsNow) + r.budgetMs
-    repeat
-      if (← r.state.get).finished then return
-      let now ← IO.monoMsNow
-      if now ≥ deadline then break
-      IO.sleep (min 50 (deadline - now)).toUInt32
-    r.expire
+def start (r : BackgroundSyncRun) : IO Unit := r.run.start
+
+/-- `expire()`: cancel the work and the backend's networking; the completion follows when the work drains. -/
+def expire (r : BackgroundSyncRun) : IO Unit := r.run.expire
 
 end BackgroundSyncRun
 
