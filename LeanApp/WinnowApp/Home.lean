@@ -189,7 +189,7 @@ def balanceSection (m : Model) : H :=
   .section "" "" [.col ([ caption "Balance", balanceText m ] ++
                   accountsBalanceLine m ++ [
                     .row ([syncLine m] ++ (if m.settings.network == .mainnet then [] else
-                      [.spacer, .identified "networkTag" (Html.badge (Html.tone .warning (caption "Signet · test coins")))])) ] ++
+                      [.spacer, .identified "networkTag" (Html.badge (Html.tone .warning (caption s!"{m.settings.network.label} · test coins")))])) ] ++
                   (if m.settings.network == .mainnet then [peerRoutingBanner m] else []) ++
                   (if m.phase.summary m.status.syncing == .peersUnavailable then
                     [.identified "retryPeersButton" (.button "Retry" .plain (some .retryPeers))] else []) ++
@@ -218,21 +218,25 @@ def chainCheckStatus (m : Model) : List H :=
       "iOS may also check while Winnow is closed, through the same routing. It cannot while the phone is off or after you force-quit Winnow."
     else "Background App Refresh is off, so Winnow checks the chain only while open.") ]
 
-/-- Advanced mode's Sync section. -/
+/-- Advanced mode's Sync section. Its rows stay the same from pass to pass (a pass that starts or ends, an
+error that comes and goes, changes them in place): the section sits above Transactions, and a row added or
+removed every few seconds moved the list under the person's finger. -/
 def syncSection (m : Model) : H :=
-  let statusText := syncStatusText m.phase
+  let failed := m.phase == .peerDiscoveryFailed
+  let warn (t : String) : H := .row [Html.tone .warning (.icon "exclamationmark.triangle"), body t]
+  let status : H := match syncStatusText m.phase with
+    | some t => if failed then warn t else .progress t
+    | none => if m.status.syncing then .progress "Scanning filters…" else
+      match m.status.lastSyncError with
+      | some e => warn e
+      | none => .labeled "Status" (if m.phase == .synced then "Up to date" else "Waiting to sync")
   .section "Sync" ""
-    ((match statusText with
-      | some t => if m.phase == .peerDiscoveryFailed then [body t, .button "Retry" .plain (some .retryPeers)]
-                  else [.progress t]
-      | none => []) ++
-     (match filterScanText m.phase m.status.nextScanHeight m.status.tipHeight with
-      | some t => [.labeled "Filter scan" t] | none => []) ++
-     [.labeled "Peers" s!"{m.status.peerCount}"] ++ chainCheckStatus m ++
-     (if m.status.syncing && statusText.isNone then [.progress "Scanning filters…"] else []) ++
-     errorRows m.status.lastSyncError ++
+    ([ .identified "syncStatus" status
+     , .labeled "Filter scan" ((filterScanText m.phase m.status.nextScanHeight m.status.tipHeight).getD "—")
+     , .labeled "Peers" s!"{m.status.peerCount}" ] ++ chainCheckStatus m ++
      (match m.status.relayStoreQuarantined with | some q => [body q] | none => []) ++
-     [.button "Sync now" .plain (if m.status.syncing then none else some .syncNow)])
+     [if failed then .identified "retryPeersButton" (.button "Retry" .plain (some .retryPeers))
+      else .button "Sync now" .plain (if m.status.syncing then none else some .syncNow)])
 
 def walletSections (m : Model) : List H :=
   [ .section "" "" [.col ([caption "Balance · confirmed", balanceText m] ++
@@ -318,7 +322,8 @@ def paymentSections (m : Model) (txid : String) : List H :=
            (if m.status.feeBumpable.contains txid then [.button "Bump fee" .plain (some (.home .openFeeBump))] else []))]
       else [.section "" "" (technical m "pay.txid" "Transaction ID" [copyableIdentifier m "pay.txid" txid])]
     [.section "" "" [paymentRow m row false]] ++ accountSection m row ++ recipients ++ labelSection ++ notice ++
-    (if h.received > 0 && !row.isDraft then [senderSection m h] else []) ++ load ++
+    -- a payment out also receives its change: only money coming in has a sender
+    (if h.net > 0 && !row.isDraft then [senderSection m h] else []) ++ load ++
     (match m.payment.error with | some e => [.section "" "" (errorRows (some e))] | none => []) ++ txSection
 
 /-! ### FeeBumpView -/

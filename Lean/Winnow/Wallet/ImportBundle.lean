@@ -58,6 +58,9 @@ structure ImportBundle where
   phone builds its next account from the same list. Public keys only. Old files omit it; the app merges it
   with the phone's own on restore rather than replacing that. -/
   signers : Option (Array SignerRecord) := none
+  /-- The wallet's payments no block has taken yet, with the coins they spend: a restore keeps those coins
+  reserved and announces the payments again, instead of forgetting a payment that was never confirmed. -/
+  pendingSends : Array PendingSend := #[]
   nextReceiveIndex : Option UInt32 := none
   nextChangeIndex : Option UInt32 := none
   deriving Inhabited, BEq
@@ -123,7 +126,8 @@ def toJV (b : ImportBundle) : JV :=
     ("utxos", some (.arr (b.utxos.map UTXO.toJV))),
     ("transactions", some (.arr (b.transactions.map KnownTransaction.toJV))),
     ("nextReceiveIndex", b.nextReceiveIndex.map (ofInt ·.toNat)), ("nextChangeIndex", b.nextChangeIndex.map (ofInt ·.toNat)), ("vaults", b.vaults.map (.arr ∘ Array.map MultisigAccountRecord.toJV)),
-    ("signers", b.signers.map (.arr ∘ Array.map SignerRecord.toJV))]
+    ("signers", b.signers.map (.arr ∘ Array.map SignerRecord.toJV)),
+    ("pendingSends", if b.pendingSends.isEmpty then none else some (.arr (b.pendingSends.map PendingSend.toJV)))]
 
 def ofJV (v : JV) : D ImportBundle := do
   let kvs ← asObject v
@@ -139,8 +143,9 @@ def ofJV (v : JV) : D ImportBundle := do
   let signers ← keyIfPresent kvs "signers" (asArray SignerRecord.ofJV)
   let nextReceiveIndex ← keyIfPresent kvs "nextReceiveIndex" asUInt32
   let nextChangeIndex ← keyIfPresent kvs "nextChangeIndex" asUInt32
+  let pendingSends := (← keyIfPresent kvs "pendingSends" (asArray PendingSend.ofJV)).getD #[]
   return { version, network, descriptor, mnemonic, lastKnownHeight, lastKnownBlockHash, utxos, transactions, vaults,
-           signers, nextReceiveIndex, nextChangeIndex }
+           signers, nextReceiveIndex, nextChangeIndex, pendingSends }
 
 /-- Decoding failures: a `WalletError` (`invalidBundle`, `unsupportedWalletData`, …) or a
 `DecodingError` case name. -/
@@ -196,7 +201,7 @@ def serialized (b : ImportBundle) : String := writePretty "" b.toJV
 /-- The v2 writer: display-hex txids, coinbase flag only when set. -/
 def «export» (descriptor network : String) (lastKnownHeight : UInt32) (utxos : Array WalletUTXO)
     (history : Array HistoryEntry) (nextReceiveIndex nextChangeIndex : UInt32) (mnemonic : Option String := none)
-    (lastKnownBlockHash : Option ByteArray := none) : ImportBundle :=
+    (lastKnownBlockHash : Option ByteArray := none) (pendingSends : Array PendingSend := #[]) : ImportBundle :=
   { network, descriptor := some descriptor, mnemonic, lastKnownHeight,
     lastKnownBlockHash := lastKnownBlockHash.map displayHex,
     utxos := utxos.map fun u =>
@@ -207,7 +212,7 @@ def «export» (descriptor network : String) (lastKnownHeight : UInt32) (utxos :
       { txid := displayHex e.txid, height := e.height, received := e.received, spent := e.spent, fee := e.fee,
         replacedBy := e.replacedBy.map displayHex, rawTransaction := e.rawTransaction,
         blockHash := e.blockHash.map displayHex, outputs := e.outputs },
-    nextReceiveIndex := some nextReceiveIndex, nextChangeIndex := some nextChangeIndex }
+    nextReceiveIndex := some nextReceiveIndex, nextChangeIndex := some nextChangeIndex, pendingSends }
 
 def parsedClaimedUTXO (u : UTXO) : Except WalletError WalletUTXO := do
   let some txid := Wire.dataOfHex? u.txid | throw (.invalidBundle s!"bad txid {excerpt u.txid}")

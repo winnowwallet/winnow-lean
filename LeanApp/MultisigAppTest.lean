@@ -1656,6 +1656,45 @@ def testPlainCreateAndJoinWording : IO Unit := do
   let (build, _) := stepMultisig .openBuild m
   check "Builder: Create an account" (contains (rendered build) "Create an account")
 
+/-- The phone locks while the person approves on the Ledger, or while a payment broadcasts: the scene goes to
+the background, which starts a new generation, and the answer comes back from the old one. It still lands
+(0.9.1 left "Creating…" and "Sending…" up for good, with the payment sent); a network switch still drops it. -/
+def testAnswersFinishAcrossTheBackground : IO Unit := do
+  let m := modelWithAccounts true
+  let building := { m with multisigBuild := { m.multisigBuild with name := "Pair", creating := true } }
+  let g := building.generation
+  let (away, _) := onHost (.scene false) building
+  let (back, _) := onHost (.scene true) away
+  check "the background started a new generation" (back.generation != g)
+  let (done, cs) := onHost (.multisigCreated g "id1" "tr(…)" (some (.ok "nnn"))) back
+  check "the account built before the background shows" (!done.multisigBuild.creating &&
+    done.multisigBuild.created.any (·.1 == "id1") && done.multisigBuild.registration matches some (.ok "nnn"))
+  check "the overview is asked for in the new generation" (cs.any fun | .multisigOverview g' => g' == back.generation | _ => false)
+  check "and the screen says so" (contains (rendered (stepMultisig .openBuild done).1) "Create an account" &&
+    !contains (rendered done) "Creating…")
+  let (failed, _) := onHost (.failed g "multisigBuild" "the Ledger did not answer in time") back
+  check "a failure from before the background shows too" (!failed.multisigBuild.creating &&
+    failed.multisigBuild.error == some "the Ledger did not answer in time")
+  -- pairing: the same
+  let (pairing, _) := stepMultisig .openLedgerPair m
+  let (pairing, _) := stepMultisig (.setLedgerName "nnn") pairing
+  let (pairing, cs) := stepMultisig .pairLedger pairing
+  let some pg := cs.findSome? fun | .pairLedger g' _ _ => some g' | _ => none
+    | check "Pair a Ledger asks the backend" false
+  let (paired, _) := onHost (.ledgerPaired pg "sig1") (onHost (.scene true) (onHost (.scene false) pairing).1).1
+  check "pairing finished across the background" (!paired.ledgerPair.pairing && paired.routes.getLast? != some .ledgerPair)
+  -- a payment broadcast while the phone was locked: the receipt shows and Send is free again
+  let paying := { m with send := { m.send with sending := true }, spendingInFlight := true }
+  let pg := paying.generation
+  let (back, _) := onHost (.scene true) (onHost (.scene false) paying).1
+  let (paid, cs) := onHost (.sent pg "tx1" []) back
+  check "the payment's receipt shows after the background" (!paid.send.sending && paid.send.sentTxid == some "tx1")
+  check "its follow-ups run in the new generation" (cs.any fun | .refresh g' => g' == back.generation | _ => false)
+  -- another wallet: dropped
+  let (other, _) := building.switchNetwork .mainnet
+  let (other, _) := onHost (.multisigCreated g "id1" "tr(…)" none) { other with multisigBuild := building.multisigBuild }
+  check "another network's wallet drops it" other.multisigBuild.created.isNone
+
 def pureTests : List (String × IO Unit) :=
   [ ("testPaymentsMergeWalletAndAccountRowsAndFoldTransfers", testPaymentsMergeWalletAndAccountRowsAndFoldTransfers)
   , ("testAReviewForTheWalletNeverSignsForAnAccount", testAReviewForTheWalletNeverSignsForAnAccount)
@@ -1664,7 +1703,8 @@ def pureTests : List (String × IO Unit) :=
   , ("testEachTabKeepsItsOwnStack", testEachTabKeepsItsOwnStack)
   , ("testOneSendForAccounts", testOneSendForAccounts)
   , ("testPlainCreateAndJoinWording", testPlainCreateAndJoinWording)
-  , ("testTheBuilderStartsAtAnyTwoMembers", testTheBuilderStartsAtAnyTwoMembers) ]
+  , ("testTheBuilderStartsAtAnyTwoMembers", testTheBuilderStartsAtAnyTwoMembers)
+  , ("testAnswersFinishAcrossTheBackground", testAnswersFinishAcrossTheBackground) ]
 
 /-! ## Stores the Swift app left (`StoreSeal.setAsideSwiftEra`) -/
 

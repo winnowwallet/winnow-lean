@@ -383,7 +383,6 @@ def walletOps : List (String × Handler) := [
       | "changeOutputMissing" => pure .changeOutputMissing
       | "transactionTooLarge" => pure (.transactionTooLarge (← j.getObjValAs? Int "a") (← j.getObjValAs? Int "b"))
       | "mnemonicUnavailable" => pure .mnemonicUnavailable
-      | "exportWhilePending" => pure .exportWhilePending
       | "invalidTransactionAmounts" => pure .invalidTransactionAmounts
       | "unsupportedWalletData" => pure .unsupportedWalletData
       | "storageTooLarge" => pure (.storageTooLarge (← j.getObjValAs? Int "a"))

@@ -6,7 +6,10 @@ import WinnowApp.People
 
 /-! `step msg m = (m', cmds)`; `update` and `cmds` of the app are its two halves (same pre-state).
 User messages go to their area's `step`; host answers are checked here — a network answer only
-for the current generation, a sensitive one only for the current epoch while active. -/
+for the current generation, a sensitive one only for the current epoch while active. The answer that ends
+something the person started (a payment, a fee bump, a saved label or person, the wallet created or
+restored) counts for the same wallet (`Model.sameWallet`): the phone may lock before it arrives, and the
+payment went out anyway. -/
 
 namespace WinnowApp
 
@@ -56,15 +59,16 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
   | .created g id =>
     -- creation finishes onboarding by itself: no phrase checklist, and neither iCloud nor a manual backup
     -- decides whether the wallet can be used
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
+    let g := m.generation
     ({ m with stage := .ready, walletID := some id, sheets := [], onboarding := ({} : Onboarding) },
      [.refresh g] ++ (if m.active then [.startNetworking g m.settings] else []))
   | .imported g id report =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     ({ m with walletID := some id, onboarding := { m.onboarding with busy := false, importReport := some report, error := none } }, [])
   | .cloud st => ({ m with cloud := st }, [])
   | .cloudRestored g id verified context =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     let note := match verified with
       | some true => none
       | some false => some "Some payments changed since this backup. Winnow updated the wallet from the network; review the restored balances."
@@ -96,7 +100,7 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
     if wasSyncing && !s.syncing then m.loadPayment else (m, [])
   | .records g r => if current g then m.onRecords r else (m, [])
   | .updated g d r =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     let (m, cs) := m.onRecords r
     let (m, cs2) := match d with
       | .none => (m, [])
@@ -104,12 +108,12 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
       | .labelSaved => m.finishLabel
     (m, cs ++ cs2)
   | .receiveAddress g a =>
-    if current g && m.hasSheet .receive then m.onReceiveAddress a else (m, [])
+    if m.sameWallet g && m.hasSheet .receive then m.onReceiveAddress a else (m, [])
   | .unconfirmed g address txid amount =>
     if current g && m.receive.address == address && !(m.receive.unconfirmed.any (·.1 == txid)) then
       ({ m with receive := { m.receive with unconfirmed := m.receive.unconfirmed ++ [(txid, amount)] } }, [])
     else (m, [])
-  | .failed g ctx msg => if current g then (m.fail ctx msg, []) else (m, [])
+  | .failed g ctx msg => if m.sameWallet g then (m.fail ctx msg, []) else (m, [])
   | .resolvedRate g forInputs milli =>
     let i := m.sendInputs
     if current g && forInputs.priority == i.priority && forInputs.override == i.override then
@@ -121,14 +125,16 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
       ({ m with send := { m.send with preview := some p, reviewing := false, error := none } }, [])
     else ({ m with send := { m.send with reviewing := false } }, [])
   | .sent g txid derived =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
+    let g := m.generation
     ({ m with send := { m.send with sending := false, sentTxid := some txid, derivedAddresses := derived },
               spendingInFlight := false },
      [.refresh g, .rawTransaction g txid, .watchRelay g txid])
   | .rawTransaction g txid hex =>
     if current g && m.send.sentTxid == some txid then ({ m with send := { m.send with rawTransaction := hex } }, []) else (m, [])
   | .relay g txid e => if current g then (m.onRelay txid e, []) else (m, [])
-  | .paymentLoaded g _ => if current g then ({ m with payment := { m.payment with loading := false } }, [.refresh g]) else (m, [])
+  | .paymentLoaded g _ =>
+    if m.sameWallet g then ({ m with payment := { m.payment with loading := false } }, [.refresh m.generation]) else (m, [])
   | .pendingRate g txid milli text =>
     if !current g || m.feeBump.txid != txid then (m, []) else
     ({ m with feeBump := { m.feeBump with currentRateMilli := some milli, targetText := text } },
@@ -138,14 +144,16 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
       ({ m with feeBump := { m.feeBump with reviewed := some (text, p), error := none } }, [])
     else (m, [])
   | .bumped g txid r =>
-    if !current g then ({ m with spendingInFlight := false }, []) else
+    if !m.sameWallet g then ({ m with spendingInFlight := false }, []) else
+    let g := m.generation
     if m.feeBump.txid != txid then ({ m with spendingInFlight := false }, [.refresh g]) else
     ({ m with feeBump := { m.feeBump with replacement := some r, bumping := false }, spendingInFlight := false }, [.refresh g])
   | .catalogStored g stored =>
     if current g then ({ m with settingsDraft := { m.settingsDraft with catalog := some stored } }, []) else (m, [])
   | .peers g ps => if current g then ({ m with settingsDraft := { m.settingsDraft with peers := ps } }, []) else (m, [])
   | .peersReset g =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
+    let g := m.generation
     ({ m with settingsDraft := { m.settingsDraft with resettingPeers := false } }, [.connectedPeers g, .refresh g])
   | .exported g e file =>
     if sensitive g e && m.hasSheet .exportBundle then
@@ -201,7 +209,7 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
   | .copiedExpired key => if m.copied == some key then ({ m with copied := none }, []) else (m, [])
   | .deleted g =>
     if !current g then (m, []) else
-    let m' := m.nextGeneration
+    let m' := m.nextWallet
     let m' := { m' with stage := Stage.onboarding, walletID := none, status := ({} : Status), records := ({} : Records),
                         multisig := ({} : MultisigOverview), collect := m'.collect.cleared }
     let m' := { m' with phase := SyncPhase.idle, confirm := none, sheets := [], routes := [], tabRoutes := [], tab := 0 }
@@ -220,7 +228,9 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
     let phase : Cmd := .journal "app.scenePhase" [("phase", if active then "active" else "background")]
     if active then
       let m := { m with active := true }
-      let resume := if m.stage == .ready then [.startNetworking m.generation m.settings, .refresh m.generation]
+      -- the Send tab's rate in flight was dropped with the old generation
+      let rate := if m.settings.advancedMode && m.tab == 1 then [.resolveRate m.generation m.sendInputs m.status.feeFloorMilli] else []
+      let resume := if m.stage == .ready then [.startNetworking m.generation m.settings, .refresh m.generation] ++ rate
         else if m.stage == .onboarding && m.walletID.isNone then [.startNetworking m.generation m.settings, .discoverCloud]
         else if m.stage == .onboarding then [.startNetworking m.generation m.settings] else []
       let window := if m.hasSheet .receive && !m.receive.address.isEmpty then [.watchAddress m.generation m.receive.address] else []
@@ -236,7 +246,7 @@ def Model.switchNetwork (m : Model) (net : Network) : Model × List Cmd :=
   -- a test session locked to one network stays there
   if m.forcedNetwork.any (· != net) then (m, []) else
   let s := { m.settings with network := net }
-  let m0 := m.nextGeneration
+  let m0 := m.nextWallet
   let m' := { m0 with settings := s, stage := Stage.loading, status := ({} : Status), records := ({} : Records),
                       multisig := ({} : MultisigOverview), collect := m0.collect.cleared,
                       phase := SyncPhase.idle, walletID := none, routes := [], tabRoutes := [], sheets := [], confirm := none,

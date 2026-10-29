@@ -108,13 +108,13 @@ def networkIndex (n : Network) : Nat := if n == .mainnet then 0 else 1
 
 /-- The picker, or the network alone when a test session is locked to it (SettingsView disables the picker). -/
 def networkPicker (m : Model) : H :=
-  if m.forcedNetwork.isSome then .labeled "Network" (if m.settings.network == .mainnet then "Mainnet" else "Signet")
+  if m.forcedNetwork.isSome then .labeled "Network" m.settings.network.label
   else .picker "Network" ["Mainnet", "Signet"] (networkIndex m.settings.network) Msg.setNetwork
 
 /-- SettingsView's footer under the network picker. -/
 def networkFooter (m : Model) : String :=
   if m.forcedNetwork.isSome then
-    s!"This debug session is locked to {if m.settings.network == .mainnet then "mainnet" else "public signet"}."
+    s!"This debug session is locked to {match m.settings.network with | .mainnet => "mainnet" | .signet => "public signet" | .regtest => "a local regtest node"}."
   else "Each network has a separate wallet. Signet uses test coins with no value."
 
 /-- PeerGatewaysSection: stage edits until Apply so incomplete addresses never disrupt live peers. -/

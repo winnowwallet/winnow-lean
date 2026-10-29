@@ -19,6 +19,12 @@ def Network.name : Network → String
   | .signet => "signet"
   | .regtest => "regtest"
 
+/-- The network as the app names it (a test session can run on a local regtest node, which is not signet). -/
+def Network.label : Network → String
+  | .mainnet => "Mainnet"
+  | .signet => "Signet"
+  | .regtest => "Regtest"
+
 inductive Explorer where
   | blockstream
   | mempool

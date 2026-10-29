@@ -404,6 +404,10 @@ structure CollectForm where
   pasted : String := ""
   error : Option String := none
   busy : Bool := false
+  /-- The operation in progress is the Ledger's signature: the person approves on the Ledger's screen. -/
+  ledgerSigning : Bool := false
+  /-- "Sign and continue" filed the draft and the overview carrying it has not come back yet. -/
+  loadingDraft : Bool := false
   /-- The account page's broadcast (from Send, the receipt shows instead). -/
   broadcastTxid : Option String := none
   /-- `SensitivePresentationEpoch`: bumped by each operation and when the screen is left or backgrounded; an
@@ -473,6 +477,9 @@ structure Model where
   paper : Option Nat := none
   /-- Bumped on suspend, network switch and rebuild: an answer from an older generation is dropped. -/
   generation : Nat := 0
+  /-- The generation this wallet opened at (network switch, delete). The phone's own stores and the Ledger
+  outlive a trip to the background, so their answers count from here (`Model.sameWallet`). -/
+  walletGeneration : Nat := 0
   /-- `UIApplication.shared.backgroundRefreshStatus == .available` (the shell's `bgtask.refreshStatus`). -/
   backgroundRefreshAvailable : Bool := true
   /-- `cloudBackups` as the backend last reported it. -/
@@ -928,5 +935,15 @@ def Model.switchTab (m : Model) (i : Nat) : Model :=
 /-- Leave the current wallet/network generation: every answer still in flight is dropped. -/
 def Model.nextGeneration (m : Model) : Model :=
   { m with generation := m.generation + 1, epoch := m.epoch + 1, spendingInFlight := false }
+
+/-- Leave the current wallet: answers about its accounts, signers and Ledger are dropped too. -/
+def Model.nextWallet (m : Model) : Model :=
+  let m := m.nextGeneration
+  { m with walletGeneration := m.generation }
+
+/-- An answer that ends an operation on this wallet (a payment, its accounts, signers or Ledger): it counts
+across trips to the background (the phone locks while the person approves on the Ledger), not from another
+wallet or network. -/
+def Model.sameWallet (m : Model) (g : Nat) : Bool := m.walletGeneration ≤ g && g ≤ m.generation
 
 end WinnowApp

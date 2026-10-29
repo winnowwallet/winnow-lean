@@ -975,6 +975,19 @@ def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
   check "confirmed tombstone persists and is silent" ((← b3.pendingTxids).isEmpty && (← b3.rawTransaction txid).isNone &&
     b3.persistenceState == .loaded 1)
   b3.shutdown
+  -- 7c. A payment broadcast while no peer is seated reaches the node once one is, not on the 60 s retry.
+  pool.stop
+  let b4 ← runNet "broadcaster, no peers" (TxBroadcaster.new pool (some broadcastPath))
+  let rawUnfunded4 ← n.wallet #["createrawtransaction", "[]", s!"\{\"{dest}\":0.1}"]
+  let funded4 ← Json.parse (← n.wallet #["fundrawtransaction", rawUnfunded4]) |> IO.ofExcept
+  let signed4 ← Json.parse (← n.wallet #["signrawtransactionwithwallet", jsonStr funded4 "hex"]) |> IO.ofExcept
+  let txid4 ← runNet "broadcast, no peers" (b4.broadcast (ofHex! (jsonStr signed4 "hex")) (some 20.0))
+  pool.start
+  let relayed ← waitUntil 20_000 (do
+    let mp ← n.json #["getrawmempool"]
+    return match mp with | .arr xs => xs.any (· == Json.str (displayHex txid4)) | _ => false)
+  check "broadcast with no peer seated: relayed as soon as one is" relayed (displayHex txid4)
+  b4.shutdown
   -- 8. A fresh Lean scan from genesis, and Winnow's Swift side on the same node.
   n.waitFilterIndex
   let freshStore ← runNet "fresh headers" (HeaderStore.open regtest (some s!"{dir}/fresh-headers.bin"))

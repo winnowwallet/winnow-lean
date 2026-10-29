@@ -175,9 +175,9 @@ def Model.popMultisig (m : Model) : Model :=
   { m' with routes := m'.routes.dropLast }
 
 /-- Begin an operation of the collection step (`run`): a new epoch, busy, no error. -/
-def Model.runCollect (m : Model) : Model × Nat :=
+def Model.runCollect (m : Model) (ledger := false) : Model × Nat :=
   let e := m.collect.epoch + 1
-  ({ m with collect := { m.collect with epoch := e, busy := true, error := none } }, e)
+  ({ m with collect := { m.collect with epoch := e, busy := true, ledgerSigning := ledger, error := none } }, e)
 
 /-- The account whose draft the collection step works on: the Send tab's, the account's collection page,
 or the account page itself (its "Paste a PSBT from a co-signer"). -/
@@ -294,7 +294,7 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .signWithLedger id =>
     let ok := ((m.multisigInfo? id).bind (·.draft)).bind (·.screen) |>.any fun s => s.progress.ledgerUnsigned && !s.progress.complete
     if spend.busy || !ok then (m, []) else
-    let (m', e) := m.runCollect
+    let (m', e) := m.runCollect (ledger := true)
     (m', [.signDraftWithLedger g e m.settings.advancedMode id])
   | .openLedgerPair => ({ m with routes := m.routes ++ [.ledgerPair], ledgerPair := {} }, [])
   | .setLedgerName s' => ({ m with ledgerPair := { m.ledgerPair with name := s' } }, [])
@@ -343,43 +343,44 @@ def Model.onMultisigHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
   | .multisig g o =>
     -- the draft's review comes with the overview (re-reviewed whenever the draft, coins or tip move)
-    if !current g then (m, []) else ({ m with multisig := o }, [])
+    if !current g then (m, []) else ({ m with multisig := o, collect := { m.collect with loadingDraft := false } }, [])
   | .multisigChecked g text r =>
     if current g && m.multisigAdd.trimmed == text then ({ m with multisigAdd := { m.multisigAdd with check := some (text, r) } }, [])
     else (m, [])
   | .multisigAdded g _ registration =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     let m' := { m with multisigAdd := { m.multisigAdd with saving := false } }
     match registration with
     | some (.error reason) =>
       -- saved, but the paired Ledger did not register it: the screen stays, with Done
       let text := s!"The account is on this phone, but the Ledger did not register it: {reason} Register on Ledger from the account screen."
-      ({ m' with multisigAdd := { m'.multisigAdd with saved := true, error := some text } }, [.multisigOverview g])
+      ({ m' with multisigAdd := { m'.multisigAdd with saved := true, error := some text } }, [.multisigOverview m.generation])
     | _ =>
       -- `dismiss()`
-      (if m'.routes.getLast? == some .multisigAdd then m'.popMultisig else m', [.multisigOverview g])
+      (if m'.routes.getLast? == some .multisigAdd then m'.popMultisig else m', [.multisigOverview m.generation])
   | .multisigCreated g id d registration =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     ({ m with multisigBuild := { m.multisigBuild with creating := false, created := some (id, d), registration } },
-     [.multisigOverview g])
+     [.multisigOverview m.generation])
   | .ledgerRegistered g id r =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     let m' := { m with ledgerRegistering := none }
     match r with
     | .ok () =>
       let b := m'.multisigBuild
       let b := if b.created.any (·.1 == id) then
           { b with registration := some (.ok ((b.pairedLedgerNames m.multisig.ledgers).head?.getD "the Ledger")) } else b
-      ({ m' with multisigBuild := b, ledgerRegisterError := none }, [.multisigOverview g])
-    | .error e => ({ m' with ledgerRegisterError := some (id, e) }, [.multisigOverview g])
+      ({ m' with multisigBuild := b, ledgerRegisterError := none }, [.multisigOverview m.generation])
+    | .error e => ({ m' with ledgerRegisterError := some (id, e) }, [.multisigOverview m.generation])
   | .multisigRemoved g id =>
-    if !current g then (m, []) else
-    (if m.routes.getLast? == some (.multisigAccount id) then m.popMultisig else m, [.multisigOverview g])
+    if !m.sameWallet g then (m, []) else
+    (if m.routes.getLast? == some (.multisigAccount id) then m.popMultisig else m, [.multisigOverview m.generation])
   | .drafted g id =>
-    if !current g then ({ m with spendingInFlight := false }, []) else
+    if !m.sameWallet g then ({ m with spendingInFlight := false }, []) else
+    let g := m.generation
     -- "Sign and continue" filed the draft: the Send tab goes on to collect its signatures
     ({ m with send := { m.send with sending := false, collecting := some id, error := none }, spendingInFlight := false,
-              collect := { epoch := spend.epoch + 1 } },
+              collect := { epoch := spend.epoch + 1, loadingDraft := true } },
      [.multisigOverview g, .refresh g])
   | .collected g e id fromPaste =>
     if !accepts g e id then (m, [.multisigOverview m.generation]) else
@@ -389,12 +390,12 @@ def Model.onMultisigHost (m : Model) (h : Host) : Model × List Cmd :=
     (m', [.multisigOverview g, .refresh g])
   | .spendHandled g _ _ => if current g then (m, [.multisigOverview g, .refresh g]) else (m, [])
   | .ledgerPaired g _ =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     let m' := { m with ledgerPair := { m.ledgerPair with pairing := false } }
     -- `dismiss()`
-    (if m'.routes.getLast? == some .ledgerPair then m'.popMultisig else m', [.multisigOverview g])
+    (if m'.routes.getLast? == some .ledgerPair then m'.popMultisig else m', [.multisigOverview m.generation])
   | .ledgerAddressShown g id index r =>
-    if !current g || m.ledgerVerify.id != id || m.ledgerVerify.index != index then (m, []) else
+    if !m.sameWallet g || m.ledgerVerify.id != id || m.ledgerVerify.index != index then (m, []) else
     let result := match r with
       | .ok _ => ("The Ledger derived this same address. Compare it with the one on its screen.", false)
       | .error e => (e, true)
@@ -626,7 +627,9 @@ def collectSections (m : Model) (id : String) : List H :=
   let f := m.collect
   let set (g : String → MultisigMsg) : String → Msg := fun s => .multisig (g s)
   match (m.multisigInfo? id).bind (·.draft) with
-  | none => [.section "" "" [caption "This account has no payment awaiting signatures."]] ++ errorSection f.error
+  | none =>
+    if f.loadingDraft then [.section "" "" [.progress "Opening the payment…"]] else
+    [.section "" "" [caption "This account has no payment awaiting signatures."]] ++ errorSection f.error
   | some d =>
     let review : H :=
       .section "Check this payment" "Check the addresses, amounts and fee on every signer's device before signing."
@@ -646,12 +649,14 @@ def collectSections (m : Model) (id : String) : List H :=
     let actions : List H := match d.screen with
       | some s =>
         let p := s.progress
-        [.section (if s.recoveryUsable then "Signing · signers or recovery path" else "Signing") p.nextStep
+        let onLedger := f.busy && f.ledgerSigning
+        [.section (if s.recoveryUsable then "Signing · signers or recovery path" else "Signing")
+          (if onLedger then "Check the payment on the Ledger's screen and approve it there. Winnow waits for the Ledger." else p.nextStep)
           ([ .identified "multisigSignButton" (.button "Add this phone's signature" .plain
               (if f.busy || !p.phoneUnsigned || p.complete then none else some (.multisig (.sign id)))) ] ++
            (if p.ledgerHolds then
              [.identified "ledgerSignButton"
-               (.button "Sign with Ledger" .plain (if f.busy || !p.ledgerUnsigned || p.complete then none else some (.multisig (.signWithLedger id))))]
+               (.button (if onLedger then "Approve on the Ledger…" else "Sign with Ledger") .plain (if f.busy || !p.ledgerUnsigned || p.complete then none else some (.multisig (.signWithLedger id))))]
             else []) ++
            [ .identified "multisigBroadcastButton" (.button (if f.busy then "Working…" else "Finalize and broadcast") .primary
                (if f.busy || !p.complete then none else some (.multisig (.broadcast id)))) ])]

@@ -121,7 +121,7 @@ def onboardingView (m : Model) : H :=
          (if m.settings.showsNetworkPicker then
            [.section "" "Each network has its own wallet. Signet uses test coins with no value."
              [.identified "onboardingNetworkPicker"
-               (if o.busy then .labeled "Network" (if m.settings.network == .mainnet then "Mainnet" else "Signet") else networkPicker m)]]
+               (if o.busy then .labeled "Network" m.settings.network.label else networkPicker m)]]
           else []) ++
          (if o.busy then [.section "" "" [.progress "Creating your wallet…"]] else []) ++
          (match o.error with | some e => [.section "" "" (errorRows (some e))] | none => [])) ] ++ overlays m)

@@ -79,19 +79,18 @@ def stepSigner (msg : SignerMsg) (m : Model) : Model × List Cmd :=
 
 /-- The backend's signer answers (`onHost` hands them here). -/
 def Model.onSignerHost (m : Model) (h : Host) : Model × List Cmd :=
-  let current (g : Nat) := g == m.generation
   match h with
   | .signerSaved g _ =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     let m' := { m with signerKeys := { m.signerKeys with saving := false } }
     -- `dismiss()`
     let m' := if m'.routes.getLast? == some .signerKeysAdd then { m' with routes := m'.routes.dropLast, signerKeys := {} } else m'
-    (m', [.multisigOverview g])
-  | .signerRenamed g _ => if current g then (m, [.multisigOverview g]) else (m, [])
+    (m', [.multisigOverview m.generation])
+  | .signerRenamed g _ => if m.sameWallet g then (m, [.multisigOverview m.generation]) else (m, [])
   | .signerRemoved g id =>
-    if !current g then (m, []) else
+    if !m.sameWallet g then (m, []) else
     let m' := if m.routes.getLast? == some (.signer id) then { m with routes := m.routes.dropLast, signerDetail := {} } else m
-    (m', [.multisigOverview g])
+    (m', [.multisigOverview m.generation])
   | _ => (m, [])
 
 /-! ## View -/

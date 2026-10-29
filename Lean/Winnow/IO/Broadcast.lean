@@ -21,8 +21,11 @@ unversioned and the legacy (txid → raw hex) shapes and validates every record 
 txid, fee rate, retry count, retry time at most 366 days ahead), refusing a damaged file rather than
 repairing it.
 
-One deliberate difference: a peer's getdata listener subscribes before the announcement is sent
-(Swift subscribes inside a task it starts, which can miss a fast reply). -/
+Deliberate differences from Swift: a peer's getdata listener subscribes before the announcement is sent
+(Swift subscribes inside a task it starts, which can miss a fast reply). An attempt that falls due with no
+peer seated waits for one (`peerWaitMs`) instead of spending itself on nobody, and a new broadcaster (the
+app's next session) makes everything pending due at once: a payment sent just before the app went to the
+background otherwise reached peers only when its 60 s retry came round. -/
 
 namespace Winnow.IO
 open Winnow.Net Lean
@@ -116,6 +119,8 @@ def maximumStoredTransactions : Nat := 4_096
 def maximumStorageBytes : Nat := 64 * 1_024 * 1_024
 def maximumRawTransactionBytes : Nat := 4_000_000
 def maximumAttempt : Nat := 63
+/-- How long a due attempt waits for a peer to be seated before it looks again. -/
+def peerWaitMs : Nat := 2_000
 def maximumFeeRate : Float := 2_100_000_000_000_000.0
 def maximumFutureSchedule : Float := 366 * 24 * 60 * 60
 /-- `Date.distantFuture.timeIntervalSince1970`. -/
@@ -523,6 +528,14 @@ private def fireDueAttempts (b : TxBroadcaster) : IO Bool := do
   let st ← b.state.get
   let due := (st.pending.toArray.qsort (fun x y => hex x.1 < hex y.1)).filter (·.2.nextAttemptAt ≤ firedAt) |>.map (·.1)
   if due.isEmpty then return true
+  -- nobody to tell yet (a session still seating its peers): look again shortly, without spending an attempt
+  if (← b.pool.connectedPeers).isEmpty then
+    let wait (p : Std.HashMap ByteArray PendingTx) (txid : ByteArray) : Std.HashMap ByteArray PendingTx :=
+      match p[txid]? with
+      | some e => p.insert txid { e with nextAttemptAt := firedAt + seconds peerWaitMs }
+      | none => p
+    b.state.modify fun s => { s with pending := due.foldl wait s.pending }
+    return true
   let candidate := due.foldl (fun (p : Std.HashMap ByteArray PendingTx) txid =>
     match p[txid]? with
     | some e =>
@@ -579,6 +592,11 @@ def new (pool : PeerPool) (path : Option System.FilePath := none) (rebroadcastBa
   let (persistenceState, pending) ← match path with
     | some p => load p (← now)
     | none => pure (.disabled, {})
+  -- a new session (the app back from the background) announces what is still pending once a peer is
+  -- seated, not when the last session's backoff says: that session may have ended before any peer asked
+  let started ← now
+  let pending := pending.fold (fun p txid e =>
+    if e.confirmedAtHeight.isNone && e.nextAttemptAt > started then p.insert txid { e with nextAttemptAt := started } else p) pending
   let stateRef ← IO.mkRef ({ pending } : BroadcastState)
   let b : TxBroadcaster := {
     pool, path, rebroadcastBaseMs, maxRebroadcastMs, maxAnnouncementsPerPeer
@@ -631,9 +649,11 @@ def broadcast (b : TxBroadcaster) (rawTx : ByteArray) (feeRate : Option Float :=
   if !validFeeRate feeRate then throw (.broadcast .invalidFeeRate)
   let txid := tx.txid
   let now ← b.now
+  -- with no peer seated the first attempt is due at once, and waits for one
+  let alone := (← b.pool.connectedPeers).isEmpty
   let entry : PendingTx := {
     rawTx, transaction := tx, feeRate, attempt := 0
-    nextAttemptAt := now + seconds (backoffInterval 0 b.rebroadcastBaseMs b.maxRebroadcastMs) }
+    nextAttemptAt := if alone then now else now + seconds (backoffInterval 0 b.rebroadcastBaseMs b.maxRebroadcastMs) }
   let candidate := (← b.state.get).pending.insert txid entry
   b.persist candidate
   b.state.modify fun st => { st with pending := candidate, persistenceBlocked := false }

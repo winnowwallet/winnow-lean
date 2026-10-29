@@ -32,7 +32,6 @@ inductive WalletError where
   | changeOutputMissing
   | transactionTooLarge (vsize limit : Int)
   | mnemonicUnavailable
-  | exportWhilePending
   | invalidTransactionAmounts
   | unsupportedWalletData
   | storageTooLarge (maxBytes : Int)
@@ -44,7 +43,7 @@ def name : WalletError → String
   | .accountKeyMismatch => "accountKeyMismatch"
   | .invalidBundle _ => "invalidBundle" | .noPayments => "noPayments"
   | .changeOutputMissing => "changeOutputMissing" | .transactionTooLarge .. => "transactionTooLarge"
-  | .mnemonicUnavailable => "mnemonicUnavailable" | .exportWhilePending => "exportWhilePending"
+  | .mnemonicUnavailable => "mnemonicUnavailable"
   | .invalidTransactionAmounts => "invalidTransactionAmounts" | .unsupportedWalletData => "unsupportedWalletData"
   | .storageTooLarge _ => "storageTooLarge"
 
@@ -61,8 +60,6 @@ def description : WalletError → String
   | .transactionTooLarge vsize limit => s!"The signed transaction is {vsize} vbytes, above the {limit}-vbyte relay maximum."
   | .mnemonicUnavailable =>
     "This wallet has no recovery phrase to export — it was imported from an extended key, not a BIP39 mnemonic."
-  | .exportWhilePending =>
-    "Wait for pending transactions to confirm before exporting. A mid-send backup would drop the coins being spent."
   | .invalidTransactionAmounts => "A matched Bitcoin transaction contains invalid amounts. Wallet state was not changed."
   | .unsupportedWalletData =>
     "This wallet contains unsupported signing data and cannot be opened here. " ++

@@ -690,9 +690,17 @@ def flow (dir : String) (n : Node) : IO Unit := do
   -- 7d. A Ledger: paired 2-of-2 and a 2-of-3 with recovery, registered, addresses verified, both funded,
   -- each spend signed by the phone and the Ledger, broadcast and confirmed.
   let ledgerIDs ← ledgerFlow n a msA device mineAddr
-  -- 8. Export, and import into a fresh directory (the wallet as exported: it paid the account in 7c).
+  -- 8. Export, and import into a fresh directory (the wallet as exported: it paid the account in 7c, and a
+  -- payment it just sent is still unconfirmed).
+  let pendingInputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "1000000", network := .regtest }
+  let pendingTxid := (← a.sendPayment pendingInputs (← a.previewSend pendingInputs)).txid
+  check "a payment pending at export" (← waitUntil 20_000 (do return (← n.mempool).contains pendingTxid))
   let (sExported, _) ← a.snapshot
   let bundle ← a.exportBundle false
+  check "exportBundle carries the pending payment with the coins it spends" (match ImportBundle.decode bundle with
+    | .ok b => b.pendingSends.size == 1 && b.pendingSends.all (fun p =>
+        (Winnow.Transaction.decode p.rawTransaction).toOption.any (fun t => Winnow.displayHex t.txid == pendingTxid) && !p.selected.isEmpty)
+    | .error _ => false)
   check "exportBundle (watch-only)" ((bundle.splitOn "\"regtest\"").length > 1 && (bundle.splitOn "mnemonic").length == 1)
   check "exportBundle carries the multisig accounts, the Ledger's registrations with them" (match ImportBundle.decode bundle with
     | .ok b => match b.vaults with
@@ -726,6 +734,23 @@ def flow (dir : String) (n : Node) : IO Unit := do
     s!"{sb.balance} vs {sExported.balance}"
   check "import report: scanned and confirmed every claim" (report.startsWith "Scanned from block" &&
     (report.splitOn "Claimed but spent since: 0").length > 1)
+  check "importBundle: the pending payment is in history, unconfirmed" ((history? sb pendingTxid).any (·.height == 0))
+  check "importBundle: the pending payment is handed to the relay" ((← bImp.rawTransactionHex pendingTxid).isSome)
+  -- a pending payment whose coins are not its inputs is refused
+  let forgedPending := match ImportBundle.decode bundle with
+    | .ok b =>
+      let forged : ImportBundle := { b with pendingSends := b.pendingSends.map fun (p : Winnow.PendingSend) => { p with selected := p.selected.extract 1 p.selected.size } }
+      some forged.serialized
+    | .error _ => none
+  let keysF ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (fImp, _) ← Backend.realWithEnv (deps keysF "F")
+  let dirF := s!"{dir}/F/BTCSwift/regtest"
+  IO.FS.createDirAll dirF
+  discard <| fImp.openWallet .regtest dirF
+  let forgedResult ← attempt (fImp.importBundle .regtest dirF (forgedPending.getD ""))
+  check "importBundle refuses a pending payment whose coins are not its inputs"
+    (match forgedResult with | .error e => toString e == (WalletError.invalidBundle "pending payment: its coins are not its inputs").description | _ => false)
+    (match forgedResult with | .error e => toString e | .ok _ => "imported")
   let restored := (← bImp.multisigOverview).accounts.find? (·.id == ms.id)
   check "importBundle restores the multisig account with its balance" ((restored.map (·.balance)) == some ms.balance)
     s!"{restored.map (·.balance)} vs {ms.balance}"
@@ -800,8 +825,9 @@ def flow (dir : String) (n : Node) : IO Unit := do
   checkJournal "import.verified" ["scannedFromHeight", "scannedToHeight", "matchesBundle", "confirmedUTXOCount",
       "spentSinceBundleCount", "discoveredUTXOCount", "balance", "utxoCount", "historyCount", "nextScanHeight"]
     (fun f => field f "matchesBundle" == "true" && field f "balance" == toString sExported.balance && field f "spentSinceBundleCount" == "0")
-  check "journal: import events come from the importing backend"
-    ((← journaled "import.started").all (·.1 == "B") && (← journaled "import.verified").all (·.1 == "B"))
+  -- B imports; F starts an import of a forged pending payment, which is refused before anything verifies
+  check "journal: import events come from the importing backends"
+    ((← journaled "import.started").all (fun e => e.1 == "B" || e.1 == "F") && (← journaled "import.verified").all (·.1 == "B"))
   check "journal: no import.verificationWaiting (the import verified)" (← journaled "import.verificationWaiting").isEmpty
   checkJournal "wallet.destroyed" ["walletID"] (field · "walletID" == walletID)
   checkJournal "multisig.accountAdded" ["id", "descriptor", "height", "firstAddress"]

@@ -268,6 +268,17 @@ def bundleFields (b : ImportBundle) : List (String × String) :=
    ("lastKnownHeight", toString b.lastKnownHeight), ("utxoCount", toString b.utxos.size),
    ("historyCount", toString b.transactions.size)]
 
+/-- A restored wallet's payments no block has taken go back to the broadcaster (a restored phone's has none
+of its own), at the rate each was sent at. -/
+def relayRestoredPayments (env : Env) (w : Wallet) (b : TxBroadcaster) : IO Unit := do
+  for p in (← w.state).pendingSends do
+    let .ok tx := Transaction.decode p.rawTransaction | continue
+    let vsize := TransactionBuilder.vsize tx
+    let rate := if vsize > 0 && p.fee > 0 then some (Float.ofInt p.fee.toInt / vsize.toFloat) else none
+    match ← (runNet (b.broadcast p.rawTransaction rate)).toBaseIO with
+    | .ok txid => env.journal "transaction.restored" [("txid", Winnow.displayHex txid)]
+    | .error e => env.journal "transaction.restoreFailed" [("txid", Winnow.displayHex tx.txid), ("error", toString e)]
+
 /-- `importWallet(bundle:authenticate:afterCommit:)`: check, seed the wallet, adopt it without the loop,
 run `afterCommit` (the iCloud backup's preparation, or a restore's context), then verify by a forward scan
 (the loop starts on the way out). The report, or none while no peer was reachable. -/
@@ -292,6 +303,7 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
       env.journal "import.verificationWaiting" [("reason", reason)]
       return (w.id, none)
     let some stack := c.stack | waiting "sync stack unavailable"
+    relayRestoredPayments env w stack.broadcaster
     let some filters := stack.filters | waiting "sync stack unavailable"
     stack.pool.start
     if !(← waitForPeer env stack.pool 60_000 c.generation) then return ← waiting "public peers unavailable"

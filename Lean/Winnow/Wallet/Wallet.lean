@@ -879,10 +879,10 @@ def commitFeeBump (w : Wallet) (prepared : PreparedFeeBump) : WM Unit := do
 
 /-! ### Export -/
 
-/-- Live wallet → import bundle (watch-only unless `includeMnemonic`). -/
+/-- Live wallet → import bundle (watch-only unless `includeMnemonic`), payments no block has taken
+included: unconfirmed coins among the UTXOs, and each pending send with the coins it reserves. -/
 def exportBundle (w : Wallet) (includeMnemonic : Bool := false) : WM ImportBundle := do
   let s ← w.state
-  if !s.pendingSends.isEmpty || s.utxos.any (·.height == 0) then throw (.wallet .exportWhilePending)
   let lastKnownHeight := if s.nextScanHeight == 0 then 0 else s.nextScanHeight - 1
   let mnemonic ← if includeMnemonic then do
       match ← WM.io (w.keyStore.load w.id).run with
@@ -892,7 +892,7 @@ def exportBundle (w : Wallet) (includeMnemonic : Bool := false) : WM ImportBundl
       | .error e => throw (.named e.name)
     else pure none
   return ImportBundle.«export» w.descriptor.serialized (networkName w.network) lastKnownHeight s.utxos s.history
-    s.nextReceiveIndex s.nextChangeIndex mnemonic s.scannedThroughHash
+    s.nextReceiveIndex s.nextChangeIndex mnemonic s.scannedThroughHash s.pendingSends
 
 /-! ### Rollback -/
 
@@ -958,15 +958,40 @@ def importedKeyMaterial (bundle : ImportBundle) (network : BitcoinNetwork) (keyS
   let .extended account _ := key.base | throw (.wallet (.invalidDescriptor text))
   return (parsed, account.neutered)
 
+/-- A coin's script is the descriptor's at its chain and index. -/
+def requireOwned (descriptor : Descriptor) (network : BitcoinNetwork) (u : WalletUTXO) : WM Unit := do
+  let outs ← WM.liftE (·.name) (descriptor.derived u.index network)
+  let some o := outs[u.chain.rawValue]? | throw (.named "indexOutOfRange")
+  unless o.scriptPubKey == u.scriptPubKey do
+    throw (.wallet (.invalidBundle s!"utxo {displayHex u.txid}:{u.vout} scriptPubKey does not match the descriptor"))
+
 def validatedClaimedUTXOs (bundle : ImportBundle) (descriptor : Descriptor) (network : BitcoinNetwork) :
     WM (Array WalletUTXO) := do
   let utxos ← WM.wallet bundle.claimedUTXOs
-  for u in utxos do
-    let outs ← WM.liftE (·.name) (descriptor.derived u.index network)
-    let some o := outs[u.chain.rawValue]? | throw (.named "indexOutOfRange")
-    unless o.scriptPubKey == u.scriptPubKey do
-      throw (.wallet (.invalidBundle s!"utxo {displayHex u.txid}:{u.vout} scriptPubKey does not match the descriptor"))
+  for u in utxos do requireOwned descriptor network u
   return utxos
+
+/-- The bundle's pending sends, checked: each transaction decodes, spends exactly its selected coins (the
+wallet's own, none also claimed unspent or spent by another pending send), and names a change output it
+has. The coins come back reserved by the payment, as `send` left them. -/
+def validatedPendingSends (bundle : ImportBundle) (descriptor : Descriptor) (network : BitcoinNetwork)
+    (claimed : Array WalletUTXO) : WM (Array PendingSend × Array WalletUTXO) := do
+  let invalid (reason : String) : WM Unit := throw (.wallet (.invalidBundle s!"pending payment: {reason}"))
+  let mut seen : Std.HashSet (ByteArray × UInt32) := claimed.foldl (fun s u => s.insert (u.txid, u.vout)) {}
+  let mut reserved : Array WalletUTXO := #[]
+  for p in bundle.pendingSends do
+    let .ok tx := Transaction.decode p.rawTransaction | throw (.wallet (.invalidBundle "pending payment: the transaction does not decode"))
+    unless WalletState.inMoney p.fee do invalid "invalid fee"
+    unless p.selected.size == tx.inputs.size && tx.inputs.all (fun i => p.selected.any (·.outpoint == i.previousOutput)) do
+      invalid "its coins are not its inputs"
+    if let some k := p.changeOutputIndex then unless k.toNat < tx.outputs.size do invalid "no such change output"
+    for c in p.selected do
+      unless c.amount > 0 && c.amount ≤ bitcoinAmountMaximum && c.txid.size == 32 do invalid "invalid coin"
+      requireOwned descriptor network c
+      if seen.contains (c.txid, c.vout) then invalid "a coin is spent twice"
+      seen := seen.insert (c.txid, c.vout)
+      reserved := reserved.push { c with spent := some { spentBy := tx.txid, height := none } }
+  return (bundle.pendingSends, reserved)
 
 /-- A claimed block hash in internal byte order, or `none` when the bundle names none; a pending entry
 has no block to name. -/
@@ -1017,7 +1042,8 @@ def importing (bundle : ImportBundle) (keyStore : KeyStore IO) (storagePath : Op
   let (descriptor, accountKey) ← importedKeyMaterial bundle network keyStore
   let utxos ← validatedClaimedUTXOs bundle descriptor network
   let history ← validatedHistory bundle
-  let maxIndex (chain : AddressChain) : UInt32 := nextIndexAfter utxos chain
+  let (pendingSends, reserved) ← validatedPendingSends bundle descriptor network utxos
+  let maxIndex (chain : AddressChain) : UInt32 := nextIndexAfter (utxos ++ reserved) chain
   let receive := max (bundle.nextReceiveIndex.getD 0) (maxIndex .receive)
   let change := max (bundle.nextChangeIndex.getD 0) (maxIndex .change)
   let maximum := HDKey.hardenedOffset - gapLimit
@@ -1030,7 +1056,8 @@ def importing (bundle : ImportBundle) (keyStore : KeyStore IO) (storagePath : Op
     descriptor := descriptor.serialized, network := networkName network,
     creationHeight := bundle.lastKnownHeight,
     nextReceiveIndex := receive, nextChangeIndex := change,
-    nextScanHeight := bundle.lastKnownHeight + 1, scannedThroughHash, allUtxos := utxos, history }
+    nextScanHeight := bundle.lastKnownHeight + 1, scannedThroughHash, allUtxos := utxos ++ reserved, history,
+    pendingSends }
   let w ← make network descriptor accountKey keyStore storagePath random state
   persistState storagePath state
   return w
