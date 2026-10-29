@@ -142,7 +142,8 @@ class PrepareTests(unittest.TestCase):
         return json.loads((self.out / media.MANIFEST).read_text())
 
     def test_a_run_writes_a_version_2_manifest(self):
-        (self.journey / "journey.mp4").write_bytes(mp4(1206, 2622, 12.5, padding=1000))
+        # at least half the tests' 87.889 s, or the exporter omits it as truncated
+        (self.journey / "journey.mp4").write_bytes(mp4(1206, 2622, 90.0, padding=1000))
         self.run_prepare()
         evidence = self.manifest()
         self.assertEqual(evidence["version"], 2)
@@ -163,7 +164,7 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual(shot["test"], "testCreateReceiveSendConfirm")
         # no ffmpeg: a recording under 25 MiB is copied, its size and duration read from the MP4 itself
         video = evidence["video"]
-        self.assertEqual((video["width"], video["height"], video["duration_seconds"]), (1206, 2622, 12.5))
+        self.assertEqual((video["width"], video["height"], video["duration_seconds"]), (1206, 2622, 90.0))
         self.assertEqual(video["sha256"], hashlib.sha256((self.out / media.VIDEO).read_bytes()).hexdigest())
         self.assertEqual(video["bytes"], (self.out / media.VIDEO).stat().st_size)
         self.assertNotIn("video_omitted", evidence)
@@ -301,13 +302,13 @@ class PrepareTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs ffmpeg")
     def test_ffmpeg_transcodes_to_at_most_720_wide(self):
         self.tools.update({"ffmpeg", "ffprobe"})
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=1206x2622:rate=30",
-                        "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(self.journey / "journey.mp4")],
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=1206x2622:rate=1",
+                        "-t", "50", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(self.journey / "journey.mp4")],
                        check=True)
         self.run_prepare()
         video = self.manifest()["video"]
         self.assertEqual((video["width"], video["codec"]), (720, "h264"))
-        self.assertAlmostEqual(video["duration_seconds"], 2.0, delta=0.5)
+        self.assertAlmostEqual(video["duration_seconds"], 50.0, delta=1.0)
         self.assertEqual(self.manifest()["original_video"]["width"], 1206)
 
 
