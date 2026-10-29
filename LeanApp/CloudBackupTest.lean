@@ -698,6 +698,82 @@ def shellAnswers : TM Unit := do
     ((← accountText (Lean.Json.mkObj [("status", Lean.Json.str "noAccount"), ("user", Lean.Json.null)])) == Real.CloudBackupError.unavailable.description)
   check "available: the user" ((← accountText (Lean.Json.mkObj [("status", Lean.Json.str "available"), ("user", Lean.Json.str "_u")])) == "ok")
 
+/-- The shell adapters over LeanNative's typed clients, against a scripted shell: what they ask and how
+they read the answers into this app's errors and texts. -/
+def shellAdapters : TM Unit := do
+  let asked ← IO.mkRef (#[] : Array (String × Lean.Json))
+  let script ← IO.mkRef (fun (_ : String) (_ : Lean.Json) => Lean.Json.null)
+  let ask : Real.Ask := fun name args => do
+    asked.modify (·.push (name, args))
+    pure (Task.pure ((← script.get) name args))
+  let answer (f : String → Lean.Json → Lean.Json) : IO Unit := do asked.set #[]; script.set f
+  let obj := Lean.Json.mkObj
+  let store := Real.shellKeyStore ask
+  let secret := Winnow.Keys.WalletSecret.mnemonic "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+  -- store: one atomic keychain.add, never a read first
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false)]
+  let stored ← (store.store secret "w1").run
+  check "store: one keychain.add, nothing read first" (stored matches .ok () && ((← asked.get).map (·.1)) == #["keychain.add"])
+  answer fun _ _ => obj [("ok", false), ("status", (-25299 : Int)), ("exists", true)]
+  check "store: an occupied id is alreadyExists" ((← (store.store secret "w1").run) matches .error (.alreadyExists "w1"))
+  -- load: the secret; a missing or raw-bytes item is notFound; a locked device is its status, not "no wallet"
+  answer fun _ _ => obj [("value", Lean.Json.str (String.fromUTF8! secret.serialized)), ("status", (0 : Int))]
+  check "load: the secret" ((← (store.load "w1").run) matches .ok _)
+  answer fun _ _ => obj [("value", Lean.Json.null), ("status", (-25300 : Int))]
+  check "load: missing is notFound" ((← (store.load "w1").run) matches .error (.notFound "w1"))
+  answer fun _ _ => obj [("value", Lean.Json.null), ("status", (0 : Int))]
+  check "load: raw bytes are notFound" ((← (store.load "w1").run) matches .error (.notFound "w1"))
+  answer fun _ _ => obj [("value", Lean.Json.null), ("status", (-25308 : Int))]
+  check "load: a locked device is errSecInteractionNotAllowed" ((← (store.load "w1").run) matches .error (.keychain (-25308)))
+  answer fun _ _ => obj [("hex", Lean.Json.null), ("status", (-25300 : Int))]
+  check "loadBytes: missing is none" ((← (store.loadBytes "w1").run) matches .ok none)
+  -- fetch: a response is a response; the shell's errors as the routed client's
+  let fetch (reply : Lean.Json) : IO (Except Winnow.IO.NetError Winnow.IO.HttpHop) := do
+    answer fun _ _ => reply
+    (Real.shellFetch ask { url := "https://example.com/x", maximumBytes := 10 }).attempt
+  check "fetch: a 404 is a response" ((← fetch (obj [("status", (404 : Nat)), ("body", "6869")])) matches .ok (.response 404 none _))
+  check "fetch: tooLarge" ((← fetch (obj [("error", "tooLarge")])) matches .error (.http .tooLarge))
+  check "fetch: bad-proxy is unavailable" ((← fetch (obj [("error", "bad-proxy")])) matches .error (.http .unavailable))
+  check "fetch: a system error keeps its text" (match ← fetch (obj [("error", "offline"), ("code", (-1009 : Int)), ("domain", "NSURLErrorDomain")]) with
+    | .error (.http (.transport t)) => t == "offline" | _ => false)
+  check "fetch: a malformed answer is a bad response" ((← fetch (obj [("status", (200 : Nat))])) matches .error (.http .response))
+  -- CloudKit: the account, then this app's record type, fields and container
+  let cloud := Real.shellCloudStore ask
+  let record (name network : String) (savedAt : Float) := obj [("name", Lean.Json.str name), ("type", "WalletBackup"),
+    ("fields", obj [("network", Lean.Json.str network), ("savedAt", obj [("date", Lean.toJson savedAt)])])]
+  let a := "6F9619FF-8B86-D011-B42D-00C04FC964FF"
+  let b := "7F9619FF-8B86-D011-B42D-00C04FC964FF"
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("records", Lean.Json.arr #[record a "signet" 978_307_300, record b "signet" 978_307_400,
+                                            record "not-a-uuid" "signet" 1, record a "mainnet" 2]), ("more", false)]
+  let listed ← (cloud.list "signet").toBaseIO
+  check "list: this network's backups, newest first" (match listed with
+    | .ok l => l.map (·.id) == #[b, a] && l.map (·.savedAt) == #[200, 100] | _ => false)
+  check "list: the query names the record type, network and container" ((← asked.get).any fun (n, args) =>
+    n == "cloudkit.query" && (args.getObjValAs? String "type").toOption == some "WalletBackup" &&
+    (args.getObjValAs? String "container").toOption == some Real.cloudContainer && (args.getObjVal? "equals").toOption == some (obj [("network", "signet")]))
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("error", "tooLarge")]
+  check "load: an asset over the limit is an invalid backup" (match ← (cloud.load a "_u").toBaseIO with
+    | .error e => toString e == Real.CloudBackupError.invalidBackup.description | .ok _ => false)
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("error", "quotaExceeded"), ("code", (25 : Int)), ("detail", "iCloud storage is full")]
+  check "load: another CloudKit error is its detail" (match ← (cloud.load a "_u").toBaseIO with
+    | .error e => toString e == "iCloud storage is full" | .ok _ => false)
+  -- the wrapping keys: synchronizable, 32 bytes
+  let keys := Real.shellCloudKeys ask
+  answer fun _ _ => obj [("hex", Lean.Json.null), ("status", (-25300 : Int))]
+  check "keys: missing is keyUnavailable" (match ← (keys.load a).toBaseIO with
+    | .error e => toString e == Real.CloudBackupError.keyUnavailable.description | .ok _ => false)
+  check "keys: asked as a synchronizable item of this app's service" ((← asked.get).any fun (n, args) =>
+    n == "keychain.get" && (args.getObjValAs? Bool "synchronizable").toOption == some true && (args.getObjValAs? String "service").toOption == some Real.cloudBackupKeyService)
+  answer fun _ _ => obj [("hex", "0011"), ("status", (0 : Int))]
+  check "keys: a key of the wrong size is an invalid backup" (match ← (keys.load a).toBaseIO with
+    | .error e => toString e == Real.CloudBackupError.invalidBackup.description | .ok _ => false)
+
 def main (args : List String) : IO UInt32 := do
   let writeDir := match args with | "--write" :: d :: _ => some d | _ => none
   runTest "roundTripRestoresSigningAndAddressCounters" roundTripRestoresSigningAndAddressCounters
@@ -714,6 +790,7 @@ def main (args : List String) : IO UInt32 := do
   runTest "controller" controllerTests
   runTest "onboardingScreens" onboardingScreens
   runTest "shellAnswers" shellAnswers
+  runTest "shellAdapters" shellAdapters
   let root ← IO.FS.createTempDir
   runTest "automaticCloud" (automaticCloudTests root)
   runTest "restoreFromICloud" (restoreFromICloud root)

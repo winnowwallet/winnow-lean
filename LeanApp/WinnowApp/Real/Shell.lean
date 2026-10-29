@@ -1,21 +1,23 @@
 import Lean.Data.Json
 import Winnow.IO.Http
 import Winnow.Keys.KeyStore
+import ElmLean.Native.Client.Keychain
+import ElmLean.Native.Client.Http
 
 /-! # The iOS shell's capabilities as the WalletCore interfaces
 
-ElmLean's native shell (its capabilities, framework/lean/ElmShell/Capabilities.lean) offers `keychain.get/set/delete`
-(`key`, `value`; answers `{"value":…|null}` / `{"ok":…}`) and `http.get` (`url`, `maxBytes`,
-`timeout`; answers `{"status":…,"body":hex}` or `{"error":…}`). `ask name args` is the app's
+Through LeanNative's typed clients (`ElmLean.Native.Client.Keychain`, `Client.Http`), which build the
+shell's `keychain.*` and `http.get` requests and read their answers. `ask name args` is the app's
 `Effects.ask`, which may be called from any thread.
 
 * `KeyStore IO` (KeychainStore.swift's contract): the wallet secret's account is the wallet ID under
   the service `org.btc-swift.wallet` (the shell's `service` argument). `store` refuses an occupied ID
-  (`alreadyExists`), a missing item is `notFound`, an unreadable one `malformedSecret`. An item that is
-  not UTF-8 text (the Swift app's raw store keys) answers no `value`, so it reads as `notFound`;
-  `loadBytes` / `storeBytes` see and keep such items as raw bytes (`hex`). The shell's
-  item is `WhenUnlockedThisDeviceOnly`; it does not add Winnow's user-presence flag (the app asks for
-  device authentication before every read instead).
+  (`alreadyExists`) with the shell's atomic `keychain.add`, never a read then a write; a missing item is
+  `notFound`, an unreadable one `malformedSecret`, and any other Keychain failure its `OSStatus`
+  (`errSecInteractionNotAllowed` while locked is not "no wallet"). An item that is not UTF-8 text (the
+  Swift app's raw store keys) reads as `notFound`; `loadBytes` / `storeBytes` see and keep such items as
+  raw bytes. The shell's item is `WhenUnlockedThisDeviceOnly`; it does not add Winnow's user-presence
+  flag (the app asks for device authentication before every read instead).
 * `HttpFetch`: one request, with its `Accept` header. The shell follows same-host redirects itself
   (never https → http); the declared length is not reported (the body size is checked here). -/
 
@@ -26,66 +28,64 @@ def walletService : String := "org.btc-swift.wallet"
 
 abbrev Ask := String → Json → IO (Task Json)
 
-private def askNow (ask : Ask) (name : String) (args : Json) : IO Json := do
-  IO.wait (← ask name args)
+open ElmLean.Native in
+/-- A typed request through `ask` (the clients' `Request.call` over an `Effects`, from `Effects.ask` alone). -/
+def callAsk (ask : Ask) (r : Client.Request α) : IO (Client.Result α) := do
+  return r.read (← IO.wait (← ask r.capability r.args))
 
-private def keyArgs (service id : String) : List (String × Json) :=
-  [("key", Json.str id), ("service", Json.str service)]
+open ElmLean.Native in
+/-- A Keychain failure as the store's error: its `OSStatus`, or `errSecParam` for an answer the shell
+should not have given (the client keeps it whole; the store's errors have no room for it). -/
+def keychainError (e : Client.Error) : KeyStoreError :=
+  .keychain (Int32.ofInt (e.code.getD (-50)))
 
-/-- The `OSStatus` a failed `keychain.set` / `keychain.delete` answered (`errSecParam` if none). -/
-private def status (r : Json) : Int32 := Int32.ofInt ((r.getObjValAs? Int "status").toOption.getD (-50))
-
+open ElmLean.Native in
 /-- The Keychain capability as a `KeyStore`, under `service` (test mode passes its own namespace). -/
-def shellKeyStore (ask : Ask) (service : String := walletService) : KeyStore IO where
-  store secret id := do
-    let existing ← (askNow ask "keychain.get" (Json.mkObj (keyArgs service id)) : IO Json)
-    if let .ok (.str _) := existing.getObjVal? "value" then throw (.alreadyExists id)
-    let some text := String.fromUTF8? secret.serialized | throw .malformedSecret
-    let r ← (askNow ask "keychain.set" (Json.mkObj (keyArgs service id ++ [("value", Json.str text)])) : IO Json)
-    unless (r.getObjValAs? Bool "ok").toOption.getD false do throw (.keychain (status r))
-  load id := do
-    let r ← (askNow ask "keychain.get" (Json.mkObj (keyArgs service id)) : IO Json)
-    match r.getObjVal? "value" with
-    | .ok (.str text) =>
-      match WalletSecret.parse text.toUTF8 with
-      | .ok s => pure s
-      | .error e => throw e
-    | _ => throw (.notFound id)
-  delete id := do
-    let r ← (askNow ask "keychain.delete" (Json.mkObj (keyArgs service id)) : IO Json)
-    unless (r.getObjValAs? Bool "ok").toOption.getD false do throw (.keychain (status r))
-  loadBytes id := do
-    let r ← (askNow ask "keychain.get" (Json.mkObj (keyArgs service id ++ [("hex", Json.bool true)])) : IO Json)
-    match r.getObjVal? "hex" with
-    | .ok (.str h) => match ofHex? h with | some b => pure (some b) | none => throw .malformedSecret
-    | _ => pure none
-  storeBytes bytes id := do
-    let existing ← (askNow ask "keychain.get" (Json.mkObj (keyArgs service id ++ [("hex", Json.bool true)])) : IO Json)
-    if let .ok (.str _) := existing.getObjVal? "hex" then throw (.alreadyExists id)
-    let r ← (askNow ask "keychain.set" (Json.mkObj (keyArgs service id ++ [("hex", Json.str (hex bytes))])) : IO Json)
-    unless (r.getObjValAs? Bool "ok").toOption.getD false do throw (.keychain (status r))
+def shellKeyStore (ask : Ask) (service : String := walletService) : KeyStore IO :=
+  let item (id : String) : Client.Keychain.Item := { key := id, service := some service }
+  let call {α} (r : Client.Request α) : ExceptT KeyStoreError IO α := do
+    match ← (callAsk ask r : IO _) with
+    | .ok a => pure a
+    | .error e => throw (keychainError e)
+  { store := fun secret id => do
+      let some _ := String.fromUTF8? secret.serialized | throw .malformedSecret
+      match ← call (Client.Keychain.add (item id) secret.serialized) with
+      | .added => pure ()
+      | .alreadyExists => throw (.alreadyExists id)
+    load := fun id => do
+      match ← (callAsk ask (Client.Keychain.getText (item id)) : IO _) with
+      | .ok (some text) =>
+        match WalletSecret.parse text.toUTF8 with
+        | .ok s => pure s
+        | .error e => throw e
+      | .ok none => throw (.notFound id)
+      -- raw bytes, not text: not a wallet secret this store reads (loadBytes sees it)
+      | .error e => if e.name == "notText" then throw (.notFound id) else throw (keychainError e)
+    delete := fun id => call (Client.Keychain.delete (item id))
+    loadBytes := fun id => call (Client.Keychain.get (item id))
+    storeBytes := fun bytes id => do
+      match ← call (Client.Keychain.add (item id) bytes) with
+      | .added => pure ()
+      | .alreadyExists => throw (.alreadyExists id) }
 
-/-- The `http.get` capability as the routed client's fetch; a SOCKS gateway goes as
-`"socks": {"host", "port"}` (the shell answers `{"error":"bad-proxy"}` to a malformed one). -/
+open ElmLean.Native in
+/-- The `http.get` capability as the routed client's fetch; a SOCKS gateway goes as `socks` (the shell
+answers `bad-proxy` to a malformed one). -/
 def shellFetch (ask : Ask) : HttpFetch := fun req => do
-  let args := Json.mkObj [("url", Json.str req.url), ("maxBytes", toJson req.maximumBytes),
-                          ("timeout", toJson req.requestTimeoutSeconds)] |>.setObjVal! "accept"
-                (match req.accept with | some a => Json.str a | none => Json.null)
-  let args := match req.socks with
-    | some p => args.setObjVal! "socks" (Json.mkObj [("host", Json.str p.host), ("port", toJson p.port.toNat)])
-    | none => args
-  let r ← (askNow ask "http.get" args : IO Json)
-  match r.getObjValAs? Nat "status", r.getObjValAs? String "body" with
-  | .ok status, .ok body =>
-    match ofHex? body with
-    | some bytes => return .response status none bytes
-    | none => throw (.http .response)
-  | _, _ =>
-    match r.getObjValAs? String "error" with
-    | .ok "tooLarge" => throw (.http .tooLarge)
-    | .ok "response" => throw (.http .response)
-    | .ok "bad-proxy" => throw (.http .unavailable)
-    | .ok e => throw (.http (.transport e))
-    | .error _ => throw (.http .response)
+  let request : Client.Http.Request :=
+    { url := req.url, maxBytes := req.maximumBytes, timeout := some req.requestTimeoutSeconds, accept := req.accept
+      socks := req.socks.map (fun p => (p.host, p.port.toNat)) }
+  let r ← (callAsk ask (Client.Http.get request) : IO _)
+  match r with
+  | .ok resp => return .response resp.status none resp.body
+  | .error e =>
+    match e.kind, e.name with
+    | _, "tooLarge" => throw (.http .tooLarge)
+    | _, "response" => throw (.http .response)
+    | _, "bad-proxy" => throw (.http .unavailable)
+    | .malformed, _ => throw (.http .response)
+    -- a system error is its text, as the shell gave it; any other name as it came
+    | _, "system" => throw (.http (.transport e.detail))
+    | _, name => throw (.http (.transport name))
 
 end WinnowApp.Real

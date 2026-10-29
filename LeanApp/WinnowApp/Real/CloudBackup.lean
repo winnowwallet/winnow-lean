@@ -1,5 +1,7 @@
 import WinnowApp.Real.CloudAppState
 import WinnowApp.Real.Shell
+import ElmLean.Native.Client.CloudKit
+import ElmLean.Native.Client.Keychain
 import WinnowApp.Real.Base
 
 /-! # Automatic iCloud backup (`CloudBackupController.swift`, `ICloudBackupStore.swift`, upstream d2ca878)
@@ -382,84 +384,93 @@ def cloudContainer : String := "iCloud.com.btcswift.app"
 def cloudBackupKeyService : String := "com.btcswift.app.cloud-backup-key.v1"
 def cloudRecordType : String := "WalletBackup"
 
-private def askNow (ask : Ask) (name : String) (args : List (String × Json)) : IO Json := do
-  IO.wait (← ask name (Json.mkObj (("container", Json.str cloudContainer) :: args)))
+open ElmLean.Native in
+/-- A CloudKit failure as the text the screens show (`missingEntitlement` and `notAuthenticated` as Swift's
+errors, anything else as the shell's detail or name). -/
+def cloudErrorText (e : Client.Error) : String :=
+  match e.name with
+  | "missingEntitlement" => CloudBackupError.missingEntitlement.description
+  | "notAuthenticated" => CloudBackupError.unavailable.description
+  | name => if e.detail.isEmpty then name else e.detail
 
-/-- A CloudKit answer that carries an error, as the text the screens show. -/
-private def cloudError? (r : Json) : Option String :=
-  match r.getObjValAs? String "error" with
-  | .ok "missingEntitlement" => some CloudBackupError.missingEntitlement.description
-  | .ok "notAuthenticated" => some CloudBackupError.unavailable.description
-  | .ok name => some ((r.getObjValAs? String "detail").toOption.getD name)
-  | .error _ => none
-
-/-- One record per device's backup, in the private database; never the public one. -/
+open ElmLean.Native in
+/-- One record per device's backup, in the private database; never the public one. Through
+`Client.CloudKit`, with this app's container, record type and fields. -/
 def shellCloudStore (ask : Ask) : CloudBackupStore :=
+  let container := some cloudContainer
+  let call {α} (r : Client.Request α) : IO (Client.Result α) := callAsk ask r
   let account : IO String := do
-    let r ← askNow ask "cloudkit.account" []
+    match ← call (Client.CloudKit.account container) with
     -- a build without the entitlement answers an error, not a status: say which
-    if let some e := cloudError? r then failText e
-    match r.getObjValAs? String "status", r.getObjValAs? String "user" with
-    | .ok "available", .ok user => pure user
-    | _, _ => CloudBackupError.unavailable.throw
+    | .error e => failText (cloudErrorText e)
+    | .ok { status := .available, user := some user } => pure user
+    | .ok _ => CloudBackupError.unavailable.throw
   { account
     list := fun network => do
       discard account
-      let r ← askNow ask "cloudkit.query"
-        [("type", Json.str cloudRecordType), ("equals", Json.mkObj [("network", Json.str network)]),
-         ("sortBy", Json.str "savedAt"), ("ascending", Json.bool false),
-         ("keys", Json.arr #[Json.str "network", Json.str "savedAt"]), ("limit", toJson (500 : Nat))]
-      if let some e := cloudError? r then failText e
-      let records := (r.getObjValAs? (Array Json) "records").toOption.getD #[]
+      let query : Client.CloudKit.Query :=
+        { type := cloudRecordType
+          equals := [("network", Client.CloudKit.Field.str network)]
+          sortBy := some "savedAt"
+          ascending := false
+          keys := some ["network", "savedAt"]
+          limit := some 500
+          container := container }
+      let q ← call (Client.CloudKit.query query)
+      let records ← match q with
+        | .ok r => pure r.records
+        | .error e => failText (cloudErrorText e)
       let found := records.filterMap fun record => do
-        let fields ← (record.getObjVal? "fields").toOption
-        guard ((fields.getObjValAs? String "network").toOption == some network)
-        let id ← UUIDText.canonical? (← (record.getObjValAs? String "name").toOption)
-        let date ← ((fields.getObjVal? "savedAt").toOption.bind fun d => (d.getObjValAs? Float "date").toOption)
+        let sameNetwork : Bool := match record.field? "network" with | some (.str n) => n == network | _ => false
+        guard sameNetwork
+        let id ← UUIDText.canonical? record.name
+        let date ← match record.field? "savedAt" with | some (.date d) => some d | _ => none
         return ({ id, network, savedAt := date - 978_307_200 } : CloudBackupSummary)
       return found.qsort (·.savedAt > ·.savedAt)
     save := fun backup expected => do
       unless (← account) == expected do CloudBackupError.accountChanged.throw
       let data ← runWM backup.encoded
-      let r ← askNow ask "cloudkit.save"
-        [("type", Json.str cloudRecordType), ("name", Json.str backup.id),
-         ("fields", Json.mkObj [("network", Json.str backup.network),
-                                ("savedAt", Json.mkObj [("date", toJson (backup.savedAt + 978_307_200))])]),
-         ("asset", Json.str (hex data)), ("assetField", Json.str "payload")]
-      if let some e := cloudError? r then failText e
-      unless (r.getObjValAs? Bool "ok").toOption.getD false do CloudBackupError.invalidBackup.throw
+      let record : Client.CloudKit.Save :=
+        { type := cloudRecordType
+          name := backup.id
+          fields := [("network", .str backup.network), ("savedAt", .date (backup.savedAt + 978_307_200))]
+          asset := some data
+          assetField := some "payload"
+          container := container }
+      match ← call (Client.CloudKit.save record) with
+      | .ok _ => pure ()
+      | .error e => if e.kind == .malformed then CloudBackupError.invalidBackup.throw else failText (cloudErrorText e)
       unless (← account) == expected do CloudBackupError.accountChanged.throw
     load := fun id expected => do
       unless (← account) == expected do CloudBackupError.accountChanged.throw
-      let r ← askNow ask "cloudkit.load"
-        [("name", Json.str id), ("maxBytes", toJson CloudWalletBackup.maximumBytes), ("assetField", Json.str "payload")]
-      if (r.getObjValAs? String "error").toOption == some "tooLarge" then CloudBackupError.invalidBackup.throw
-      if let some e := cloudError? r then failText e
-      let some data := (r.getObjValAs? String "asset").toOption.bind ofHex? | CloudBackupError.invalidBackup.throw
+      let loaded ← call (Client.CloudKit.load id (maxBytes := some CloudWalletBackup.maximumBytes)
+        (assetField := some "payload") (container := container))
+      let data ← match loaded with
+        | .ok (_, some data) => pure data
+        | .ok (_, none) => CloudBackupError.invalidBackup.throw
+        | .error e =>
+          if e.name == "tooLarge" || e.kind == .malformed then CloudBackupError.invalidBackup.throw
+          else failText (cloudErrorText e)
       unless data.size ≤ CloudWalletBackup.maximumBytes do CloudBackupError.invalidBackup.throw
       let backup ← runWM (CloudWalletBackup.decode data)
       unless backup.id == id && (← account) == expected do CloudBackupError.accountChanged.throw
       return backup }
 
+open ElmLean.Native in
 /-- The wrapping keys: a synchronizable iCloud Keychain item per backup id (raw 32 bytes), kept apart from
 the wallet's device-only key so automatic recovery never changes its protection. -/
 def shellCloudKeys (ask : Ask) : CloudBackupKeys :=
-  let args (id : String) : List (String × Json) :=
-    [("service", Json.str cloudBackupKeyService), ("key", Json.str id), ("synchronizable", Json.bool true)]
+  let item (id : String) : Client.Keychain.Item := { key := id, service := some cloudBackupKeyService, synchronizable := true }
   { load := fun id => do
-      let r ← IO.wait (← ask "keychain.get" (Json.mkObj (args id ++ [("hex", Json.bool true)])))
-      match r.getObjVal? "hex" with
-      | .ok (.str h) =>
-        match ofHex? h with
-        | some k => if k.size == 32 then pure k else CloudBackupError.invalidBackup.throw
-        | none => CloudBackupError.invalidBackup.throw
-      | _ => CloudBackupError.keyUnavailable.throw
+      match ← (callAsk ask (Client.Keychain.get (item id)) : IO _) with
+      | .ok (some k) => if k.size == 32 then pure k else CloudBackupError.invalidBackup.throw
+      | .ok none => CloudBackupError.keyUnavailable.throw
+      | .error e => if e.kind == .malformed then CloudBackupError.invalidBackup.throw else CloudBackupError.keyUnavailable.throw
     create := fun id => do
       let key ← IO.getRandomBytes 32
-      let r ← IO.wait (← ask "keychain.set" (Json.mkObj (args id ++ [("hex", Json.str (hex key))])))
-      unless (r.getObjValAs? Bool "ok").toOption.getD false do
-        failText (keyStoreErrorText (.keychain (Int32.ofInt ((r.getObjValAs? Int "status").toOption.getD (-50)))))
-      return key }
+      match ← (callAsk ask (Client.Keychain.set (item id) key) : IO _) with
+      | .ok () => return key
+      | .error e => failText (keyStoreErrorText (keychainError e)) }
 
 /-- Memory versions for tests (`MemoryCloudBackups`, `MemoryCloudKeys`). -/
 structure MemoryCloud where
