@@ -1,4 +1,8 @@
-Winnow 0.9.3: the same wallet, rewritten in Lean (internal test)
+Winnow 0.9.4: the same wallet, rewritten in Lean (internal test)
+
+New in 0.9.4
+
+Nothing you can see: it takes LeanNative's fixes to the test recordings and to how a failed Face ID is reported. Please keep checking 0.9.3's items below.
 
 New in 0.9.3
 
