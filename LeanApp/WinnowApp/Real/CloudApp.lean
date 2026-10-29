@@ -1,5 +1,6 @@
 import WinnowApp.Real.Full
 import WinnowApp.Real.CloudBackup
+import ElmLean.Native.EffectScope
 
 /-! # AppModel's iCloud backup (the `AppModel` extension in AppModel.swift, upstream d2ca878 :3485–3651)
 
@@ -40,9 +41,13 @@ structure CloudApp where
   authenticate : String → IO Unit
   /-- `attemptedCloudPreparation`: the wallets prepared (or tried) this foreground session. -/
   attempted : IO.Ref (List String)
-  /-- `cloudPreparationTask != nil`, and its epoch (`cloudPreparationEpoch`). -/
-  preparing : IO.Ref (Option Nat)
-  preparationEpoch : IO.Ref Nat
+  /-- `cloudPreparationTask != nil`: the running preparation's token. -/
+  preparing : IO.Ref (Option ElmLean.Native.EffectScope.Token)
+  /-- `cloudPreparationEpoch`, as LeanNative's `EffectScope`: a new preparation, the background and a wallet
+  change end it, and the protected part (the words, the copy) runs as its task. -/
+  preparation : ElmLean.Native.EffectScope
+  /-- `cloudPreparationTask`: the last preparation's task, which ends after its scope's checks. -/
+  preparationTask : IO.Ref (Option (Task (Except IO.Error Unit)))
   /-- `cloudRestoreNotice`. -/
   restoreNotice : IO.Ref (Option String)
   /-- Whether the scene is active (`isActive`), as the cloud flows last heard. -/
@@ -53,7 +58,7 @@ namespace CloudApp
 def new (controller : CloudBackupController) (env : Env) (host : RecordsHost) (multisig : MultisigApp) (allows : Bool)
     (authenticate : String → IO Unit) : IO CloudApp := do
   return { controller, env, host, multisig, allows, authenticate, attempted := ← IO.mkRef [], preparing := ← IO.mkRef none,
-           preparationEpoch := ← IO.mkRef 0, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false }
+           preparation := ← ElmLean.Native.EffectScope.new, preparationTask := ← IO.mkRef none, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false }
 
 def directory (a : CloudApp) : IO (Option System.FilePath) := do return (← a.env.get).dir.map System.FilePath.mk
 def walletID (a : CloudApp) : IO (Option String) := do return (← a.env.get).wallet.map (·.id)
@@ -141,16 +146,32 @@ def recoveryWords (a : CloudApp) (walletID : String) : IO String := do
   | .error e => failText (keyStoreErrorText e)
 
 /-- `prepareExistingCloudBackup(walletID:network:)`: the account first (no prompt when iCloud is
-unavailable), then authentication, the words, the copy. -/
-def prepareExisting (a : CloudApp) (walletID : String) (network : Option WinnowApp.Network) (epoch : Nat) : IO Unit := do
-  let live : IO Bool := do return (← a.preparationEpoch.get) == epoch && (← a.accepts walletID network)
+unavailable), then authentication, the words, the copy. The preparation's scope is checked before the
+prompt, and the words and the copy start only as the scope's task after the answer, so a wallet switch, a
+network switch or the background while the person answers ends it before the protected part starts; this
+app's own conditions (the same wallet, network, an active scene) are checked with it. -/
+def prepareExisting (a : CloudApp) (walletID : String) (network : Option WinnowApp.Network)
+    (token : ElmLean.Native.EffectScope.Token) : IO Unit := do
+  let live : IO Bool := do return (← a.preparation.isValid token) && (← a.accepts walletID network)
+  -- the authentication's own error, as this app reports it
+  let declined ← IO.mkRef (none : Option IO.Error)
+  let authenticate : IO (ElmLean.Native.Client.Result Unit) := do
+    try a.authenticate "Protect your wallet with automatic iCloud backup"; return .ok ()
+    catch e =>
+      declined.set (some e)
+      return .error { kind := .failed, name := "authentication", detail := toString e }
   try
     let account ← a.controller.accountForPreparation
     if !(← live) then return
-    a.authenticate "Protect your wallet with automatic iCloud backup"
-    if !(← live) then return
-    let words ← a.recoveryWords walletID
-    a.prepare words (some account)
+    let r ← a.preparation.authenticated token authenticate do
+      unless ← a.accepts walletID network do return
+      let words ← a.recoveryWords walletID
+      a.prepare words (some account)
+    match r with
+    | .done () | .stale _ => pure ()
+    | .failed e => throw e
+    | .denied _ | .cancelled _ | .error _ =>
+      if let some e ← declined.get then throw e
   catch e =>
     if !isCancellation e && (← live) then a.controller.reportPreparationFailure e
 
@@ -163,12 +184,15 @@ def schedulePreparation (a : CloudApp) : IO Unit := do
   a.configureCurrent
   if !(← a.controller.get).needsPreparation || (← a.attempted.get).contains w.id then return
   a.attempted.modify (· ++ [w.id])
-  let epoch ← a.preparationEpoch.modifyGet fun e => (e + 1, e + 1)
-  a.preparing.set (some epoch)
+  -- a new preparation ends any earlier one's scope
+  discard <| a.preparation.invalidateWithoutWaiting
+  let token ← a.preparation.capture
+  a.preparing.set (some token)
   let network := c.network
-  discard <| IO.asTask (prio := .dedicated) do
-    a.prepareExisting w.id network epoch
-    if (← a.preparationEpoch.get) == epoch then a.preparing.set none
+  let task ← IO.asTask (prio := .dedicated) do
+    a.prepareExisting w.id network token
+    if ← a.preparation.isValid token then a.preparing.set none
+  a.preparationTask.set (some task)
 
 /-- What `refresh()` asks of the iCloud side: an update of the copy, and a preparation if one is due. -/
 def tick (a : CloudApp) : IO Unit := do
@@ -182,13 +206,14 @@ def sceneChanged (a : CloudApp) (active : Bool) : IO Unit := do
   if active then
     if !was then a.attempted.set []
   else
-    a.preparationEpoch.modify (· + 1)
+    discard <| a.preparation.invalidateWithoutWaiting
     a.preparing.set none
     a.controller.suspend
 
 /-- The wallet changed or went (`adopt`, `destroyWallet`, `switchNetwork`). -/
 def walletChanged (a : CloudApp) : IO Unit := do
-  a.preparationEpoch.modify (· + 1)
+  -- without waiting: this hook can run inside the preparation's own task (the copy adopts the wallet)
+  discard <| a.preparation.invalidateWithoutWaiting
   a.preparing.set none
   a.controller.configure none none
 

@@ -491,7 +491,7 @@ structure CloudPhone where
 
 open Real in
 def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO) (auth : Bool) (cloud : Option MemoryCloud := none)
-    (cloudKeys : Option CloudBackupKeys := none) : TM CloudPhone := do
+    (cloudKeys : Option CloudBackupKeys := none) (whileAuthenticating : IO Unit := pure ()) : TM CloudPhone := do
   let vars := [("WINNOW_E2E", "1"), ("WINNOW_E2E_RUN", "cloud"), ("WINNOW_E2E_ENTROPY", "04040404040404040404040404040404"),
                ("WINNOW_E2E_PEER", "127.0.0.1:1"), ("WINNOW_E2E_CHALLENGE", "51")]
   let .active mode := WinnowApp.E2E.resolve (fun k => vars.lookup k) | throw "test mode did not resolve"
@@ -500,7 +500,10 @@ def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO
   let attempts ← IO.mkRef 0
   let deps : Deps := { keyStore := keys, fetch := fun _ => throw (.other "offline"), networkParams := mode.networkParams, peerCount := 1 }
   let (backend, env, app) ← Backend.realWithCloud deps (store := cloud.store) (keys := cloudKeys)
-    (authenticate := fun _ => do attempts.modify (· + 1); unless auth do throw (IO.userError "Authentication was denied."))
+    (authenticate := fun _ => do
+      attempts.modify (· + 1)
+      whileAuthenticating
+      unless auth do throw (IO.userError "Authentication was denied."))
     (scheduleDelayMs := 50)
   let dir := (root / name / "signet").toString
   IO.FS.createDirAll dir
@@ -774,6 +777,37 @@ def shellAdapters : TM Unit := do
   check "keys: a key of the wrong size is an invalid backup" (match ← (keys.load a).toBaseIO with
     | .error e => toString e == Real.CloudBackupError.invalidBackup.description | .ok _ => false)
 
+/-- The existing wallet's preparation runs in LeanNative's EffectScope: the background or a wallet change
+while the person answers the prompt ends it before the protected part (the words, the copy) starts, and
+says nothing to the person. The prompt is held open by a gate, released after the change. -/
+def scopedPreparationTests (root : System.FilePath) : TM Unit := do
+  for (name, change) in [("background", fun (p : CloudPhone) => p.backend.cloudScene false),
+                         ("wallet change", fun (p : CloudPhone) => p.app.walletChanged)] do
+    let prompted ← IO.Promise.new
+    let answer ← IO.Promise.new
+    let loads ← IO.mkRef 0
+    let base ← newKeys
+    let keys : KeyStore IO := { base with load := fun id => do (loads.modify (· + 1) : IO Unit); base.load id }
+    let p ← cloudPhone root s!"scoped-{name.replace " " "-"}" keys true
+      (whileAuthenticating := do prompted.resolve (); discard <| IO.wait answer.result?)
+    p.bootExisting
+    p.activate
+    let asked ← waitUntil 5000 prompted.isResolved
+    let before ← loads.get
+    change p
+    answer.resolve ()
+    -- the preparation's task ends (its scope's check after the answer); then nothing it would have done has happened
+    let ended ← match ← p.app.preparationTask.get with
+      | some t => do discard <| IO.wait t; pure true
+      | none => pure false
+    check s!"{name} during the prompt: the prompt was asked" asked
+    check s!"{name} during the prompt: the preparation ends" ended
+    check s!"{name} during the prompt: the words are not read" ((← loads.get) == before)
+    check s!"{name} during the prompt: nothing is uploaded" ((← p.cloud.records.get).isEmpty)
+    check s!"{name} during the prompt: no failure is shown" ((← p.app.controller.get).message.isNone)
+    p.backend.cloudScene false
+    p.backend.stopNetworking
+
 def main (args : List String) : IO UInt32 := do
   let writeDir := match args with | "--write" :: d :: _ => some d | _ => none
   runTest "roundTripRestoresSigningAndAddressCounters" roundTripRestoresSigningAndAddressCounters
@@ -793,6 +827,7 @@ def main (args : List String) : IO UInt32 := do
   runTest "shellAdapters" shellAdapters
   let root ← IO.FS.createTempDir
   runTest "automaticCloud" (automaticCloudTests root)
+  runTest "scopedPreparation" (scopedPreparationTests root)
   runTest "restoreFromICloud" (restoreFromICloud root)
   try IO.FS.removeDirAll root catch _ => pure ()
   let f ← failures.get
