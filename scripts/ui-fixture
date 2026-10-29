@@ -1,0 +1,58 @@
+#!/bin/bash
+# The UI journeys' fixture, as the UI_BEFORE / UI_AFTER hooks of ElmLean's ui-tests
+# (LeanApp/.lake/packages/elmlean/framework/native/ci/ui-tests):
+#
+#   scripts/ui-fixture start <out>             a fresh regtest node of the pinned Bitcoin Core
+#                                              (scripts/install-bitcoin) with a funded wallet `w` (backend-test
+#                                              --fixture, random ports) and <out>/ui.json, the journeys' config
+#   scripts/ui-fixture stop <out> [simulator]  the app's test-mode journals copied out of the simulator, and
+#                                              the node stopped
+#
+# The journeys (LeanApp/ios/UITests) find ui.json through WINNOW_UI_CONFIG, which `start` leaves in
+# <out>/test-env. The node's data directory is <out>/private/fixture, which CI keeps out of the evidence.
+# scripts/ui-journeys runs the whole thing locally.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$ROOT/LeanApp"
+action="${1:?start or stop}"; OUT="${2:?the ui-tests output directory}"
+
+case "$action" in
+  start)
+    BIN="$("$ROOT/scripts/install-bitcoin")"
+    export WINNOW_BITCOIND="$BIN/bitcoind" WINNOW_BITCOIN_CLI="$BIN/bitcoin-cli"
+    (cd "$APP" && lake build backend-test >/dev/null)
+    mkdir -p "$OUT/private" "$OUT/screenshots"
+    "$APP/.lake/build/bin/backend-test" --fixture "$OUT/private/fixture" > "$OUT/fixture.log" 2>&1 \
+      || { cat "$OUT/fixture.log"; exit 1; }
+    tail -1 "$OUT/fixture.log"
+    /usr/bin/python3 - "$OUT" "$WINNOW_BITCOIN_CLI" "$APP/.lake/build/bin/backend-test" <<'PY'
+import json, os, sys
+out, cli, backend_test = sys.argv[1:4]
+config = {"fixture": out + "/private/fixture", "bitcoinCli": cli, "backendTest": backend_test,
+          "screenshots": out + "/screenshots"}
+device = os.path.join(out, "device.json")
+if os.path.exists(device):
+    config["device"] = json.load(open(device))
+json.dump(config, open(out + "/ui.json", "w"), indent=2)
+PY
+    echo "WINNOW_UI_CONFIG=$OUT/ui.json" > "$OUT/test-env"
+    ;;
+  stop)
+    UDID="${3:-}"
+    if [ -n "$UDID" ]; then
+      BUNDLE_ID=$(grep -m1 'PRODUCT_BUNDLE_IDENTIFIER:' "$APP/ios/project.yml" | sed 's/.*: *//')
+      # the app's test-mode journals (Application Support/BTCSwiftE2E-<run>/story-events.jsonl)
+      if DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null); then
+        for j in "$DATA/Library/Application Support"/BTCSwiftE2E-*/story-events.jsonl; do
+          [ -f "$j" ] && cp "$j" "$OUT/journal-$(basename "$(dirname "$j")").jsonl"
+        done
+      fi
+    fi
+    FIXTURE="$OUT/private/fixture/fixture.json"
+    if [ -f "$FIXTURE" ]; then
+      NODE_PID=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$FIXTURE")
+      kill "$NODE_PID" 2>/dev/null || true
+    fi
+    ;;
+  *) echo "ui-fixture: start or stop" >&2; exit 2 ;;
+esac

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>How a payment is made &mdash; Winnow</title>
+<meta name="description" content="How Winnow chooses coins and fees, signs payments, and relays them to Bitcoin peers.">
+<link rel="canonical" href="https://winnowwallet.com/write-side">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://winnowwallet.com/write-side">
+<meta property="og:title" content="How a payment is made &mdash; Winnow">
+<meta property="og:description" content="How Winnow chooses coins and fees, signs payments, and relays them to Bitcoin peers.">
+<meta property="og:image" content="https://winnowwallet.com/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="How a payment is made &mdash; Winnow">
+<meta name="twitter:description" content="How Winnow chooses coins and fees, signs payments, and relays them to Bitcoin peers.">
+<meta name="twitter:image" content="https://winnowwallet.com/og.png">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar"><div class="bar"><a class="mark" href="/" aria-label="Winnow home">winnow</a><nav class="links" aria-label="Main"><a href="/architecture">How it works</a><a href="https://github.com/winnowwallet/winnow">GitHub ↗</a></nav></div></header>
+<main id="main">
+  <h1 id="the-write-side-how-a-phone-pays-without-asking-anyone">How a payment is made</h1>
+  <p class="lede">Choose coins and a fee, build the payment, review and sign, then relay it to Bitcoin peers. Confirmation comes from a later block.</p>
+  <nav class="contents" aria-label="On this page"><a href="#coin-selection-and-change">Coins and change</a><a href="#fees-without-a-mempool">Fees</a><a href="#signing">Signing</a><a href="#getting-it-out">Relay</a><a href="#what-still-leaks">Privacy</a></nav>
+  <h2 id="the-problem">Four steps</h2><ol><li>Select enough coins for the payment and fee.</li><li>Build a transaction and return any change to your wallet.</li><li>Review the address, amount and fee before signing.</li><li>Broadcast through peers, then distinguish relay from confirmation.</li></ol>
+  <h2 id="one-spend-shape">2. One spend shape</h2>
+  <p>Everyday spends are BIP86 P2TR key-path. The signed witness is one 64-byte Schnorr signature (<code>SIGHASH_DEFAULT</code>); fee math uses 66 witness bytes per input (compact-size count + length + 64). Script-path and MuSig2 shapes belong to <a href="/vaults">vaults</a> and plug into the same builder via <code>witnessBytesPerInput</code>.</p>
+  <p>The phone <em>receives</em> only P2TR. It <em>pays</em> standard P2PKH, P2SH, P2WPKH, P2WSH and P2TR addresses. Destination diversity is a payment-layer concern; the wallet’s own outputs stay one type so coin selection, change, and watch-list code have a single script shape.</p>
+  <p>Transactions are version 2, empty <code>scriptSig</code>s, and sequence <code>0xFFFFFFFD</code> (locktime-disabled, BIP125 opt-in RBF). A pending send with change can be fee-bumped in the transaction history; signaling replacement from the first broadcast avoids a policy surprise when it is needed.</p>
+  <hr />
+  <h2 id="coin-selection-and-change">3. Coin selection and change</h2>
+  <p>Largest-first, with Bitcoin Core’s dust rule (<code>policy.cpp</code> <code>GetDustThreshold</code>). At the default dust relay feerate (3000 sat/kvB) a 43-byte P2TR output is dust below <strong>330 sats</strong>. The often-quoted 294 sats is the P2WPKH threshold; using it here would produce outputs some peers will not relay.</p>
+  <p>The loop accumulates the largest UTXOs until the selection covers the payment plus the fee of the transaction <em>as currently shaped</em> (each added input grows vsize, so the fee target moves). A change output is created when the remainder clears the change script’s dust threshold; otherwise the remainder is folded into the fee. Feerates outside <code>(0, 10_000]</code> sat/vB are rejected by Winnow’s fee safety limit. This is a wallet policy, not a network-wide fee ceiling. Payment outputs that are themselves dust are rejected before a transaction is built — a sub-dust payment would strand the inputs in a tx no peer will take. A selection whose transaction would exceed Bitcoin Core’s standardness ceiling (<code>MAX_STANDARD_TX_WEIGHT</code>, 400,000 weight units, 100,000 vbytes) is refused before anything is signed, to stay within default relay policy. Coinbase outputs are credited when their block matches, but they are not selected until exactly 100 confirmations (<code>COINBASE_MATURITY</code>), as required by consensus.</p>
+  <p>Change, when any, goes to the next unused internal address (<code>tr(…/&lt;0;1&gt;/*)</code>, choice 1). Its position among the outputs is chosen uniformly at random so change is not “always last” — a well-known chain-analysis fingerprint. After a successful broadcast the spent UTXOs leave the local set immediately and the change UTXO enters it at height 0, so a second send cannot double-spend the unconfirmed inputs. Height 0 is pending, never “confirmed.”</p>
+  <p><strong>Commit-after-broadcast.</strong> <code>Wallet.buildSend</code> produces a signed transaction without mutating wallet state. <code>commit</code> runs only after the bytes have been handed to the broadcaster. Committing first and then failing to leave the device would strand inputs in a locally-spent, on-chain-unspent limbo that forward-only scanning cannot repair.</p>
+  <hr />
+  <h2 id="fees-without-a-mempool">4. Fees without a mempool</h2>
+  <p>A filter-only client does not see the fee market. Feerates of stranger transactions require their input amounts, which means recursively fetching parents — the bandwidth blowup the read side refused. So this product does not estimate from gossip.</p>
+  <p>Resolution, strongest first (<code>FeePolicy</code>):</p>
+  <ol type="1">
+  <li><strong>User override</strong> (sat/vB), when the send form set one.</li>
+  <li><strong>Median of this wallet’s own recently confirmed spends.</strong> Those feerates are exact: the wallet knows every input amount because it selected them.</li>
+  <li><strong>Static presets</strong> — low 2, medium 5, high 12 sat/vB. Deliberately above typical minima. A mempool-blind wallet must overpay rather than stall.</li>
+  </ol>
+  <p>The result is clamped from below by the strictest BIP133 <code>feefilter</code> among connected peers (the minimum that will relay at all). If every remaining peer’s floor later rises above a pending transaction’s feerate, the broadcaster emits <code>feeFloorExceeded</code> once; the caller decides whether to bump. There is no live histogram and no “arrives in 10 minutes” claim.</p>
+  <p>This is cruder than any mempool-aware estimator. It is also the only estimator that does not reintroduce a server or a persistent relay subscription. Owned, and said in the send UI as a rate, not as a promise.</p>
+  <h3 id="replacing-a-stuck-send">4.1 Replacing a stuck send</h3>
+  <p>Winnow persists the exact inputs and raw transaction for each locally-created pending send. A replacement spends those same inputs, preserves every recipient output and its ordering, and pays the increase by shrinking the existing change output. If the remainder falls below the change script’s dust threshold, change is removed and the whole remainder becomes fee. A changeless transaction cannot be bumped without adding an input, so the same-input flow refuses it rather than altering a recipient amount.</p>
+  <p>The builder enforces both fee dimensions of BIP125 policy: the replacement’s absolute fee and feerate are strictly higher, and the increase pays the default incremental relay fee for the replacement’s own virtual size. It uses the same PSBTv2 key-path signer as the original send. Building is mutation-free; the app broadcasts the replacement, commits the wallet-state swap, then cancels relay of the original. If the wallet commit fails, the replacement broadcaster entry is cancelled and the original keeps relaying.</p>
+  <p>History retains the old txid as <strong>replaced</strong> and adds the new pending entry. If the original wins the confirmation race before the replacement propagates, scanning discards the replacement descendant and its locally-counted change before applying the confirmed original. Conversely, if broadcasting succeeds but the replacement’s state commit fails, its exact input set still identifies it as the winner when scanned and removes the original pending change. Neither race can double-count balance.</p>
+  <hr />
+  <h2 id="signing">5. Signing</h2>
+  <p>The everyday path is PSBTv2 even for single-sig (BIP370/371): creator attaches witness UTXOs and Taproot key-origin metadata, the signer writes <code>PSBT_IN_TAP_KEY_SIG</code>, the finalizer extracts a raw transaction. One pipeline with <a href="/vaults">vaults</a>, instead of a private “just sign it” shortcut that would drift.</p>
+  <p>Secrets:</p>
+  <ul>
+  <li>The seed is a BIP39 mnemonic (12 words, 16 bytes of entropy) or a master xprv, stored by <code>KeychainStore</code> under the wallet id (master fingerprint, 8 hex chars).</li>
+  <li>Accessibility is <code>WhenUnlockedThisDeviceOnly</code> behind a <code>.userPresence</code> access control, so the Keychain itself asks for the passcode or biometrics before releasing the secret; <code>kSecAttrSynchronizable</code> is false. The JSON wallet file on disk holds the descriptor, UTXOs, and history — public material.</li>
+  <li><code>Wallet.tweakedPrivateKey</code> loads the secret, derives <code>m/86'/coin'/account'/chain/index</code>, applies the BIP86 tweak (no merkle root), signs, and drops the key. The actor never holds the seed in <code>WalletState</code>.</li>
+  </ul>
+  <p>Wallet amounts and UTXOs come from locally verified blocks, not Esplora. BIP341 signatures commit to input amounts; explorer pages are external manual checks and never feed the signer.</p>
+  <hr />
+  <h2 id="unsupported-wallet-data">6. Unsupported wallet data</h2>
+  <p>Winnow restores descriptor-derived coins. It refuses wallet files or import bundles containing legacy signing data that it cannot use, rather than dropping that data and showing coins it cannot spend.</p>
+  <p>A recovery phrase alone does not recover unsupported coin types. Keep the original wallet and backup and use compatible wallet software for those coins. See <a href="/import">import and recovery</a>.</p>
+  <hr />
+  <h2 id="getting-it-out">7. Getting it out</h2>
+  <p><code>TxBroadcaster</code> is P2P relay, not an API client:</p>
+  <ul>
+  <li>Announce <code>inv(MSG_WITNESS_TX)</code> to the connected pool (default 3 peers).</li>
+  <li>Answer <code>getdata</code> with the raw transaction.</li>
+  <li>Per-peer state: <code>announced → requested → served</code>, plus <code>failed</code> on timeout/disconnect and <code>deprioritized</code> if a peer never answers <code>maxAnnouncementsPerPeer</code> invs (then skipped for that tx).</li>
+  <li>Re-announce on exponential backoff (60s base, cap 1h) until <code>FilterSync</code> reports the tx in a matched block, or the caller cancels (e.g. a replacement).</li>
+  <li>Pending txs persist as JSON (raw tx, feerate, next attempt) so a killed app resumes relay.</li>
+  </ul>
+  <p>While the Send screen is open, a <a href="/read-side#bounded-mempool-windows">bounded mempool window</a> watches for peers echoing our txid back. An echo is evidence the network has the bytes; it is not confirmation. The UI says “broadcast” / “relayed” / “seen in a block”, never “sent” at 0-conf.</p>
+  <p>Winnow does not POST transactions to Esplora. A transaction row can open the selected explorer after a warning, but P2P relay remains the broadcast path and the page’s answer is not consumed by the wallet.</p>
+  <hr />
+  <h2 id="what-still-leaks">8. What still leaks</h2>
+  <p>Filters protect the <em>read</em>. The write is a public announcement.</p>
+  <ul>
+  <li>The peers you <code>inv</code> see your IP and your transaction. They learn the inputs you spend and the outputs you create. Change randomization and Taproot-only outputs shrink fingerprints; they do not hide the spend from the relay peer.</li>
+  <li>A network observer between you and those peers sees the same.</li>
+  <li>RBF signaling and a recognizable vsize (one 64-byte witness per input) are visible on the wire. That is the cost of a simple spend shape.</li>
+  </ul>
+  <p>There is no Dandelion, no Tor requirement, no equal-output coinjoin. A user who needs those wants a different product. This paper will not claim broadcast privacy the implementation does not provide.</p>
+  <hr />
+  <h2 id="use-cases">9. Use cases</h2>
+  <div class="table-wrap" role="region" tabindex="0" aria-label="Scrollable table"><table>
+  <colgroup>
+  <col style="width: 12%" />
+  <col style="width: 41%" />
+  <col style="width: 45%" />
+  </colgroup>
+  <thead>
+  <tr>
+  <th>#</th>
+  <th>Use case</th>
+  <th>Mechanism</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+  <td>1</td>
+  <td>Pay a bech32m / bech32 / base58 address</td>
+  <td>Decode → select → build (random change slot) → PSBT sign → broadcast</td>
+  </tr>
+  <tr>
+  <td>2</td>
+  <td>Pick a fee</td>
+  <td>Override / observed median / preset, clamped by <code>feefilter</code></td>
+  </tr>
+  <tr>
+  <td>3</td>
+  <td>“Is it out?”</td>
+  <td>Peer <code>getdata</code> + txid echo while Send is open</td>
+  </tr>
+  <tr>
+  <td>4</td>
+  <td>“Is it done?”</td>
+  <td>Filter match on a confirmed block; height 0 change flips to that height</td>
+  </tr>
+  <tr>
+  <td>5</td>
+  <td>App killed mid-relay</td>
+  <td>Persisted pending set resumes backoff</td>
+  </tr>
+  <tr>
+  <td>6</td>
+  <td>Peers will not take this feerate</td>
+  <td><code>feeFloorExceeded</code>; user may bump (RBF already signaled)</td>
+  </tr>
+  </tbody>
+  </table></div>
+  <hr />
+<h2 id="conclusion">Related guides</h2><p><a href="/read-side">How confirmation is detected</a> · <a href="/import">Backup and recovery</a></p>
+</main>
+<footer><div class="bar"><nav aria-label="Footer"><a href="/roadmap">Roadmap</a><a href="/privacy">Privacy</a><a href="/recording">Recording</a></nav></div></footer>
+</body>
+</html>
