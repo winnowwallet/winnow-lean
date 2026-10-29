@@ -21,9 +21,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   app:
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@df75d4d0c5cfe9e73efac497cd61a8e79a751893
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@728337944248041f69e5c8b96713d5151cad0086
     with:
-      elmlean: df75d4d0c5cfe9e73efac497cd61a8e79a751893
+      elmlean: 728337944248041f69e5c8b96713d5151cad0086
       runs-on: warp-macos-26-arm64-12x
       lean-packages: Lean LeanApp
       build-targets: |

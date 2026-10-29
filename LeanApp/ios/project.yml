@@ -103,7 +103,10 @@ targets:
   WinnowLeanUITests:
     type: bundle.ui-testing
     platform: iOS
-    sources: [UITests]
+    sources:
+      - UITests
+      # LeanNative's XCTest kit, in this target only: the app never links XCTest
+      - { path: ../.lake/packages/elmlean/framework/native/testkit, name: ElmLeanTestKit }
     dependencies:
       - target: WinnowLean
     settings:
