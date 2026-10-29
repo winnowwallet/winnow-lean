@@ -1,14 +1,13 @@
-Winnow 0.9.2: the same wallet, rewritten in Lean (internal test)
+Winnow 0.9.3: the same wallet, rewritten in Lean (internal test)
 
-New in 0.9.2
+New in 0.9.3
 
-1. Leaving the app no longer loses an answer in flight. In 0.9.1, if the phone locked or you switched apps while Winnow worked (approving "Create an account" on the Ledger, sending a payment), the screen stayed on "Creating…" or "Sending…" even though the work was done. Try: start Create an account with a Ledger, lock the phone while you approve, unlock: the account shows as approved. Send a payment and press Home at once: the receipt shows when you come back.
-2. A payment sent just before Winnow goes to the background reaches the network as soon as you return, not a minute later.
-3. Advanced mode's Wallet tab no longer jumps while it syncs: scroll down to Transactions and wait through a few syncs.
-4. Sign with Ledger says "Approve on the Ledger…" while it waits for the Ledger.
-5. After "Sign and continue" the collect step says "Opening the payment…" instead of briefly saying there is no payment.
-6. Your own outgoing payments no longer offer "Save sender as person".
-7. Backups no longer wait for payments to confirm. The iCloud backup and a backup file now include payments not yet confirmed, with the coins they spend; restoring announces them to the network again. Try: send a payment, back up to a file at once (Settings → Backup), restore it on a second device before the payment confirms: it shows the payment as pending and then confirmed.
+Nothing should look different. Winnow now builds on LeanNative, the framework drawn out of it, so the parts that talk to iOS were rewritten underneath: background checks, the Keychain, iCloud backup, Face ID and the Ledger over Bluetooth. Please try:
+1. Background checks: leave Winnow in the background for a few hours (not force-quit); in Advanced mode the Wallet tab's Sync section should then say "Chain last checked" a short time ago.
+2. iCloud backup: while Winnow prepares the backup and Face ID asks, lock the phone or switch apps. No error should show, and Settings → Backup should end at "Backed up".
+3. Ledger: pair, create an account and sign a payment over Bluetooth.
+
+Also in 0.9.2: answers survive leaving the app, payments sent just before the background reach the network at once, the Wallet tab no longer jumps while it syncs, and backups carry payments not yet confirmed.
 
 This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Signers. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
 
