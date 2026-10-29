@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Check the archived or exported Lean app's identity and signature before it goes to TestFlight.
+
+    scripts/verify-signed-archive <WinnowLean.app> [--distribution]
+
+The same identity as the Swift app it replaces (com.btcswift.app, team 2858MX5336, meant to keep an
+installed wallet's Keychain items and files; an update over a Swift build has not been tried), the
+version release.yml set, the iCloud container with CloudKit (automatic iCloud backup; production iCloud
+for distribution), arm64 only, no Swift."""
+import argparse
+import os
+from pathlib import Path
+import plistlib
+import subprocess
+
+
+def verify(app, distribution=False):
+    info = plistlib.loads((app / 'Info.plist').read_bytes())
+    assert info['CFBundleShortVersionString'] == os.environ['TESTFLIGHT_MARKETING_VERSION'], 'app version mismatch'
+    assert str(info['CFBundleVersion']) == os.environ['TESTFLIGHT_BUILD_NUMBER'], 'app build number mismatch'
+    assert info['CFBundleIdentifier'] == 'com.btcswift.app', 'app bundle mismatch'
+    assert info.get('ITSAppUsesNonExemptEncryption') is False, 'export compliance must be declared'
+    icon = info.get('CFBundleIcons', {}).get('CFBundlePrimaryIcon', {})
+    assert icon.get('CFBundleIconName') == 'AppIcon', 'the app icon must come from the asset catalog'
+    subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+    entitlements = plistlib.loads(subprocess.check_output(
+        ['codesign', '-d', '--entitlements', ':-', str(app)], stderr=subprocess.DEVNULL))
+    assert entitlements['application-identifier'] == '2858MX5336.com.btcswift.app', 'app signing identity mismatch'
+    assert entitlements['com.apple.developer.team-identifier'] == '2858MX5336', 'signing team mismatch'
+    assert entitlements['com.apple.developer.icloud-container-identifiers'] == ['iCloud.com.btcswift.app']
+    assert 'CloudKit' in entitlements['com.apple.developer.icloud-services']
+    environment = entitlements.get('com.apple.developer.icloud-container-environment')
+    if distribution or entitlements.get('get-task-allow') is not True:
+        assert environment == 'Production', 'distribution requires production iCloud'
+        assert entitlements.get('get-task-allow') is False, 'distribution must disable debugging'
+    else:
+        # Xcode adds the selected environment when exporting this development archive.
+        assert environment in {None, 'Development', 'Production'}, 'unexpected archive iCloud environment'
+    binary = app / info['CFBundleExecutable']
+    architectures = subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split()
+    assert architectures == ['arm64'], 'app must contain only the iPhone ARM64 executable'
+    linked = subprocess.check_output(['otool', '-L', str(binary)], text=True)
+    assert 'swift' not in linked.lower(), 'the app links a Swift library'
+    assert not (app / 'Frameworks').exists() or not any('swift' in p.name.lower() for p in (app / 'Frameworks').iterdir()), \
+        'the app bundles a Swift library'
+    print('Distribution identity, signature, iCloud, ARM64 and no Swift verified.' if distribution
+          else 'Archive identity, signature, iCloud, ARM64 and no Swift verified; distribution export is checked separately.')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('app', type=Path)
+    parser.add_argument('--distribution', action='store_true')
+    args = parser.parse_args()
+    verify(args.app, args.distribution)

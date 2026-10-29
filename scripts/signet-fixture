@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Provision the disposable custom-signet fixture the UI journey needs.
+#
+# The previous fixture existed only as a datadir on one workstation, and it was
+# lost with that machine's disk. Its challenge key went with it, which made the
+# whole suite unrunnable. This script rebuilds an equivalent chain from nothing,
+# so the fixture is a property of the repository rather than of a laptop.
+#
+#   scripts/signet-fixture up          start the node (creates it if absent)
+#   scripts/signet-fixture down        stop the node
+#   scripts/signet-fixture status      report height and wallet state
+#   scripts/signet-fixture destroy     stop and delete the datadir
+#   scripts/signet-fixture snapshot DIR  copy the stopped node's data to DIR (a template)
+#
+# With WINNOW_FIXTURE_TEMPLATE set to such a snapshot, `up` starts a new datadir
+# from it instead of from genesis for local development. Hosted CI does not
+# use a template: winnow-fixture prepares a fresh bank natively before the UI
+# journey, outside the simulator's host-process bridge.
+#
+# The challenge key below is a published dev constant for a chain that holds
+# nothing. It is deliberately in the repo: a key only one machine has is how the
+# last fixture disappeared. Never reuse it anywhere that holds value.
+set -euo pipefail
+
+DATADIR="${WINNOW_DATADIR:-$HOME/.bitcoin-mysignet}"
+RPC_PORT="${WINNOW_RPC_PORT:-38400}"
+P2P_PORT="${WINNOW_P2P_PORT:-38401}"
+
+# secret = sha256("winnow-dev-signet-fixture-2026"); pubkey verified against
+# Core via getdescriptorinfo, which returns this same compressed point.
+WIF="cU5G84sozM6AUeMTmh6M6E6bUZ8fkFAw7gyhLiQoxjQEQgM6HnhM"
+CHALLENGE="512102d4d3dfe322ab358061c7e08beebb48dc06a4c175342b975ecd0d55a79e6d6cdc51ae"
+
+cli() { bitcoin-cli -datadir="$DATADIR" -rpcport="$RPC_PORT" "$@"; }
+
+write_conf() {
+  mkdir -p "$DATADIR"
+  cat > "$DATADIR/bitcoin.conf" <<CONF
+# Winnow UI integration fixture: a disposable custom signet holding no value.
+# Regenerate with scripts/signet-fixture.
+signet=1
+
+[signet]
+signetchallenge=$CHALLENGE
+rpcport=$RPC_PORT
+port=$P2P_PORT
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+listen=1
+bind=127.0.0.1:$P2P_PORT
+discover=0
+connect=0
+# The wallet discovers payments through the node's compact filters.
+blockfilterindex=1
+peerblockfilters=1
+txindex=1
+debug=net
+fallbackfee=0.0002
+# Isolated: this chain has no seeds and must not look for peers.
+dnsseed=0
+CONF
+}
+
+wait_for_rpc() {
+  for _ in $(seq 1 30); do
+    if cli getblockchaininfo >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  echo "node did not answer RPC on port $RPC_PORT" >&2
+  return 1
+}
+
+ensure_miner_wallet() {
+  if cli listwallets | grep -q '"miner"'; then return 0; fi
+  cli loadwallet miner >/dev/null 2>&1 && return 0
+  cli -named createwallet wallet_name=miner blank=true >/dev/null
+  # SignetMiner has this wallet sign every block's challenge over RPC
+  # (signrawtransactionwithwallet), so the descriptor must be the challenge
+  # script itself, with its private key.
+  local checksum
+  checksum=$(cli getdescriptorinfo "multi(1,$WIF)" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['checksum'])")
+  cli -rpcwallet=miner importdescriptors \
+    "[{\"desc\":\"multi(1,$WIF)#$checksum\",\"timestamp\":\"now\",\"active\":false}]" >/dev/null
+}
+
+case "${1:-up}" in
+  up)
+    if [ ! -e "$DATADIR" ] && [ -n "${WINNOW_FIXTURE_TEMPLATE:-}" ] && [ -d "$WINNOW_FIXTURE_TEMPLATE" ]; then
+      cp -R "$WINNOW_FIXTURE_TEMPLATE" "$DATADIR"
+      rm -f "$DATADIR"/signet/*.log "$DATADIR"/signet/mempool.dat "$DATADIR"/signet/.lock
+      echo "datadir started from the template at $WINNOW_FIXTURE_TEMPLATE"
+    fi
+    write_conf
+    if cli getblockchaininfo >/dev/null 2>&1; then
+      echo "already running"
+    else
+      bitcoind -datadir="$DATADIR" -daemon >/dev/null
+      wait_for_rpc
+    fi
+    ensure_miner_wallet
+    echo "fixture up: rpc=$RPC_PORT p2p=$P2P_PORT height=$(cli getblockcount)"
+    echo "set it as the app's manual peer (Settings → Manual peers, or WINNOW_E2E_PEER in test mode)"
+    ;;
+  down)
+    cli stop >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      if ! cli getblockcount >/dev/null 2>&1; then
+        echo "stopped"
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "node did not stop" >&2
+    exit 1
+    ;;
+  status)
+    if cli getblockchaininfo >/dev/null 2>&1; then
+      echo "height=$(cli getblockcount) wallets=$(cli listwallets | tr -d '\n ')"
+    else
+      echo "not running"
+    fi
+    ;;
+  destroy)
+    cli stop >/dev/null 2>&1 || true
+    sleep 2
+    rm -rf "$DATADIR"
+    echo "destroyed $DATADIR"
+    ;;
+  snapshot)
+    TARGET="${2:?usage: $0 snapshot DIR}"
+    [ ! -e "$TARGET" ] || { echo "$TARGET already exists" >&2; exit 1; }
+    # Stop the node so the copy is consistent, and wait for the process to be
+    # gone, not just its RPC: the indexes are flushed after the RPC server
+    # stops, and a copy taken in between starts with "best block of txindex
+    # not found". `up` starts the node again.
+    PIDFILE="$DATADIR/signet/bitcoind.pid"
+    NODE_PID=$(cat "$PIDFILE" 2>/dev/null || true)
+    cli stop >/dev/null 2>&1 || true
+    for _ in $(seq 1 60); do
+      if [ -n "$NODE_PID" ]; then kill -0 "$NODE_PID" 2>/dev/null || break; else cli getblockcount >/dev/null 2>&1 || break; fi
+      sleep 1
+    done
+    [ -z "$NODE_PID" ] || ! kill -0 "$NODE_PID" 2>/dev/null || { echo "node $NODE_PID did not exit" >&2; exit 1; }
+    mkdir -p "$TARGET"
+    cp -R "$DATADIR"/. "$TARGET"/
+    rm -f "$TARGET"/signet/*.log "$TARGET"/signet/mempool.dat "$TARGET"/signet/.lock "$TARGET"/signet/.cookie "$TARGET"/signet/bitcoind.pid
+    echo "snapshot written to $TARGET ($(du -sh "$TARGET" | cut -f1)); start the node again with: $0 up"
+    ;;
+  *)
+    echo "usage: $0 {up|down|status|destroy|snapshot DIR}" >&2
+    exit 2
+    ;;
+esac
