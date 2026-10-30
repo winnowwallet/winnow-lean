@@ -17,11 +17,32 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  # nightly: nothing to run when this commit of main already passed (main changes only with a release; the first
+  # night after one runs, which gives the website main's journey media)
+  nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    outputs:
+      tested: ${{ steps.check.outputs.tested }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&head_sha=$GITHUB_SHA&status=success&per_page=1" --jq .total_count)
+          echo "successful runs on main at $GITHUB_SHA: $n"
+          if [ "$n" -gt 0 ]; then echo tested=true; else echo tested=false; fi >> "$GITHUB_OUTPUT"
   app:
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@b3610efd39d68bc33e5bc0f86d5b0ce7d5d0702f
+    needs: nightly
+    if: ${{ !cancelled() && needs.nightly.outputs.tested != 'true' }}
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@edea384b3f5f29de57138fca2abaa2d48aa89b90
     with:
-      leannative: b3610efd39d68bc33e5bc0f86d5b0ce7d5d0702f
+      leannative: edea384b3f5f29de57138fca2abaa2d48aa89b90
       runs-on: warp-macos-26-arm64-12x
+      # the UI journeys drive one simulator: half the runner, half the price
+      app-runs-on: warp-macos-26-arm64-6x
       lean-packages: Lean LeanApp
       build-targets: |
         Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check
