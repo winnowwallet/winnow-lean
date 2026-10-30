@@ -1,0 +1,39 @@
+Winnow 0.9.7: the same wallet, rewritten in Lean
+
+New in 0.9.7
+
+Nothing should look different. The app's three largest functions, the ones that answer the wallet, run its commands and drive the multisig screens, are split by area into smaller ones. Please use the wallet as you normally do and report anything that no longer responds: a payment, a fee bump, the iCloud backup, the recovery phrase, a multisig account or the Ledger.
+
+0.9.6 said that the peer list ships with the app and checked the iPhone features Winnow declares; 0.9.5 generated the app's Xcode project from a description in Lean; 0.9.4 took LeanNative's fixes to the test recordings and to how a failed Face ID is reported.
+
+New in 0.9.3
+
+Nothing should look different. Winnow now builds on LeanNative, the framework drawn out of it, so the parts that talk to iOS were rewritten underneath: background checks, the Keychain, iCloud backup, Face ID and the Ledger over Bluetooth. Please try:
+1. Background checks: leave Winnow in the background for a few hours (not force-quit); in Advanced mode the Wallet tab's Sync section should then say "Chain last checked" a short time ago.
+2. iCloud backup: while Winnow prepares the backup and Face ID asks, lock the phone or switch apps. No error should show, and Settings → Backup should end at "Backed up".
+3. Ledger: pair, create an account and sign a payment over Bluetooth.
+
+Also in 0.9.2: answers survive leaving the app, payments sent just before the background reach the network at once, the Wallet tab no longer jumps while it syncs, and backups carry payments not yet confirmed.
+
+This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Signers. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
+
+Install over the current app
+
+1. With the App Store's Winnow holding a wallet, install this build from TestFlight. The same wallet, balance and Transactions must appear, and it must sync to "Up to date".
+2. Settings → Backup: iCloud backup should show "Backed up" with a time after it updates. On a second device signed into the same Apple Account, a fresh install should offer "Restore your iCloud wallet" and restore the same wallet.
+3. Settings → Signers → Pair a Ledger works (0.9.0 said "Winnow could not safely read its signers").
+
+Everyday use (Simple mode)
+
+Receive, Send and Activity work as before. Simple mode has no new controls. Tap a payment to see its details; copy its transaction ID.
+
+One Send (Advanced mode)
+
+1. Multisig: "Create an account" chooses who signs (this phone, a Ledger paired under Settings → Signers, keys someone sent); "Join an account" pastes one shared with you. The account page has "Share with co-signers" instead of the descriptor text.
+2. Every payment, from the wallet or from an account, starts in Send: pick the account under From. With a recovery path, Send offers "Signers now / Recovery path".
+3. Sign and continue, then collect signatures (phone, Ledger, a pasted copy) and finalize. The PSBT to share is BIP174 v0, readable by Bitcoin Core.
+4. A payment between the wallet and one of your accounts is one row in Transactions.
+
+Also new: Tor and I2P peers under Settings → Peer networks, background chain checks, and the iPad layout (rotation, sidebar). Mac users with Apple silicon can run the iPad version.
+
+Report bugs at https://github.com/winnowwallet/winnow-lean/issues with app version, device, Ledger model, network and steps. Never include recovery words, private keys or backup files.

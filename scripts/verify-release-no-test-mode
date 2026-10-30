@@ -1,0 +1,64 @@
+#!/bin/bash
+# Test mode, sample data and tracing are compiled into every build of the Lean app and switched on at run
+# time only when the shell's `build` capability answers Debug (`#if DEBUG`), so a `strings` check of the
+# binary proves nothing. This checks the behaviour instead: launched in the simulator with test mode's
+# environment, the Release build must boot into its ordinary storage and write no test-mode run, while the
+# Debug build (the control) must start that run and journal it.
+#
+#   scripts/verify-release-no-test-mode <Release WinnowLean.app> <Debug WinnowLean.app>
+#
+# Both builds are com.btcswift.app and each launch starts from a fresh install, so this runs on a throwaway
+# simulator it creates and deletes: never on one that may hold a real Winnow wallet.
+set -euo pipefail
+RELEASE="${1:?Release .app (iphonesimulator)}"; DEBUG="${2:?Debug .app (iphonesimulator)}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+MODEL="$(xcrun simctl list devices available -j | /usr/bin/python3 -c '
+import json, sys
+for d in json.load(sys.stdin)["devices"].values():
+    for x in d:
+        if x["name"].startswith("iPhone"): print(x["deviceTypeIdentifier"]); sys.exit()')"
+UDID=$(xcrun simctl create "Winnow release check $$" "$MODEL")
+trap 'xcrun simctl shutdown "$UDID" >/dev/null 2>&1; xcrun simctl delete "$UDID" >/dev/null 2>&1 || true' EXIT
+xcrun simctl boot "$UDID"
+xcrun simctl bootstatus "$UDID" -b >/dev/null
+RUN="relcheck$$"
+
+# launch <app>: a fresh install started with test mode's environment; prints its Application Support
+launch() {
+  local app="$1" id
+  id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+  xcrun simctl terminate "$UDID" "$id" >/dev/null 2>&1 || true
+  xcrun simctl uninstall "$UDID" "$id" >/dev/null 2>&1 || true
+  xcrun simctl install "$UDID" "$app"
+  SIMCTL_CHILD_WINNOW_E2E=1 SIMCTL_CHILD_WINNOW_E2E_RUN="$RUN" SIMCTL_CHILD_WINNOW_E2E_RESET=1 \
+    SIMCTL_CHILD_WINNOW_E2E_ENTROPY=000102030405060708090a0b0c0d0e0f \
+    SIMCTL_CHILD_WINNOW_LEAN_SAMPLE=1 SIMCTL_CHILD_WINNOW_LEAN_TRACE=1 \
+    xcrun simctl launch "$UDID" "$id" >/dev/null
+  local support
+  support="$(xcrun simctl get_app_container "$UDID" "$id" data)/Library/Application Support"
+  # boot writes the ordinary storage (Release) or the run's (Debug); give it up to 30 s
+  for _ in $(seq 60); do
+    [ -d "$support/BTCSwift" ] || [ -f "$support/BTCSwiftE2E-$RUN/story-events.jsonl" ] && break
+    sleep 0.5
+  done
+  sleep 2
+  xcrun simctl terminate "$UDID" "$id" >/dev/null 2>&1 || true
+  printf '%s' "$support"
+}
+
+fail=0
+debug_support=$(launch "$DEBUG")
+if grep -q '"app.initialized"' "$debug_support/BTCSwiftE2E-$RUN/story-events.jsonl" 2>/dev/null; then
+  echo "control: the Debug build started test-mode run $RUN and journaled app.initialized"
+else
+  echo "control failed: the Debug build did not start test-mode run $RUN, so this check would prove nothing"; fail=1
+fi
+release_support=$(launch "$RELEASE")
+if [ -e "$release_support/BTCSwiftE2E-$RUN" ]; then
+  echo "the Release build started test-mode run $RUN"; fail=1
+elif [ ! -d "$release_support/BTCSwift" ]; then
+  echo "the Release build did not boot into its ordinary storage"; fail=1
+else
+  echo "the Release build ignored test mode's environment and booted into its ordinary storage"
+fi
+exit "$fail"

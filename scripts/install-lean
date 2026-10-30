@@ -1,0 +1,14 @@
+#!/bin/bash
+# elan and the Lean toolchain that Lean/lean-toolchain names, for CI and release runners. On GitHub Actions
+# elan's bin directory is added to the PATH of the following steps; source this script to get it in the
+# current shell.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if ! command -v elan >/dev/null && [ ! -x "$HOME/.elan/bin/elan" ]; then
+  curl -sSfL https://raw.githubusercontent.com/leanprover/elan/v4.1.2/elan-init.sh \
+    | sh -s -- -y --default-toolchain none --no-modify-path
+fi
+export PATH="$HOME/.elan/bin:$PATH"
+[ -n "${GITHUB_PATH:-}" ] && echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+elan toolchain install "$(cat "$ROOT/Lean/lean-toolchain")" >/dev/null 2>&1 || true
+(cd "$ROOT/Lean" && lean --version)
