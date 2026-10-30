@@ -21,9 +21,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   app:
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@86376602a7fee7a433308c16424a6d056713bfda
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@249516cb3d354a755988452b39f54c8db56288cd
     with:
-      leannative: 86376602a7fee7a433308c16424a6d056713bfda
+      leannative: 249516cb3d354a755988452b39f54c8db56288cd
+      # the Mac mini's runners by default; WarpBuild for forks, when CI_RUNNER is `hosted`, and when no mini
+      # runner is online (with RUNNER_STATUS_TOKEN)
+      self-hosted: '["self-hosted", "winnow-lean-mini"]'
+      runner: ${{ vars.CI_RUNNER }}
       runs-on: warp-macos-26-arm64-12x
       lean-packages: Lean LeanApp
       build-targets: |
@@ -55,3 +59,5 @@ jobs:
       after-ui: scripts/journey-media
       publish-name: journey-media
       publish-path: build/journey-media/
+    secrets:
+      RUNNER_STATUS_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
