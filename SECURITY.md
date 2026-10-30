@@ -15,7 +15,7 @@ their disposition. What the wallet claims, and what it does not, is in
 ## Timing side channels
 
 Winnow's cryptography is written in Lean and is not constant-time. The
-secp256k1 code (`Lean/Secp`, used for ECDSA and BIP340 signing, Taproot tweaks
+secp256k1 code (`Lean/Secp`, used for BIP340 signing, Taproot tweaks
 and BIP32 key derivation) computes with Lean's `Nat`, which is backed by GMP and
 takes time that depends on the numbers, and its scalar multiplication branches on
 each bit of the scalar. The AES code behind backup encryption

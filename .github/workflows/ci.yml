@@ -27,7 +27,7 @@ jobs:
       runs-on: warp-macos-26-arm64-12x
       lean-packages: Lean LeanApp
       build-targets: |
-        Lean multisig-test ledger-test silent-payment-test io-test multisig-differential census-check
+        Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check
         LeanApp records-test multisig-app-test ledger-transport-test backend-test
       app-dir: LeanApp
       app-root: WinnowApp
@@ -41,6 +41,7 @@ jobs:
         Lean .lake/build/bin/multisig-test
         Lean .lake/build/bin/ledger-test
         Lean .lake/build/bin/silent-payment-test
+        Lean .lake/build/bin/crypto-test
         LeanApp .lake/build/bin/records-test
         LeanApp .lake/build/bin/multisig-app-test
         LeanApp .lake/build/bin/ledger-transport-test

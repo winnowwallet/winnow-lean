@@ -1,7 +1,8 @@
 import Winnow
 import Lean.Data.Json
 
-/-! `crypto-test`: AES (FIPS 197) and AES-GCM (SP 800-38D) against published and CryptoKit vectors.
+/-! `crypto-test`: AES (FIPS 197) and AES-GCM (SP 800-38D) against published and CryptoKit vectors, and
+BIP340 signing against BIP340's own vectors.
 
 * FIPS 197 Appendix C: one block under AES-128, AES-192 and AES-256, and S-box entries.
 * `Vectors/wycheproof-aes-gcm.json`: every Wycheproof AES-GCM test (316; source URL and SHA-256 of the
@@ -11,10 +12,17 @@ import Lean.Data.Json
 * `Vectors/cryptokit-aes-gcm.json`: CryptoKit's own output (`AES.GCM.seal` with a given nonce, the
   `combined` layout, long nonces, and the error each refusal raises), written by a scratch Swift program
   over CryptoKit; see that file's `source`.
+* `Vectors/bip340-test-vectors.csv`: BIP340's test vectors, byte for byte as published (bitcoin/bips at
+  200f9b26fe0a2f235a2af8b30c4be9f12f6bc9cb, `bip-0340/test-vectors.csv`, SHA-256
+  34c9d1d9c3a88d524bc80778540dc43f8306ec249a7485293063c376db851c2d). Where a vector has a secret key, the
+  x-only key derived from it and the signature `schnorrSign` makes with its `aux_rand` must be the
+  vector's exactly, so the nonce derivation is checked, not only that signatures verify (`sign_verifies`
+  proves that much). Every vector's verification result must be the vector's. Then one message signed
+  twice with `Signer.randomAuxiliaryRand` gives two different signatures that both verify.
 
 Run from `Lean/`. Exits 1 on any failure. -/
 
-open Winnow Lean
+open Winnow Winnow.Keys Lean
 
 initialize passed : IO.Ref Nat ← IO.mkRef 0
 initialize failures : IO.Ref (Array String) ← IO.mkRef #[]
@@ -113,6 +121,36 @@ def cryptokit : IO Unit := do
     (errName (AESGCM.seal (ByteArray.mk (Array.replicate 20 1)) .empty (ByteArray.mk (Array.replicate 12 0))) ==
       field keyErrors "20 bytes")
 
+def bip340 : IO Unit := do
+  let rows := ((← IO.FS.readFile "Vectors/bip340-test-vectors.csv").splitOn "\n").drop 1
+    |>.map (·.replace "\r" "") |>.filter (!·.isEmpty)
+  check "bip340: 19 vectors" (rows.length == 19) s!"{rows.length}"
+  for row in rows do
+    match row.splitOn "," with
+    | i :: sk :: pk :: aux :: msg :: sig :: result :: _ =>
+      let hx (h : String) := ofHex! h.toLower
+      if !sk.isEmpty then
+        match secretOf (hx sk) with
+        | .error e => check s!"bip340 {i}: secret key" false e.name
+        | .ok d =>
+          check s!"bip340 {i}: x-only key" (match pointOfSecret d with
+            | .ok p => xonlyBytes p == hx pk | .error _ => false)
+          let got := schnorrSign d (hx msg) (hx aux)
+          check s!"bip340 {i}: signature" (match got with | .ok s => s == hx sig | .error _ => false)
+            (match got with | .ok s => hex s | .error e => e.name)
+      let ok := (schnorrVerify (hx pk) (hx msg) (hx sig)).toOption.getD false
+      check s!"bip340 {i}: verifies {result}" (ok == (result == "TRUE"))
+    | _ => check s!"bip340: row {row.take 8}" false "fewer than 7 fields"
+  let d := 0xB7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF
+  let msg := ofHex! "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89"
+  let some p := (pointOfSecret d).toOption | check "bip340: fresh aux key" false; return
+  match schnorrSign d msg (← Signer.randomAuxiliaryRand), schnorrSign d msg (← Signer.randomAuxiliaryRand) with
+  | .ok s1, .ok s2 =>
+    check "bip340: fresh auxiliary randomness gives a fresh nonce" (s1.extract 0 32 != s2.extract 0 32)
+    check "bip340: both verify" ((schnorrVerify (xonlyBytes p) msg s1).toOption.getD false &&
+      (schnorrVerify (xonlyBytes p) msg s2).toOption.getD false)
+  | _, _ => check "bip340: signing with fresh auxiliary randomness" false
+
 def roundTrips : IO Unit := do
   let key ← IO.getRandomBytes 32
   let msg ← IO.getRandomBytes 1_048_576
@@ -137,6 +175,7 @@ def main : IO UInt32 := do
   fips197
   wycheproof
   cryptokit
+  bip340
   roundTrips
   let f ← failures.get
   IO.println s!"crypto-test: {← passed.get} passed, {f.size} failed"
