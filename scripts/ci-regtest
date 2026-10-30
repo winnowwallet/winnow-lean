@@ -1,6 +1,6 @@
 #!/bin/bash
 # Winnow's tests against a disposable regtest bitcoind of the pinned Bitcoin Core (scripts/install-bitcoin):
-# io-test, backend-test and the multisig differential. CI runs it as the `extra` job of ElmLean's ios-app
+# io-test, backend-test and the multisig differential. CI runs it as the `extra` job of LeanNative's ios-app
 # workflow (.github/workflows/ci.yml), after the build job has built the executables; locally, build them first
 # (README, "Tests").
 #

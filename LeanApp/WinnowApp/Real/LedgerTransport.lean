@@ -1,12 +1,12 @@
 import Lean.Data.Json
 import Winnow.Ledger
 import WinnowApp.Real.Shell
-import ElmLean.Native.Client.Bluetooth
+import LeanNative.Native.Client.Bluetooth
 
 /-! # A Ledger over the shell's Bluetooth: LedgerBluetooth.swift's transport
 
 The shell offers generic Bluetooth LE (`ble.state`, `ble.connect`, `ble.subscribe`, `ble.write`,
-`ble.read`, `ble.close`), asked through LeanNative's typed client (`ElmLean.Native.Client.Bluetooth`).
+`ble.read`, `ble.close`), asked through LeanNative's typed client (`LeanNative.Native.Client.Bluetooth`).
 Everything Ledger-specific lives here and in `Winnow.Ledger`: the services and characteristics, the frame-size request, the
 0x05 framing and reassembly. The steps and their timeouts are Swift's: power on 15 s, connect 45 s,
 characteristics 20 s (inside the shell's connect), notifications 90 s (pairing happens here), frame
@@ -43,7 +43,7 @@ def bleFailure (code : String) : String :=
       | e => e.description
     | _ => "a write to the Ledger failed"
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- A Bluetooth request through `ask`; a failure as Swift's message (`failure` when the shell's answer
 names no error). -/
 private def ble (ask : Ask) (r : Client.Request α) (failure : String) : IO α := do
@@ -51,11 +51,11 @@ private def ble (ask : Ask) (r : Client.Request α) (failure : String) : IO α :
   | .ok a => pure a
   | .error e => throw (transportError (if e.kind == .malformed then failure else bleFailure e.name))
 
-open ElmLean.Native in
+open LeanNative.Native in
 private def readValue (ask : Ask) (id notify : String) (timeout : Nat) : IO ByteArray :=
   ble ask (Client.Bluetooth.read id notify (some timeout)) "the Ledger sent a malformed frame"
 
-open ElmLean.Native in
+open LeanNative.Native in
 private def writeValue (ask : Ask) (id write : String) (bytes : ByteArray) : IO Unit :=
   ble ask (Client.Bluetooth.write id write bytes (timeout := some 15)) "a write to the Ledger failed"
 
@@ -77,13 +77,13 @@ private partial def collectReply (ask : Ask) (id notify : String) (router : Blue
   | (_, some (.error e)) => throw (IO.userError e.description)
   | (r, none) => collectReply ask id notify r
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- The state's name, as `Bluetooth.readiness` reads it. -/
 private def stateName : Client.Bluetooth.State → String
   | .poweredOn => "poweredOn" | .poweredOff => "poweredOff" | .unauthorized => "unauthorized"
   | .unsupported => "unsupported" | .resetting => "resetting" | .unknown => "unknown"
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- Waits for a usable Bluetooth state (15 s), as `readiness(for:)` decides. -/
 private partial def awaitPoweredOn (ask : Ask) (tries : Nat) : IO Unit := do
   -- an answer of no known state is not yet a usable one: asked again
@@ -98,7 +98,7 @@ private partial def awaitPoweredOn (ask : Ask) (tries : Nat) : IO Unit := do
     IO.sleep 250
     awaitPoweredOn ask (tries - 1)
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- `LedgerBluetoothTransport.open()`: connects to the first Ledger found, subscribes to its notify
 characteristic (pairing on first use) and asks its frame size. -/
 def openLedger (ask : Ask) : IO LedgerSession := do

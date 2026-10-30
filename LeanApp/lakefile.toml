@@ -1,5 +1,5 @@
-# The Winnow app in Lean (ElmLean native mode): Model, Msg, update, view, commands; the wallet is the
-# Lean port in ../Lean. Built into the iOS app by ElmLean's framework/native (see ../PORT.md).
+# The Winnow app in Lean (LeanNative native mode): Model, Msg, update, view, commands; the wallet is the
+# Lean port in ../Lean. Built into the iOS app by LeanNative's framework/native (see ../PORT.md).
 name = "winnowapp"
 defaultTargets = ["WinnowApp"]
 
@@ -7,14 +7,14 @@ defaultTargets = ["WinnowApp"]
 name = "winnow"
 path = "../Lean"
 
-# LeanNative (formerly ElmLean; its Lake package is still `elmlean`), pinned: the framework's Lean package
+# LeanNative (formerly ElmLean), pinned: the framework's Lean package
 # (framework/lean) and, beside it, the native shell's C shim and build scripts (framework/native), at
-# .lake/packages/elmlean/framework after `lake update`. The same commit is the `uses:` and `elmlean:` of
+# .lake/packages/leannative/framework after `lake update`. The same commit is the `uses:` and `leannative:` of
 # .github/workflows/ci.yml.
 [[require]]
-name = "elmlean"
+name = "leannative"
 git = "https://github.com/LeanNative/leannative.git"
-rev = "c5382aef77ec08c2133135664c85bd8064a3f3a0"
+rev = "119affda1277b56ff0fc9d492fde165e576dece8"
 subDir = "framework/lean"
 
 [[lean_lib]]

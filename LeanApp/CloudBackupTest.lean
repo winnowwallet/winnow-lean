@@ -2,8 +2,8 @@ import WinnowApp.Real.CloudAppState
 import WinnowApp.Real
 import WinnowApp.View
 import WinnowApp.E2E
-import ElmLean.Erase
-import ElmLean.Json
+import LeanNative.Erase
+import LeanNative.Json
 import Lean.Data.Json
 
 /-! `cloud-backup-test`: the encrypted iCloud recovery formats, headless.
@@ -619,7 +619,7 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
 
 /-! ## The screens: onboarding without a checklist, Simple's backup line, Advanced's iCloud controls -/
 
-def rendered (h : H) : String := (ElmLean.Html.toWire h).toJson.compress
+def rendered (h : H) : String := (LeanNative.Html.toWire h).toJson.compress
 
 def onboardingScreens : TM Unit := do
   let m : Model := { stage := .onboarding, active := true }

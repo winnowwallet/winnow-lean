@@ -1,6 +1,6 @@
 #!/bin/bash
 # The Objective-C UI journeys (LeanApp/ios/UITests) in the simulator against a fresh regtest node, as CI runs
-# them: ElmLean's ui-tests with Winnow's fixture (scripts/ui-fixture) as its hooks.
+# them: LeanNative's ui-tests with Winnow's fixture (scripts/ui-fixture) as its hooks.
 #
 #   scripts/ui-journeys [xcodebuild test arguments, e.g. -only-testing:WinnowLeanUITests/WinnowLeanUITests/testCreateReceiveSendConfirm]
 #
@@ -14,4 +14,4 @@ export APP_DIR="$ROOT/LeanApp" APP_ROOT=WinnowApp SCHEME=WinnowLean
 export UI_OUT="${UI_OUT:-$ROOT/LeanApp/ios/build/ui-journey}" UI_NAME=journey
 export UI_BEFORE="$ROOT/scripts/ui-fixture start" UI_AFTER="$ROOT/scripts/ui-fixture stop"
 [ -f "$ROOT/build/census/peers.json" ] || "$ROOT/scripts/import-census"
-exec "$ROOT/LeanApp/.lake/packages/elmlean/framework/native/ci/ui-tests" "$@"
+exec "$ROOT/LeanApp/.lake/packages/leannative/framework/native/ci/ui-tests" "$@"

@@ -1,12 +1,12 @@
 import Lean.Data.Json
 import Winnow.IO.Http
 import Winnow.Keys.KeyStore
-import ElmLean.Native.Client.Keychain
-import ElmLean.Native.Client.Http
+import LeanNative.Native.Client.Keychain
+import LeanNative.Native.Client.Http
 
 /-! # The iOS shell's capabilities as the WalletCore interfaces
 
-Through LeanNative's typed clients (`ElmLean.Native.Client.Keychain`, `Client.Http`), which build the
+Through LeanNative's typed clients (`LeanNative.Native.Client.Keychain`, `Client.Http`), which build the
 shell's `keychain.*` and `http.get` requests and read their answers. `ask name args` is the app's
 `Effects.ask`, which may be called from any thread.
 
@@ -28,18 +28,18 @@ def walletService : String := "org.btc-swift.wallet"
 
 abbrev Ask := String → Json → IO (Task Json)
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- A typed request through `ask` (the clients' `Request.call` over an `Effects`, from `Effects.ask` alone). -/
 def callAsk (ask : Ask) (r : Client.Request α) : IO (Client.Result α) := do
   return r.read (← IO.wait (← ask r.capability r.args))
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- A Keychain failure as the store's error: its `OSStatus`, or `errSecParam` for an answer the shell
 should not have given (the client keeps it whole; the store's errors have no room for it). -/
 def keychainError (e : Client.Error) : KeyStoreError :=
   .keychain (Int32.ofInt (e.code.getD (-50)))
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- The Keychain capability as a `KeyStore`, under `service` (test mode passes its own namespace). -/
 def shellKeyStore (ask : Ask) (service : String := walletService) : KeyStore IO :=
   let item (id : String) : Client.Keychain.Item := { key := id, service := some service }
@@ -68,7 +68,7 @@ def shellKeyStore (ask : Ask) (service : String := walletService) : KeyStore IO 
       | .added => pure ()
       | .alreadyExists => throw (.alreadyExists id) }
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- The `http.get` capability as the routed client's fetch; a SOCKS gateway goes as `socks` (the shell
 answers `bad-proxy` to a malformed one). -/
 def shellFetch (ask : Ask) : HttpFetch := fun req => do

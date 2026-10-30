@@ -6,7 +6,7 @@ sheet presents the next one inside itself, and the one alert in the tree goes on
 (an alert behind a sheet never shows). Each area's screens are in its own module. -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 /-! ## Onboarding -/
 

@@ -1,6 +1,6 @@
 #!/bin/bash
-# The UI journeys' fixture, as the UI_BEFORE / UI_AFTER hooks of ElmLean's ui-tests
-# (LeanApp/.lake/packages/elmlean/framework/native/ci/ui-tests):
+# The UI journeys' fixture, as the UI_BEFORE / UI_AFTER hooks of LeanNative's ui-tests
+# (LeanApp/.lake/packages/leannative/framework/native/ci/ui-tests):
 #
 #   scripts/ui-fixture start <out>             a fresh regtest node of the pinned Bitcoin Core
 #                                              (scripts/install-bitcoin) with a funded wallet `w` (backend-test

@@ -1,4 +1,4 @@
-# Winnow app layer: survey for the ElmLean port (2026-10-26)
+# Winnow app layer: survey for the LeanNative port (2026-10-26)
 
 Source: `Sources/WinnowApp` (AppModel.swift = AM). Condensed from a read-only survey; file:line refs
 point at the original.

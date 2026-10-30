@@ -3,8 +3,8 @@ import WinnowApp.Real
 import WinnowApp.View
 import WinnowApp.E2E
 import WinnowApp.Project
-import ElmLean.Erase
-import ElmLean.Json
+import LeanNative.Erase
+import LeanNative.Json
 
 /-! `records-test`: a scripted run of every records operation against a temporary directory, with the
 in-memory key store and two wallets made by `Wallet.create` (two phones: A and B).
@@ -396,9 +396,9 @@ def peerGatewayModel (t : T) : IO Unit := do
   t.check "banner: the private line" ((PeerRoutingState.overlay true true).message == "Private: peers reached through Tor and I2P")
   t.check "banner: a fallback says the IP is seen" (contains (PeerRoutingState.direct true).message "can see your IP address")
   t.check "banner: mixed says the IP is seen" (contains PeerRoutingState.mixed.message "can see your IP address")
-  let banner := (ElmLean.Html.toWire (.list (beginnerSections { m with settings := { network := .mainnet } }) : H)).toJson.compress
+  let banner := (LeanNative.Html.toWire (.list (beginnerSections { m with settings := { network := .mainnet } }) : H)).toJson.compress
   t.check "banner: Simple mode shows it on mainnet" (contains banner "peerRoutingBanner" && contains banner "Direct: peers can see your IP address. No Tor")
-  let signet := (ElmLean.Html.toWire (.list (beginnerSections { m with settings := { network := .signet } }) : H)).toJson.compress
+  let signet := (LeanNative.Html.toWire (.list (beginnerSections { m with settings := { network := .signet } }) : H)).toJson.compress
   t.check "banner: not on signet" (!contains signet "peerRoutingBanner")
   -- testCandidateCountFollowsRoutedNetworks
   let entry : CensusEntry := { host := "8.8.8.8", port := 8333, userAgent := "/Satoshi:30/", startHeight := 900_000 }
@@ -484,15 +484,15 @@ shows every error; Advanced's Sync section says when the chain was last checked.
 def syncBookkeepingScreens (t : T) : IO Unit := do
   let dropped := (Winnow.IO.NetError.peer (.disconnected "closed")).description
   let status (n : Nat) : Status := { lastSyncError := some dropped, transientSyncError := some dropped, transientSyncFailures := n }
-  let simple (n : Nat) := (ElmLean.Html.toWire (.list (beginnerSections { stage := .ready, status := status n }) : H)).toJson.compress
-  let advanced (n : Nat) := (ElmLean.Html.toWire (.list (walletSections { stage := .ready, settings := { advancedMode := true }, status := status n }) : H)).toJson.compress
+  let simple (n : Nat) := (LeanNative.Html.toWire (.list (beginnerSections { stage := .ready, status := status n }) : H)).toJson.compress
+  let advanced (n : Nat) := (LeanNative.Html.toWire (.list (walletSections { stage := .ready, settings := { advancedMode := true }, status := status n }) : H)).toJson.compress
   t.check "Simple mode: a dropped peer stays quiet" (!contains (simple 1) "closed")
   t.check "Simple mode: the third says so in plain words" (contains (simple 3) "Winnow keeps losing its connection to Bitcoin peers.")
   t.check "Advanced mode: every error shows" (contains (advanced 1) dropped)
   t.check "Advanced: never fully checked" (contains (advanced 0) "Chain not fully checked yet")
   let st : Status := { lastCheckedAgo := some (relativeAgo 300) }
   let mm : Model := { stage := .ready, settings := { advancedMode := true }, status := st, backgroundRefreshAvailable := false }
-  let checked := (ElmLean.Html.toWire (.list (walletSections mm) : H)).toJson.compress
+  let checked := (LeanNative.Html.toWire (.list (walletSections mm) : H)).toJson.compress
   t.check "Advanced: last checked" (contains checked "Chain last checked 5 min ago")
   t.check "Advanced: Background App Refresh off" (contains checked "Background App Refresh is off, so Winnow checks the chain only while open.")
   t.check "relative: under a minute" (relativeAgo 59 == "under a minute")

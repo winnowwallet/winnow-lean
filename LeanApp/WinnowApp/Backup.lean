@@ -6,7 +6,7 @@ automatic-backup controls, and CloudRestoreView, onboarding's restore from iClou
 fresh epoch, and an answer counts only while that epoch is current and the app is active. -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 /-- Start a sensitive operation: a new epoch, so an older answer can never land. -/
 def Model.beginEpoch (m : Model) : Model := { m with epoch := m.epoch + 1 }

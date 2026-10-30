@@ -6,7 +6,7 @@ explorer, chain verification, connected peers (with the reset confirmation), abo
 papers (Components.swift `DesignPapersView`, bundled HTML), and the danger zone. -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 def explorers : List Explorer := [.blockstream, .mempool, .custom]
 

@@ -19,7 +19,7 @@ the account's "Verify on Ledger", and "Sign with Ledger". The texts that depend 
 signing footer) already follow a record's registration. -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 /-! ## Update -/
 

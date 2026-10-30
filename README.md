@@ -100,7 +100,7 @@ scripts/ui-journeys                          # the Objective-C UI journeys again
 ```
 
 LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
-`LeanApp/.lake/packages/elmlean` (its Lake package keeps the name it had as ElmLean).
+`LeanApp/.lake/packages/leannative` (its Lake package keeps the name it had as LeanNative).
 `scripts/build-ios <Debug|Release> [iossim|ios]` runs LeanNative's
 `framework/native/ci/build-ios` with Winnow's names: it builds WinnowApp, gathers the generated C, prints the
 Objective-C shell, writes the Xcode project from the manifest (XcodeGen 2.46.0) and builds it. Simulator builds are ad-hoc signed (an unsigned app has no

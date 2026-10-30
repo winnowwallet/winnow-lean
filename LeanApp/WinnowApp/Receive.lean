@@ -4,7 +4,7 @@ import WinnowApp.Common
 window's unconfirmed rows), ReceiveAddressLabelEditor.swift and ShareMyCardView. -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 def Model.receiveLabel? (m : Model) (address : String) : Option String := lookup m.records.receiveLabels address
 
