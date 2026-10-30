@@ -1,122 +1,95 @@
-# Testing the wallet
+# Testing the Lean app
 
-Use checks that exercise the changed behavior and retain the source revision,
-command, environment and result. This guide maps the existing suites and CI;
-it does not turn a test count, screenshot or old audit into a release guarantee.
-The [architecture guide](architecture.md) explains source ownership, and the
-[CI and release runbook](../.github/internal/ci-release.md) covers operations.
+Winnow 0.9.x is written in Lean 4. This guide describes how this repository's
+app is tested and what its journey media show. The Swift app's suites
+(WalletCoreTests, AppTests, the single signet journey) ended with 0.8.13; their
+history stays in [winnowwallet/winnow](https://github.com/winnowwallet/winnow).
+[PORT.md](../PORT.md) lists how each ported part is verified, and the
+[script index](../scripts/README.md) describes the helpers named below.
 
-## Test coverage
+## CI
 
-| Suite | Exercises | Boundaries |
-| --- | --- | --- |
-| [BitcoinCoreTests](../Tests/BitcoinCoreTests/README.md) | Cryptographic and encoding vectors, silent payment vectors, descriptors, scripts and parser bounds | Vectors and parser checks do not demonstrate a user workflow |
-| [WalletCoreTests](../Tests/WalletCoreTests/README.md) | Coin selection, fees, imports, people and contact cards, reorgs, peer behavior and synchronization | Controlled peers and fixtures cover their asserted cases |
-| [AppTests](../AppTests/README.md) | Review, authorization, persistence, startup, recipients, backup state and iOS integration | Most cloud cases use in-memory stores; a simulator cannot prove device-lock enforcement |
-| [UITests](../UITests/README.md) | A recorded iPhone payment journey and peer-setting persistence | No automated iPad journey or hardware-wallet matrix |
-| [ToolsTests](../Tests/ToolsTests/README.md) and [fuzzing](../Tools/Fuzz/README.md) | Debugging commands, generators, parser regressions and hostile inputs | A bounded corpus or fuzz run establishes only its own executed coverage |
-| [Script regressions](../scripts/tests/README.md) | CI evidence, media validation and release helpers | These check tooling rather than wallet payments |
+Every pull request and push to main runs LeanNative's reusable `ios-app`
+workflow ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on
+WarpBuild runners. A fork's pull request gets no CI. The Lean is built once and
+cached; the other jobs restore it and run in parallel.
 
-The encrypted envelope tests are in
-[AppTests/CloudWalletBackupTests.swift](../AppTests/CloudWalletBackupTests.swift).
-They moved with CloudWalletBackup into the app; `swift test` does not run them.
-App tests also cover backup defaults, retries, opt-out, account changes and
-cancellation using injected stores.
+| Job | What it runs |
+| --- | --- |
+| `build` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables. Imports the census peer list once (`scripts/import-census`). |
+| `tests` | `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`. |
+| `extra` | `scripts/ci-regtest`: `io-test`, `backend-test` and `multisig-differential` against a disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads). |
+| `app` | Debug and Release simulator builds and a Release device build, each checked for Swift; `verify-release-no-test-mode`; the UI journeys; then the `journey-media` artifact. |
 
-Keep signing-policy and hostile-input regressions close to the code they test.
-Descriptor changes, forged PSBT metadata, signature validation, amount bounds and storage integrity need focused assertions. A UI journey
-cannot substitute for those checks.
+`verify-release-no-test-mode` launches both simulator builds with test mode's
+environment: Debug must start the test run, Release must ignore it.
 
-## Run locally
+## The five journeys
 
-Run from the repository root on macOS with Xcode and the Swift toolchain:
+The UI journeys are Objective-C XCUITests (`LeanApp/ios/UITests`, target
+`WinnowLeanUITests`). Each launches the app in test mode on an iPhone Duo
+simulator against a regtest node, finds controls by the identifiers the views
+give them, and checks the app's results against the node.
+
+- `testCreateReceiveSendConfirm`: create a wallet, receive from the node,
+  review and send a payment the node accepts, see it confirm.
+- `testLedgerPairVerifySpend`: pair test mode's simulated Ledger, have it
+  verify the receive address, and spend with the phone's and the Ledger's
+  signatures.
+- `testMultisigTwoOfThreeWithRecovery`: a 2-of-3 with two Bitcoin Core
+  wallets, built in the app. The first address is Core's; the phone and both
+  Cores sign, and Core accepts a witness with exactly two signatures. After the
+  one-day delay the phone alone spends on the recovery path.
+- `testShippedCensus`: the census peer list the build ships shows in Settings
+  on mainnet.
+- `testSilentPaymentSend`: pay a BIP352 code. The node's transaction pays the
+  one output that backend-test's receiver, written from the BIP's receiving
+  side, finds, and the receipt shows its address.
+
+What the journeys do not cover: a physical Ledger (CI's is simulated; the
+owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift
+app), receiving silent payments (Winnow does not), live Tor and I2P gateways,
+iCloud, background tasks scheduled by iOS, and iPad layouts.
+
+## Run them locally
+
+From the repository root, with the Lean toolchain `leanprover/lean4:v4.35.0`
+(elan):
 
 ```sh
-swift test
+cd LeanApp
+lake build backend-test records-test
+./.lake/build/bin/backend-test               # end to end against a fresh regtest bitcoind
+./.lake/build/bin/records-test
+cd ..
+scripts/build-ios Debug                      # the app for the simulator, from a clean checkout
+scripts/ui-journeys                          # the UI journeys against a regtest fixture
 ```
 
-This runs the SwiftPM targets, including ToolsTests. For iOS
-app tests, generate the project after importing the census:
+`scripts/ui-journeys` runs the journeys as CI does, on a throwaway simulator
+unless `UI_SIMULATOR` names one, and keeps the result bundle, a screen
+recording, the screenshots and the app's test-mode journals in
+`LeanApp/ios/build/ui-journey`. Pass `xcodebuild` arguments to run one, for
+example
+`-only-testing:WinnowLeanUITests/WinnowLeanUITests/testCreateReceiveSendConfirm`.
+Tests find Bitcoin Core through `WINNOW_BITCOIND` and `WINNOW_BITCOIN_CLI`,
+Homebrew or the PATH; `scripts/ci-regtest` uses the pinned release that
+`scripts/install-bitcoin` downloads.
 
-```sh
-scripts/import-census
-scripts/install-xcodegen
-"${RUNNER_TEMP:-${TMPDIR:-/tmp}}/winnow-xcodegen-2.46.0/xcodegen/bin/xcodegen"
-WINNOW_APP_RESULTS=$(mktemp -d /tmp/winnow-app-tests-XXXXXX)
-scripts/ci-app-tests "$WINNOW_APP_RESULTS"
-```
+## The journey media
 
-The app-test script selects an installed iPhone simulator and writes its log and
-`AppTests.xcresult` into that new directory. These results are separate from
-SwiftPM's output. Use [the UI test setup](../UITests/README.md#run-locally) for
-the signet fixture, continuous recording and journey. Local simulator runs
-should be serial because they share fixture ports and an environment file.
+After the journeys, `scripts/journey-media` turns the run into the
+`journey-media` artifact: the screenshots, a browser copy of the recording and
+`journey-provenance.json` (the run, source commit, device, each test's result
+and seconds, and each file's SHA-256).
 
-Repository Python tooling requires Python 3.11 or later; CI uses 3.12. The macOS
-system Python may be older. See [script regressions](../scripts/tests/README.md)
-for their command.
+The website ([winnowwallet/website](https://github.com/winnowwallet/website))
+downloads that artifact from the newest successful `ci.yml` run on this
+repository's main, checks every file against the provenance file, and builds
+its homepage gallery and [recording page](https://winnowwallet.com/recording)
+from it. When the fetch fails, the site publishes its committed reference media
+from the Swift app instead.
 
-Use [the script index](../scripts/README.md) for dependency checks, warning
-gates, debugging smoke and evidence validation. `ci-lane` and `ci-tailnet` are
-runner orchestration scripts for disposable CI machines; use the documented
-local entry points on a development Mac.
-
-## The payment journey
-
-`WinnowAppUITests.test01CreateReceiveSendConfirm` creates a wallet, receives,
-reviews, sends and confirms an ordinary payment, then a BIP352 silent payment
-to a code whose receiver the test plays (Core cannot), then the multisig
-account journey. A disposable private signet fixture funds the app's address,
-accepts the transactions and mines confirmations. The test checks both the
-app's outcomes and the node's accepted payments.
-
-The host records one continuous video and retains checkpoint screenshots with
-the test log and Xcode result bundle. Those assertions establish the result;
-media helps review the interaction. This journey supplies evidence for that
-flow on an iPhone simulator. Other signing orders, hardware, recovery paths
-and network environments need their own checks.
-
-## CI and reused evidence
-
-[CI](../.github/workflows/ci.yml) selects parallel validation for same-repository
-runs and a hosted fallback for fork PRs or the manual `hosted` option. Parallel
-validation has five lanes: package, build, units, journey and tailnet. The build
-lane publishes one Debug build; units and journey verify and use those products
-on separate runners and simulators. The hosted fallback combines package, build
-and app checks in one job. Fork PRs omit the signet journey and deployment
-credentials. The [workflow index](../.github/workflows/README.md) lists the
-lanes and retained artifacts.
-
-The tailnet lane creates disposable Headscale clients and gateway services.
-It checks discovery and routing in that controlled setup. Live Tor/I2P gateway
-checks are separate manual operations; passing the simulation does not establish
-public-network reachability.
-
-[scripts/ci-validation](../scripts/ci-validation) can reuse a complete,
-successful same-repository evidence bundle for matching build/test inputs,
-workflow identity and validation policy, up to seven days old. It verifies the
-record, file hashes, shared Debug build and media provenance. An unbundled docs
-edit can match; HTML/CSS bundled in the app participates in the fingerprint.
-Changed inputs, missing artifacts, invalid records or lookup errors run fresh
-validation. Manual and nightly runs force fresh checks. Tag releases can reuse
-eligible evidence under the same policy.
-
-Reused evidence keeps its original tested source, run, inventory and recording;
-a green reuse run does not mean the tests executed again. Inspect job
-conclusions and the validation record before reporting a run as fresh. Wallet
-CI retains evidence without building or deploying the separate website.
-
-## Checks that need devices or external evidence
-
-Simulator and in-memory tests do not establish locked-device Keychain behavior,
-actual iCloud transport or iCloud Keychain synchronization. A CloudKit save date
-confirms an upload, without establishing an end-to-end recovery result. Keep
-manual backup and recovery-word guidance in place while physical-device
-validation is outstanding.
-
-Battery life, background scheduling in daily use, peer independence and
-hardware-wallet compatibility also need measurements or explicit integration
-tests. Record the devices, configuration, revision and actual result when doing
-that work. Dated [security reports](security/README.md) and published recordings
-retain their original scope; proposed work belongs on the
-[roadmap](https://winnowwallet.com/roadmap).
+The result bundle and logs are what establish a pass. The recording and
+screenshots show the run; they do not replace its assertions, and they are
+evidence only for the commit and device their provenance names.

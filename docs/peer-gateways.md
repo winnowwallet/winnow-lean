@@ -23,7 +23,7 @@ IPv4 tailnet addresses; custom address ranges and IPv6-only discovery need an
 extension. Manual gateways support DNS names and bracketed IPv6 addresses.
 
 When either gateway answers, Automatic uses only Tor and I2P: no peer
-connection, catalog download or explorer lookup goes direct, and peers never
+connection or explorer lookup goes direct, and peers never
 see the phone's IP address. When neither answers, it falls back to clearnet
 so the wallet keeps syncing, and simple mode's banner says peers can see the
 IP address. Existing peer provenance and address diversity checks remain in
@@ -59,29 +59,15 @@ reproduces the gateway VMs the project ran.
 
 ## Validation
 
-`swift test --filter 'PeerGatewayTests|TailnetGatewayDiscoveryTests'` checks
-route isolation, candidate filtering, DNS parsing, SOCKS checks and cancellation.
-The app tests cover persistence, corrupt preferences and stale discovery after
-backgrounding or a settings change. `PeerGatewaySettingsUITests` exercises the
-Advanced controls and relaunch persistence with a disposable wallet.
-
-Every CI run also builds a private tailnet on its runner (`scripts/ci-tailnet`):
-Headscale, a client tailscaled whose `100.100.100.100` answers as on a phone,
-and two gateway nodes under the conventional names. `TailnetSimulationTests`
-discovers them through Quad100 and completes Bitcoin handshakes through each
-with local nodes behind fake SOCKS proxies. Live Tor and I2P are not involved;
-the census's daily crawl dials onion and I2P peers with the same code.
-
-To opt into a read-only check of the two named gateways on the connected tailnet:
-
-```sh
-scripts/check-live-gateways
-```
-
-It discovers both gateways, then performs a Bitcoin handshake through each
-with peers from the census list the build ships. The check sends no wallet
-addresses or transactions. CI has no tailnet of real gateways, so this check is manual; the
-[2026-09-29 run](security/evidence/live-gateways-2026-09-29.md) is recorded.
+`io-test` (`Lean/IOTest.lean`, run by `scripts/ci-regtest` in CI's `extra`
+job) checks gateway configuration and
+address parsing, MagicDNS answers, discovery, SOCKS5 greetings, routed HTTP
+(I2P alone makes no request; Tor alone fetches through its gateway by host
+name) and a regtest node reached by an onion name through a SOCKS5 stand-in.
+Live Tor and I2P are not involved, and CI has no tailnet of real gateways.
+The [2026-09-29 run](security/evidence/live-gateways-2026-09-29.md) of the
+Swift app's manual live-gateway check is recorded; this repository has no such
+script.
 
 A successful greeting is not proof of Tor/I2P reachability. A physical iPhone
 with the Tailscale VPN enabled remains part of device acceptance testing.

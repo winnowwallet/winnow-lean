@@ -56,7 +56,7 @@ def confirms (m : Model) : List H :=
   | some (.deleteFailed msg) =>
     [.alert "Could not delete the wallet" msg [.button "OK" .plain (some .dismissConfirm)]]
   | some .resetPeers =>
-    [.alert "Reset and shuffle peers?" "Disconnects all peers, forgets saved peers, and finds new ones from the downloaded peer list and, when clearnet is allowed, DNS seeds. Your manual peers and downloaded catalog are kept."
+    [.alert "Reset and shuffle peers?" "Disconnects all peers, forgets saved peers, and finds new ones from the peer list this version ships with and, when clearnet is allowed, DNS seeds. Your manual peers and the shipped peer list are kept."
        [.button "Reset and shuffle peers" .destructive (some (.settings .resetPeers)), cancel] .actionSheet]
   | some .exportWithPhrase =>
     [.alert "Include the recovery phrase?" "This adds your phone's signing key to the file. Anyone with the file can use that key."

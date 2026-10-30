@@ -4,7 +4,7 @@ Winnow is a Bitcoin wallet for iPhone and iPad, also available on Apple silicon
 Mac as an iPad app. It receives and sends bitcoin and saves recipients. This
 build signs with this phone's key, alone or as one signer of a k-of-n multisig
 account. It is written in Lean 4: the wallet, the networking and the app's
-model, update and view, compiled to C and rendered by ElmLean's generic native
+model, update and view, compiled to C and rendered by LeanNative's generic native
 shell; the curve arithmetic behind every signature is the proven secp256k1 in
 `Lean/Secp`.
 
@@ -38,7 +38,7 @@ coin that has not moved for a chosen number of blocks can then be spent by
 fewer of the same signers, or by a separate recovery key. A Ledger (Bitcoin
 app 2.1.2 or later; 2.2.1 for a recovery path) can be a signer: Winnow pairs with it
 over Bluetooth, registers the account on it, and asks it to sign after it shows
-the payment on its own screen ([Ledger signer](Sources/WalletCore/Ledger/README.md)).
+the payment on its own screen ([Ledger signer](Lean/Winnow/Ledger)).
 There are no MuSig2 accounts, cosigner cards or shared-savings screens. A backup carrying a MuSig2
 account from the shared-account Winnow is refused rather than restored without
 those funds.
@@ -72,11 +72,11 @@ well. The
 
 ## Layout
 
-- `Lean/`: the wallet in Lean 4 (`Winnow/`): keys, transactions, PSBTs, descriptors, vaults and
-  MuSig2, the wallet, compact-filter sync, peers, mempool windows and the broadcaster, over libuv TCP.
+- `Lean/`: the wallet in Lean 4 (`Winnow/`): keys, transactions, PSBTs, descriptors, k-of-n
+  multisig accounts, silent payments, the Ledger signer, the wallet, compact-filter sync, peers, mempool windows and the broadcaster, over libuv TCP.
   `Secp/` is the proven secp256k1. `IOTest.lean` (`io-test`) runs the network layer against a disposable
   regtest bitcoind.
-- `LeanApp/`: the app: `WinnowApp/` holds the model, update, views and commands (Elm-style, ElmLean),
+- `LeanApp/`: the app: `WinnowApp/` holds the model, update, views and commands (Elm-style, LeanNative),
   `WinnowApp/Real/` the backend, `WinnowApp/E2E.lean` the Debug-only test mode, `WinnowApp/Project.lean`
   the app's manifest: LeanNative generates the Xcode project from it (`lake exe ios-project` writes the XcodeGen
   spec) and refuses a capability the app uses without its usage text or entitlement. `ios/` keeps only the
@@ -99,8 +99,9 @@ scripts/build-ios Debug                      # the app for the simulator, from a
 scripts/ui-journeys                          # the Objective-C UI journeys against a regtest fixture
 ```
 
-LeanApp pins the ElmLean framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
-`LeanApp/.lake/packages/elmlean`. `scripts/build-ios <Debug|Release> [iossim|ios]` runs ElmLean's
+LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
+`LeanApp/.lake/packages/elmlean` (its Lake package keeps the name it had as ElmLean).
+`scripts/build-ios <Debug|Release> [iossim|ios]` runs LeanNative's
 `framework/native/ci/build-ios` with Winnow's names: it builds WinnowApp, gathers the generated C, prints the
 Objective-C shell, writes the Xcode project from the manifest (XcodeGen 2.46.0) and builds it. Simulator builds are ad-hoc signed (an unsigned app has no
 Keychain entitlement). `backend-test --fixture <dir>` leaves a funded regtest node running for manual
@@ -124,13 +125,13 @@ give them (`Html.identified`, the shell's `accessibilityIdentifier`) and checks 
 - `testSilentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
   receiver (written from the BIP's receiving side) finds, and the receipt shows its address.
 
-`scripts/ui-journeys` runs them as CI does: ElmLean's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`),
+`scripts/ui-journeys` runs them as CI does: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`),
 with `scripts/ui-fixture` starting the node before and collecting the app's test-mode journals after; it
 keeps the result bundle, a screen recording, the screenshots and the journals.
 
 ### CI and TestFlight
 
-`.github/workflows/ci.yml` calls ElmLean's reusable `ios-app` workflow on every pull request and push to
+`.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request and push to
 main, on WarpBuild runners (a fork's pull request gets no CI: push it to a branch here). The Lean is built once and
 cached; the other jobs restore it and run in parallel, and every long step prints its progress as it goes:
 

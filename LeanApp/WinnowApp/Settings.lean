@@ -127,7 +127,7 @@ def peerGatewaysSection (m : Model) : H :=
     .identified s!"peerType_{n.rawValue}"
       (.toggle (match n with | .clearnet => "Clearnet peers" | .tor => "Tor peers" | .i2p => "I2P peers")
         (d.gatewayNetworks.contains n) fun on => .settings (.setGatewayNetwork n on))
-  .section "Peer networks" "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does, in both simple and advanced mode. Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Manual settings stay in effect in simple mode. Tor and I2P peers always use their gateway. Peer-list downloads and explorer requests use clearnet when selected, Tor otherwise. With I2P alone, the peer list comes from its I2P mirror and explorer requests are unavailable. A SOCKS check does not guarantee overlay connectivity."
+  .section "Peer networks" "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does, in both simple and advanced mode. Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Manual settings stay in effect in simple mode. Tor and I2P peers always use their gateway. The peer list ships with the app, so finding peers downloads nothing. Explorer requests use clearnet when selected, Tor otherwise; with I2P alone they are unavailable. A SOCKS check does not guarantee overlay connectivity."
     ([ .identified "gatewayRoutingMode"
          (.picker "Gateway routing" ["Automatic", "Direct only", "Manual"] d.gatewayMode fun i => .settings (.setGatewayMode i)) ] ++
      (if d.gatewayMode == 2 then
