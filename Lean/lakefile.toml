@@ -60,7 +60,7 @@ name = "silent-payment-test"
 root = "SilentPaymentTest"
 
 # AES and AES-GCM (Winnow/Crypto/AES*.lean): FIPS 197, every Wycheproof AES-GCM test and CryptoKit's own
-# output (Vectors/). Run from Lean/.
+# output; BIP340 signing against BIP340's test vectors (Vectors/). Run from Lean/; CI runs it.
 [[lean_exe]]
 name = "crypto-test"
 root = "CryptoTest"
