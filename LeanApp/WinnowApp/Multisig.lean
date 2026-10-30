@@ -184,14 +184,10 @@ or the account page itself (its "Paste a PSBT from a co-signer"). -/
 def Model.collectingOn? (m : Model) (id : String) : Bool :=
   m.send.collecting == some id || m.multisigPSBTRoute? == some id || m.routes.getLast? == some (.multisigAccount id)
 
-def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
+/-- Opening and leaving the multisig screens. -/
+def stepMultisigNav (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
-  let add := m.multisigAdd
-  let build := m.multisigBuild
   let spend := m.collect
-  let withAdd (f : MultisigAddForm) : Model := { m with multisigAdd := f }
-  let withBuild (f : MultisigBuildForm) : Model := { m with multisigBuild := f }
-  let withSpend (f : CollectForm) : Model := { m with collect := f }
   match msg with
   | .openAdd => ({ m with routes := m.routes ++ [.multisigAdd], multisigAdd := {} }, [])
   | .openBuild =>
@@ -205,7 +201,14 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .openPSBT id =>
     ({ m with routes := m.routes ++ [.multisigPSBT id], collect := { epoch := spend.epoch + 1 } }, [])
   | .pop => (m.popMultisig, [])
-  -- MultisigAddView
+  | _ => (m, [])
+
+/-- MultisigAddView ("Join an account"). -/
+def stepMultisigAdd (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
+  let g := m.generation
+  let add := m.multisigAdd
+  let withAdd (f : MultisigAddForm) : Model := { m with multisigAdd := f }
+  match msg with
   | .setName s => (withAdd { add with name := s }, [])
   | .setDescriptor s =>
     let f := { add with descriptor := s }
@@ -216,7 +219,14 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .save =>
     if !add.canSave then (m, []) else
     (withAdd { add with saving := true, error := none }, [.addMultisigAccount g m.settings.advancedMode add.name add.descriptor])
-  -- MultisigBuildView
+  | _ => (m, [])
+
+/-- MultisigBuildView ("Create an account") and its Ledger registration. -/
+def stepMultisigBuild (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
+  let g := m.generation
+  let build := m.multisigBuild
+  let withBuild (f : MultisigBuildForm) : Model := { m with multisigBuild := f }
+  match msg with
   | .buildSetName s => (withBuild { build with name := s }, [])
   | .openPicker into => ({ m with multisigBuild := { build with pickInto := into, pasteError := none } }.present .signerPicker, [])
   | .pickSigner id =>
@@ -258,7 +268,14 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .registerLedger id =>
     if m.ledgerRegistering.isSome then (m, []) else
     ({ m with ledgerRegistering := some id, ledgerRegisterError := none }, [.registerLedger g m.settings.advancedMode id])
-  -- MultisigAccountView
+  | _ => (m, [])
+
+/-- MultisigAccountView, and PaymentDetailView's Account section. -/
+def stepMultisigAccount (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
+  let g := m.generation
+  let spend := m.collect
+  let withSpend (f : CollectForm) : Model := { m with collect := f }
+  match msg with
   | .newAddress =>
     match m.routes.getLast? with
     | some (.multisigAccount id) => ({ m with multisigAccountError := none }, [.newMultisigAddress g id])
@@ -279,7 +296,30 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
     ({ m' with send := { inputs } }, [.resolveRate g inputs m.status.feeFloorMilli])
   | .pasteForAccount id =>
     if spend.busy then (m, []) else (withSpend { spend with error := none }, [.paste (.accountPSBT id)])
-  -- the collection step
+  | .verifyAddress =>
+    match m.routes.getLast? with
+    | some (.multisigAccount id) =>
+      match m.multisigInfo? id with
+      | some a =>
+        if m.ledgerVerify.checking then (m, []) else
+        ({ m with ledgerVerify := { id, index := a.nextReceiveIndex, checking := true } },
+         [.verifyLedgerAddress g m.settings.advancedMode id a.nextReceiveIndex])
+      | none => (m, [])
+    | _ => (m, [])
+  | .rebroadcast id txid => ({ m with payment := { m.payment with error := none } }, [.rebroadcastSpend g id txid])
+  | .askAbandon id txid => ({ m with confirm := some (.abandonSpend id txid) }, [])
+  | .abandon =>
+    match m.confirm with
+    | some (.abandonSpend id txid) => ({ m with confirm := none }, [.abandonSpend g id txid])
+    | _ => (m, [])
+  | _ => (m, [])
+
+/-- The collection step (MultisigPSBTView while the account has a draft). -/
+def stepMultisigCollect (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
+  let g := m.generation
+  let spend := m.collect
+  let withSpend (f : CollectForm) : Model := { m with collect := f }
+  match msg with
   | .setPasted s => (withSpend { spend with pasted := s }, [])
   | .pastePSBT => (m, [.paste .multisigPSBT])
   | .addPasted id =>
@@ -296,22 +336,6 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
     if spend.busy || !ok then (m, []) else
     let (m', e) := m.runCollect (ledger := true)
     (m', [.signDraftWithLedger g e m.settings.advancedMode id])
-  | .openLedgerPair => ({ m with routes := m.routes ++ [.ledgerPair], ledgerPair := {} }, [])
-  | .setLedgerName s' => ({ m with ledgerPair := { m.ledgerPair with name := s' } }, [])
-  | .pairLedger =>
-    let f := m.ledgerPair
-    if f.pairing || !f.nameIsUsable then (m, []) else
-    ({ m with ledgerPair := { f with pairing := true, error := none } }, [.pairLedger g m.settings.advancedMode f.name])
-  | .verifyAddress =>
-    match m.routes.getLast? with
-    | some (.multisigAccount id) =>
-      match m.multisigInfo? id with
-      | some a =>
-        if m.ledgerVerify.checking then (m, []) else
-        ({ m with ledgerVerify := { id, index := a.nextReceiveIndex, checking := true } },
-         [.verifyLedgerAddress g m.settings.advancedMode id a.nextReceiveIndex])
-      | none => (m, [])
-    | _ => (m, [])
   | .broadcast id =>
     let ok := ((m.multisigInfo? id).bind (·.draft)).bind (·.screen) |>.any (·.progress.complete)
     if spend.busy || !ok then (m, []) else
@@ -327,12 +351,40 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
       let (m', e) := { m with confirm := none }.runCollect
       (m', [.discardDraft g e id])
     | _ => (m, [])
-  | .rebroadcast id txid => ({ m with payment := { m.payment with error := none } }, [.rebroadcastSpend g id txid])
-  | .askAbandon id txid => ({ m with confirm := some (.abandonSpend id txid) }, [])
-  | .abandon =>
-    match m.confirm with
-    | some (.abandonSpend id txid) => ({ m with confirm := none }, [.abandonSpend g id txid])
-    | _ => (m, [])
+  | _ => (m, [])
+
+/-- LedgerPairView. -/
+def stepLedgerPair (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
+  let g := m.generation
+  match msg with
+  | .openLedgerPair => ({ m with routes := m.routes ++ [.ledgerPair], ledgerPair := {} }, [])
+  | .setLedgerName s' => ({ m with ledgerPair := { m.ledgerPair with name := s' } }, [])
+  | .pairLedger =>
+    let f := m.ledgerPair
+    if f.pairing || !f.nameIsUsable then (m, []) else
+    ({ m with ledgerPair := { f with pairing := true, error := none } }, [.pairLedger g m.settings.advancedMode f.name])
+  | _ => (m, [])
+
+/-- A multisig message goes to its screen's handler. -/
+def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
+  match msg with
+  | .openAdd | .openBuild | .openAccount .. | .openPSBT .. | .pop =>
+    stepMultisigNav msg m
+  | .setName .. | .setDescriptor .. | .pasteDescriptor | .save =>
+    stepMultisigAdd msg m
+  | .buildSetName .. | .openPicker .. | .pickSigner .. | .pickAccount .. | .pasteMemberKeys
+  | .removeMemberKey .. | .removeMember .. | .setThreshold .. | .setWithRecovery .. | .setRecoveryMode ..
+  | .setRecoveryThreshold .. | .pasteRecoveryKey | .removeRecoveryKey | .setRecoveryDays .. | .create
+  | .registerLedger .. =>
+    stepMultisigBuild msg m
+  | .newAddress | .askRemove | .remove | .sendFrom .. | .pasteForAccount .. | .verifyAddress | .rebroadcast ..
+  | .askAbandon .. | .abandon =>
+    stepMultisigAccount msg m
+  | .setPasted .. | .pastePSBT | .addPasted .. | .sign .. | .signWithLedger .. | .broadcast .. | .askDiscard ..
+  | .discard =>
+    stepMultisigCollect msg m
+  | .openLedgerPair | .setLedgerName .. | .pairLedger =>
+    stepLedgerPair msg m
 
 /-- The backend's multisig answers (`onHost` hands them here). -/
 def Model.onMultisigHost (m : Model) (h : Host) : Model × List Cmd :=

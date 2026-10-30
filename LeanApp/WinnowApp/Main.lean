@@ -155,9 +155,8 @@ def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit
     b.observeCloud fun st => fx.post (.cloud st)
     backendRef.set b
 
-def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
-  let b ← backendRef.get
-  match c with
+/-- `perform`'s trace line for the commands worth following (`WINNOW_LEAN_TRACE=1`, Debug only). -/
+def traceCmd : Cmd → IO Unit
   | .refresh g => trace s!"refresh {g}"
   | .syncNow g => trace s!"syncNow {g}"
   | .exportBundle g _ _ name => trace s!"exportBundle {g} {name}"
@@ -166,49 +165,56 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .stopNetworking => trace "stopNetworking"
   | .openWallet g _ _ => trace s!"openWallet {g}"
   | _ => pure ()
-  let records (g : Nat) (d : Done) (r : IO Records) : IO Host := do return .updated g d (← r)
+
+/-- People and labels changed: the records after `r`, with what the screen does next. -/
+def recordsAfter (g : Nat) (d : Done) (r : IO Records) : IO Host := do return .updated g d (← r)
+
+/-- `boot()`: the build and paths, test mode, the backend, the storage directory and the settings. -/
+def bootApp (fx : Effects Host) : IO Unit := discard <| IO.asTask do
+  let build := (← IO.wait (← fx.ask "build" Json.null))
+  let debug := (build.getObjValAs? Bool "debug").toOption.getD false
+  debugBuild.set debug
+  let mode ← if debug then resolveE2E else pure none
+  let paths := (← IO.wait (← fx.ask "paths" Json.null))
+  let support := (paths.getObjValAs? String "support").toOption.getD "."
+  supportDir.set support
+  let root := System.FilePath.mk support / ((mode.map (·.storageDirectoryName)).getD "BTCSwift")
+  if let some m := mode then
+    -- `wipeIfRequested()`: this run's storage and its Keychain namespace
+    if m.reset then
+      try IO.FS.removeDirAll root catch _ => pure ()
+      discard <| IO.wait (← fx.ask "keychain.clear" (Json.mkObj [("service", Json.str m.keychainService)]))
+  e2eRef.set mode
+  chooseBackend fx mode
+  IO.FS.createDirAll root
+  let _ ← fx.ask "exclude-from-backup" (Json.mkObj [("path", Json.str root.toString)])
+  rootDir.set root.toString
+  -- `ExportStagingFile.sweep()`: a crash with the export sheet open leaves a file that may hold the phrase
+  let tmp := (paths.getObjValAs? String "tmp").toOption.getD ""
+  tmpDir.set tmp
+  unless tmp.isEmpty do Winnow.ExportStagingFile.sweep tmp
+  let settings ← match mode with
+    | none => loadSettings
+    | some m => do
+      let (s, hadNetwork) ← loadSettingsNoting
+      -- the fixture is a signet (or a forced network); advanced mode and the local node as the only peer
+      let network := m.forcedNetwork.getD (if hadNetwork then s.network else .signet)
+      let s := { s with network, advancedMode := s.advancedMode || m.advancedMode }
+      let s := match m.peer with
+        | some p => if s.scoped.manualPeers.contains p then s else s.withScoped fun n => { n with manualPeers := [p] }
+        | none => s
+      IO.FS.writeFile (← settingsPath) (toJson s).pretty
+      if let some text := m.clipboard then
+        discard <| IO.wait (← fx.ask "clipboard.set" (Json.mkObj [("text", Json.str text)]))
+      let tab := match m.initialTab with | some "send" => 1 | some "settings" => 2 | _ => 0
+      fx.post (.launched m.forcedNetwork tab)
+      journal "app.initialized" [("network", s.network.name)]
+      pure s
+  fx.post (.settingsLoaded settings)
+
+/-- The wallet itself: settings, opening, creating, importing and deleting it. -/
+def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
-  | .boot => discard <| IO.asTask do
-      let build := (← IO.wait (← fx.ask "build" Json.null))
-      let debug := (build.getObjValAs? Bool "debug").toOption.getD false
-      debugBuild.set debug
-      let mode ← if debug then resolveE2E else pure none
-      let paths := (← IO.wait (← fx.ask "paths" Json.null))
-      let support := (paths.getObjValAs? String "support").toOption.getD "."
-      supportDir.set support
-      let root := System.FilePath.mk support / ((mode.map (·.storageDirectoryName)).getD "BTCSwift")
-      if let some m := mode then
-        -- `wipeIfRequested()`: this run's storage and its Keychain namespace
-        if m.reset then
-          try IO.FS.removeDirAll root catch _ => pure ()
-          discard <| IO.wait (← fx.ask "keychain.clear" (Json.mkObj [("service", Json.str m.keychainService)]))
-      e2eRef.set mode
-      chooseBackend fx mode
-      IO.FS.createDirAll root
-      let _ ← fx.ask "exclude-from-backup" (Json.mkObj [("path", Json.str root.toString)])
-      rootDir.set root.toString
-      -- `ExportStagingFile.sweep()`: a crash with the export sheet open leaves a file that may hold the phrase
-      let tmp := (paths.getObjValAs? String "tmp").toOption.getD ""
-      tmpDir.set tmp
-      unless tmp.isEmpty do Winnow.ExportStagingFile.sweep tmp
-      let settings ← match mode with
-        | none => loadSettings
-        | some m => do
-          let (s, hadNetwork) ← loadSettingsNoting
-          -- the fixture is a signet (or a forced network); advanced mode and the local node as the only peer
-          let network := m.forcedNetwork.getD (if hadNetwork then s.network else .signet)
-          let s := { s with network, advancedMode := s.advancedMode || m.advancedMode }
-          let s := match m.peer with
-            | some p => if s.scoped.manualPeers.contains p then s else s.withScoped fun n => { n with manualPeers := [p] }
-            | none => s
-          IO.FS.writeFile (← settingsPath) (toJson s).pretty
-          if let some text := m.clipboard then
-            discard <| IO.wait (← fx.ask "clipboard.set" (Json.mkObj [("text", Json.str text)]))
-          let tab := match m.initialTab with | some "send" => 1 | some "settings" => 2 | _ => 0
-          fx.post (.launched m.forcedNetwork tab)
-          journal "app.initialized" [("network", s.network.name)]
-          pure s
-      fx.post (.settingsLoaded settings)
   | .saveSettings s => discard <| IO.asTask do
       IO.FS.writeFile (← settingsPath) (toJson s).pretty
       b.updateSettings s
@@ -236,6 +242,14 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
     if seeded then authenticated fx g "import" "Import this wallet's recovery phrase" act
     else background fx g "import" act
   | .finishOnboarding _ => discard <| IO.asTask b.finishOnboarding
+  | .deleteWallet g => background fx g "delete" do
+      b.deleteWallet
+      return .deleted g
+  | _ => pure ()
+
+/-- Syncing: refreshes, the peers and the networking with its status watcher. -/
+def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
+  match c with
   | .refresh g => do
       background fx g "refresh" do
         let (s, p) ← b.snapshot
@@ -256,19 +270,6 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
       b.reconnect s
       let (st, p) ← b.snapshot
       return .snapshot g st p
-  | .receiveAddress g fresh => background fx g "receive" do return .receiveAddress g (← b.receiveAddress fresh)
-  | .watchAddress g address => discard <| IO.asTask do
-      try b.watchAddress address (fun txid amount => fx.post (.unconfirmed g address txid amount)) catch _ => pure ()
-  | .stopWatchingAddress => discard <| IO.asTask b.stopWatchingAddress
-  | .setReceiveLabel g address label => background fx g "label" (records g .labelSaved (b.setReceiveLabel address label))
-  | .copy text policy => fx.cap "clipboard.set" (clipPolicyArgs text policy) fun _ => .copiedExpired ""
-  | .timer ms h => discard <| IO.asTask do
-      IO.sleep ms.toUInt32
-      fx.post h
-  | .openURL url => fx.cap "open" (Json.mkObj [("url", Json.str url)]) fun _ => .copiedExpired ""
-  | .deleteWallet g => background fx g "delete" do
-      b.deleteWallet
-      return .deleted g
   | .startNetworking g s => do
       discard <| IO.asTask (b.startNetworking s)
       -- AppModel's 1 s `phaseTask`: what the sync loop changed reaches the model as a snapshot
@@ -295,6 +296,16 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .stopNetworking => do
       watcherToken.modify (· + 1)
       discard <| IO.asTask b.stopNetworking
+  | _ => pure ()
+
+/-- Receiving, sending, a payment's details and a fee bump. -/
+def performPayments (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
+  match c with
+  | .receiveAddress g fresh => background fx g "receive" do return .receiveAddress g (← b.receiveAddress fresh)
+  | .watchAddress g address => discard <| IO.asTask do
+      try b.watchAddress address (fun txid amount => fx.post (.unconfirmed g address txid amount)) catch _ => pure ()
+  | .stopWatchingAddress => discard <| IO.asTask b.stopWatchingAddress
+  | .setReceiveLabel g address label => background fx g "label" (recordsAfter g .labelSaved (b.setReceiveLabel address label))
   | .resolveRate g inputs _ => background fx g "rate" do
       return .resolvedRate g inputs (← b.resolveFeeRate inputs.priority (parseRateMilli inputs.override))
   | .previewSend g inputs => background fx g "send" do return .previewed g inputs (← b.previewSend inputs)
@@ -316,6 +327,11 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .bumpFee g txid p =>
       authenticated fx g "feeBump" "Replace this transaction with a higher fee" do
         return .bumped g txid (← b.bumpFee txid p)
+  | _ => pure ()
+
+/-- Settings: the peer catalog and peers, the backup file, the recovery phrase and the person card. -/
+def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
+  match c with
   | .catalogStatus g => background fx g "catalog" do return .catalogStored g (← b.catalogStatus)
   | .connectedPeers g => background fx g "peers" do return .peers g (← b.connectedPeers)
   | .resetPeers g => background fx g "peers" do
@@ -344,6 +360,11 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
         journal "backup.phraseRevealReady" [("deviceAuthenticationRequired", toString required)]
         return .revealed g e words
   | .ownCard g name => background fx g "card" do return .card g name (← b.ownCard name)
+  | _ => pure ()
+
+/-- People and sender labels. -/
+def performPeople (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
+  match c with
   | .parsePaste g text => discard <| IO.asTask do
       try fx.post (.pasteParsed g text (.ok (← b.parsePaste text)))
       catch e => fx.post (.pasteParsed g text (.error (toString e)))
@@ -353,10 +374,15 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .editPerson g pid name attach => background fx g "person" do
       if let some (paste, prov, source) := attach then discard <| b.attachDestination pid paste prov source
       return .updated g .personSaved (← b.updateRecipient pid (some name) true)
-  | .updateRecipient g pid name saved ctx => background fx g ctx (records g .none (b.updateRecipient pid name saved))
-  | .labelSender g txid pid => background fx g "person" (records g .senderLabeled (b.labelSender txid pid))
-  | .removeSenderLabel g txid => background fx g "payment" (records g .none (b.removeSenderLabel txid))
+  | .updateRecipient g pid name saved ctx => background fx g ctx (recordsAfter g .none (b.updateRecipient pid name saved))
+  | .labelSender g txid pid => background fx g "person" (recordsAfter g .senderLabeled (b.labelSender txid pid))
+  | .removeSenderLabel g txid => background fx g "payment" (recordsAfter g .none (b.removeSenderLabel txid))
   | .lookupSender g txid base => background fx g "person" do return .senderLookup g txid base (← b.lookupSender txid base)
+  | _ => pure ()
+
+/-- Multisig accounts, their drafts, the Ledger and saved signers. -/
+def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
+  match c with
   | .multisigOverview g => background fx g "multisigOverview" do return .multisig g (← b.multisigOverview)
   | .checkMultisigDescriptor g text => discard <| IO.asTask do
       try fx.post (.multisigChecked g text (.ok (← b.checkMultisigDescriptor text)))
@@ -415,6 +441,16 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .abandonSpend g id txid => background fx g "accountSpend" do
       b.abandonSpend id txid
       return .spendHandled g id txid
+  | _ => pure ()
+
+/-- The shell's capabilities: the clipboard, timers, links, the journal, iCloud and background tasks. -/
+def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
+  match c with
+  | .copy text policy => fx.cap "clipboard.set" (clipPolicyArgs text policy) fun _ => .copiedExpired ""
+  | .timer ms h => discard <| IO.asTask do
+      IO.sleep ms.toUInt32
+      fx.post h
+  | .openURL url => fx.cap "open" (Json.mkObj [("url", Json.str url)]) fun _ => .copiedExpired ""
   | .journal name fields => journal name fields
   | .discoverCloud => discard <| IO.asTask (try b.discoverCloudBackups catch _ => pure ())
   | .setAutomaticCloud enabled => discard <| IO.asTask (try b.setAutomaticCloudBackup enabled catch _ => pure ())
@@ -455,6 +491,38 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
       | none =>
         let j ← IO.wait (← fx.ask "clipboard.get" Json.null)
         fx.post (.pasted target ((j.getObjValAs? String "text").toOption.getD ""))
+  | _ => pure ()
+
+def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
+  traceCmd c
+  let b ← backendRef.get
+  match c with
+  | .boot => bootApp fx
+  | .saveSettings .. | .openWallet .. | .createWallet .. | .importWallet .. | .finishOnboarding ..
+  | .deleteWallet .. =>
+    performWallet b fx c
+  | .refresh .. | .syncNow .. | .retryPeers .. | .reconnect .. | .startNetworking .. | .stopNetworking =>
+    performSync b fx c
+  | .receiveAddress .. | .watchAddress .. | .stopWatchingAddress | .setReceiveLabel .. | .resolveRate ..
+  | .previewSend .. | .sendPayment .. | .rawTransaction .. | .watchRelay .. | .loadPaymentDetails ..
+  | .pendingFeeRate .. | .previewFeeBump .. | .bumpFee .. =>
+    performPayments b fx c
+  | .catalogStatus .. | .connectedPeers .. | .resetPeers .. | .exportBundle .. | .removeExport ..
+  | .revealPhrase .. | .ownCard .. =>
+    performSettings b fx c
+  | .parsePaste .. | .addPerson .. | .editPerson .. | .updateRecipient .. | .labelSender ..
+  | .removeSenderLabel .. | .lookupSender .. =>
+    performPeople b fx c
+  | .multisigOverview .. | .checkMultisigDescriptor .. | .addMultisigAccount .. | .removeMultisigAccount ..
+  | .newMultisigAddress .. | .createMultisigAccount .. | .registerLedger .. | .pairLedger .. | .addSignerKeys ..
+  | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft ..
+  | .signDraftWithLedger .. | .adoptDraft .. | .broadcastDraft .. | .discardDraft .. | .rebroadcastSpend ..
+  | .abandonSpend .. =>
+    performMultisig b fx c
+  | .copy .. | .timer .. | .openURL .. | .journal .. | .discoverCloud | .setAutomaticCloud .. | .restoreCloud ..
+  | .suspendCloud | .cloudScene .. | .scheduleBackgroundTasks | .runBackgroundTask .. | .expireBackgroundTask ..
+  | .backgroundRefreshStatus | .paste .. =>
+    performShell b fx c
 
 def app : Native.App Model Msg Cmd Host :=
   { init := {}, update, view, cmds, host := Msg.host, perform := fun c fx => do

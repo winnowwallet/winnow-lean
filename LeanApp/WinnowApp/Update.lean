@@ -33,16 +33,21 @@ def Model.background (m : Model) : Model × List Cmd :=
   -- `BackgroundSyncScheduler.shared.schedule()` on every trip to the background
   (m2, [.stopNetworking, .stopWatchingAddress, .scheduleBackgroundTasks, .cloudScene false] ++ m.discardExport ++ cs)
 
-def onHost (h : Host) (m : Model) : Model × List Cmd :=
-  let current (g : Nat) := g == m.generation
-  let sensitive (g e : Nat) := g == m.generation && e == m.epoch && m.active
+/-- An answer for the current generation of the wallet's tasks. -/
+def Model.current (m : Model) (g : Nat) : Bool := g == m.generation
+
+/-- A sensitive answer: the current generation and epoch, while the scene is active. -/
+def Model.sensitive (m : Model) (g e : Nat) : Bool := g == m.generation && e == m.epoch && m.active
+
+/-- The wallet opened, created, imported, restored or deleted, and the settings it opened with. -/
+def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
   | .launched forced tab => ({ m with forcedNetwork := forced, tab := tab }, [])
   | .settingsLoaded s =>
     let m := { m with settings := s }.loadGatewayDraft
     (m, [.openWallet m.generation s.network true])
   | .booted g r =>
-    if !current g then (m, []) else
+    if !m.current g then (m, []) else
     -- networking runs only while the scene is active (a cold background launch has no scene); a background
     -- task iOS launched during boot runs now
     let start : List Cmd := if m.active then [.startNetworking g m.settings] else []
@@ -81,8 +86,20 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
       let s := { m.settings with ownDisplayName := name, advancedMode := advanced }
       ({ m with settings := s }, [.saveSettings s])
     | none => (m, [])
+  | .deleted g =>
+    if !m.current g then (m, []) else
+    let m' := m.nextWallet
+    let m' := { m' with stage := Stage.onboarding, walletID := none, status := ({} : Status), records := ({} : Records),
+                        multisig := ({} : MultisigOverview), collect := m'.collect.cleared }
+    let m' := { m' with phase := SyncPhase.idle, confirm := none, sheets := [], routes := [], tabRoutes := [], tab := 0 }
+    (m', [.stopNetworking])
+  | _ => (m, [])
+
+/-- What the sync and the records report: a snapshot, records, the receive window, a failure. -/
+def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
+  match h with
   | .snapshot g s p =>
-    if !current g then (m, []) else
+    if !m.current g then (m, []) else
     let wasSyncing := m.status.syncing
     let s := { s with history := historyForDisplay s.history }
     let m := { m with status := s, phase := p }
@@ -98,7 +115,7 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
         else m
       | none => m
     if wasSyncing && !s.syncing then m.loadPayment else (m, [])
-  | .records g r => if current g then m.onRecords r else (m, [])
+  | .records g r => if m.current g then m.onRecords r else (m, [])
   | .updated g d r =>
     if !m.sameWallet g then (m, []) else
     let (m, cs) := m.onRecords r
@@ -110,18 +127,23 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
   | .receiveAddress g a =>
     if m.sameWallet g && m.hasSheet .receive then m.onReceiveAddress a else (m, [])
   | .unconfirmed g address txid amount =>
-    if current g && m.receive.address == address && !(m.receive.unconfirmed.any (·.1 == txid)) then
+    if m.current g && m.receive.address == address && !(m.receive.unconfirmed.any (·.1 == txid)) then
       ({ m with receive := { m.receive with unconfirmed := m.receive.unconfirmed ++ [(txid, amount)] } }, [])
     else (m, [])
   | .failed g ctx msg => if m.sameWallet g then (m.fail ctx msg, []) else (m, [])
+  | _ => (m, [])
+
+/-- The Send tab, its payment and a fee bump. -/
+def Model.onSendHost (m : Model) (h : Host) : Model × List Cmd :=
+  match h with
   | .resolvedRate g forInputs milli =>
     let i := m.sendInputs
-    if current g && forInputs.priority == i.priority && forInputs.override == i.override then
+    if m.current g && forInputs.priority == i.priority && forInputs.override == i.override then
       ({ m with send := { m.send with resolvedRateMilli := some milli } }, [])
     else (m, [])
   | .previewed g forInputs p =>
     -- a preview counts only for the inputs it was made for (SendReviewInputs)
-    if current g && forInputs == m.sendInputs then
+    if m.current g && forInputs == m.sendInputs then
       ({ m with send := { m.send with preview := some p, reviewing := false, error := none } }, [])
     else ({ m with send := { m.send with reviewing := false } }, [])
   | .sent g txid derived =>
@@ -131,16 +153,16 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
               spendingInFlight := false },
      [.refresh g, .rawTransaction g txid, .watchRelay g txid])
   | .rawTransaction g txid hex =>
-    if current g && m.send.sentTxid == some txid then ({ m with send := { m.send with rawTransaction := hex } }, []) else (m, [])
-  | .relay g txid e => if current g then (m.onRelay txid e, []) else (m, [])
+    if m.current g && m.send.sentTxid == some txid then ({ m with send := { m.send with rawTransaction := hex } }, []) else (m, [])
+  | .relay g txid e => if m.current g then (m.onRelay txid e, []) else (m, [])
   | .paymentLoaded g _ =>
     if m.sameWallet g then ({ m with payment := { m.payment with loading := false } }, [.refresh m.generation]) else (m, [])
   | .pendingRate g txid milli text =>
-    if !current g || m.feeBump.txid != txid then (m, []) else
+    if !m.current g || m.feeBump.txid != txid then (m, []) else
     ({ m with feeBump := { m.feeBump with currentRateMilli := some milli, targetText := text } },
      match parseRateMilli text (trimNewlines := true) with | some r => [.previewFeeBump g txid text r] | none => [])
   | .bumpPreviewed g txid text p =>
-    if current g && m.feeBump.txid == txid && m.feeBump.targetText == text then
+    if m.current g && m.feeBump.txid == txid && m.feeBump.targetText == text then
       ({ m with feeBump := { m.feeBump with reviewed := some (text, p), error := none } }, [])
     else (m, [])
   | .bumped g txid r =>
@@ -148,72 +170,47 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
     let g := m.generation
     if m.feeBump.txid != txid then ({ m with spendingInFlight := false }, [.refresh g]) else
     ({ m with feeBump := { m.feeBump with replacement := some r, bumping := false }, spendingInFlight := false }, [.refresh g])
+  | _ => (m, [])
+
+/-- Settings: the peer catalog, peers, the backup file, the recovery phrase, the person card. -/
+def Model.onSettingsHost (m : Model) (h : Host) : Model × List Cmd :=
+  match h with
   | .catalogStored g stored =>
-    if current g then ({ m with settingsDraft := { m.settingsDraft with catalog := some stored } }, []) else (m, [])
-  | .peers g ps => if current g then ({ m with settingsDraft := { m.settingsDraft with peers := ps } }, []) else (m, [])
+    if m.current g then ({ m with settingsDraft := { m.settingsDraft with catalog := some stored } }, []) else (m, [])
+  | .peers g ps => if m.current g then ({ m with settingsDraft := { m.settingsDraft with peers := ps } }, []) else (m, [])
   | .peersReset g =>
     if !m.sameWallet g then (m, []) else
     let g := m.generation
     ({ m with settingsDraft := { m.settingsDraft with resettingPeers := false } }, [.connectedPeers g, .refresh g])
   | .exported g e file =>
-    if sensitive g e && m.hasSheet .exportBundle then
+    if m.sensitive g e && m.hasSheet .exportBundle then
       ({ m with exportState := { m.exportState with file := some file, busy := false, error := none } }, [])
     else (m, [.removeExport file])
   | .revealed g e words =>
-    if sensitive g e then ({ m with reveal := { words } }.present .revealPhrase, [])
+    if m.sensitive g e then ({ m with reveal := { words } }.present .revealPhrase, [])
     else (m, [])
   | .card g name card =>
-    if current g && m.settings.ownDisplayName.trimAscii.copy == name then ({ m with shareCard := { card := some card } }, []) else (m, [])
+    if m.current g && m.settings.ownDisplayName.trimAscii.copy == name then ({ m with shareCard := { card := some card } }, []) else (m, [])
+  | _ => (m, [])
+
+/-- Adding a person: the parsed paste and the sender lookup. -/
+def Model.onPeopleHost (m : Model) (h : Host) : Model × List Cmd :=
+  match h with
   | .pasteParsed g text r =>
-    if !current g || m.person.pasted != text then (m, []) else
+    if !m.current g || m.person.pasted != text then (m, []) else
     match r with
     | .ok p => ({ m with person := { m.person with parsed := some p, error := none } }, [])
     | .error e => ({ m with person := { m.person with parsed := none, error := some e } }, [])
   | .senderLookup g txid source addresses =>
-    if current g && m.person.mode.txid == some txid then
+    if m.current g && m.person.mode.txid == some txid then
       ({ m with person := { m.person with inferring := false, inferredAddresses := addresses, inferredSource := some source } }, [])
     else (m, [])
-  | .pasted target text =>
-    match target with
-    | .destination =>
-      m.editSend fun i => { i with destination := text.trimAscii.copy }
-    | .person => m.setPersonPasted text
-    | .importBundle => ({ m with onboarding := { m.onboarding with importText := text } }, [])
-    | .multisigDescriptor => stepMultisig (.setDescriptor text) m
-    | .memberKeys =>
-      -- SignerPickerSheet's `paste()`: one key, or several that always sign together
-      let b := m.multisigBuild
-      let keys := signerKeysOf text
-      if keys.isEmpty then ({ m with multisigBuild := { b with pasteError := some "The clipboard holds no key." } }, []) else
-      match signerKeysError text m.settings.network with
-      | some e => ({ m with multisigBuild := { b with pasteError := some e } }, [])
-      | none =>
-        let labelled := keys.map fun k => ({ key := k, label := "Pasted " ++ keyFingerprint k m.settings.network } : BuildKey)
-        let f := b.addPick labelled none none b.pickInto
-        { m with multisigBuild := { f with pasteError := none }.clamp m.settings.network }.closeSheet .signerPicker
-    | .multisigRecoveryKey =>
-      ({ m with multisigBuild := { m.multisigBuild with recoveryKey := Winnow.Keys.Unicode.trimWhitespace text }.clamp m.settings.network }, [])
-    | .multisigPSBT => ({ m with collect := { m.collect with pasted := text } }, [])
-    | .accountPSBT id =>
-      -- the account page's paste: filed as the draft at once, then the collection step opens
-      if m.collect.busy then (m, []) else
-      if text.trimAscii.isEmpty then ({ m with collect := { m.collect with error := some "The clipboard holds no PSBT." } }, []) else
-      let (m', e) := m.runCollect
-      (m', [.adoptDraft m.generation e id text])
-    | .signerKeys => ({ m with signerKeys := { m.signerKeys with text := text, error := none } }, [])
-  | .multisig .. | .multisigChecked .. | .multisigAdded .. | .multisigCreated .. | .multisigRemoved ..
-  | .drafted .. | .collected .. | .draftBroadcast .. | .spendHandled .. | .ledgerPaired ..
-  | .ledgerAddressShown .. | .ledgerRegistered .. =>
-    m.onMultisigHost h
-  | .signerSaved .. | .signerRenamed .. | .signerRemoved .. => m.onSignerHost h
+  | _ => (m, [])
+
+/-- The shell: the copied badge, screen capture, background tasks and the scene phase. -/
+def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
+  match h with
   | .copiedExpired key => if m.copied == some key then ({ m with copied := none }, []) else (m, [])
-  | .deleted g =>
-    if !current g then (m, []) else
-    let m' := m.nextWallet
-    let m' := { m' with stage := Stage.onboarding, walletID := none, status := ({} : Status), records := ({} : Records),
-                        multisig := ({} : MultisigOverview), collect := m'.collect.cleared }
-    let m' := { m' with phase := SyncPhase.idle, confirm := none, sheets := [], routes := [], tabRoutes := [], tab := 0 }
-    (m', [.stopNetworking])
   | .captured on => ({ m with captured := on }, [])
   | .backgroundRefresh available => ({ m with backgroundRefreshAvailable := available }, [])
   | .bgtask id kind =>
@@ -239,6 +236,62 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
       let (m, cs) := m.background
       (m, phase :: cs)
   | .sceneInactive => (m, [.journal "app.scenePhase" [("phase", "inactive")]])
+  | _ => (m, [])
+
+/-- The clipboard's text, read for `target`. -/
+def Model.onPasted (m : Model) (target : PasteTarget) (text : String) : Model × List Cmd :=
+  match target with
+  | .destination =>
+    m.editSend fun i => { i with destination := text.trimAscii.copy }
+  | .person => m.setPersonPasted text
+  | .importBundle => ({ m with onboarding := { m.onboarding with importText := text } }, [])
+  | .multisigDescriptor => stepMultisig (.setDescriptor text) m
+  | .memberKeys =>
+    -- SignerPickerSheet's `paste()`: one key, or several that always sign together
+    let b := m.multisigBuild
+    let keys := signerKeysOf text
+    if keys.isEmpty then ({ m with multisigBuild := { b with pasteError := some "The clipboard holds no key." } }, []) else
+    match signerKeysError text m.settings.network with
+    | some e => ({ m with multisigBuild := { b with pasteError := some e } }, [])
+    | none =>
+      let labelled := keys.map fun k => ({ key := k, label := "Pasted " ++ keyFingerprint k m.settings.network } : BuildKey)
+      let f := b.addPick labelled none none b.pickInto
+      { m with multisigBuild := { f with pasteError := none }.clamp m.settings.network }.closeSheet .signerPicker
+  | .multisigRecoveryKey =>
+    ({ m with multisigBuild := { m.multisigBuild with recoveryKey := Winnow.Keys.Unicode.trimWhitespace text }.clamp m.settings.network }, [])
+  | .multisigPSBT => ({ m with collect := { m.collect with pasted := text } }, [])
+  | .accountPSBT id =>
+    -- the account page's paste: filed as the draft at once, then the collection step opens
+    if m.collect.busy then (m, []) else
+    if text.trimAscii.isEmpty then ({ m with collect := { m.collect with error := some "The clipboard holds no PSBT." } }, []) else
+    let (m', e) := m.runCollect
+    (m', [.adoptDraft m.generation e id text])
+  | .signerKeys => ({ m with signerKeys := { m.signerKeys with text := text, error := none } }, [])
+
+/-- A host answer goes to its area's handler. -/
+def onHost (h : Host) (m : Model) : Model × List Cmd :=
+  match h with
+  | .launched .. | .settingsLoaded .. | .booted .. | .created .. | .imported .. | .cloud .. | .cloudRestored ..
+  | .deleted .. =>
+    m.onWalletHost h
+  | .snapshot .. | .records .. | .updated .. | .receiveAddress .. | .unconfirmed .. | .failed .. =>
+    m.onSyncHost h
+  | .resolvedRate .. | .previewed .. | .sent .. | .rawTransaction .. | .relay .. | .paymentLoaded .. | .pendingRate ..
+  | .bumpPreviewed .. | .bumped .. =>
+    m.onSendHost h
+  | .catalogStored .. | .peers .. | .peersReset .. | .exported .. | .revealed .. | .card .. =>
+    m.onSettingsHost h
+  | .pasteParsed .. | .senderLookup .. =>
+    m.onPeopleHost h
+  | .copiedExpired .. | .captured .. | .backgroundRefresh .. | .bgtask .. | .bgtaskExpired .. | .scene ..
+  | .sceneInactive =>
+    m.onSystemHost h
+  | .pasted target text => m.onPasted target text
+  | .multisig .. | .multisigChecked .. | .multisigAdded .. | .multisigCreated .. | .multisigRemoved ..
+  | .drafted .. | .collected .. | .draftBroadcast .. | .spendHandled .. | .ledgerPaired ..
+  | .ledgerAddressShown .. | .ledgerRegistered .. =>
+    m.onMultisigHost h
+  | .signerSaved .. | .signerRenamed .. | .signerRemoved .. => m.onSignerHost h
 
 /-- Switch to the other network's wallet (`switchNetwork`): a new generation, nothing carried over. -/
 def Model.switchNetwork (m : Model) (net : Network) : Model × List Cmd :=
