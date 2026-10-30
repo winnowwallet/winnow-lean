@@ -9,5 +9,5 @@ int64_t WLDigits(NSString *text) {
 
 void WLShotAt(XCTestCase *test, XCUIApplication *app, NSString *name, NSString *file, NSUInteger line) {
     NSString *dir = WLHost.shared.screenshotDir;
-    ELShotAt(test, app, name, dir.length ? [ELScreenshots inDirectory:dir] : [ELScreenshots attachmentsOnly], file, line);
+    LNShotAt(test, app, name, dir.length ? [LNScreenshots inDirectory:dir] : [LNScreenshots attachmentsOnly], file, line);
 }

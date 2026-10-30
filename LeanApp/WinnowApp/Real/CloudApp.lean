@@ -1,6 +1,6 @@
 import WinnowApp.Real.Full
 import WinnowApp.Real.CloudBackup
-import ElmLean.Native.EffectScope
+import LeanNative.Native.EffectScope
 
 /-! # AppModel's iCloud backup (the `AppModel` extension in AppModel.swift, upstream d2ca878 :3485–3651)
 
@@ -42,10 +42,10 @@ structure CloudApp where
   /-- `attemptedCloudPreparation`: the wallets prepared (or tried) this foreground session. -/
   attempted : IO.Ref (List String)
   /-- `cloudPreparationTask != nil`: the running preparation's token. -/
-  preparing : IO.Ref (Option ElmLean.Native.EffectScope.Token)
+  preparing : IO.Ref (Option LeanNative.Native.EffectScope.Token)
   /-- `cloudPreparationEpoch`, as LeanNative's `EffectScope`: a new preparation, the background and a wallet
   change end it, and the protected part (the words, the copy) runs as its task. -/
-  preparation : ElmLean.Native.EffectScope
+  preparation : LeanNative.Native.EffectScope
   /-- `cloudPreparationTask`: the last preparation's task, which ends after its scope's checks. -/
   preparationTask : IO.Ref (Option (Task (Except IO.Error Unit)))
   /-- `cloudRestoreNotice`. -/
@@ -58,7 +58,7 @@ namespace CloudApp
 def new (controller : CloudBackupController) (env : Env) (host : RecordsHost) (multisig : MultisigApp) (allows : Bool)
     (authenticate : String → IO Unit) : IO CloudApp := do
   return { controller, env, host, multisig, allows, authenticate, attempted := ← IO.mkRef [], preparing := ← IO.mkRef none,
-           preparation := ← ElmLean.Native.EffectScope.new, preparationTask := ← IO.mkRef none, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false }
+           preparation := ← LeanNative.Native.EffectScope.new, preparationTask := ← IO.mkRef none, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false }
 
 def directory (a : CloudApp) : IO (Option System.FilePath) := do return (← a.env.get).dir.map System.FilePath.mk
 def walletID (a : CloudApp) : IO (Option String) := do return (← a.env.get).wallet.map (·.id)
@@ -151,11 +151,11 @@ prompt, and the words and the copy start only as the scope's task after the answ
 network switch or the background while the person answers ends it before the protected part starts; this
 app's own conditions (the same wallet, network, an active scene) are checked with it. -/
 def prepareExisting (a : CloudApp) (walletID : String) (network : Option WinnowApp.Network)
-    (token : ElmLean.Native.EffectScope.Token) : IO Unit := do
+    (token : LeanNative.Native.EffectScope.Token) : IO Unit := do
   let live : IO Bool := do return (← a.preparation.isValid token) && (← a.accepts walletID network)
   -- the authentication's own error, as this app reports it
   let declined ← IO.mkRef (none : Option IO.Error)
-  let authenticate : IO (ElmLean.Native.Client.Result Unit) := do
+  let authenticate : IO (LeanNative.Native.Client.Result Unit) := do
     try a.authenticate "Protect your wallet with automatic iCloud backup"; return .ok ()
     catch e =>
       declined.set (some e)

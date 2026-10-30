@@ -1,4 +1,4 @@
-import ElmLean.Html
+import LeanNative.Html
 import WinnowApp.Model
 import WinnowApp.Pure
 
@@ -7,7 +7,7 @@ forgets its state, sensitive ones bump the epoch), and the small view pieces Win
 provides (copyable identifiers and text blocks, warned explorer links, technical disclosures). -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 abbrev H := Html Msg
 

@@ -5,7 +5,7 @@
 
 <journey-out> is a UI-journeys output directory (scripts/ui-journeys' $UI_OUT, CI's $CI_RESULTS/journey), as
 LeanNative's ui-tests writes it. The evidence itself is LeanNative's: framework/native/ci/export-evidence (in
-the pinned package, LeanApp/.lake/packages/elmlean, or $LEANNATIVE_EXPORT_EVIDENCE) reads the result bundle,
+the pinned package, LeanApp/.lake/packages/leannative, or $LEANNATIVE_EXPORT_EVIDENCE) reads the result bundle,
 xcodebuild.log, device.json and run.json, attributes and hashes the screenshots and exports the recording.
 This wrapper keeps what is the website's: <media-out> must not exist or be empty, and receives
 
@@ -30,7 +30,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-EXPORTER = ROOT / "LeanApp/.lake/packages/elmlean/framework/native/ci/export-evidence"
+EXPORTER = ROOT / "LeanApp/.lake/packages/leannative/framework/native/ci/export-evidence"
 VIDEO = "videos/wallet-journey.mp4"
 MANIFEST = "journey-provenance.json"
 MAX_BYTES = 25 * 1024 * 1024

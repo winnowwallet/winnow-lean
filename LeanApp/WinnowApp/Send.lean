@@ -4,7 +4,7 @@ import WinnowApp.Multisig
 Winnow's four warnings, and the status with the relay log. -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 /-- `SendView.reviewInputs`: what a preview must have been made for. Priority and override count only
 in Advanced mode; a person's payment index is part of it, so a review for an earlier address is void. -/

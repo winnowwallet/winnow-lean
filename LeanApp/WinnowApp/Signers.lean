@@ -6,7 +6,7 @@ signer's detail (rename, keys, remove); LedgerPairView (moved here from the Mult
 the Ledger's key and registers nothing); SignerKeysAddView ("Save keys someone sent"). -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 /-! ## Update -/
 

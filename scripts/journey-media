@@ -4,7 +4,7 @@
 #
 #   scripts/journey-media [<journeys' output> [<media directory>]]
 #
-# Defaults: $CI_RESULTS/journey (the `app` job of ElmLean's ios-app workflow) and build/journey-media.
+# Defaults: $CI_RESULTS/journey (the `app` job of LeanNative's ios-app workflow) and build/journey-media.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JOURNEY="${1:-${CI_RESULTS:?set CI_RESULTS or pass the journeys output}/journey}"

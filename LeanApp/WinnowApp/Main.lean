@@ -1,4 +1,4 @@
-import ElmLean.Native
+import LeanNative.Native
 import WinnowApp.View
 import WinnowApp.Update
 import WinnowApp.Backend
@@ -6,12 +6,12 @@ import WinnowApp.Sample
 import WinnowApp.Real
 import WinnowApp.E2E
 
-/-! The Winnow app in ElmLean native mode: the model and screens (Update, View and the area modules),
+/-! The Winnow app in LeanNative native mode: the model and screens (Update, View and the area modules),
 the commands run by `perform` against the `Backend` (the Lean wallet and network) and the shell's
 capabilities (auth, clipboard, open). -/
 
 namespace WinnowApp
-open ElmLean ElmLean.Native Lean
+open LeanNative LeanNative.Native Lean
 
 /-- Where the app keeps its files: `<Application Support>/BTCSwift`, as the Swift app did. -/
 initialize rootDir : IO.Ref String ← IO.mkRef ""

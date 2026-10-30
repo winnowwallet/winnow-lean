@@ -6,7 +6,7 @@ import WinnowApp.Payments
 PaymentDetailView (recipients, receive labels, sender, details, transaction) and FeeBumpView. -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 /-! ## Update -/
 

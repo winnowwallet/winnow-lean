@@ -1,4 +1,4 @@
-import ElmShell.Manifest
+import LeanNativeShell.Manifest
 
 /-! The Winnow app's Xcode project, from LeanNative's app manifest: `lake exe ios-project` (IosProject.lean)
 writes its XcodeGen spec, and LeanNative's framework/native/ci/build-ios runs it. The app never imports this
@@ -11,7 +11,7 @@ the framework. What the capabilities in `uses` need is checked at generation: a 
 background-task or CloudKit use without its usage text or entitlement is refused. -/
 
 namespace WinnowApp
-open ElmShell
+open LeanNativeShell
 
 def manifest : Manifest where
   name := "WinnowLean"

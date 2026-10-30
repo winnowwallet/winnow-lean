@@ -2,8 +2,8 @@ import WinnowApp.Real
 import WinnowApp.Signers
 import WinnowApp.Payments
 import WinnowApp.View
-import ElmLean.Erase
-import ElmLean.Json
+import LeanNative.Erase
+import LeanNative.Json
 
 /-! `multisig-app-test`: upstream 1cf93fb's app-side multisig tests, ported.
 
@@ -1507,7 +1507,7 @@ def testTheDraftRowShowsTheLeafClosestToFinishing : IO Unit := do
 def contains (hay needle : String) : Bool := (hay.splitOn needle).length > 1
 
 /-- The rendered tree as the shell receives it. -/
-def rendered (m : Model) : String := (ElmLean.Html.toWire (view m)).toJson.compress
+def rendered (m : Model) : String := (LeanNative.Html.toWire (view m)).toJson.compress
 
 /-- A phone with a multisig account holding a draft, its rows in the one list, a paired Ledger and saved keys. -/
 def modelWithAccounts (advanced : Bool) : Model :=
@@ -1546,13 +1546,13 @@ def testSimpleModeShowsAccountsOnlyInTheBalanceAndActivity : IO Unit := do
   let draftRow := paymentRow simple simple.status.payments[0]!
   let accountRow := paymentRow simple simple.status.payments[1]!
   let walletRow := paymentRow simple simple.status.payments[2]!
-  let actions (h : H) := (ElmLean.Html.toWire h).toJson.compress
+  let actions (h : H) := (LeanNative.Html.toWire h).toJson.compress
   check "the draft row has no action" (!contains (actions draftRow) "\"button\"")
   check "the account row has no action" (!contains (actions accountRow) "\"button\"")
   check "the wallet's row opens its payment" (contains (actions walletRow) "\"button\"")
   -- the Send sheet itself (the home behind it was checked above)
   let sendModel := { simple with send := { inputs := { network := .signet, accountID := some "acct" } } }.present .send
-  let send := (ElmLean.Html.toWire (sendSheet sendModel [])).toJson.compress
+  let send := (LeanNative.Html.toWire (sendSheet sendModel [])).toJson.compress
   for needle in ["Ledger", "Signers", "sendFrom", "\"From\"", "Sign and continue", "Household"] do
     check s!"Simple Send has no {needle}" (!contains send needle) (match send.splitOn needle with
       | a :: _ => (a.drop (a.length - 120)).toString | [] => "")

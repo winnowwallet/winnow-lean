@@ -2,11 +2,11 @@
 
 # Scripts
 
-CI is ElmLean's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls it); its generic scripts
+CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls it); its generic scripts
 (`build-ios`, `ui-tests`, `check-no-swift`, `install-xcodegen`, `progress`) are in
-`LeanApp/.lake/packages/elmlean/framework/native/ci`. These are Winnow's own:
+`LeanApp/.lake/packages/leannative/framework/native/ci`. These are Winnow's own:
 
-- [build-ios](build-ios) builds the Lean app from a clean checkout with ElmLean's `build-ios`, after the census
+- [build-ios](build-ios) builds the Lean app from a clean checkout with LeanNative's `build-ios`, after the census
   list (`build-ios <Debug|Release> [iossim|ios]`; `PREPARE_ONLY=1` stops before xcodebuild).
 - [verify-release-no-test-mode](verify-release-no-test-mode) launches the Release and Debug simulator builds
   with test mode's environment: Debug must start the test run, Release must ignore it (CI's `release-check`).

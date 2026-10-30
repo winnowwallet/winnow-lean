@@ -6,7 +6,7 @@ sender of a received payment (a saved person, the funding addresses the payment 
 consented explorer lookup). -/
 
 namespace WinnowApp
-open ElmLean
+open LeanNative
 
 def fundingWarning : String :=
   "A funding address is unverified as a destination for this person. Exchanges, coinjoins and shared wallets can make it misleading. Select one only after checking with the person. Sending to it reuses an address; ask for a fresh address or payment card."

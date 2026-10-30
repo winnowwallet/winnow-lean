@@ -1,7 +1,7 @@
 import WinnowApp.Real.CloudAppState
 import WinnowApp.Real.Shell
-import ElmLean.Native.Client.CloudKit
-import ElmLean.Native.Client.Keychain
+import LeanNative.Native.Client.CloudKit
+import LeanNative.Native.Client.Keychain
 import WinnowApp.Real.Base
 
 /-! # Automatic iCloud backup (`CloudBackupController.swift`, `ICloudBackupStore.swift`, upstream d2ca878)
@@ -384,7 +384,7 @@ def cloudContainer : String := "iCloud.com.btcswift.app"
 def cloudBackupKeyService : String := "com.btcswift.app.cloud-backup-key.v1"
 def cloudRecordType : String := "WalletBackup"
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- A CloudKit failure as the text the screens show (`missingEntitlement` and `notAuthenticated` as Swift's
 errors, anything else as the shell's detail or name). -/
 def cloudErrorText (e : Client.Error) : String :=
@@ -393,7 +393,7 @@ def cloudErrorText (e : Client.Error) : String :=
   | "notAuthenticated" => CloudBackupError.unavailable.description
   | name => if e.detail.isEmpty then name else e.detail
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- One record per device's backup, in the private database; never the public one. Through
 `Client.CloudKit`, with this app's container, record type and fields. -/
 def shellCloudStore (ask : Ask) : CloudBackupStore :=
@@ -456,7 +456,7 @@ def shellCloudStore (ask : Ask) : CloudBackupStore :=
       unless backup.id == id && (← account) == expected do CloudBackupError.accountChanged.throw
       return backup }
 
-open ElmLean.Native in
+open LeanNative.Native in
 /-- The wrapping keys: a synchronizable iCloud Keychain item per backup id (raw 32 bytes), kept apart from
 the wallet's device-only key so automatic recovery never changes its protection. -/
 def shellCloudKeys (ask : Ask) : CloudBackupKeys :=

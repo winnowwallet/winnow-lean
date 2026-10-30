@@ -1,5 +1,5 @@
 import WinnowApp.Real.Peers
-import ElmLean.Native.BackgroundRun
+import LeanNative.Native.BackgroundRun
 
 /-! # Background chain checks (`BackgroundSyncScheduler.swift`, AppModel's `runBackgroundSync`, upstream 66c6a48)
 
@@ -26,17 +26,17 @@ def backgroundProcessingID : String := "com.btcswift.winnow.chain-processing"
 `.seconds(25)` for refresh). -/
 def backgroundBudgetMs (kind : String) : Nat := if kind == "processing" then 120_000 else 25_000
 
-/-- `BackgroundSyncRun`: LeanNative's `BackgroundRun` (`ElmLean.Native.BackgroundRun`) with the task's budget
+/-- `BackgroundSyncRun`: LeanNative's `BackgroundRun` (`LeanNative.Native.BackgroundRun`) with the task's budget
 as its deadline. It completes exactly once, including when iOS expires the task during start-up; once
 expired, the work and the backend's cancellation drain before the completion, which then reports no
 success. -/
 structure BackgroundSyncRun where
-  run : ElmLean.Native.BackgroundRun
+  run : LeanNative.Native.BackgroundRun
 
 namespace BackgroundSyncRun
 
 def new (budgetMs : Nat) (work : IO Bool) (cancel : IO Unit) (completion : Bool → IO Unit) : IO BackgroundSyncRun := do
-  return ⟨← ElmLean.Native.BackgroundRun.new
+  return ⟨← LeanNative.Native.BackgroundRun.new
     { work, cancel, completion := fun o => completion o.success, deadline := .after budgetMs }⟩
 
 /-- `start()`: the work, and the deadline that expires it. A second start does nothing. -/
