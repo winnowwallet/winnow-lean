@@ -1,0 +1,11 @@
+# The census publisher's Ed25519 public key (32 bytes, hex), pinned: scripts/import-census refuses a
+# census/peers.json whose census/peers.json.sig does not verify under this key, or names another one.
+#
+# Recorded 2026-10-28 from what winnowwallet/census publishes, and the same in all three places looked at:
+#   census/signing-public-key.txt and census/peers.json.sig's publicKey at census commit
+#   340726e8f586cdc9c69a1ab394c68efde5410f45 (2026-10-27), and the wallet's docs/census-signing.md at
+#   winnowwallet/winnow 557032a2b3e882e18a689c74cc8ce7d273cea799 (CensusPublisher.trustedKeysHex).
+# All three are in one GitHub organization, so they are one source: CONFIRM THIS KEY OUT OF BAND with the
+# census's maintainer before relying on it. A key rotation (docs/census-signing.md upstream) adds the
+# new key here, one per line, before the publisher switches.
+b999d0881c236f3f38dce334bd373c75b936677bbed952685745486131d32b74

@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Validate a stable release version."""
+import os
+import pathlib
+import re
+
+tag = os.environ.get('RELEASE_TAG', '')
+if tag and not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
+    raise SystemExit('expected a stable vMAJOR.MINOR.PATCH tag')
+
+# App Store Connect takes at most this many characters of What to Test and
+# refuses more only after the build is uploaded (releases 0.8.16 and 0.8.17);
+# the same limit is in scripts/testflight.sh. The file is found from this
+# script, whatever the working directory, and TESTFLIGHT_WHATS_NEW_FILE names
+# another one, as it does for scripts/testflight.sh.
+WHATS_NEW_LIMIT = 4000
+repository = pathlib.Path(__file__).resolve().parent.parent
+notes = pathlib.Path(os.environ.get('TESTFLIGHT_WHATS_NEW_FILE') or repository / 'docs' / 'testflight-what-to-test.txt')
+text = notes.read_text().rstrip() if notes.exists() else ''
+if not text:
+    raise SystemExit(f'{notes} is missing or empty')
+if len(text) > WHATS_NEW_LIMIT:
+    raise SystemExit(f'{notes} is {len(text)} characters; App Store Connect takes at most {WHATS_NEW_LIMIT}')

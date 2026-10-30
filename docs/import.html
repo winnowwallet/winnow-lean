@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Back up and restore &mdash; Winnow</title>
+<meta name="description" content="Back up your wallet, restore its history, and understand what the catch-up scan can verify.">
+<link rel="canonical" href="https://winnowwallet.com/import">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://winnowwallet.com/import">
+<meta property="og:title" content="Back up and restore &mdash; Winnow">
+<meta property="og:description" content="Back up your wallet, restore its history, and understand what the catch-up scan can verify.">
+<meta property="og:image" content="https://winnowwallet.com/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Back up and restore &mdash; Winnow">
+<meta name="twitter:description" content="Back up your wallet, restore its history, and understand what the catch-up scan can verify.">
+<meta name="twitter:image" content="https://winnowwallet.com/og.png">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar"><div class="bar"><a class="mark" href="/" aria-label="Winnow home">winnow</a><nav class="links" aria-label="Main"><a href="/architecture">How it works</a><a href="https://github.com/winnowwallet/winnow">GitHub ↗</a></nav></div></header>
+<main id="main">
+  <h1 id="import-the-bundle-is-the-history">Back up and restore</h1>
+  <p class="lede">Keep the backup file and your recovery words. The file restores known funds and history; signing recovery also requires the phone’s key.</p>
+  <nav class="contents" aria-label="On this page"><a href="#the-problem">Before you restore</a><a href="#format-version-2">File format</a><a href="#verification">What gets checked</a><a href="#what-a-lying-bundle-can-and-cannot-do">Trust limits</a><a href="#export-the-writer">Export details</a></nav>
+  <h2 id="the-problem">Before you restore</h2>
+  <p><strong>Automatic iCloud backup.</strong> Winnow saves an encrypted copy containing this phone’s signing secret and wallet state when iCloud is available. Simple mode shows upload status and offers a manual backup shortcut when iCloud is unavailable. Advanced contains manual export, recovery words and the switch to disable automatic backup. A successful save date confirms the upload; keep a manual file and recovery words as well. Payments not yet confirmed are in it too, so a restore announces them again. The encrypted copy also includes saved people, payment cards, sender names, receive labels, display name and interface mode. The steps below describe manual file backup and import.</p>
+  <ol><li>Choose <strong>Back up wallet</strong> and save a fresh file. A payment not yet confirmed goes in the file with the coins it spends.</li><li>Keep recovery words separately. The default file excludes them; choosing <strong>Include recovery phrase</strong> creates a file containing your phone’s signing secret.</li><li>Import a file from your own trusted wallet. Review the catch-up report and keep the original backup until the restored wallet is checked.</li></ol>
+  <p><strong>On a replacement device, a backup without recovery words restores a watch-only wallet.</strong> The manual JSON import screen does not accept the words separately. To restore signing through this screen, the imported backup must include them. You can create that file with <strong>Include recovery phrase</strong> on the original phone; protect it like the words themselves.</p>
+  <p>Winnow scans forward from the file’s recorded height. It does not search the entire past chain from a recovery phrase.</p>
+  <h3 id="cannot-restore">What a backup cannot restore</h3>
+  <ul>
+  <li><strong>Signing from a file without words.</strong> It restores a watch-only wallet; the import screen has no separate word entry.</li>
+  <li><strong>Coins from words alone.</strong> Winnow scans forward from a backup’s recorded height and never searches the past chain from a phrase.</li>
+  <li><strong>A send still pending.</strong> Manual export is refused until it confirms, and iCloud updates wait for it, so the saved date can lag.</li>
+  <li><strong>App context in a file.</strong> Saved people, payment cards, sender names and receive labels are only in the iCloud copy.</li>
+  <li><strong>Watch-only and xprv-only wallets in iCloud.</strong> Automatic backup needs recovery words; use a file for these.</li>
+  <li><strong>Device settings.</strong> Peer routing, manual peers and the explorer choice stay on the old device.</li>
+  <li><strong>Another Apple Account.</strong> A cloud backup stays with the first Apple Account that received it; later account changes cannot overwrite it.</li>
+  </ul>
+  <aside class="guide-summary"><p><strong>A catch-up scan is not proof of the backup’s past.</strong> It can find later payments and spends. It cannot independently establish every older coin’s existence, amount, or unspent status. Never accept a stranger’s file as proof of funds.</p></aside>
+  <h2 id="format-version-2">Backup file format</h2>
+<details><summary>JSON schema and validation rules</summary>
+  <p>JSON, one object:</p>
+  <div class="sourceCode" id="cb1"><pre class="sourceCode json"><code class="sourceCode json"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+  <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;version&quot;</span><span class="fu">:</span> <span class="dv">2</span><span class="fu">,</span></span>
+  <span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;network&quot;</span><span class="fu">:</span> <span class="st">&quot;signet&quot;</span><span class="fu">,</span></span>
+  <span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;descriptor&quot;</span><span class="fu">:</span> <span class="st">&quot;tr([fp/86&#39;/1&#39;/0&#39;]tpub…/&lt;0;1&gt;/*)#checksum&quot;</span><span class="fu">,</span></span>
+  <span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;mnemonic&quot;</span><span class="fu">:</span> <span class="st">&quot;word …&quot;</span><span class="fu">,</span></span>
+  <span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;lastKnownHeight&quot;</span><span class="fu">:</span> <span class="dv">150000</span><span class="fu">,</span></span>
+  <span id="cb1-6a"><a href="#cb1-6a" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;nextReceiveIndex&quot;</span><span class="fu">:</span> <span class="dv">4</span><span class="fu">,</span></span>
+  <span id="cb1-6b"><a href="#cb1-6b" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;nextChangeIndex&quot;</span><span class="fu">:</span> <span class="dv">2</span><span class="fu">,</span></span>
+  <span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;utxos&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+  <span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span></span>
+  <span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;txid&quot;</span><span class="fu">:</span> <span class="st">&quot;&lt;display hex&gt;&quot;</span><span class="fu">,</span></span>
+  <span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;vout&quot;</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span></span>
+  <span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;amount&quot;</span><span class="fu">:</span> <span class="dv">50000</span><span class="fu">,</span></span>
+  <span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;scriptPubKey&quot;</span><span class="fu">:</span> <span class="st">&quot;5120…&quot;</span><span class="fu">,</span></span>
+  <span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;chain&quot;</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span></span>
+  <span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;index&quot;</span><span class="fu">:</span> <span class="dv">3</span><span class="fu">,</span></span>
+  <span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;height&quot;</span><span class="fu">:</span> <span class="dv">149000</span><span class="fu">,</span></span>
+  <span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;isCoinbase&quot;</span><span class="fu">:</span> <span class="kw">true</span></span>
+  <span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">}</span></span>
+  <span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span><span class="fu">,</span></span>
+  <span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;transactions&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+  <span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span></span>
+  <span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;txid&quot;</span><span class="fu">:</span> <span class="st">&quot;&lt;display hex&gt;&quot;</span><span class="fu">,</span></span>
+  <span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;height&quot;</span><span class="fu">:</span> <span class="dv">149000</span><span class="fu">,</span></span>
+  <span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;received&quot;</span><span class="fu">:</span> <span class="dv">50000</span><span class="fu">,</span></span>
+  <span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;spent&quot;</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span></span>
+  <span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;fee&quot;</span><span class="fu">:</span> <span class="dv">250</span><span class="fu">,</span></span>
+  <span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;replacedBy&quot;</span><span class="fu">:</span> <span class="st">&quot;&lt;replacement transaction id, when fee-bumped&gt;&quot;</span></span>
+  <span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>    <span class="fu">}</span></span>
+  <span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span></span>
+  <span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+  <p>Rules the importer enforces before any network call:</p>
+  <ul>
+  <li><code>version</code> is <code>1</code> or <code>2</code>. Version 1 remains readable for existing descriptor-only exports; writers emit version 2. Unknown versions fail closed.</li>
+  <li><code>network</code> is <code>signet</code> or <code>mainnet</code> (the two networks the app opens).</li>
+  <li>At least one of <code>descriptor</code> or <code>mnemonic</code> is present.</li>
+  <li>If both are present they must <em>agree</em>: the BIP86 descriptor derived from the mnemonic equals the bundle descriptor, or import throws <code>descriptorMismatch</code>.</li>
+  <li>Mnemonic-only: the app derives the canonical <code>tr([fp/86'/coin'/0']xpub/&lt;0;1&gt;/*)</code> and stores the mnemonic in the keychain (spendable).</li>
+  <li>Descriptor-only: watch-only. The descriptor must be that same single-sig shape. Signing is impossible until a secret is supplied by some later path (there is none today — watch-only stays watch-only).</li>
+  <li>For each UTXO, <code>scriptPubKey</code> must be exactly what the descriptor derives at <code>(chain, index)</code>. A bundle cannot attach an arbitrary output to this wallet by lying about coordinates.</li>
+  <li>Legacy <code>silentPaymentTweak</code> signing data is unsupported. A bundle carrying it is refused so the metadata cannot be silently lost. Keep the original wallet file and use compatible wallet software to recover those coins.</li>
+  <li><code>isCoinbase</code> is emitted only when true. It preserves the consensus 100-confirmation maturity rule across export and restore; older bundles omit it and are treated as false.</li>
+  <li><code>txid</code> values are display (big-endian) hex on the wire and in the file; internally they are reversed to Bitcoin’s byte order, same as the rest of the stack.</li>
+  <li><code>chain</code> is <code>0</code> receive / <code>1</code> change (BIP44 external/internal, matching the multipath descriptor).</li>
+  <li>Scanning resumes at <code>lastKnownHeight + 1</code>. <code>creationHeight</code> of the new wallet state <em>is</em> <code>lastKnownHeight</code>.</li>
+  <li><code>lastKnownBlockHash</code> is optional: the display hex hash of block <code>lastKnownHeight</code>. Writers include it once the wallet has recorded it, so a later restore check can compare where it starts against headers; this version records it without checking it. Older files omit it.</li>
+  <li><code>nextReceiveIndex</code> / <code>nextChangeIndex</code> are the next unused BIP86 derivation indices. Writers emit them so a restore does not reissue an address whose coins have already been spent (UTXO-derived maxima go to 0 when every receive coin is gone). Older files omit the keys; the importer then uses <code>max(claimed index) + 1</code>, and never goes <em>below</em> that floor if a file names a smaller cursor.</li>
+  <li><code>vaults</code> is an optional list of multisig accounts: each account's <code>tr(NUMS, sortedmulti_a(k, …))</code> descriptor, address positions and tracked coins, under the key the shared-account Winnow used for all its accounts. Old files omit it. The app validates every account before replacing local state, then watches them during the same forward scan as the everyday wallet. A file carrying any other kind of account, such as a MuSig2 one, is refused, so those funds are never silently dropped from a restore. Other signers' private keys are never included. Each account also carries its <code>history</code> (the same entries as <code>transactions</code>, for the account's own receives and spends), at most one <code>draft</code> (the PSBT this phone is collecting signatures for, as base64, with the person it pays) and <code>inFlight</code> spends (transactions this phone broadcast that no block has taken, witness included, so a restored phone can announce them again or give up on them). Old files omit all three. A backup no longer waits for an account's payments to confirm: pending coins and reserved inputs travel as they are, and the restored phone keeps waiting for the same blocks.</li>
+  <li><code>rawTransaction</code> on a history entry is optional base64-encoded transaction data without witnesses. Its transaction ID must match the entry. It supplies the addresses and amounts shown when you open a payment. Older backups remain readable; when details are missing, Winnow can fetch that one known block from a Bitcoin peer, check its hash and Merkle root, and find the transaction. This does not rescan history or change balances. Recipient names and address counters stay in the phone’s separate local recipient file; they are not included in the manual wallet file. The encrypted iCloud backup includes this app context.</li>
+  <li><code>fee</code> on a history entry is optional. The writer includes it only when every input of that transaction was ours (the only case a filter client can compute the fee exactly). Older v1 files omit the key; readers treat absence as unknown. This is display state — omitting it does not create or destroy money. The on-device <code>observedFeeRates</code> samples FeePolicy uses are <strong>not</strong> in the bundle; a restored wallet falls back to the static presets until it observes new sends.</li>
+  <li><code>blockHash</code> on a history entry is optional: the display hex hash of the block the transaction confirmed in, recorded so a later restore check can compare the entry against headers instead of fetching the block; this version records it without checking it. A pending entry (height 0) never carries one; a malformed or pending hash is refused. Older files omit it.</li>
+  <li><code>signers</code> is an optional list of the signers the phone knows (Settings → Signers): the Ledgers it paired and the keys other people sent, each a name with one or more key expressions, and a paired Ledger's master fingerprint. Public keys only. Old files omit it. The list is not a wallet's, so on restore it joins the phone's own rather than replacing it: a signer already on the phone stays, one it does not have is added. A list that does not parse is refused with the file, never restored in part.</li>
+  </ul>
+  <p>Writers emit version 2. Readers accept versions 1 and 2 for ordinary descriptor-derived coins; version compatibility does not enable unsupported signing data.</p>
+  <p>Multisig accounts, their Ledger registrations and the signer list are included in current exports, file and iCloud alike. Each signer still needs their own key backup. A file from the shared-account Winnow that carries a MuSig2 account is refused; restore it in that app instead.</p>
+  <hr />
+</details>
+  <h2 id="verification">3. Verification</h2>
+  <p><code>Wallet.importing</code> seeds state <em>exactly as the bundle claims</em>. That is intentional: the phone must be able to watch the claimed scripts in order to check them. <code>watchScripts()</code> unions every known UTXO script onto the descriptor gap window — BIP158 basic filters include the prevout scriptPubKey, and without that union a later spend would never fetch the block. <code>Wallet.verifyImport</code> then runs <code>FilterSync</code> from <code>lastKnownHeight + 1</code> and builds an <code>ImportReport</code>:</p>
+  <div class="table-wrap" role="region" tabindex="0" aria-label="Scrollable table"><table>
+  <colgroup>
+  <col style="width: 43%" />
+  <col style="width: 56%" />
+  </colgroup>
+  <thead>
+  <tr>
+  <th>Field</th>
+  <th>Meaning</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+  <td><code>scannedFromHeight</code> / <code>scannedToHeight</code></td>
+  <td>The forward window actually scanned.</td>
+  </tr>
+  <tr>
+  <td><code>confirmedUTXOs</code></td>
+  <td>Claimed coins remaining after the scan. This does not independently prove their historical existence or amount.</td>
+  </tr>
+  <tr>
+  <td><code>spentSinceBundle</code></td>
+  <td>Claimed UTXOs the scan saw spent. Stale or wrong bundle.</td>
+  </tr>
+  <tr>
+  <td><code>discoveredUTXOs</code></td>
+  <td>Found by the scan, absent from the bundle (payments after export). Informational.</td>
+  </tr>
+  </tbody>
+  </table></div>
+  <p><code>matchesBundle</code> is <code>spentSinceBundle.isEmpty</code>. A stale export (you spent after you wrote the file) is a report the user can see, not a silent rewrite. Discovered UTXOs are applied — the point of the forward scan is to catch up — but a claimed-and-spent coin is never left in the spendable set as if the bundle were current.</p>
+  <p>The report core (<code>ImportReport.make</code>) is a pure function of the bundle plus the <code>MatchEffect</code>s of the scanned blocks, so it is unit-tested without a network. Import is outside the current payment journey. An earlier UI suite captured the report (<code>14-import-report.png</code>); its 18.79s verification measurement was recorded on 2026-08-17 using a signet iPhone 17 Pro Max simulator (<code>screenshots/timings.json</code>), not the current test.</p>
+  <p>Cost is proportional to how stale the bundle is, not to how old the wallet is. A current bundle needs little catch-up work; the phone still synchronizes headers and validates the file.</p>
+  <hr />
+  <h2 id="what-a-lying-bundle-can-and-cannot-do">4. What a lying bundle can and cannot do</h2>
+  <p>The bundle is trusted as a <em>starting claim</em>, then checked against filters. That is a weaker assumption than “the file is true,” and a stronger one than “the file is untrusted input from the internet.”</p>
+  <p>A malicious bundle <strong>cannot</strong>:</p>
+  <ul>
+  <li>Make this wallet spendable for an output it does not derive. ScriptPubKey / <code>(chain, index)</code> disagreement fails import.</li>
+  <li>Change the descriptor behind a mnemonic. Mismatch fails import.</li>
+  </ul>
+  <p>A malicious bundle <strong>can</strong>:</p>
+  <ul>
+  <li>Invent an older coin or misstate its amount while supplying a script the wallet derives. A forward scan does not prove that historical output exists. The claim may remain in the displayed balance and report; Bitcoin would reject an invalid spend.</li>
+  <li>Omit a UTXO you actually own. Verify will not invent it unless a forward-scan block happens to pay you again (or still contains it — it won’t, it’s old). <strong>Omission of old coins is the residual lie</strong>, and it is the same lie as any incomplete export. The mitigation is: export from software you trust, inspect the report, do not import a bundle a stranger handed you as a way to “recover” funds.</li>
+  <li>Omit history entries. The history list is for display; the spendable set is the UTXOs. Missing history does not create money.</li>
+  <li>Point <code>lastKnownHeight</code> too high, so the forward scan skips the window in which a claimed coin was spent. Then <code>spentSinceBundle</code> stays empty and a spent coin looks live until some later spend attempt fails, or a restore from a trustworthy earlier backup. <strong>A too-high height is the dangerous lie.</strong> The importer does not currently prove the height against a checkpoint the previous wallet signed. Mitigation: treat a bundle from an unknown height as suspect; prefer exports that name a height you can see on a header explorer you already use; the report shows the window that was actually scanned.</li>
+  <li>Point <code>lastKnownHeight</code> too low. That only makes the forward scan longer. Harmless except for bandwidth.</li>
+  </ul>
+  <p>This is the import analogue of <a href="/read-side">read-side</a> §2.7.1 (filters can lie by omission). Here the <em>file</em> can lie by omission or by a too-high height. The chain check catches spends inside the scanned window. It does not reconstruct a past the bundle refused to include.</p>
+  <hr />
+  <h2 id="export-the-writer">5. Export (the writer)</h2>
+  <p>Winnow writes version 2 JSON and reads versions 1 and 2. <strong>Back up wallet</strong> (in Advanced settings, or the manual-backup shortcut when beginner mode is not backed up) writes descriptor + known UTXOs + history (including <code>fee</code> when known) + the next unused receive and change indices + <code>lastKnownHeight</code> = the live FilterSync frontier (<code>nextScanHeight − 1</code>). The app persists that frontier back into <code>WalletState</code> after each sync pass — <code>apply(match:)</code> alone does not move it — so an export after ordinary app use resumes where the phone actually stopped, not at the creation/import height. The mnemonic is <strong>excluded by default</strong>; including it is a hot backup and takes an explicit toggle plus a confirm. The screen confirms whether recovery words are included and offers a save/share button. It does not display the JSON or recovery words. The share-sheet file is a unique, backup-excluded temp that is deleted when the backup screen closes, the app goes into the background, the seed toggle flips, or the write fails. A missing keystore entry or an xprv-only wallet throws <code>mnemonicUnavailable</code> rather than a raw keystore error.</p>
+  <p>A Winnow-native wallet that is never exported cannot be recovered here from the 12 words alone — that is the no-back-scan rule, not a missing feature of import. Export is the other half.</p>
+  <p>Pending (height 0) change outputs stay in the UTXO set: they are live spendable state. A send no block has taken yet goes in the bundle's <code>pendingSends</code>: its raw transaction, the coins it spends, its change and fee. Import checks each one against the descriptor (its inputs are exactly those coins, the wallet's own, none spent twice), keeps the coins reserved by it and hands the transaction back to the relay, so the restored phone keeps announcing it until a block takes it. Shared accounts carry their drafts and spends in flight the same way.</p>
+  <hr />
+  <h2 id="what-this-is-not">6. What this is not</h2>
+  <ul>
+  <li><strong>Not a BIP39-only import.</strong> A 12-word phrase without history would force a back-scan. The onboarding UI does not offer “type your words and we’ll find your coins.”</li>
+  <li><strong>Not an xpub watcher that asks an indexer.</strong> Descriptor-only import is watch-only and still uses filters, from the bundle height forward. External explorer links never get to skip the bundle.</li>
+  <li><strong>Not SLIP-39 / Passport / SeedQR / output descriptors of every flavor.</strong> v1 is the everyday BIP86 wallet this app itself creates. That is the export we can specify and the import we can verify. Broader descriptor import is a format-version bump, not a silent widening of <code>tr(KEY)</code>.</li>
+  </ul>
+  <hr />
+<h2 id="conclusion">Keep the original backup</h2>
+<p>A successful forward scan checks activity within its scanned window. Missing older coins, invented claims and an incorrect starting height remain reasons to trust the source of the file, not just the report.</p>
+</main>
+<footer><div class="bar"><nav aria-label="Footer"><a href="/roadmap">Roadmap</a><a href="/privacy">Privacy</a><a href="/recording">Recording</a></nav></div></footer>
+</body>
+</html>

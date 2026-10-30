@@ -1,0 +1,25 @@
+#!/bin/bash
+# The Lean app for iOS from a clean checkout: ElmLean's build-ios
+# (LeanApp/.lake/packages/elmlean/framework/native/ci/build-ios) with Winnow's names, after the census list
+# the app bundles:
+#
+#   scripts/build-ios <Debug|Release> [iossim|ios|maccatalyst] [xcodebuild arguments]
+#
+# The census (scripts/import-census) is imported for CI (`CI=true`) and Release builds, and whenever
+# build/census/peers.json is missing; IMPORT_CENSUS=1 forces it and IMPORT_CENSUS=0 skips it. ElmLean's
+# variables apply (PREPARE_ONLY=1, BUILD_LOG, DERIVED_DATA). A device build without xcodebuild arguments is
+# unsigned.
+set -euo pipefail
+CONFIG="${1:?Debug or Release}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+case "${IMPORT_CENSUS-}" in
+  1) IMPORT=1 ;;
+  0) IMPORT=0 ;;
+  "") if [ "${CI:-}" = true ] || [ "$CONFIG" = Release ]; then IMPORT=1; else IMPORT=0; fi ;;
+  *) echo "IMPORT_CENSUS: 0 or 1" >&2; exit 2 ;;
+esac
+[ -f "$ROOT/build/census/peers.json" ] || IMPORT=1
+if [ "$IMPORT" = 1 ]; then "$ROOT/scripts/import-census"; fi
+(cd "$ROOT/LeanApp" && lake env true)
+APP_DIR="$ROOT/LeanApp" APP_ROOT=WinnowApp SCHEME=WinnowLean \
+  exec "$ROOT/LeanApp/.lake/packages/elmlean/framework/native/ci/build-ios" "$@"
