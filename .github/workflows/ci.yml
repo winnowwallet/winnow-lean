@@ -1,32 +1,26 @@
 name: CI
-# The Lean app's checks on every pull request and push to main, by LeanNative's ios-app workflow
-# (LeanNative/leannative, formerly posix4e/elmlean): one job builds
-# the Lean once (every proof checked) and caches it; `tests`, `extra` (the regtest node) and `app` (the iOS
-# builds and the UI journeys) restore that build and run in parallel, on the Mac mini's runners with WarpBuild as the fallback (see `self-hosted` below). The LeanNative commit below is the one LeanApp/lake-manifest.json pins; the
-# build job fails if they differ. Actions does not follow repository redirects for reusable workflows, so the
-# owner/repo here is the framework's real home.
+# The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
+# two WarpBuild jobs that start at once, `lean` (the Lean built, every proof checked, then every test below at the
+# same time, the regtest node's among them) and `app` (the iOS builds and the UI journeys). It runs on pull
+# requests, nightly on main and by hand; not on a push to main, which only ever gets a tree a pull request
+# already passed (release.yml looks for that run instead of testing again). The LeanNative commit below is
+# the one LeanApp/lake-manifest.json pins; both jobs fail if they differ. Actions does not follow repository
+# redirects for reusable workflows, so the owner/repo here is the framework's real home.
 on:
   pull_request:
-  push:
-    branches: [main]
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
-  workflow_call:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   app:
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@eb09bea55d82212cfef846689102b3433d966885
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@b3610efd39d68bc33e5bc0f86d5b0ce7d5d0702f
     with:
-      leannative: eb09bea55d82212cfef846689102b3433d966885
-      # the Mac mini's runners by default; WarpBuild for forks, when CI_RUNNER is `hosted`, and when no mini
-      # runner is online (with RUNNER_STATUS_TOKEN)
-      self-hosted: '["self-hosted", "winnow-lean-mini"]'
-      runner: ${{ vars.CI_RUNNER }}
+      leannative: b3610efd39d68bc33e5bc0f86d5b0ce7d5d0702f
       runs-on: warp-macos-26-arm64-12x
       lean-packages: Lean LeanApp
       build-targets: |
@@ -35,9 +29,8 @@ jobs:
       app-dir: LeanApp
       app-root: WinnowApp
       scheme: WinnowLean
-      # the census list the app bundles: signature verified, health filtered, once per run
+      # the census list the app bundles: signature verified, health filtered (each job imports it)
       prepare: scripts/import-census && cp build/census/peers-source.txt "$CI_RESULTS/"
-      carry: build/census/
       tests: |
         . Lean/.lake/build/bin/census-check build/census/peers.json
         . CENSUS_CHECK="$PWD/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s scripts/tests -v
@@ -48,7 +41,7 @@ jobs:
         LeanApp .lake/build/bin/records-test
         LeanApp .lake/build/bin/multisig-app-test
         LeanApp .lake/build/bin/ledger-transport-test
-      extra: scripts/ci-regtest
+        . scripts/ci-regtest
       release-check: scripts/verify-release-no-test-mode
       ui-name: journey
       # the only iPhone the WarpBuild runner's newest iOS runtime (27.1) has; the website's screenshots are this size
@@ -59,5 +52,3 @@ jobs:
       after-ui: scripts/journey-media
       publish-name: journey-media
       publish-path: build/journey-media/
-    secrets:
-      RUNNER_STATUS_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}

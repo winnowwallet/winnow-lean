@@ -9,17 +9,16 @@ history stays in [winnowwallet/winnow](https://github.com/winnowwallet/winnow).
 
 ## CI
 
-Every pull request and push to main runs LeanNative's reusable `ios-app`
-workflow ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on
-WarpBuild runners. A fork's pull request gets no CI. The Lean is built once and
-cached; the other jobs restore it and run in parallel.
+Every pull request runs LeanNative's reusable `ios-app` workflow
+([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on WarpBuild runners,
+and so does main, nightly and by hand. A push to main does not: main only gets a
+tree a pull request already passed, and `release.yml` looks for that run. Two
+jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `build` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables. Imports the census peer list once (`scripts/import-census`). |
-| `tests` | `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`. |
-| `extra` | `scripts/ci-regtest`: `io-test`, `backend-test` and `multisig-differential` against a disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads). |
-| `app` | Debug and Release simulator builds and a Release device build, each checked for Swift; `verify-release-no-test-mode`; the UI journeys; then the `journey-media` artifact. |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, and `scripts/ci-regtest` (`io-test`, `backend-test` and `multisig-differential` against a disposable regtest Bitcoin Core, the pinned release `scripts/install-bitcoin` downloads). |
+| `app` | The same build and import; Debug and Release simulator builds and a Release device build, each checked for Swift; `verify-release-no-test-mode`; the UI journeys; then the `journey-media` artifact. |
 
 `verify-release-no-test-mode` launches both simulator builds with test mode's
 environment: Debug must start the test run, Release must ignore it.

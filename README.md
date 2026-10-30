@@ -131,18 +131,17 @@ keeps the result bundle, a screen recording, the screenshots and the journals.
 
 ### CI and TestFlight
 
-`.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request and push to
-main, on WarpBuild runners (a fork's pull request gets no CI: push it to a branch here). The Lean is built once and
-cached; the other jobs restore it and run in parallel, and every long step prints its progress as it goes:
+`.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request, nightly on main
+and by hand, in two WarpBuild jobs that start at once and each build the Lean from the cache; every long step
+prints its progress as it goes:
 
 | job | what |
 |---|---|
-| `build` | builds `Lean/` and `LeanApp/` (every proof) and the test executables; imports the census list once |
-| `tests` | census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, records-test, multisig-app-test, ledger-transport-test |
-| `extra` | `scripts/ci-regtest`: io-test, backend-test and multisig-differential against a disposable regtest bitcoind |
-| `app` | Debug and Release for the simulator and Release for devices, each checked for Swift; `verify-release-no-test-mode`; the UI journeys (`scripts/ui-fixture` as the hooks); the website's media (`scripts/journey-media`) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test and `scripts/ci-regtest` (io-test, backend-test and multisig-differential against a disposable regtest bitcoind) |
+| `app` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift; `verify-release-no-test-mode`; the UI journeys (`scripts/ui-fixture` as the hooks); the website's media (`scripts/journey-media`) |
 
-`.github/workflows/release.yml`: a `vMAJOR.MINOR.PATCH` tag runs the whole CI, then archives the app as
+`.github/workflows/release.yml`: a `vMAJOR.MINOR.PATCH` tag finds a successful CI run on the same tree (main is a
+fold of a tested pull request), then archives the app as
 `com.btcswift.app` (team 2858MX5336, the identity of the Swift app it replaces), checks the archive and
 the exported IPA (`verify-signed-archive`, `verify-exported-ipa`, `check-no-swift`), uploads it and adds
 it to TestFlight's internal group (`scripts/testflight.sh`, whose App Store Connect token comes from
