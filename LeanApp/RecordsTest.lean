@@ -2,6 +2,7 @@ import WinnowApp.Real.RecordsBackend
 import WinnowApp.Real
 import WinnowApp.View
 import WinnowApp.E2E
+import WinnowApp.Project
 import ElmLean.Erase
 import ElmLean.Json
 
@@ -574,11 +575,15 @@ def backgroundRuns (t : T) : IO Unit := do
     Real.stopNetworking env
     IO.FS.removeDirAll root
   | _ => t.check "cold background run: test mode resolves" false
-  -- testBackgroundIdentifiersAreDeclaredInBuiltApplication: the project the app is built from
-  let project ← IO.FS.readFile "ios/project.yml"
+  -- testBackgroundIdentifiersAreDeclaredInBuiltApplication: the Info.plist the app's manifest generates
+  let info := WinnowApp.manifest.infoPlist
+  let strs (k : String) : List String := match info.getObjValAs? (Array String) k with
+    | .ok a => a.toList
+    | .error _ => []
   t.check "background: the identifiers are permitted in Info.plist"
-    (contains project s!"- {Real.backgroundRefreshID}" && contains project s!"- {Real.backgroundProcessingID}")
-  t.check "background: fetch and processing modes" (contains project "UIBackgroundModes: [fetch, processing]")
+    (strs "BGTaskSchedulerPermittedIdentifiers" == [Real.backgroundRefreshID, Real.backgroundProcessingID])
+  t.check "background: fetch and processing modes" (strs "UIBackgroundModes" == ["fetch", "processing"])
+  t.check "background: the manifest passes LeanNative's capability checks" WinnowApp.manifest.problems.isEmpty
   -- the Model: a cold launch's task waits for boot, boot without a scene starts no networking
   let (m, cs) := onHost (.bgtask Real.backgroundRefreshID "refresh") ({} : Model)
   t.check "Model: a task launched during boot waits for the wallet" (m.pendingBackgroundTask == some (Real.backgroundRefreshID, "refresh") &&

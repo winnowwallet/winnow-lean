@@ -536,7 +536,7 @@ static NSString *WLAccountID(NSString *descriptor) {
     WLShot(self, app, @"23-ledger-transactions");
 }
 
-/// The census list the build ships (project.yml bundles build/census/peers.json; CensusCatalog.bundled
+/// The census list the build ships (the app's manifest bundles build/census/peers.json; CensusCatalog.bundled
 /// reads it beside the executable): Advanced mode's Settings on mainnet show its date and count, not the
 /// sentence for a build without one.
 - (void)testShippedCensus {

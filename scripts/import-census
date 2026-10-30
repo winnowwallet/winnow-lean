@@ -24,7 +24,7 @@ census's main, its newest), and:
 5. writes build/census/peers.json and peers-source.txt (where it came from,
    the signature, the health filter, both files' SHA-256).
 
-project.yml bundles build/census/peers.json; scripts/build-ios runs this.
+The app's manifest (LeanApp/WinnowApp/Project.lean) bundles build/census/peers.json; scripts/build-ios runs this.
 
 Usage: scripts/import-census [40-character census commit]
 

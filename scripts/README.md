@@ -33,7 +33,7 @@ CI is ElmLean's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls it
 - [signet-fixture](signet-fixture) provisions a disposable custom-signet bitcoind (`up`, `down`, `status`,
   `snapshot DIR`, `destroy`). For a regtest node with a funded wallet, use `LeanApp`'s `backend-test --fixture <dir>`.
 - [import-census](import-census) fetches the census's `census/peers.json` at a census commit (default: its
-  `main`, the newest) into `build/census/`, the peer list the app ships (`project.yml` bundles it): it
+  `main`, the newest) into `build/census/`, the peer list the app ships (the app's manifest, `LeanApp/WinnowApp/Project.lean`, bundles it): it
   verifies the Ed25519 signature under the key pinned in [census-public-key.txt](census-public-key.txt)
   ([ed25519_verify.py](ed25519_verify.py)), drops clearnet peers the census's health record scores under 70,
   checks the result with Lean's `census-check` and records its provenance in `build/census/peers-source.txt`.

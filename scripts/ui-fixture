@@ -40,7 +40,8 @@ PY
   stop)
     UDID="${3:-}"
     if [ -n "$UDID" ]; then
-      BUNDLE_ID=$(grep -m1 'PRODUCT_BUNDLE_IDENTIFIER:' "$APP/ios/project.yml" | sed 's/.*: *//')
+      # the app's bundle id, from the spec LeanNative's build-ios wrote from WinnowApp/Project.lean
+      BUNDLE_ID=$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["targets"]["WinnowLean"]["settings"]["base"]["PRODUCT_BUNDLE_IDENTIFIER"])' "$APP/ios/build/project.json")
       # the app's test-mode journals (Application Support/BTCSwiftE2E-<run>/story-events.jsonl)
       if DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null); then
         for j in "$DATA/Library/Application Support"/BTCSwiftE2E-*/story-events.jsonl; do

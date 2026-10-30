@@ -47,9 +47,8 @@ jobs:
       - name: Set version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          sed -i '' "s/MARKETING_VERSION: \"0.1.0\"/MARKETING_VERSION: \"$VERSION\"/" LeanApp/ios/project.yml
-          sed -i '' "s/CURRENT_PROJECT_VERSION: \"1\"/CURRENT_PROJECT_VERSION: \"$GITHUB_RUN_NUMBER\"/" LeanApp/ios/project.yml
-          grep -E "MARKETING_VERSION|CURRENT_PROJECT_VERSION" LeanApp/ios/project.yml
+          # the archive passes both to xcodebuild (the manifest's version is MARKETING_VERSION and
+          # CURRENT_PROJECT_VERSION, WinnowApp/Project.lean)
           printf 'TESTFLIGHT_MARKETING_VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
           printf 'TESTFLIGHT_BUILD_NUMBER=%s\n' "$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
 
@@ -125,6 +124,8 @@ jobs:
           -authenticationKeyPath "${RUNNER_TEMP}/winnow-signing/AuthKey.p8"
           -authenticationKeyID "$ASC_KEY_ID"
           -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          MARKETING_VERSION="$TESTFLIGHT_MARKETING_VERSION"
+          CURRENT_PROJECT_VERSION="$TESTFLIGHT_BUILD_NUMBER"
           archive 2>&1 | tee build-archive.log
 
       - name: Verify the archive's identity, signature and that it has no Swift

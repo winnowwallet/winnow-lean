@@ -2,7 +2,7 @@
 build/
 DerivedData/
 WinnowApp.xcodeproj/
-# The Lean app's Xcode project is generated from LeanApp/ios/project.yml; Lake's build output
+# The Lean app's Xcode project is generated from its manifest (LeanApp/WinnowApp/Project.lean); Lake's build output
 LeanApp/ios/WinnowLean.xcodeproj/
 .lake/
 *.xcuserstate

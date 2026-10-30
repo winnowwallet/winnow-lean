@@ -1,8 +1,10 @@
-Winnow 0.9.4: the same wallet, rewritten in Lean (internal test)
+Winnow 0.9.5: the same wallet, rewritten in Lean
 
-New in 0.9.4
+New in 0.9.5
 
-Nothing you can see: it takes LeanNative's fixes to the test recordings and to how a failed Face ID is reported. Please keep checking 0.9.3's items below.
+Nothing you can see: the app's Xcode project is now generated from a description of the app in Lean, which checks that every permission Winnow asks for (Face ID, Bluetooth, background checks, iCloud) carries its explanation. Please keep checking 0.9.3's items below.
+
+0.9.4 took LeanNative's fixes to the test recordings and to how a failed Face ID is reported.
 
 New in 0.9.3
 

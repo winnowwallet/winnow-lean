@@ -77,8 +77,10 @@ well. The
   `Secp/` is the proven secp256k1. `IOTest.lean` (`io-test`) runs the network layer against a disposable
   regtest bitcoind.
 - `LeanApp/`: the app: `WinnowApp/` holds the model, update, views and commands (Elm-style, ElmLean),
-  `WinnowApp/Real/` the backend, `WinnowApp/E2E.lean` the Debug-only test mode. `ios/` is the XcodeGen
-  project that links the Lean-generated C with ElmLean's native shell (renderer, C shim, capabilities:
+  `WinnowApp/Real/` the backend, `WinnowApp/E2E.lean` the Debug-only test mode, `WinnowApp/Project.lean`
+  the app's manifest: LeanNative generates the Xcode project from it (`lake exe ios-project` writes the XcodeGen
+  spec) and refuses a capability the app uses without its usage text or entitlement. `ios/` keeps only the
+  icon and the UI tests. The project links the Lean-generated C with LeanNative's native shell (renderer, C shim, capabilities:
   Keychain, device authentication, clipboard, HTTPS, paths). The shell is Objective-C printed from Lean
   at build time into `ios/build/native-shell/`, never checked in; the app compiles no Swift at all.
 - `docs/`: the website and the papers the app bundles.
@@ -100,7 +102,7 @@ scripts/ui-journeys                          # the Objective-C UI journeys again
 LeanApp pins the ElmLean framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
 `LeanApp/.lake/packages/elmlean`. `scripts/build-ios <Debug|Release> [iossim|ios]` runs ElmLean's
 `framework/native/ci/build-ios` with Winnow's names: it builds WinnowApp, gathers the generated C, prints the
-Objective-C shell, writes the Xcode project (XcodeGen 2.46.0) and builds it. Simulator builds are ad-hoc signed (an unsigned app has no
+Objective-C shell, writes the Xcode project from the manifest (XcodeGen 2.46.0) and builds it. Simulator builds are ad-hoc signed (an unsigned app has no
 Keychain entitlement). `backend-test --fixture <dir>` leaves a funded regtest node running for manual
 simulator runs. Tests find Bitcoin Core through `WINNOW_BITCOIND` / `WINNOW_BITCOIN_CLI`, Homebrew or the
 PATH; CI sets the first two to the pinned release `scripts/install-bitcoin` downloads.

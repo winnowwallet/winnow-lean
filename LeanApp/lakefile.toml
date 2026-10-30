@@ -14,11 +14,16 @@ path = "../Lean"
 [[require]]
 name = "elmlean"
 git = "https://github.com/LeanNative/leannative.git"
-rev = "1f859db60356d7a4038b3605f8e4a75a6c44cc0c"
+rev = "7ab7ec8f523263491cc0b532c187cbd59daf1da3"
 subDir = "framework/lean"
 
 [[lean_lib]]
 name = "WinnowApp"
+
+# The Xcode project's spec, from WinnowApp/Project.lean (LeanNative's framework/native/ci/build-ios runs it).
+[[lean_exe]]
+name = "ios-project"
+root = "IosProject"
 
 # `Backend.real` end to end against a disposable regtest bitcoind (BackendTest.lean).
 [[lean_exe]]
