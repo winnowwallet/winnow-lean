@@ -1,0 +1,20 @@
+-- The Wallet area (aggregator: import every module of Winnow/Wallet here).
+import Winnow.Crypto
+import Winnow.Wallet.FeePolicy
+import Winnow.Wallet.SwiftDouble
+import Winnow.Wallet.SwiftJSON
+import Winnow.Wallet.Types
+import Winnow.Wallet.CoinSelection
+import Winnow.Wallet.ExportStagingFile
+import Winnow.Wallet.Descriptor
+import Winnow.Wallet.Signer
+import Winnow.Wallet.PSBTRoles
+import Winnow.Wallet.MultisigSpendRecords
+import Winnow.Wallet.MultisigAccount
+import Winnow.Wallet.SignerRecord
+import Winnow.Wallet.HistoryLedger
+import Winnow.Wallet.Characters
+import Winnow.Wallet.ImportBundle
+import Winnow.Wallet.Wallet
+import Winnow.Wallet.CloudWalletBackup
+import Winnow.Wallet.People

@@ -1,0 +1,63 @@
+name: CI
+# The Lean app's checks on every pull request and push to main, by LeanNative's ios-app workflow
+# (LeanNative/leannative, formerly posix4e/elmlean): one job builds
+# the Lean once (every proof checked) and caches it; `tests`, `extra` (the regtest node) and `app` (the iOS
+# builds and the UI journeys) restore that build and run in parallel, on the Mac mini's runners with WarpBuild as the fallback (see `self-hosted` below). The LeanNative commit below is the one LeanApp/lake-manifest.json pins; the
+# build job fails if they differ. Actions does not follow repository redirects for reusable workflows, so the
+# owner/repo here is the framework's real home.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  app:
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@eb09bea55d82212cfef846689102b3433d966885
+    with:
+      leannative: eb09bea55d82212cfef846689102b3433d966885
+      # the Mac mini's runners by default; WarpBuild for forks, when CI_RUNNER is `hosted`, and when no mini
+      # runner is online (with RUNNER_STATUS_TOKEN)
+      self-hosted: '["self-hosted", "winnow-lean-mini"]'
+      runner: ${{ vars.CI_RUNNER }}
+      runs-on: warp-macos-26-arm64-12x
+      lean-packages: Lean LeanApp
+      build-targets: |
+        Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check
+        LeanApp records-test multisig-app-test ledger-transport-test backend-test
+      app-dir: LeanApp
+      app-root: WinnowApp
+      scheme: WinnowLean
+      # the census list the app bundles: signature verified, health filtered, once per run
+      prepare: scripts/import-census && cp build/census/peers-source.txt "$CI_RESULTS/"
+      carry: build/census/
+      tests: |
+        . Lean/.lake/build/bin/census-check build/census/peers.json
+        . CENSUS_CHECK="$PWD/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s scripts/tests -v
+        Lean .lake/build/bin/multisig-test
+        Lean .lake/build/bin/ledger-test
+        Lean .lake/build/bin/silent-payment-test
+        Lean .lake/build/bin/crypto-test
+        LeanApp .lake/build/bin/records-test
+        LeanApp .lake/build/bin/multisig-app-test
+        LeanApp .lake/build/bin/ledger-transport-test
+      extra: scripts/ci-regtest
+      release-check: scripts/verify-release-no-test-mode
+      ui-name: journey
+      # the only iPhone the WarpBuild runner's newest iOS runtime (27.1) has; the website's screenshots are this size
+      ui-device-type: iPhone Duo
+      ui-before: scripts/ui-fixture start
+      ui-after: scripts/ui-fixture stop
+      # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run
+      after-ui: scripts/journey-media
+      publish-name: journey-media
+      publish-path: build/journey-media/
+    secrets:
+      RUNNER_STATUS_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}

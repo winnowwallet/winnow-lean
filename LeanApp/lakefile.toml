@@ -1,0 +1,68 @@
+# The Winnow app in Lean (LeanNative native mode): Model, Msg, update, view, commands; the wallet is the
+# Lean port in ../Lean. Built into the iOS app by LeanNative's framework/native (see ../PORT.md).
+name = "winnowapp"
+defaultTargets = ["WinnowApp"]
+
+[[require]]
+name = "winnow"
+path = "../Lean"
+
+# LeanNative (formerly ElmLean), pinned: the framework's Lean package
+# (framework/lean) and, beside it, the native shell's C shim and build scripts (framework/native), at
+# .lake/packages/leannative/framework after `lake update`. The same commit is the `uses:` and `leannative:` of
+# .github/workflows/ci.yml.
+[[require]]
+name = "leannative"
+git = "https://github.com/LeanNative/leannative.git"
+rev = "eb09bea55d82212cfef846689102b3433d966885"
+subDir = "framework/lean"
+
+[[lean_lib]]
+name = "WinnowApp"
+
+# The Xcode project's spec, from WinnowApp/Project.lean (LeanNative's framework/native/ci/build-ios runs it).
+[[lean_exe]]
+name = "ios-project"
+root = "IosProject"
+
+# `Backend.real` end to end against a disposable regtest bitcoind (BackendTest.lean).
+[[lean_exe]]
+name = "backend-test"
+root = "BackendTest"
+
+# The records side of the backend, headless (WinnowApp/Real/Records*.lean).
+[[lean_exe]]
+name = "records-test"
+root = "RecordsTest"
+
+# The Lean side of the records lockstep (LeanOracle/gen/f_records.py; Swift: oracle-records).
+[[lean_exe]]
+name = "oracle-records"
+root = "OracleRecords"
+
+# The Lean side of the pure-helpers lockstep (LeanOracle/gen/f_pure.py; Swift: oracle-pure).
+[[lean_exe]]
+name = "oracle-pure"
+root = "OraclePure"
+
+# The Lean side of the test-mode lockstep (LeanOracle/gen/f_e2e.py; Swift: oracle-e2e).
+[[lean_exe]]
+name = "oracle-e2e"
+root = "OracleE2E"
+
+# The app's Ledger transport over the shell's ble.* capabilities, against a fake peripheral backed by
+# the Lean Ledger simulator.
+[[lean_exe]]
+name = "ledger-transport-test"
+root = "LedgerTransportTest"
+
+# Upstream's MultisigStoreTests and the non-Ledger MultisigAccountFlowTests (WinnowApp/Real/Multisig*.lean).
+[[lean_exe]]
+name = "multisig-app-test"
+root = "MultisigAppTest"
+
+# The encrypted iCloud recovery formats (Winnow/Wallet/CloudWalletBackup.lean, WinnowApp/Real/CloudAppState.lean),
+# with Swift's own backups and digests (../Lean/Vectors/cloud-backup.json). Run from LeanApp/.
+[[lean_exe]]
+name = "cloud-backup-test"
+root = "CloudBackupTest"
