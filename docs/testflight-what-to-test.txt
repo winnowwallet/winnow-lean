@@ -1,10 +1,10 @@
-Winnow 0.9.8: the same wallet, rewritten in Lean
+Winnow 0.9.9: the same wallet, rewritten in Lean
 
-New in 0.9.8
+New in 0.9.9
 
-Nothing should look different. LeanNative, the framework Winnow is built on, finished renaming its parts from their old ElmLean names, and Winnow's signatures are now checked on every build against BIP340's published test vectors. Please use the wallet as you normally do and report anything that no longer responds: a payment, a fee bump, the iCloud backup, Face ID, a multisig account or the Ledger.
+Nothing should look different: only how Winnow is tested changed, and the app is built from the same code as 0.9.8. Please use the wallet as you normally do and report anything that no longer responds: a payment, a fee bump, the iCloud backup, Face ID, a multisig account or the Ledger.
 
-0.9.7 split the app's largest functions into smaller ones; 0.9.6 said that the peer list ships with the app; 0.9.5 generated the Xcode project from Lean; 0.9.4 fixed how a failed Face ID is reported.
+0.9.8 checked signatures against BIP340's test vectors; 0.9.7 split the app's largest functions; 0.9.6 said that the peer list ships with the app; 0.9.5 generated the Xcode project from Lean.
 
 New in 0.9.3
 
