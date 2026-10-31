@@ -11,37 +11,41 @@ history stays in [winnowwallet/winnow](https://github.com/winnowwallet/winnow).
 
 Every pull request runs LeanNative's reusable `ios-app` workflow
 ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on WarpBuild runners,
-and so does main, nightly and by hand. A push to main does not: main only gets a
-tree a pull request already passed, and `release.yml` looks for that run. Two
-jobs start at once, and each builds the Lean from the cache.
+and so does main, nightly and by hand. A push to main does not. A pull request's
+run is the short one: Debug only, the first journey, two differential cases, and
+`multisig-app-test` without its two slowest nested flows. The nightly and manual
+runs do everything, and `release.yml` looks for one of those on the tag's tree.
+Two jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, and `scripts/ci-regtest` (`io-test`, `backend-test` and `multisig-differential` against a disposable regtest Bitcoin Core, the pinned release `scripts/install-bitcoin` downloads). |
-| `app` | The same build and import; Debug and Release simulator builds and a Release device build, each checked for Swift; `verify-release-no-test-mode`; the UI journeys; then the `journey-media` artifact. |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test` (`MULTISIG_APP_QUICK=1` on a pull request), `ledger-transport-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6, or 2 on a pull request). |
+| `app` | The same build and import; a Debug simulator build, checked for Swift; the UI journeys, `createReceiveSendConfirm` on a pull request and all five otherwise. A full run also makes the Release simulator and device builds, checks them for Swift, runs `verify-release-no-test-mode`, and produces the `journey-media` artifact. |
 
 `verify-release-no-test-mode` launches both simulator builds with test mode's
 environment: Debug must start the test run, Release must ignore it.
 
 ## The five journeys
 
-The UI journeys are Objective-C XCUITests (`LeanApp/ios/UITests`, target
-`WinnowLeanUITests`). Each launches the app in test mode on an iPhone Duo
-simulator against a regtest node, finds controls by the identifiers the views
-give them, and checks the app's results against the node.
+The UI journeys are Lean (`LeanApp/Journeys.lean`), run on the Mac. Each step
+is one command to LeanNative's journey driver, the one XCUITest in the app's UI
+test target; each check is Lean, against the node. Each journey launches the
+app in test mode on an iPhone Duo simulator against a regtest node, finds
+controls by the identifiers the views give them, and checks the app's results
+against the node.
 
-- `testCreateReceiveSendConfirm`: create a wallet, receive from the node,
+- `createReceiveSendConfirm`: create a wallet, receive from the node,
   review and send a payment the node accepts, see it confirm.
-- `testLedgerPairVerifySpend`: pair test mode's simulated Ledger, have it
+- `ledgerPairVerifySpend`: pair test mode's simulated Ledger, have it
   verify the receive address, and spend with the phone's and the Ledger's
   signatures.
-- `testMultisigTwoOfThreeWithRecovery`: a 2-of-3 with two Bitcoin Core
+- `multisigTwoOfThreeWithRecovery`: a 2-of-3 with two Bitcoin Core
   wallets, built in the app. The first address is Core's; the phone and both
   Cores sign, and Core accepts a witness with exactly two signatures. After the
   one-day delay the phone alone spends on the recovery path.
-- `testShippedCensus`: the census peer list the build ships shows in Settings
+- `shippedCensus`: the census peer list the build ships shows in Settings
   on mainnet.
-- `testSilentPaymentSend`: pay a BIP352 code. The node's transaction pays the
+- `silentPaymentSend`: pay a BIP352 code. The node's transaction pays the
   one output that backend-test's receiver, written from the BIP's receiving
   side, finds, and the receipt shows its address.
 
@@ -67,10 +71,10 @@ scripts/ui-journeys                          # the UI journeys against a regtest
 
 `scripts/ui-journeys` runs the journeys as CI does, on a throwaway simulator
 unless `UI_SIMULATOR` names one, and keeps the result bundle, a screen
-recording, the screenshots and the app's test-mode journals in
-`LeanApp/ios/build/ui-journey`. Pass `xcodebuild` arguments to run one, for
-example
-`-only-testing:WinnowLeanUITests/WinnowLeanUITests/testCreateReceiveSendConfirm`.
+recording, the screenshots, `journeys.json` (each journey's result and time)
+and the app's test-mode journals in `LeanApp/ios/build/ui-journey`. Name
+journeys to run only those, for example
+`UI_JOURNEYS="createReceiveSendConfirm" scripts/ui-journeys`.
 Tests find Bitcoin Core through `WINNOW_BITCOIND` and `WINNOW_BITCOIN_CLI`,
 Homebrew or the PATH; `scripts/ci-regtest` uses the pinned release that
 `scripts/install-bitcoin` downloads.

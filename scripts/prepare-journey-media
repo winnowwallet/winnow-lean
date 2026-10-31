@@ -11,7 +11,7 @@ This wrapper keeps what is the website's: <media-out> must not exist or be empty
 
   screenshots/<name>.png      every checkpoint (lowercase letters, digits and hyphens; at most 25 MiB)
   videos/wallet-journey.mp4   the screen recording, H.264 at most 720 wide and 24 fps (ffmpeg), at most 25 MiB
-  journey-provenance.json     version 2: the run, the source, the device, each test's result and seconds,
+  journey-provenance.json     version 2: the run, the source, the device, each test's (each journey's) result and seconds,
                               each screenshot's test, size and SHA-256, the video's, and the network
 
 Only a run whose every test passed is published: anything else (failed, skipped, incomplete, or the result
@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 EXPORTER = ROOT / "LeanApp/.lake/packages/leannative/framework/native/ci/export-evidence"
 VIDEO = "videos/wallet-journey.mp4"
 MANIFEST = "journey-provenance.json"
+JOURNEYS = "LeanApp/Journeys.lean"
 MAX_BYTES = 25 * 1024 * 1024
 NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 
@@ -50,6 +51,11 @@ def load_exporter(path=None):
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+def test_name(journey):
+    """A journey's name as the website's test name: createReceiveSendConfirm is testCreateReceiveSendConfirm."""
+    return "test" + journey[:1].upper() + journey[1:]
 
 
 def run_url_of(args, run):
@@ -112,6 +118,19 @@ def prepare(journey, media, args, exporter=None):
             (media / VIDEO).parent.mkdir(parents=True)
             shutil.copyfile(out / VIDEO, media / VIDEO)
     device = evidence["device"]
+    journeys = evidence.get("journeys")
+    shots = [{k: s[k] for k in ("name", "test", "width", "height", "bytes", "sha256")} for s in evidence["screenshots"]]
+    if journeys:
+        # the website knows the journeys by their tests' names (createReceiveSendConfirm is
+        # testCreateReceiveSendConfirm), and groups each screenshot under the journey that took it
+        journeys = [dict(j, name=test_name(j["name"])) for j in journeys]
+        # a screenshot every journey takes (01-onboarding) is the first journey's, as the exporter attributes it
+        taken_by = {}
+        for j in journeys:
+            for shot in j.get("screenshots", []):
+                taken_by.setdefault(shot, j["name"])
+        for shot in shots:
+            shot["test"] = taken_by.get(shot["name"])
     os_name = device.get("os") or (f"iOS {device['os_version']}" if device.get("os_version") else None)
     manifest = {
         "version": 2,
@@ -119,12 +138,13 @@ def prepare(journey, media, args, exporter=None):
         "run_url": run_url,
         "branch": branch,
         "network": args.network,
-        "test": ", ".join(sorted({t["class"] for t in evidence["tests"] if t.get("class")})) or "UI journeys",
+        # a journeys run (LeanApp/Journeys.lean) is one XCTest, LeanNative's driver: its tests are the journeys
+        "test": JOURNEYS if journeys else ", ".join(sorted({t["class"] for t in evidence["tests"] if t.get("class")})) or "UI journeys",
         "result": "passed",
         "test_seconds": evidence["test_seconds"],
         "device": {k: v for k, v in {"name": device.get("name"), "os": os_name, "type": device.get("type")}.items() if v},
-        "tests": [{"name": t["name"], "result": t["result"], "seconds": t["seconds"]} for t in evidence["tests"]],
-        "screenshots": [{k: s[k] for k in ("name", "test", "width", "height", "bytes", "sha256")} for s in evidence["screenshots"]],
+        "tests": [{"name": t["name"], "result": t["result"], "seconds": t["seconds"]} for t in (journeys or evidence["tests"])],
+        "screenshots": shots,
         "video": evidence["video"],
         "original_video": evidence["original_video"],
         "normalized_at": evidence["exported"]["at"],

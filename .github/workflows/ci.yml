@@ -2,8 +2,9 @@ name: CI
 # The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
 # two WarpBuild jobs that start at once, `lean` (the Lean built, every proof checked, then every test below at the
 # same time, the regtest node's among them) and `app` (the iOS builds and the UI journeys). It runs on pull
-# requests, nightly on main and by hand; not on a push to main, which only ever gets a tree a pull request
-# already passed (release.yml looks for that run instead of testing again). The LeanNative commit below is
+# requests, nightly on main and by hand; not on a push to main. A pull request's run is the short one (Debug only,
+# one journey, the slowest Lean flows left out); nightly and by hand run everything, and release.yml looks for
+# such a run on the tag's tree instead of testing again. The LeanNative commit below is
 # the one LeanApp/lake-manifest.json pins; both jobs fail if they differ. Actions does not follow repository
 # redirects for reusable workflows, so the owner/repo here is the framework's real home.
 on:
@@ -37,9 +38,9 @@ jobs:
   app:
     needs: nightly
     if: ${{ !cancelled() && needs.nightly.outputs.tested != 'true' }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@2a6d129205e4d2bb1ab8b926fc864c9e44a76e52
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@700b3889a99a55804bd7fd256fb4fd3f008e236b
     with:
-      leannative: 2a6d129205e4d2bb1ab8b926fc864c9e44a76e52
+      leannative: 700b3889a99a55804bd7fd256fb4fd3f008e236b
       runs-on: warp-macos-26-arm64-12x
       # the UI journeys drive one simulator: half the runner, half the price
       app-runs-on: warp-macos-26-arm64-6x
@@ -52,6 +53,8 @@ jobs:
       scheme: WinnowLean
       # the census list the app bundles: signature verified, health filtered (each job imports it)
       prepare: scripts/import-census && cp build/census/peers-source.txt "$CI_RESULTS/"
+      # a pull request skips the two slowest nested-multisig flows and runs two differential cases, not six;
+      # nightly and by hand run everything (release.yml wants one of those)
       tests: |
         . Lean/.lake/build/bin/census-check build/census/peers.json
         . CENSUS_CHECK="$PWD/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s scripts/tests -v
@@ -60,16 +63,24 @@ jobs:
         Lean .lake/build/bin/silent-payment-test
         Lean .lake/build/bin/crypto-test
         LeanApp .lake/build/bin/records-test
-        LeanApp .lake/build/bin/multisig-app-test
+        LeanApp MULTISIG_APP_QUICK=${{ github.event_name == 'pull_request' && '1' || '' }} .lake/build/bin/multisig-app-test
         LeanApp .lake/build/bin/ledger-transport-test
-        . scripts/ci-regtest
+        . scripts/ci-regtest io
+        . scripts/ci-regtest backend
+        . MULTISIG_CASES=${{ github.event_name == 'pull_request' && '2' || '6' }} scripts/ci-regtest differential
       release-check: scripts/verify-release-no-test-mode
+      # the Release builds (and the check above) are for a release, which takes a nightly or manual run
+      release-builds: ${{ github.event_name != 'pull_request' }}
       ui-name: journey
       # the only iPhone the WarpBuild runner's newest iOS runtime (27.1) has; the website's screenshots are this size
       ui-device-type: iPhone Duo
       ui-before: scripts/ui-fixture start
       ui-after: scripts/ui-fixture stop
-      # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run
-      after-ui: scripts/journey-media
-      publish-name: journey-media
+      # the journeys are Lean on the Mac (LeanApp/Journeys.lean); xcodebuild runs only LeanNative's driver. A pull
+      # request runs the first; nightly and by hand, all five
+      ui-journey: ${{ github.event_name == 'pull_request' && 'journeys createReceiveSendConfirm' || 'journeys' }}
+      # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful
+      # run, which is a nightly one: a pull request makes none
+      after-ui: ${{ github.event_name != 'pull_request' && 'scripts/journey-media' || '' }}
+      publish-name: ${{ github.event_name != 'pull_request' && 'journey-media' || '' }}
       publish-path: build/journey-media/

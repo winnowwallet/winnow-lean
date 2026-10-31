@@ -264,8 +264,9 @@ Upstream's Swift tests, UI tests and workflows went with the Swift code; their L
 
 * **Lean tests**: multisig-test, ledger-test, records-test, multisig-app-test, ledger-transport-test, and
   against a regtest bitcoind io-test, backend-test and multisig-differential (Bitcoin Core as the oracle).
-* **UI tests**: Objective-C XCUITest in `LeanApp/ios/UITests` (no Swift: the runner is Objective-C too),
-  driving the app in test mode against `backend-test --fixture`. Controls are found by id: LeanNative's
+* **UI tests**: Lean journeys on the Mac (`LeanApp/Journeys.lean`, LeanNative.Journey), each step carried
+  out by LeanNative's one generic XCUITest (LNDriver), driving the app in test mode against
+  `backend-test --fixture`. Controls are found by id: LeanNative's
   `Html.identified id child` (framework, with the erasure and Sat theorems extended to it) puts `"id"` on
   the node's wire object and the shell sets it as the control's `accessibilityIdentifier`; the views use
   upstream's identifier names where upstream had them. The journeys follow upstream's

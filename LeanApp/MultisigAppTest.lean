@@ -1842,7 +1842,12 @@ def main : IO UInt32 := do
   IO.println "SignerRosterTests"
   for (name, t) in signerTests do runTest name t
   IO.println "NestedMultisigFlowTests"
-  for (name, t) in nestedTests do runTest name t
+  -- MULTISIG_APP_QUICK=1 (a pull request's CI) leaves out the two slowest flows, six minutes between them;
+  -- multisig-differential's nested cases still run
+  let quick := (← IO.getEnv "MULTISIG_APP_QUICK") == some "1"
+  for (name, t) in nestedTests do
+    if quick && name != "testPairingSavingAndRegisteringAreAdvancedModeOnly" then IO.println s!"  {name}: skipped (MULTISIG_APP_QUICK)"
+    else runTest name t
   IO.println "MultisigAccountFlowTests (one wallet)"
   for (name, t) in oneWalletTests do runTest name t
   IO.println "HistoryDisplayTests, SendReviewBindingTests, draft rows"

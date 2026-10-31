@@ -1,18 +1,25 @@
 #!/bin/bash
 # Winnow's tests against a disposable regtest bitcoind of the pinned Bitcoin Core (scripts/install-bitcoin):
-# io-test, backend-test and the multisig differential. CI runs it as the `extra` job of LeanNative's ios-app
-# workflow (.github/workflows/ci.yml), after the build job has built the executables; locally, build them first
-# (README, "Tests").
+# io-test, backend-test and the multisig differential, or only the suites named. Each starts its own node, so
+# CI's `lean` job runs the three as separate lines at the same time (.github/workflows/ci.yml); locally, build
+# them first (README, "Tests").
 #
-#   scripts/ci-regtest
+#   scripts/ci-regtest [io] [backend] [differential]
+#
+#   MULTISIG_CASES  the differential's random cases (default 6; pull requests run 2)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$("$ROOT/scripts/install-bitcoin")"
 export WINNOW_BITCOIND="$BIN/bitcoind" WINNOW_BITCOIN_CLI="$BIN/bitcoin-cli"
 "$WINNOW_BITCOIND" -version | head -1
-echo "▶ io-test"
-(cd "$ROOT/Lean" && .lake/build/bin/io-test)
-echo "▶ backend-test"
-(cd "$ROOT/LeanApp" && .lake/build/bin/backend-test)
-echo "▶ multisig-differential"
-(cd "$ROOT/Lean" && .lake/build/bin/multisig-differential --cases "${MULTISIG_CASES:-6}")
+[ $# -gt 0 ] || set -- io backend differential
+for suite in "$@"; do
+  case "$suite" in
+    io) echo "▶ io-test"; (cd "$ROOT/Lean" && .lake/build/bin/io-test) ;;
+    backend) echo "▶ backend-test"; (cd "$ROOT/LeanApp" && .lake/build/bin/backend-test) ;;
+    differential)
+      echo "▶ multisig-differential"
+      (cd "$ROOT/Lean" && .lake/build/bin/multisig-differential --cases "${MULTISIG_CASES:-6}") ;;
+    *) echo "ci-regtest: no suite $suite (io, backend, differential)" >&2; exit 2 ;;
+  esac
+done

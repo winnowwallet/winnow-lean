@@ -2,8 +2,8 @@ name: Release
 
 # A vMAJOR.MINOR.PATCH tag builds the Lean app as com.btcswift.app (the Swift app it replaces: same
 # bundle identifier and team, meant to keep an installed wallet: not yet tried over a Swift build) and sends it to
-# TestFlight's internal group, once CI has passed on the same tree (a pull request's run, or one on main): the
-# tag's commit is a fold of a tested pull request, so the release finds that run instead of testing again.
+# TestFlight's internal group, once CI's full run (nightly or by hand, not a pull request's short one) has passed
+# on the same tree: the release finds that run instead of testing again.
 # Manual dispatch runs the gates without signing or publishing.
 on:
   push:
@@ -30,8 +30,9 @@ jobs:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: scripts/check-release-policy
 
-  # every lane, including the Release build's test-mode check and the no-Swift checks, passed on this tree;
-  # with none, run CI on main by hand (Actions → CI → Run workflow) and rerun this release once it passes
+  # every lane, including all five journeys, the Release build's test-mode check and the no-Swift checks, passed
+  # on this tree: a pull request's run builds Debug only and runs one journey, so it does not count. With none,
+  # run CI on main by hand (Actions → CI → Run workflow) and rerun this release once it passes
   tested:
     needs: policy
     runs-on: ubuntu-24.04
@@ -45,7 +46,7 @@ jobs:
           want=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$SHA" --jq .tree.sha)
           echo "$GITHUB_REF_NAME: commit $SHA, tree $want"
           runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?status=success&per_page=100" \
-            --jq '.workflow_runs[] | "\(.head_sha) \(.html_url)"')
+            --jq '.workflow_runs[] | select(.event != "pull_request") | "\(.head_sha) \(.html_url)"')
           seen=" "
           while read -r sha url; do
             [ -n "$sha" ] || continue
@@ -53,12 +54,12 @@ jobs:
             seen="$seen$sha "
             tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$sha" --jq .tree.sha 2>/dev/null || true)
             if [ "$tree" = "$want" ]; then
-              echo "CI passed on this tree: $url (commit $sha)"
-              echo "CI passed on this tree: $url" >> "$GITHUB_STEP_SUMMARY"
+              echo "CI's full run passed on this tree: $url (commit $sha)"
+              echo "CI's full run passed on this tree: $url" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
           done <<< "$runs"
-          echo "::error::no successful CI run has tested tree $want: run CI on main by hand, then rerun this release"
+          echo "::error::no full CI run (nightly or by hand) has passed on tree $want: run CI on main by hand, then rerun this release"
           exit 1
 
   testflight:

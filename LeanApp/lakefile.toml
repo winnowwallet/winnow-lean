@@ -14,7 +14,7 @@ path = "../Lean"
 [[require]]
 name = "leannative"
 git = "https://github.com/LeanNative/leannative.git"
-rev = "2a6d129205e4d2bb1ab8b926fc864c9e44a76e52"
+rev = "700b3889a99a55804bd7fd256fb4fd3f008e236b"
 subDir = "framework/lean"
 
 [[lean_lib]]
@@ -66,3 +66,9 @@ root = "MultisigAppTest"
 [[lean_exe]]
 name = "cloud-backup-test"
 root = "CloudBackupTest"
+
+# The UI journeys (Journeys.lean), run on the Mac by LeanNative's ui-tests as UI_JOURNEY (scripts/ui-journeys;
+# CI: ios-app.yml's ui-journey)
+[[lean_exe]]
+name = "journeys"
+root = "Journeys"

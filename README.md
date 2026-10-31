@@ -96,7 +96,7 @@ lake build backend-test records-test        # Lean toolchain leanprover/lean4:v4
 ./.lake/build/bin/records-test
 cd ..
 scripts/build-ios Debug                      # the app for the simulator, from a clean checkout
-scripts/ui-journeys                          # the Objective-C UI journeys against a regtest fixture
+scripts/ui-journeys                          # the UI journeys (Lean) against a regtest fixture
 ```
 
 LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
@@ -110,38 +110,43 @@ PATH; CI sets the first two to the pinned release `scripts/install-bitcoin` down
 
 ### UI tests
 
-`LeanApp/ios/UITests` holds XCUITest journeys in Objective-C (target `WinnowLeanUITests`). Each launches
-the app in test mode on the regtest node of `backend-test --fixture`, finds controls by the ids the views
-give them (`Html.identified`, the shell's `accessibilityIdentifier`) and checks the app against the node:
+The UI journeys are Lean (`LeanApp/Journeys.lean`, the `journeys` executable), run on the Mac: each step is
+one command to LeanNative's journey driver (`LNDriver`, the one XCUITest in the app's UI test target), each
+check is Lean against the node. Each launches the app in test mode on the regtest node of
+`backend-test --fixture`, finds controls by the ids the views give them (`Html.identified`, the shell's
+`accessibilityIdentifier`) and checks the app against the node:
 
-- `testCreateReceiveSendConfirm`: create a wallet, receive from the node, review and send a payment the
+- `createReceiveSendConfirm`: create a wallet, receive from the node, review and send a payment the
   node accepts, see it confirm;
-- `testMultisigTwoOfThreeWithRecovery`: a 2-of-3 with two Bitcoin Core wallets, built in the app; the
+- `multisigTwoOfThreeWithRecovery`: a 2-of-3 with two Bitcoin Core wallets, built in the app; the
   first address is Core's, the phone and both Cores sign, Core accepts a witness with exactly two
   signatures; after the one-day delay the phone alone spends on the recovery path;
-- `testLedgerPairVerifySpend`: pair test mode's simulated Ledger, have it verify the receive address,
+- `ledgerPairVerifySpend`: pair test mode's simulated Ledger, have it verify the receive address,
   and spend with the phone's and the Ledger's signatures;
-- `testShippedCensus`: the census peer list the build ships shows in Settings on mainnet;
-- `testSilentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
+- `shippedCensus`: the census peer list the build ships shows in Settings on mainnet;
+- `silentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
   receiver (written from the BIP's receiving side) finds, and the receipt shows its address.
 
-`scripts/ui-journeys` runs them as CI does: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`),
-with `scripts/ui-fixture` starting the node before and collecting the app's test-mode journals after; it
-keeps the result bundle, a screen recording, the screenshots and the journals.
+`scripts/ui-journeys` runs them as CI does: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
+with the journeys as `UI_JOURNEY`, and `scripts/ui-fixture` starting the node before and collecting the app's
+test-mode journals after; it keeps the result bundle, a screen recording, the screenshots, `journeys.json`
+(each journey's result and time) and the journals. `UI_JOURNEYS="silentPaymentSend" scripts/ui-journeys` runs
+only the journeys named.
 
 ### CI and TestFlight
 
 `.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request, nightly on main
 and by hand, in two WarpBuild jobs that start at once and each build the Lean from the cache; every long step
-prints its progress as it goes:
+prints its progress as it goes. A pull request's run is the short one (marked *full run only* below); nightly and
+by hand run everything:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test and `scripts/ci-regtest` (io-test, backend-test and multisig-differential against a disposable regtest bitcoind) |
-| `app` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift; `verify-release-no-test-mode`; the UI journeys (`scripts/ui-fixture` as the hooks); the website's media (`scripts/journey-media`) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test (its two slowest nested flows: *full run only*), ledger-transport-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases; 2 on a pull request) |
+| `app` | the same build and census import; Debug for the simulator, and (*full run only*) Release for the simulator and devices, each checked for Swift, and `verify-release-no-test-mode`; the UI journeys (`scripts/ui-fixture` as the hooks): a pull request runs `createReceiveSendConfirm`, a full run all five; (*full run only*) the website's media (`scripts/journey-media`) |
 
-`.github/workflows/release.yml`: a `vMAJOR.MINOR.PATCH` tag finds a successful CI run on the same tree (main is a
-fold of a tested pull request), then archives the app as
+`.github/workflows/release.yml`: a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (nightly or by hand,
+not a pull request's) on the same tree, then archives the app as
 `com.btcswift.app` (team 2858MX5336, the identity of the Swift app it replaces), checks the archive and
 the exported IPA (`verify-signed-archive`, `verify-exported-ipa`, `check-no-swift`), uploads it and adds
 it to TestFlight's internal group (`scripts/testflight.sh`, whose App Store Connect token comes from

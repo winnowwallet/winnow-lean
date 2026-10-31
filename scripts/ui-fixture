@@ -8,8 +8,8 @@
 #   scripts/ui-fixture stop <out> [simulator]  the app's test-mode journals copied out of the simulator, and
 #                                              the node stopped
 #
-# The journeys (LeanApp/ios/UITests) find ui.json through WINNOW_UI_CONFIG, which `start` leaves in
-# <out>/test-env. The node's data directory is <out>/private/fixture, which CI keeps out of the evidence.
+# The journeys (LeanApp/Journeys.lean, on the Mac) find ui.json through WINNOW_UI_CONFIG, which `start` leaves in
+# <out>/test-env (ui-tests passes test-env to them). The node's data directory is <out>/private/fixture, which CI keeps out of the evidence.
 # scripts/ui-journeys runs the whole thing locally.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
