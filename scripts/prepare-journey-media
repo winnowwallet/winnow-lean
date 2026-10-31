@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Turn one UI-journeys output into the media the website publishes, with its provenance.
+
+  scripts/prepare-journey-media <journey-out> <media-out> [--run-url URL] [--sha SHA] [--branch NAME] [--network NAME]
+
+<journey-out> is a UI-journeys output directory (scripts/ui-journeys' $UI_OUT, CI's $CI_RESULTS/journey), as
+LeanNative's ui-tests writes it. The evidence itself is LeanNative's: framework/native/ci/export-evidence (in
+the pinned package, LeanApp/.lake/packages/leannative, or $LEANNATIVE_EXPORT_EVIDENCE) reads the result bundle,
+xcodebuild.log, device.json and run.json, attributes and hashes the screenshots and exports the recording.
+This wrapper keeps what is the website's: <media-out> must not exist or be empty, and receives
+
+  screenshots/<name>.png      every checkpoint (lowercase letters, digits and hyphens; at most 25 MiB)
+  videos/wallet-journey.mp4   the screen recording, H.264 at most 720 wide and 24 fps (ffmpeg), at most 25 MiB
+  journey-provenance.json     version 2: the run, the source, the device, each test's (each journey's) result and seconds,
+                              each screenshot's test, size and SHA-256, the video's, and the network
+
+Only a run whose every test passed is published: anything else (failed, skipped, incomplete, or the result
+bundle and the log disagreeing) fails with the exporter's reasons. The tested commit is the one ui-tests
+recorded as the journeys ran (run.json); --sha must match it, and this checkout's HEAD is never used.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+EXPORTER = ROOT / "LeanApp/.lake/packages/leannative/framework/native/ci/export-evidence"
+VIDEO = "videos/wallet-journey.mp4"
+MANIFEST = "journey-provenance.json"
+JOURNEYS = "LeanApp/Journeys.lean"
+MAX_BYTES = 25 * 1024 * 1024
+NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+class Failure(Exception):
+    pass
+
+
+def load_exporter(path=None):
+    path = Path(path or os.environ.get("LEANNATIVE_EXPORT_EVIDENCE") or EXPORTER)
+    if not path.is_file():
+        raise Failure(f"no LeanNative export-evidence at {path} (run `lake update` in LeanApp)")
+    loader = importlib.machinery.SourceFileLoader("export_evidence", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def test_name(journey):
+    """A journey's name as the website's test name: createReceiveSendConfirm is testCreateReceiveSendConfirm."""
+    return "test" + journey[:1].upper() + journey[1:]
+
+
+def run_url_of(args, run):
+    if args.run_url:
+        url = args.run_url
+    elif run.get("ci") and run["ci"].get("run_id"):
+        ci = run["ci"]
+        url = f"{ci.get('server') or 'https://github.com'}/{ci['repository']}/actions/runs/{ci['run_id']}"
+        if ci.get("run_attempt") and ci["run_attempt"] != "1":
+            url += f"/attempts/{ci['run_attempt']}"
+    else:
+        return None
+    if not re.fullmatch(r"https://\S+/actions/runs/\d+(/attempts/\d+)?", url):
+        raise Failure("--run-url must be a GitHub Actions run URL")
+    return url
+
+
+def identity(args, run):
+    """(sha, run URL, branch): the commit ui-tests recorded; --sha only confirms it."""
+    sha = (run.get("source") or {}).get("revision")
+    if args.sha is not None and not re.fullmatch(r"[0-9a-f]{40}", args.sha):
+        raise Failure("--sha must be the tested commit's full SHA")
+    if not sha:
+        raise Failure("the run recorded no tested commit (run.json): it was not made by LeanNative's ui-tests")
+    if args.sha and args.sha != sha:
+        raise Failure(f"--sha {args.sha} is not the commit the journeys ran at ({sha})")
+    ref = ((run.get("ci") or {}).get("ref") or "").removeprefix("refs/heads/")
+    branch = args.branch or os.environ.get("GITHUB_HEAD_REF") or (ref if ref and not ref.startswith("refs/") else None)
+    return sha, run_url_of(args, run), branch
+
+
+def prepare(journey, media, args, exporter=None):
+    journey, media = Path(journey), Path(media)
+    if not journey.is_dir():
+        raise Failure(f"no journey output at {journey}")
+    if media.exists() and any(media.iterdir()):
+        raise Failure(f"{media} is not empty")
+    ex = exporter or load_exporter()
+    run = json.loads((journey / "run.json").read_text()) if (journey / "run.json").is_file() else {}
+    sha, run_url, branch = identity(args, run)
+    with tempfile.TemporaryDirectory() as scratch:
+        out = Path(scratch) / "evidence"
+        options = argparse.Namespace(name="journey", screenshots=None, video_out=VIDEO, max_video_bytes=MAX_BYTES,
+                                     transcode="auto", app_metadata=None, source_revision=sha, require_passed=False)
+        try:
+            evidence = ex.export(journey, out, options)
+        except ex.Failure as error:
+            raise Failure(str(error))
+        if evidence["result"] != "passed":
+            raise Failure(f"not every test passed ({evidence['result']}): " + "; ".join(evidence["result_reasons"]))
+        if not evidence["screenshots"]:
+            raise Failure("no screenshots in the result bundle")
+        if bad := [s["name"] for s in evidence["screenshots"] if not NAME.fullmatch(s["name"])]:
+            raise Failure("screenshot names must be lowercase letters, digits and hyphens: " + ", ".join(bad))
+        if big := [s["name"] for s in evidence["screenshots"] if s["bytes"] > MAX_BYTES]:
+            raise Failure("screenshots over 25 MiB: " + ", ".join(big))
+        media.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(out / "screenshots", media / "screenshots")
+        if evidence["video"]:
+            (media / VIDEO).parent.mkdir(parents=True)
+            shutil.copyfile(out / VIDEO, media / VIDEO)
+    device = evidence["device"]
+    journeys = evidence.get("journeys")
+    shots = [{k: s[k] for k in ("name", "test", "width", "height", "bytes", "sha256")} for s in evidence["screenshots"]]
+    if journeys:
+        # the website knows the journeys by their tests' names (createReceiveSendConfirm is
+        # testCreateReceiveSendConfirm), and groups each screenshot under the journey that took it
+        journeys = [dict(j, name=test_name(j["name"])) for j in journeys]
+        # a screenshot every journey takes (01-onboarding) is the first journey's, as the exporter attributes it
+        taken_by = {}
+        for j in journeys:
+            for shot in j.get("screenshots", []):
+                taken_by.setdefault(shot, j["name"])
+        for shot in shots:
+            shot["test"] = taken_by.get(shot["name"])
+    os_name = device.get("os") or (f"iOS {device['os_version']}" if device.get("os_version") else None)
+    manifest = {
+        "version": 2,
+        "source_sha": sha,
+        "run_url": run_url,
+        "branch": branch,
+        "network": args.network,
+        # a journeys run (LeanApp/Journeys.lean) is one XCTest, LeanNative's driver: its tests are the journeys
+        "test": JOURNEYS if journeys else ", ".join(sorted({t["class"] for t in evidence["tests"] if t.get("class")})) or "UI journeys",
+        "result": "passed",
+        "test_seconds": evidence["test_seconds"],
+        "device": {k: v for k, v in {"name": device.get("name"), "os": os_name, "type": device.get("type")}.items() if v},
+        "tests": [{"name": t["name"], "result": t["result"], "seconds": t["seconds"]} for t in (journeys or evidence["tests"])],
+        "screenshots": shots,
+        "video": evidence["video"],
+        "original_video": evidence["original_video"],
+        "normalized_at": evidence["exported"]["at"],
+    }
+    if evidence.get("video_omitted"):
+        manifest["video_omitted"] = evidence["video_omitted"]
+    (media / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("journey", type=Path, help="a UI-journeys output directory (scripts/ui-journeys)")
+    parser.add_argument("media", type=Path, help="where the website's media and manifest go")
+    parser.add_argument("--run-url", help="the CI run (default: the one ui-tests recorded)")
+    parser.add_argument("--sha", help="the tested commit, to confirm against the one ui-tests recorded")
+    parser.add_argument("--branch", help="the tested branch (default: GITHUB_HEAD_REF, else the recorded ref)")
+    parser.add_argument("--network", default="regtest",
+                        help="the Bitcoin network the journeys paid on (scripts/ui-fixture: regtest)")
+    args = parser.parse_args(argv)
+    try:
+        evidence = prepare(args.journey, args.media, args)
+    except (Failure, OSError, ValueError, KeyError) as error:
+        raise SystemExit(f"prepare-journey-media: {error}")
+    print(f"{len(evidence['tests'])} tests passed in {evidence['test_seconds']} s; "
+          f"{len(evidence['screenshots'])} screenshots; "
+          + (f"video {evidence['video']['width']}x{evidence['video']['height']}, {evidence['video']['bytes']:,} bytes"
+             if evidence["video"] else f"no video: {evidence['video_omitted']}"))
+    print(f"wrote {args.media / MANIFEST}")
+
+
+if __name__ == "__main__":
+    main()

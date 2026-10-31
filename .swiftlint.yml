@@ -1,0 +1,15 @@
+# One rule, enforced: every function stays under a cyclomatic complexity
+# budget. The wallet's argument is that it is small enough to read; this
+# keeps each function that way too, and any tool or person writing code
+# here has to pass it before CI goes green.
+only_rules:
+  - cyclomatic_complexity
+
+included:
+  - Sources
+  - Tools/Debug/Sources/WinnowDebug/SoakCommand.swift
+
+cyclomatic_complexity:
+  warning: 7
+  error: 8
+  ignores_case_statements: true

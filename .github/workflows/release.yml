@@ -1,0 +1,256 @@
+name: Release
+
+# A vMAJOR.MINOR.PATCH tag builds the Lean app as com.btcswift.app (the Swift app it replaces: same
+# bundle identifier and team, meant to keep an installed wallet: not yet tried over a Swift build) and sends it to
+# TestFlight's internal group, once a CI run on main (a push, nightly or by hand) has passed on the same tree: the
+# release finds that run instead of testing again. A pull request's run does not count: it tests the merge of the
+# pull request into main as it was, whose tree need not be the tag's.
+# Manual dispatch runs the gates without signing or publishing.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate stable release version
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: scripts/check-release-policy
+
+  # every lane, including all five journeys, the Release build's test-mode check and the no-Swift checks, passed
+  # on this tree: a pull request's run builds Debug only and runs one journey, so it does not count. With none,
+  # run CI on main by hand (Actions → CI → Run workflow) and rerun this release once it passes
+  tested:
+    needs: policy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: A successful CI run on this tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          want=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$SHA" --jq .tree.sha)
+          echo "$GITHUB_REF_NAME: commit $SHA, tree $want"
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?status=success&per_page=100" \
+            --jq '.workflow_runs[] | select(.event != "pull_request") | "\(.head_sha) \(.html_url)"')
+          seen=" "
+          while read -r sha url; do
+            [ -n "$sha" ] || continue
+            case "$seen" in *" $sha "*) continue ;; esac
+            seen="$seen$sha "
+            tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$sha" --jq .tree.sha 2>/dev/null || true)
+            if [ "$tree" = "$want" ]; then
+              echo "CI's full run passed on this tree: $url (commit $sha)"
+              echo "CI's full run passed on this tree: $url" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done <<< "$runs"
+          echo "::error::no full CI run (nightly or by hand) has passed on tree $want: run CI on main by hand, then rerun this release"
+          exit 1
+
+  testflight:
+    if: ${{ !cancelled() && needs.tested.result == 'success' && github.event_name == 'push' }}
+    needs: tested
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # the archive passes both to xcodebuild (the manifest's version is MARKETING_VERSION and
+          # CURRENT_PROJECT_VERSION, WinnowApp/Project.lean)
+          printf 'TESTFLIGHT_MARKETING_VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+          printf 'TESTFLIGHT_BUILD_NUMBER=%s\n' "$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Restore the Lean toolchain and builds
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.elan
+            Lean/.lake
+            LeanApp/.lake
+          key: lean-hosted-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-${{ hashFiles('Lean/**/*.lean', 'LeanApp/**/*.lean', '!**/.lake/**') }}
+          restore-keys: |
+            lean-hosted-arm64-${{ hashFiles('Lean/lean-toolchain', 'Lean/lake-manifest.json', 'LeanApp/lake-manifest.json') }}-
+
+      - name: Lean, the generated C and Objective-C, and the Xcode project for devices
+        run: |
+          source scripts/install-lean
+          PREPARE_ONLY=1 scripts/build-ios Release ios
+
+      - name: The census this build ships, in What to Test
+        # build-ios imported the newest census (signature verified, health-filtered); What to Test names it.
+        # The line is added on the runner only, never committed; the length check runs again before upload.
+        run: |
+          cat build/census/peers-source.txt
+          line=$(grep -m1 '^Peers: census ' build/census/peers-source.txt)
+          python3 -c 'import pathlib, sys; p = pathlib.Path(sys.argv[1]); p.write_text(p.read_text().rstrip() + "\n\n" + sys.argv[2] + "\n")' \
+            docs/testflight-what-to-test.txt "$line"
+          tail -1 docs/testflight-what-to-test.txt
+          RELEASE_TAG="$GITHUB_REF_NAME" scripts/check-release-policy
+
+      - name: Preserve the census provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/census/peers-source.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Prepare signing credentials
+        env:
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: scripts/ci-sign.sh
+
+      - name: Import the persistent development certificate
+        # With the certificate present, automatic signing reuses it instead of minting a new one on every
+        # ephemeral runner (upstream's release.yml has the history).
+        env:
+          DEV_CERT_P12: ${{ secrets.DEV_CERT_P12 }}
+          DEV_CERT_P12_PASSWORD: ${{ secrets.DEV_CERT_P12_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/winnow-ci.keychain-db"
+          KCPW="$(uuidgen)"
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          printf '%s' "$DEV_CERT_P12" | base64 -D > "$RUNNER_TEMP/dev.p12"
+          security import "$RUNNER_TEMP/dev.p12" -k "$KC" -P "$DEV_CERT_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          rm "$RUNNER_TEMP/dev.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KCPW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" login.keychain
+          security find-identity -p codesigning "$KC" | head -3
+
+      - name: Archive
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: >-
+          xcodebuild -project LeanApp/ios/WinnowLean.xcodeproj -scheme WinnowLean
+          -configuration Release -destination 'generic/platform=iOS'
+          -archivePath build/WinnowLean.xcarchive
+          -derivedDataPath build/DerivedData
+          -allowProvisioningUpdates
+          -authenticationKeyPath "${RUNNER_TEMP}/winnow-signing/AuthKey.p8"
+          -authenticationKeyID "$ASC_KEY_ID"
+          -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          MARKETING_VERSION="$TESTFLIGHT_MARKETING_VERSION"
+          CURRENT_PROJECT_VERSION="$TESTFLIGHT_BUILD_NUMBER"
+          archive 2>&1 | tee build-archive.log
+
+      - name: Verify the archive's identity, signature and that it has no Swift
+        run: |
+          LeanApp/.lake/packages/leannative/framework/native/ci/check-no-swift build-archive.log build/WinnowLean.xcarchive/Products/Applications/WinnowLean.app
+          scripts/verify-signed-archive build/WinnowLean.xcarchive/Products/Applications/WinnowLean.app
+
+      - name: Export the App Store distribution package
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          mkdir -p build
+          cat > build/ExportOptions.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>destination</key>
+            <string>export</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>teamID</key>
+            <string>2858MX5336</string>
+            <key>manageAppVersionAndBuildNumber</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath build/WinnowLean.xcarchive \
+            -exportOptionsPlist build/ExportOptions.plist \
+            -exportPath build/export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "${RUNNER_TEMP}/winnow-signing/AuthKey.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+      - name: Verify the exported production package
+        run: scripts/verify-exported-ipa build/export/WinnowLean.ipa
+
+      - name: Upload the verified package to App Store Connect
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          API_PRIVATE_KEYS_DIR: ${{ runner.temp }}/winnow-signing
+        run: |
+          shasum -a 256 -c build/export/WinnowLean.ipa.verified.sha256
+          ln -s AuthKey.p8 "$API_PRIVATE_KEYS_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          xcrun altool --upload-app -f build/export/WinnowLean.ipa -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: TestFlight internal group
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_PATH: ${{ runner.temp }}/winnow-signing/AuthKey.p8
+        run: |
+          scripts/testflight.sh wait-processing
+          scripts/testflight.sh notes
+          scripts/testflight.sh internal
+          # External beta review is never requested here: a review request cannot be withdrawn, so handing a
+          # build to external testers is a person's decision (`scripts/testflight.sh external`).
+
+      - name: Remove App Store Connect key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/winnow-ci.keychain-db" || true
+          rm -f "$RUNNER_TEMP/dev.p12"
+          find "${RUNNER_TEMP}/winnow-signing" -maxdepth 1 -name 'AuthKey*.p8' -delete 2>/dev/null || true
+          rmdir "${RUNNER_TEMP}/winnow-signing" 2>/dev/null || true
+
+  github-release:
+    if: ${{ !cancelled() && needs.testflight.result == 'success' }}
+    needs: testflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Is the tagged commit on main?
+        id: placement
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A tag on a branch is an internal TestFlight build, published as a pre-release so it never becomes
+          # "latest"; a tag on main is a full release.
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)
+          on_main=false
+          if [ "$status" = "identical" ] || [ "$status" = "ahead" ]; then on_main=true; fi
+          echo "on_main=$on_main" >> "$GITHUB_OUTPUT"
+          echo "$GITHUB_SHA against main: $status; on_main=$on_main"
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          generate_release_notes: true
+          prerelease: ${{ steps.placement.outputs.on_main != 'true' }}

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The wallet on your phone &mdash; Winnow</title>
+<meta name="description" content="Device constraints, key storage, direct Bitcoin connections, and recovery requirements.">
+<link rel="canonical" href="https://winnowwallet.com/mobile">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://winnowwallet.com/mobile">
+<meta property="og:title" content="The wallet on your phone &mdash; Winnow">
+<meta property="og:description" content="Device constraints, key storage, direct Bitcoin connections, and recovery requirements.">
+<meta property="og:image" content="https://winnowwallet.com/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The wallet on your phone &mdash; Winnow">
+<meta name="twitter:description" content="Device constraints, key storage, direct Bitcoin connections, and recovery requirements.">
+<meta name="twitter:image" content="https://winnowwallet.com/og.png">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar"><div class="bar"><a class="mark" href="/" aria-label="Winnow home">winnow</a><nav class="links" aria-label="Main"><a href="/architecture">How it works</a><a href="/vaults">Multisig</a><a href="https://github.com/winnowwallet/winnow-lean">GitHub ↗</a></nav></div></header>
+<main id="main">
+  <h1 id="a-private-bitcoin-wallet-on-a-phone">The wallet on your phone</h1>
+  <p class="lede">Your phone matches payments locally, keeps its keys in the device keychain, and connects to Bitcoin peers, directly or through your own Tor and I2P gateways, while the app is open and in short background checks iOS allows.</p>
+  <nav class="contents" aria-label="On this page"><a href="#what-a-phone-actually-is">Device constraints</a><a href="#the-four-jobs-and-two-more">How the pieces fit</a><a href="#what-the-device-forces-onto-the-wallet">Wallet behavior</a><a href="#trust-on-a-phone">Trust limits</a><a href="#how-the-implementation-is-checked">Checks</a></nav>
+  <h2 id="the-constraint">What this means for you</h2><p>Unexpected payments may appear on the next sync. Fees are estimates, and a backup restores signing only when it holds this phone’s words, which the iCloud copy always does; see <a href="/import#cannot-restore">what a backup cannot restore</a>. Direct connections expose your IP address to peers; your own Tor or I2P gateways can carry peer connections instead. The <a href="/read-side">read guide</a>, <a href="/write-side">payment guide</a> and <a href="/import">recovery guide</a> explain these tradeoffs.</p>
+  <h2 id="what-a-phone-actually-is">2. What a phone actually is</h2>
+  <p>Constraints that are load-bearing, not stylistic:</p>
+  <ul>
+  <li><strong>Outbound TCP only.</strong> The app talks to full-node peers over Lean’s own TCP, on libuv. No public inbound listener. Backgrounding stops networking; a background check iOS starts builds it again for one bounded scan. Peers are a small outbound pool (default 3): manual endpoints first, then a persisted good-peers list, then the clearnet peers of the census list bundled with this build, then DNS-seed results — seeds resolve over DNS-over-HTTPS (Cloudflare dns-json at 1.1.1.1, configurable, fetched through the shell’s HTTPS capability because Lean has no TLS) and fall back to <code>getaddrinfo</code> if DoH is empty or down; RFC1918/loopback answers are dropped on public networks. Dials race a batch of candidates at a time with a short per-attempt timeout, and report exhaustion instead of spinning forever. Peer routing (Automatic, Direct only or Manual) decides which networks are eligible; DNS seeds are used only when clearnet is, and Tor or I2P candidates only through their gateway. Each build ships the census list of its day; the app downloads no census and has no refresh for it. Saved-peer and DNS discovery continue independently. With DNS as the only source, the diversity policy permits two of the three default slots. No addr gossip, no scoring buckets — a misbehaving peer is dropped and replaced.</li>
+  <li><strong>Foreground, plus short background checks.</strong> Winnow syncs while open, and asks iOS for background checks (<code>BGAppRefreshTask</code> and <code>BGProcessingTask</code>, at most every 15 minutes). Each is one scan of up to 2,000 blocks inside the time iOS grants, about 25 seconds for a refresh and up to two minutes for processing, with the foreground's routing, peers and checks; then networking stops. iOS decides when and whether they run; they do not run while the phone is off, after Winnow is force-quit, or with Background App Refresh off. Automatic routing that last reached peers through a gateway skips a check when no gateway answers rather than connect directly with no banner to say so. There is no standing connection and no push: push notifications would require a server that knows your addresses or your txids. A payment you are not looking at is found at the next check or the next open.</li>
+  <li><strong>This-device keychain.</strong> Secrets live in the iOS Keychain as <code>kSecAttrAccessibleWhenUnlockedThisDeviceOnly</code>, with iCloud Keychain sync off. They are not in the app’s ordinary JSON state or device backup. Automatic iCloud backup creates a separate encrypted copy after device authentication unless disabled in Advanced; its wrapping key synchronizes through iCloud Keychain. The app asks for device-owner authentication (passcode, Face ID or Touch ID) before it reads the secret, and fails closed on a device with no passcode. Unlike the Swift app, the Keychain item carries no user-presence flag of its own, so this gate rests on the app’s code. Recovery words appear only behind an explicit Advanced control (Back up → Show recovery phrase). That screen offers an explicit copy action; its pasteboard item is local-only, expires after two minutes, and the screen says paper is more private. Signing loads the secret for the call.</li>
+  <li><strong>Cryptography and transport dependencies.</strong> Curve math (key derivation, Taproot tweaks, BIP340 signing) is Winnow’s own secp256k1 in Lean, <code>Lean/Secp</code>, with proofs that tie it to a specification curve. Hashes, AES-GCM, filters, headers, PSBT, descriptors and Bitcoin P2P are Lean too. The other code in the app is Lean’s runtime and standard library, libuv, GMP and LeanNative’s Objective-C shell.</li>
+  <li><strong>App Store reality.</strong> iOS 17 or later. The app targets iPhone and iPad; Apple silicon Macs run the iPad app (“Designed for iPad”), and there is no Mac Catalyst build. Wallet and protocol behavior lives in the <code>Winnow</code> Lean library under <code>Lean/</code>; the app’s model, update and view are in <code>LeanApp/WinnowApp</code>. Lean test executables check both, and recorded iPhone journeys check the interface against a regtest node.</li>
+  </ul>
+  <p>Bandwidth and battery are real but secondary. Steady-state compact filters are a few megabytes a day (approx.; see <a href="/read-side">read-side</a> §2.5). The worse mobile cost is <em>policy</em>: an always-on mempool subscription, a historical back-scan, or a server that answers <code>getbalance</code>. Those are refused even when the radio would allow them.</p>
+  <hr />
+  <h2 id="the-four-jobs-and-two-more">3. The four jobs, and two more</h2>
+  <div class="table-wrap" role="region" tabindex="0" aria-label="Scrollable table"><table>
+  <colgroup>
+  <col style="width: 14%" />
+  <col style="width: 64%" />
+  <col style="width: 20%" />
+  </colgroup>
+  <thead>
+  <tr>
+  <th>Job</th>
+  <th>Default on this phone</th>
+  <th>Paper</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+  <td>What’s mine?</td>
+  <td>BIP157/158 filters, matched on-device, from creation height forward</td>
+  <td><a href="/read-side">read-side</a></td>
+  </tr>
+  <tr>
+  <td>Where’s the tip?</td>
+  <td>80-byte headers, PoW + chainwork</td>
+  <td><a href="/read-side">read-side</a></td>
+  </tr>
+  <tr>
+  <td>What fee?</td>
+  <td>User override, else median of <em>our</em> confirmed spends, else presets; raised to the BIP133 <code>feefilter</code> floor most peer seats report, with an automatic increase capped at 120 sat/vB</td>
+  <td><a href="/write-side">write-side</a></td>
+  </tr>
+  <tr>
+  <td>Did my tx get out?</td>
+  <td><code>inv</code> → <code>getdata</code> → <code>tx</code> to the peer pool, rebroadcast until a filter match, echo-watch while Send is open</td>
+  <td><a href="/write-side">write-side</a></td>
+  </tr>
+  <tr>
+  <td>Who holds the keys?</td>
+  <td>This-device Keychain; Taproot key-path for the everyday wallet</td>
+  <td>this paper, <a href="/write-side">write-side</a></td>
+  </tr>
+  <tr>
+  <td>Shared custody?</td>
+  <td>Raw k-of-n <code>sortedmulti_a</code> script-path accounts in Advanced mode, coordinated by PSBT, no server; a Ledger can sign over Bluetooth; no MuSig2</td>
+  <td><a href="/vaults">multisig accounts</a></td>
+  </tr>
+  <tr>
+  <td>Moving a wallet in?</td>
+  <td>A history bundle. There is no back-scan.</td>
+  <td><a href="/import">import</a></td>
+  </tr>
+  </tbody>
+  </table></div>
+  <p>One user-controlled escape hatch crosses several rows: a selected external explorer website. Opening an exact address or transaction requires a warning; its response never becomes wallet state.</p>
+  <hr />
+  <h2 id="what-the-device-forces-onto-the-wallet">4. What the device forces onto the wallet</h2>
+  <h3 id="fresh-and-forward-only">4.1 Fresh, and forward-only</h3>
+  <p>A new wallet and its recovery phrase are created immediately, offline. Header synchronization and automatic backup continue after onboarding; the wallet starts scanning from the last already-validated height so the interval cannot be missed. Recovering an old wallet <em>privately from the chain</em> would mean gigabytes of historical filters on a radio the user pays for. The product does not do that. Import requires the previous wallet’s answers to come along — descriptor, UTXOs, history, a last-known height — and the phone verifies them by scanning <em>forward</em> from that height. The argument and the bundle format are <a href="/import">import</a>.</p>
+  <p>This is the constraint that makes the rest cheap. It is not a v1 shortcut.</p>
+  <h3 id="taproot-only">4.2 Taproot only</h3>
+  <p>Receiving is BIP86 P2TR. There is no legacy / nested-segwit / P2WPKH path, and no ECDSA signing path. One output type means one watch-list shape, one sighash, one witness size for fee math (66 bytes for a key-path spend), and no “which address type did this contact use?” branch in the UI. The proposed <a href="/roadmap">P2WSH Safe</a> is a deliberately scoped exception: an opt-in <code>wsh(pk(KEY))</code> store with its own hardened keys, its own watch list and an ECDSA/BIP143 signing path, added beside the Taproot account rather than in place of it. Nothing about the account described here changes; see the Safe’s <a href="https://github.com/winnowwallet/winnow/issues/164">design and release criteria</a>.</p>
+  <p>The phone can <em>pay</em> standard P2PKH, P2SH, P2WPKH, P2WSH and P2TR addresses. Recovery supports descriptor-derived coins; wallet files requiring unsupported signing data are refused. Keep the original wallet and backup for any unsupported coin types. See <a href="/import">import and recovery</a>.</p>
+  <h3 id="two-modern-multisig-flavors-same-read-path">4.3 Multisig accounts, same read path</h3>
+  <p>A multisig account is another descriptor and another watch list, scanned with the same filters. The phone does not run a coordinator, a coinjoin server, or a notification service for co-signers. The PSBT <em>is</em> the coordinator, and anything that carries text carries it. A paired Ledger is reached over Bluetooth instead: it registers the account, shows addresses and payments on its own screen, and returns a signature the phone verifies before keeping it. Each signer adds an ordinary script-path signature, in any order. A backup that carries a MuSig2 account from the older Swift app is refused rather than restored without those funds. <a href="/vaults">Multisig accounts</a>.</p>
+  <h3 id="default-network-is-signet">4.4 Mainnet by default, signet for testing</h3>
+  <p>The app opens on mainnet by default; signet is available in Advanced settings with its own wallet state. CI’s UI journeys and their video use a disposable regtest node. The numbers in <code>screenshots/timings.json</code> are historical signet measurements.</p>
+  <hr />
+  <h2 id="trust-on-a-phone">5. Trust on a phone</h2>
+  <p>What the user is asked to trust, stated as mechanisms rather than intentions:</p>
+  <ul>
+  <li><strong>The keychain and the device.</strong> The default backup file excludes recovery words. An export made with <strong>Include recovery phrase</strong> contains your phone’s signing secret. Protect that file like the words themselves. Anyone able to unlock your phone may be able to authorize signing or secret access.</li>
+  <li><strong>Winnow’s secp256k1.</strong> Curve math on secrets is Winnow’s own Lean code, <code>Lean/Secp</code>. Its proofs are about the answers, not the timing: it computes with GMP-backed numbers and its scalar multiplication branches on each bit of a secret, so signing time depends on the key. That is acceptable for signing the owner approves on their own phone, where no one else can trigger or time it; the code is not for servers or signing services (<a href="https://github.com/winnowwallet/winnow-lean/blob/main/SECURITY.md">security notes</a>). Each BIP340 signature takes 32 fresh bytes of auxiliary randomness.</li>
+  <li><strong>The peers you can reach.</strong> Compact filters are not consensus-committed. Multi-peer <code>cfcheckpt</code> / <code>cfheaders</code> comparison detects disagreement; it cannot prove which peer lied, and a fully eclipsed phone can be shown a consistent lie. Manual peers exist so a user who <em>has</em> a node they trust can skip DNS seeds. The residual risk is <a href="/read-side">read-side</a> §2.7.1 and §2.9.</li>
+  <li><strong>No one, on the read path, by default.</strong> No server is handed an address, an xpub, or a scripthash. A network observer sees a compact-filter client syncing from a height — the same bytes every such client downloads.</li>
+  </ul>
+  <p>What the user is <em>not</em> asked to trust: an indexer operator’s retention policy or a push-notification vendor. Automatic iCloud backup adds trust in the Apple Account and iCloud Keychain recovery path. The app asks for device authentication and keeps the backup preference. Wallet, protocol and crypto code is the <code>Winnow</code> library under <code>Lean/</code>, which does not depend on the app; what only iOS can do goes through the shell’s declared capabilities. The Objective-C shell and iOS are trusted, not proven.</p>
+  <hr />
+  <h2 id="deliberate-absences">6. Deliberate absences</h2>
+  <p>These are product decisions, not missing tickets:</p>
+  <ul>
+  <li>Always-on mempool / background 0-conf / live fee histograms</li>
+  <li>Historical filter back-scan</li>
+    <li>BIP37, Electrum, or any “ask a node about my address”</li>
+  <li>An embedded consensus engine or fraud-proof verifier</li>
+  <li>A multisig coordinator server</li>
+  </ul>
+  <p>The focused guides explain the consequences: delayed payment discovery, coarser fees, a required history backup, and transaction disclosure to relay peers.</p>
+  <hr />
+  <h2 id="how-the-implementation-is-checked">7. How the implementation is checked</h2>
+  <p>The validation appendix of <a href="/read-side">the read side</a> covers the stack. CI runs on every pull request and push to main. It builds the Lean once, checking every proof, then runs the Lean test executables, a regtest stage (io-test, backend-test and a differential check of multisig accounts against Bitcoin Core) and the UI journeys, written in Lean, in an iPhone simulator against a disposable regtest node: create, receive, send and confirm; pair a simulated Ledger, verify an address and spend; a 2-of-3 with two Bitcoin Core wallets, then its recovery path; the shipped census list; a silent payment. Each Debug, Release and device build is checked for Swift. Guide illustrations and <code>screenshots/timings.json</code> retain their historical provenance; they are not current-run evidence.</p>
+  <p>The journeys record a video and screenshots, which this site takes from the newest successful run on main; the recording keeps its source and run.</p>
+  <hr />
+  <h2 id="status">8. Status</h2>
+  <p>The app defaults to mainnet and also supports signet. Current signing choices are ordinary Taproot and script-path k-of-n accounts. Silent payments can be sent, not received. Planned features remain on the <a href="/roadmap">roadmap</a>.</p>
+</main>
+<footer><div class="bar"><nav aria-label="Footer"><a href="/roadmap">Roadmap</a><a href="/privacy">Privacy</a><a href="/recording">Recording</a></nav></div></footer>
+</body>
+</html>

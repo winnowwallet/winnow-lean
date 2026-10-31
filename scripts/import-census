@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Import the census's newest signed peer list into build/census/ for the app to ship.
+
+The census repository (winnowwallet/census) commits census/peers.json after
+every accepted daily run, signs it (census/peers.json.sig) and publishes a
+30-day health record of every endpoint it dialled (census/health.json and the
+nodes artifact it names). This takes them at one census commit (default: the
+census's main, its newest), and:
+
+1. verifies the Ed25519 signature over b"winnow-census-peers-v1\\0" + the exact
+   bytes of peers.json under the key pinned in scripts/census-public-key.txt
+   (scripts/ed25519_verify.py; refuses a signature naming another key);
+2. drops the clearnet entries the health record shows as inconsistent: a
+   consistency score under 70 over at least 3 attempted days. Entries the
+   record does not cover, or covers on fewer days, are kept; when fewer than
+   200 clearnet entries would remain, the list is kept unfiltered. Tor and I2P
+   are kept as published (what the health filter would drop there is recorded);
+3. ships the signed bytes when nothing is dropped; otherwise a derived file:
+   the same document without the dropped entries, written the way the census
+   writes it (Swift's JSONEncoder, pretty-printed with sorted keys), which is
+   checked to reproduce the signed bytes exactly before anything is removed;
+4. holds the file to the app's own decoder (Lean's `census-check`,
+   CensusCatalog.readFile: what CensusCatalog.bundled reads at launch);
+5. writes build/census/peers.json and peers-source.txt (where it came from,
+   the signature, the health filter, both files' SHA-256).
+
+The app's manifest (LeanApp/WinnowApp/Project.lean) bundles build/census/peers.json; scripts/build-ios runs this.
+
+Usage: scripts/import-census [40-character census commit]
+
+CENSUS_SOURCE=<dir> reads the census files from a directory (a copy of the
+census's census/ folder) instead of GitHub (the commit, if not given, is
+recorded as 0000000); CENSUS_CHECK=<binary> names a
+built census-check (default: lake builds it in Lean/).
+"""
+import gzip
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ed25519_verify  # noqa: E402
+
+CENSUS = 'https://github.com/winnowwallet/census'
+RAW = 'https://raw.githubusercontent.com/winnowwallet/census'
+DESTINATION = ROOT / 'build/census'
+PINNED_KEYS = Path(__file__).resolve().parent / 'census-public-key.txt'
+DOMAIN = b'winnow-census-peers-v1\x00'
+
+PEERS_LIMIT = 4 * 1_024 * 1_024          # CensusCatalog.maximumBytes
+SIGNATURE_LIMIT = 4_096
+HEALTH_LIMIT = 4 * 1_024 * 1_024
+NODES_LIMIT = 64 * 1_024 * 1_024         # the gzip artifact (8 MiB in October 2026)
+NODES_EXPANDED_LIMIT = 1_024 * 1_024 * 1_024  # its JSON (128 MB in October 2026)
+
+HEALTH_MODEL = 'observed-consistency-1'
+MINIMUM_SCORE = 70
+MINIMUM_ATTEMPT_DAYS = 3
+MINIMUM_FILTERED_CLEARNET = 200
+FILTERED_NETWORKS = ('clearnet',)
+# health records' `network` for each peers.json network
+HEALTH_NETWORKS = {'clearnet': ('ipv4', 'ipv6'), 'tor': ('tor',), 'i2p': ('i2p',)}
+
+
+class Refused(Exception):
+    """The census at this commit must not ship."""
+
+
+# --- fetching -------------------------------------------------------------------------------------
+
+class Source:
+    """The census's census/ folder at one commit, on GitHub or in a local directory."""
+
+    def __init__(self, commit, directory=None):
+        self.commit = commit
+        self.directory = Path(directory) if directory else None
+
+    def fetch(self, name, limit, missing_ok=False):
+        if self.directory:
+            path = self.directory / name
+            if not path.exists():
+                if missing_ok:
+                    return None
+                raise Refused(f'{path} is missing')
+            with open(path, 'rb') as f:
+                data = f.read(limit + 1)
+        else:
+            try:
+                with urllib.request.urlopen(f'{RAW}/{self.commit}/census/{name}', timeout=120) as response:
+                    data = response.read(limit + 1)
+            except urllib.error.HTTPError as error:
+                if error.code == 404 and missing_ok:
+                    return None
+                raise Refused(f'census/{name} at {self.commit}: HTTP {error.code}') from error
+        if len(data) > limit:
+            raise Refused(f'census/{name} is over {limit} bytes')
+        return data
+
+
+def newest_commit():
+    out = subprocess.check_output(['git', 'ls-remote', CENSUS, 'refs/heads/main'], text=True)
+    return out.split()[0]
+
+
+# --- the signature --------------------------------------------------------------------------------
+
+def pinned_keys(path=PINNED_KEYS):
+    keys = [line.strip().lower() for line in Path(path).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith('#')]
+    if not keys or not all(re.fullmatch(r'[0-9a-f]{64}', k) for k in keys):
+        raise Refused(f'{path} must hold one or more 64-hex Ed25519 public keys')
+    return keys
+
+
+def verify_signature(peers, signature_file, keys):
+    """The pinned key that signed `peers` (bytes), from peers.json.sig's bytes; Refused otherwise."""
+    try:
+        sig = json.loads(signature_file)
+        algorithm, key, signature = sig['algorithm'], sig['publicKey'].lower(), sig['signature']
+        signature = bytes.fromhex(signature)
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise Refused(f'peers.json.sig is not a signature file: {error}') from error
+    if algorithm != 'ed25519':
+        raise Refused(f'peers.json.sig: algorithm {algorithm!r}, not ed25519')
+    if key not in keys:
+        raise Refused(f'peers.json.sig names key {key}, not the pinned key (scripts/census-public-key.txt)')
+    if not ed25519_verify.verify(bytes.fromhex(key), DOMAIN + peers, signature):
+        raise Refused('peers.json does not verify under the pinned census key')
+    return key
+
+
+# --- the health filter ----------------------------------------------------------------------------
+
+def endpoint(host, port):
+    """The health record's endpoint for a peers.json entry: host:port, an IPv6 host in brackets."""
+    return f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
+
+
+def nodes_artifact(health):
+    """(file name, sha256) of the nodes artifact health.json names, checked against each other."""
+    artifact = health.get('nodesArtifact') or {}
+    name, digest = artifact.get('file'), artifact.get('sha256')
+    match = re.fullmatch(r'health-nodes-([0-9a-f]{64})\.json\.gz', name or '')
+    if not match or match.group(1) != digest:
+        raise Refused(f'health.json names nodes artifact {name!r} with sha256 {digest!r}: they disagree')
+    return name, digest
+
+
+def read_nodes(compressed, digest):
+    """The nodes artifact's records, after its SHA-256 is checked against the one its name carries."""
+    actual = hashlib.sha256(compressed).hexdigest()
+    if actual != digest:
+        raise Refused(f'the health nodes artifact has sha256 {actual}, not {digest} (its name)')
+    with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as f:
+        expanded = f.read(NODES_EXPANDED_LIMIT + 1)
+    if len(expanded) > NODES_EXPANDED_LIMIT:
+        raise Refused(f'the health nodes artifact expands past {NODES_EXPANDED_LIMIT} bytes')
+    nodes = json.loads(expanded).get('nodes')
+    if not isinstance(nodes, list):
+        raise Refused('the health nodes artifact has no nodes list')
+    return nodes
+
+
+def inconsistent(record):
+    """A health record the filter drops: a consistency score under 70 over at least 3 attempted days."""
+    score, days = record.get('consistencyScore'), record.get('attemptDays')
+    return (isinstance(score, (int, float)) and isinstance(days, int) and days >= MINIMUM_ATTEMPT_DAYS
+            and score < MINIMUM_SCORE)
+
+
+def health_filter(catalog, nodes, filtered_networks=FILTERED_NETWORKS, floor=MINIMUM_FILTERED_CLEARNET):
+    """(networks after the filter, report per network).
+
+    Each report: entries, covered (by a health record), drop (what the rule would drop), dropped (what was
+    dropped), and `kept` naming why nothing was dropped when the rule would have."""
+    records = {r.get('endpoint'): r for r in nodes if isinstance(r, dict)}
+    networks, report = {}, {}
+    for network, entries in catalog['networks'].items():
+        allowed = HEALTH_NETWORKS.get(network, ())
+        matched = [records.get(endpoint(e['host'], e['port'])) for e in entries]
+        matched = [r if r is not None and r.get('network') in allowed else None for r in matched]
+        drop = [r is not None and inconsistent(r) for r in matched]
+        row = {'entries': len(entries), 'covered': sum(r is not None for r in matched), 'drop': sum(drop),
+               'dropped': 0, 'kept': None}
+        kept = [e for e, d in zip(entries, drop) if not d]
+        if network not in filtered_networks:
+            row['kept'] = 'as published'
+            networks[network] = entries
+        elif network == 'clearnet' and row['drop'] and len(kept) < floor:
+            row['kept'] = f'unfiltered: only {len(kept)} would remain, under {floor}'
+            networks[network] = entries
+        else:
+            row['dropped'] = row['drop']
+            networks[network] = kept
+        report[network] = row
+    return networks, report
+
+
+# --- the shipped file -----------------------------------------------------------------------------
+
+def census_json(document):
+    """`document` as the census writes peers.json: Swift's JSONEncoder with [.prettyPrinted, .sortedKeys]
+    (two-space indent, " : ", "/" escaped, UTF-8 unescaped, no final newline). "/" occurs in JSON only
+    inside strings, so escaping every one is exact."""
+    text = json.dumps(document, indent=2, separators=(',', ' : '), sort_keys=True, ensure_ascii=False)
+    return text.replace('/', '\\/').encode()
+
+
+def derive(peers, catalog, networks):
+    """The bytes to ship: the signed `peers` when nothing was dropped, else the document without the
+    dropped entries in the census's own style (None when that style does not reproduce `peers`)."""
+    if all(len(networks[n]) == len(es) for n, es in catalog['networks'].items()):
+        return peers
+    if census_json(catalog) != peers:
+        return None
+    return census_json({**catalog, 'networks': networks})
+
+
+def census_check(path, binary=None):
+    """The app's decoder on `path` (Lean's census-check): its output line; Refused when it fails."""
+    if binary is None:
+        binary = os.environ.get('CENSUS_CHECK')
+    if not binary:
+        lean = ROOT / 'Lean'
+        build = subprocess.run(['lake', 'build', 'census-check'], cwd=lean, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+        if build.returncode:
+            raise Refused(f'lake build census-check failed:\n{build.stdout[-2000:]}')
+        binary = lean / '.lake/build/bin/census-check'
+    run = subprocess.run([str(binary), str(path)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if run.returncode:
+        raise Refused(f'the app would not use this list: {run.stdout.strip()}')
+    return run.stdout.strip()
+
+
+def run(commit, source, destination=DESTINATION, keys_path=PINNED_KEYS, checker=None, log=print):
+    keys = pinned_keys(keys_path)
+    peers = source.fetch('peers.json', PEERS_LIMIT)
+    key = verify_signature(peers, source.fetch('peers.json.sig', SIGNATURE_LIMIT), keys)
+    try:
+        catalog = json.loads(peers)
+    except ValueError as error:
+        raise Refused(f'peers.json is not JSON: {error}') from error
+    if (not isinstance(catalog, dict) or catalog.get('schemaVersion') != 1
+            or not isinstance(catalog.get('networks'), dict) or 'clearnet' not in catalog['networks']):
+        raise Refused('peers.json is not a schema-1 list')
+    fingerprint = hashlib.sha256(bytes.fromhex(key)).hexdigest()[:16]
+    pin = Path(keys_path).resolve()
+    pin = pin.relative_to(ROOT) if pin.is_relative_to(ROOT) else pin
+    log(f'census {commit[:7]} of {catalog["date"]}: signature verified (key {key[:16]}…, sha256 {fingerprint})')
+
+    # the health filter: hygiene on top of the signed list, so its absence ships the list unfiltered
+    networks, report, health_line = catalog['networks'], None, None
+    health_bytes = source.fetch('health.json', HEALTH_LIMIT, missing_ok=True)
+    health = json.loads(health_bytes) if health_bytes else None
+    if health is None:
+        health_line = 'unfiltered: the census has no health.json at this commit'
+    elif health.get('modelVersion') != HEALTH_MODEL:
+        health_line = f'unfiltered: health model {health.get("modelVersion")!r} is not {HEALTH_MODEL}'
+    else:
+        name, digest = nodes_artifact(health)
+        nodes = read_nodes(source.fetch(name, NODES_LIMIT), digest)
+        networks, report = health_filter(catalog, nodes)
+        days = health.get('acceptedDays') or []
+        span = f'{days[0]}..{days[-1]}' if days else 'none'
+        health_line = (f'{HEALTH_MODEL}, {len(days)} accepted days ({span}), as of {health.get("asOf")}, '
+                       f'{name} (sha256 verified, {len(nodes)} records)')
+    shipped = derive(peers, catalog, networks)
+    if shipped is None:
+        networks = catalog['networks']
+        shipped = peers
+        health_line = 'unfiltered: re-serializing peers.json does not reproduce the signed bytes'
+        report = {n: {**row, 'dropped': 0, 'kept': 'unfiltered (re-serialization)'} for n, row in report.items()}
+
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination, prefix='.peers-', suffix='.json', delete=False) as f:
+        f.write(shipped)
+        staged = Path(f.name)
+    try:
+        checked = census_check(staged, checker).replace(str(staged), str(destination / 'peers.json'))
+    except Refused:
+        staged.unlink()
+        raise
+
+    counts = ', '.join(f'{len(es)} {n}' for n, es in networks.items())
+    lines = [
+        f'Peers: census {commit[:7]} of {catalog["date"]}',
+        f'commit: {commit}',
+        f'source: {CENSUS}/blob/{commit}/census/peers.json',
+        f'date: {catalog["date"]}, tip {catalog["tip"]}',
+        f'signature: verified, ed25519 key {key} (sha256 fingerprint {fingerprint}, pinned in {pin})',
+        f'signed peers.json: sha256 {hashlib.sha256(peers).hexdigest()}, {len(peers)} bytes',
+        f'health: {health_line}',
+    ]
+    for network, row in (report or {}).items():
+        rule = f'score < {MINIMUM_SCORE} over >= {MINIMUM_ATTEMPT_DAYS} days'
+        if row['kept']:
+            lines.append(f'health {network}: {row["entries"]} kept {row["kept"]} ({row["covered"]} covered, '
+                         f'{row["drop"]} with {rule})')
+        else:
+            lines.append(f'health {network}: {row["entries"]} -> {row["entries"] - row["dropped"]} '
+                         f'({row["covered"]} covered, {row["dropped"]} dropped with {rule})')
+    derived = 'the signed bytes' if shipped == peers else 'derived from the signed file by the health filter'
+    lines += [
+        f'shipped peers.json: sha256 {hashlib.sha256(shipped).hexdigest()}, {len(shipped)} bytes, {derived}',
+        f'shipped counts: {counts}',
+        checked,
+    ]
+    os.replace(staged, destination / 'peers.json')
+    (destination / 'peers-source.txt').write_text('\n'.join(lines) + '\n')
+    for line in lines[6:]:
+        log(line)
+    return lines
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) > 1 or (args and not re.fullmatch(r'[0-9a-f]{40}', args[0])):
+        sys.exit('usage: scripts/import-census [40-character census commit]')
+    directory = os.environ.get('CENSUS_SOURCE')
+    commit = args[0] if args else ('0' * 40 if directory else newest_commit())
+    try:
+        run(commit, Source(commit, directory))
+    except Refused as error:
+        sys.exit(f'import-census: refused census {commit[:7]}: {error}')
+
+
+if __name__ == '__main__':
+    main()
