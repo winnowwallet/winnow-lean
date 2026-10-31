@@ -71,12 +71,33 @@ def toA : Option Point → APoint
   | none => .inf
   | some (x, y) => .pt x y
 
+/-- What compiled code runs for `addOpt`, `mulOpt` and `mulGen` (`Secp.Fast`, as `Secp.mulG` does). -/
+def affineFast (j : Secp.Fast.J) : PK (Option Point) :=
+  if j.Z.isZero then pure none else
+  match j.toA? with | some a => pure (some (Secp.ofFastA a)) | none => throw .underlyingCryptoError
+
+def addOptFast (a b : Option Point) : PK (Option Point) :=
+  match a, b with
+  | none, none => pure none
+  | some p, none | none, some p => pure (some p)
+  | some p, some q => affineFast ((Secp.Fast.J.inf.addA (Secp.toFastA p.1 p.2)).addA (Secp.toFastA q.1 q.2))
+
+def mulOptFast (k : Nat) (p : Point) : PK (Option Point) :=
+  match Secp.Fast.mulPtJ (k % groupN) (Secp.toFastA p.1 p.2) with
+  | some j => affineFast j
+  | none => throw .underlyingCryptoError
+
+def mulGenFast (k : Nat) : PK (Option Point) := affineFast (Secp.Fast.mulGJ (k % groupN))
+
 /-- `a + b`, either possibly infinity. -/
+@[implemented_by addOptFast]
 def addOpt (a b : Option Point) : PK (Option Point) := affine ((Jac.inf.add (toA a)).add (toA b))
 
 /-- `k·p`; `none` for infinity. -/
+@[implemented_by mulOptFast]
 def mulOpt (k : Nat) (p : Point) : PK (Option Point) := affine (smulJ k (.pt p.1 p.2))
 
+@[implemented_by mulGenFast]
 def mulGen (k : Nat) : PK (Option Point) := affine (smulJ k Secp.Gpt)
 
 /-- `d·G` for a valid secret. -/

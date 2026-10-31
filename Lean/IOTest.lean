@@ -71,6 +71,16 @@ def Node.mine (n : Node) (count : Nat) (addr : String) : IO Unit := do
     discard <| n.cli #["generatetoaddress", toString k, addr]
     left := left - k
 
+/-- `count` blocks paying an anyone-can-spend script, so the node's wallet records none of them. -/
+def Node.mineElsewhere (n : Node) (count : Nat) : IO Unit := do
+  let some d := ((← n.json #["getdescriptorinfo", "raw(51)"]).getObjValAs? String "descriptor").toOption
+    | throw (IO.userError "getdescriptorinfo raw(51)")
+  let mut left := count
+  while left > 0 do
+    let k := min left 500
+    discard <| n.cli #["generatetodescriptor", toString k, d]
+    left := left - k
+
 def Node.endpoint (n : Node) : PeerEndpoint := { host := "127.0.0.1", port := n.p2p }
 
 def killPid (pid : UInt32) (signal : String := "-TERM") : IO Unit := do
@@ -87,7 +97,8 @@ def startNode (dir : String) : IO Node := do
       cmd := bitcoind
       args := #["-regtest", s!"-datadir={datadir}", s!"-port={p2p}", s!"-rpcport={rpc}", "-bind=127.0.0.1",
         "-listen=1", "-server=1", "-blockfilterindex=1", "-peerblockfilters=1", "-fallbackfee=0.0002",
-        "-printtoconsole=0", "-dnsseed=0", "-discover=0", "-listenonion=0", "-whitelist=noban@127.0.0.1"]
+        "-printtoconsole=0", "-dnsseed=0", "-discover=0", "-listenonion=0", "-whitelist=noban@127.0.0.1",
+        "-keypool=1", "-unsafesqlitesync=1"]
       stdout := .null, stderr := .null, stdin := .null }
     let n : Node := { datadir, p2p, rpc, pid := child.pid }
     let mut ready := false
@@ -808,7 +819,7 @@ def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
   let fundTxid ← n.wallet #["sendtoaddress", watchAddr, "1.0"]
   n.mine 1 mineAddr
   let fundHeight ← n.height
-  n.mine 2100 mineAddr
+  n.mineElsewhere 2100
   let tip ← n.height
   say s!"  chain: tip {tip}, funding tx {fundTxid} at {fundHeight}"
   -- 2. Header sync through the pool
@@ -1069,9 +1080,10 @@ def main (args : List String) : IO UInt32 := do
     say s!"  FAIL exception: {e}"
   finally
     discard <| (n.cli #["stop"]).toBaseIO
+    -- gone, or a zombie: this process never reaps it, so `kill -0` would answer until the 10 s ran out
     discard <| waitUntil 10_000 (do
-      let r ← IO.Process.output { cmd := "kill", args := #["-0", toString n.pid] }
-      return r.exitCode != 0)
+      let r ← IO.Process.output { cmd := "ps", args := #["-o", "stat=", "-p", toString n.pid] }
+      return r.exitCode != 0 || r.stdout.trimAscii.toString.startsWith "Z")
     killPid n.pid "-KILL"
     try IO.FS.removeDirAll tmp catch _ => pure ()
   let fs ← failures.get

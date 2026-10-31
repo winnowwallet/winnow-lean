@@ -1,17 +1,19 @@
 import Secp.Curve.Jacobian
 import Secp.Sha256
+import Secp.Fast
 
 /-! # Keys, tweaks and BIP340, as NativeSecp256k1 exposes them
 
 The same inputs, outputs and refusal reasons as `Secp256k1.PrivateKey`, `PublicKey`, `XOnlyKey`
 and `Schnorr` in `Sources/NativeSecp256k1`, so the two can be compared answer for answer.
-Scalars are integers below `N`, computed with `Nat`; points go through the proven Jacobian code.
+Scalars are integers below `N`, computed with `Nat`; points go through the proven Jacobian code, which
+compiled code replaces with `Secp.Fast` for scalar multiplication and lift_x (see below and SECURITY.md).
 `internal` reports a field inverse that failed its own check, which `P` being prime rules out.
 
 **Not constant-time.** Correct by proof (`sign_verifies`, `verify_sound` and the rest of `Secp.Proofs.Gate`)
 and by lockstep against libsecp256k1, but secret scalars are Lean `Nat`s, GMP-backed big numbers whose
-running time depends on their values, and every scalar multiplication goes through `smulJ`, which branches
-on each bit of the scalar (`Secp.Curve.Jacobian`). Signing, tweaking and public-key derivation therefore
+running time depends on their values, and every scalar multiplication picks a table entry by each 4-bit
+window of the scalar (`Secp.Fast`). Signing, tweaking and public-key derivation therefore
 leak timing. That is acceptable for what Winnow does with it: low-volume signing the user approves, on the
 user's own device, where no one can trigger operations on demand or time them. Do not reuse it in servers,
 signing services, shared hosts, or anything that signs on someone else's request (SECURITY.md, "Timing side
@@ -35,13 +37,41 @@ abbrev R := Except Err
 
 def Gpt : APoint := .pt (Fq.ofNat Spec.Gx.val) (Fq.ofNat Spec.Gy.val)
 
+/-! ### What compiled code runs (`Secp.Fast`)
+
+Each `…Fast` below is the compiled form of the proved definition after it (`@[implemented_by]`): the same
+type and, trusted rather than proved, the same answers for points on the curve. Scalars are reduced mod `N`
+first, which changes nothing there, every point having order `N`. -/
+
+def toFastA (x y : Fq) : Fast.A := ⟨Fast.F.ofNat x.toNat, Fast.F.ofNat y.toNat⟩
+def ofFastA (a : Fast.A) : Fq × Fq := (Fq.ofNat a.x.toNat, Fq.ofNat a.y.toNat)
+
+def ofFastJ (j : Fast.J) : R APoint :=
+  if j.Z.isZero then pure .inf else
+  match j.toA? with | some a => let (x, y) := ofFastA a; pure (.pt x y) | none => throw .internal
+
+def mulGFast (k : Nat) : R APoint := ofFastJ (Fast.mulGJ (k % N))
+
+def mulPtFast (k : Nat) (p : APoint) : R APoint :=
+  match p with
+  | .inf => pure .inf
+  | .pt x y => match Fast.mulPtJ (k % N) (toFastA x y) with | some j => ofFastJ j | none => throw .internal
+
+def mulGAddFast (k : Nat) (p : APoint) : R APoint :=
+  match p with
+  | .inf => mulGFast k
+  | .pt x y => ofFastJ ((Fast.mulGJ (k % N)).addA (toFastA x y))
+
+@[implemented_by mulGFast]
 def mulG (k : Nat) : R APoint :=
   match smul? k Gpt with | some q => pure q | none => throw .internal
 
+@[implemented_by mulPtFast]
 def mulPt (k : Nat) (p : APoint) : R APoint :=
   match smul? k p with | some q => pure q | none => throw .internal
 
 /-- `k·G + p`, through one Jacobian addition. -/
+@[implemented_by mulGAddFast]
 def mulGAdd (k : Nat) (p : APoint) : R APoint :=
   match ((smulJ k Gpt).add p).toAffine? with | some q => pure q | none => throw .internal
 
@@ -67,7 +97,16 @@ def pubOf (d : Nat) : R (Fq × Fq) := do
 def compressed (x y : Fq) : ByteArray :=
   (ByteArray.mk #[if y.isOdd then 3 else 2]) ++ toBE32 x.toNat
 
+def liftXFast? (x : Nat) : Option (Fq × Fq) :=
+  if x < P then
+    let fx := Fast.F.ofNat x
+    match (fx * fx * fx + Fast.F.ofNat 7).sqrt? with
+    | some y => some (ofFastA ⟨fx, if y.isOdd then Fast.zero - y else y⟩)
+    | none => none
+  else none
+
 /-- The even-y point with this x (`lift_x`), or `none` when `x ≥ P` or `x³ + 7` is not a square. -/
+@[implemented_by liftXFast?]
 def liftX? (x : Nat) : Option (Fq × Fq) :=
   if x < P then
     let fx := Fq.ofNat x

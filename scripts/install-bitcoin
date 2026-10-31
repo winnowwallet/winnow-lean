@@ -17,15 +17,27 @@ ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/winnow-bitcoin-$VERSION"
 ARCHIVE="$ROOT/$NAME"
 BIN="$ROOT/bitcoin-$VERSION/bin"
 
-verified() { [ -f "$ARCHIVE" ] && [ "$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')" = "$ARCHIVE_SHA256" ]; }
+verified() { [ -f "$1" ] && [ "$(shasum -a 256 "$1" | awk '{print $1}')" = "$ARCHIVE_SHA256" ]; }
+installed() { verified "$ARCHIVE" && [ -x "$BIN/bitcoind" ] && [ -x "$BIN/bitcoin-cli" ]; }
 
-if ! verified; then
+# CI starts several suites at once, each running this: each downloads and unpacks in a directory of its own, and
+# the finished copy goes into place by one rename, so no suite ever sees a half-made or deleted install
+if ! installed; then
   install -d -m 700 "$ROOT"
+  WORK="$(mktemp -d "$ROOT/install.XXXXXX")"
+  trap 'rm -rf "$WORK"' EXIT
   curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
-    "https://bitcoincore.org/bin/bitcoin-core-$VERSION/$NAME" --output "$ARCHIVE"
-  verified || { echo "Bitcoin Core archive checksum mismatch: expected $ARCHIVE_SHA256" >&2; rm -f "$ARCHIVE"; exit 1; }
-  rm -rf "$ROOT/bitcoin-$VERSION"
+    "https://bitcoincore.org/bin/bitcoin-core-$VERSION/$NAME" --output "$WORK/$NAME"
+  verified "$WORK/$NAME" || { echo "Bitcoin Core archive checksum mismatch: expected $ARCHIVE_SHA256" >&2; exit 1; }
+  tar -xzf "$WORK/$NAME" -C "$WORK"
+  # a copy without both programs is a leftover from an interrupted install; one with them may be another suite's
+  # finished copy, in use, so it stays
+  { [ -x "$BIN/bitcoind" ] && [ -x "$BIN/bitcoin-cli" ]; } || rm -rf "$ROOT/bitcoin-$VERSION"
+  # rename(2) refuses a directory onto one that exists, where `mv` would move it inside
+  /usr/bin/python3 -I -c 'import os, sys
+try: os.rename(sys.argv[1], sys.argv[2])
+except OSError: pass' "$WORK/bitcoin-$VERSION" "$ROOT/bitcoin-$VERSION"
+  mv -f "$WORK/$NAME" "$ARCHIVE"
 fi
-[ -x "$BIN/bitcoind" ] || tar -xzf "$ARCHIVE" -C "$ROOT"
 test -x "$BIN/bitcoind" && test -x "$BIN/bitcoin-cli"
 printf '%s\n' "$BIN"

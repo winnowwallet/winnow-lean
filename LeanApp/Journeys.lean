@@ -83,8 +83,28 @@ def strings (j : Json) : List String :=
 def Host.mempool (h : Host) : IO (List String) := do return strings (← h.cliJson #["getrawmempool"])
 def Host.bankAddress (h : Host) : IO String := h.wallet "w" #["getnewaddress"]
 def Host.height (h : Host) : IO Nat := do return (← h.cli #["getblockcount"]).toNat!
+/-- Until the node's block filter index reaches its tip. The app asks for filters up to the tip it has
+synced; a request past the index goes unanswered until it times out, and the app then drops its only peer. -/
+def Host.waitFilterIndex (h : Host) : IO Unit := do
+  let tip ← h.height
+  for _ in [0:600] do
+    let info ← h.cliJson #["getindexinfo", "basic block filter index"]
+    let best := ((info.getObjValD "basic block filter index").getObjValAs? Nat "best_block_height").toOption.getD 0
+    if best ≥ tip then return
+    IO.sleep 50
+  failure "the node's block filter index did not reach its tip in 30 s"
+
 def Host.mine (h : Host) (blocks : Nat) : IO Unit := do
   discard <| h.cli #["generatetoaddress", toString blocks, ← h.bankAddress]
+  h.waitFilterIndex
+
+/-- `blocks` blocks paying an anyone-can-spend script: no wallet on the node scans them in, so many blocks mine
+in a moment. -/
+def Host.mineElsewhere (h : Host) (blocks : Nat) : IO Unit := do
+  let some d := ((← h.cliJson #["getdescriptorinfo", "raw(51)"]).getObjValAs? String "descriptor").toOption
+    | failure "getdescriptorinfo raw(51)"
+  discard <| h.cli #["generatetodescriptor", toString blocks, d]
+  h.waitFilterIndex
 
 def btc (sats : Nat) : String :=
   let frac := toString (sats % 100000000)
@@ -289,12 +309,12 @@ def receiveAddress : UI String := do
   return address
 
 def waitForBalance (target : Nat) (what : String) (f : Find := "balanceText") : UI Unit :=
-  waitUntil 90 s!"{what} (balance {target})" (every := 1) do return (← amount f) == some target
+  waitUntil 90 s!"{what} (balance {target})" (every := 0.25) do return (← amount f) == some target
 
 /-- The one transaction that entered the mempool after `before`. -/
 def newMempoolTransaction (h : Host) (before : List String) (within : Float) (what : String) : UI String := do
   let found ← IO.mkRef (none : Option String)
-  waitUntil within what (every := 1) do
+  waitUntil within what (every := 0.25) do
     let now ← h.mempool
     found.set (now.find? (!before.contains ·))
     return (← found.get).isSome
@@ -428,7 +448,7 @@ def multisigTwoOfThreeWithRecovery : Journey := ⟨"multisigTwoOfThreeWithRecove
   for _ in [0:5] do
     let days := (digits ((← text delay).splitOn " days").head!).getD 0
     if days ≤ 1 then break
-    if days ≤ 5 then tap decrement (times := days - 1) else press decrement 15
+    if days ≤ 5 then tap decrement (times := days - 1) else press decrement 25
   expectEq "the delay" (← text delay) s!"After about 1 days ({recoveryBlocks} blocks)"
   shot "10-multisig-build"
   tap "multisigBuildCreateButton"
@@ -498,9 +518,14 @@ def multisigTwoOfThreeWithRecovery : Journey := ⟨"multisigTwoOfThreeWithRecove
   needScroll s!"multisigAccount-{account}" "the account is not listed"
   tap s!"multisigAccount-{account}"
 
-  -- past the delay, the phone alone spends the change on the recovery path
+  -- past the delay, the phone alone spends the change on the recovery path. The Core signers are done, and the
+  -- app is in the background while the node mines, so it next syncs to the new tip in one go.
+  for signer in [core, second] do discard <| h.cli #["unloadwallet", signer.wallet]
   let height ← h.height
-  if height < spentAt + recoveryBlocks - 1 then h.mine (spentAt + recoveryBlocks - 1 - height)
+  if height < spentAt + recoveryBlocks - 1 then
+    home
+    h.mineElsewhere (spentAt + recoveryBlocks - 1 - height)
+    activate
   -- the account page: no payment form of its own, Send from this account, Paste a PSBT, Share with co-signers
   needScroll "multisigPastePSBTButton" "the account page has no Paste a PSBT"
   expect (!(← exists? "multisigAddressField")) "the account page still has a payment form"
@@ -519,11 +544,11 @@ def multisigTwoOfThreeWithRecovery : Journey := ⟨"multisigTwoOfThreeWithRecove
   tap "pasteDestinationButton"
   type "amountField" (toString recoveryPayment)
   -- the phone may not have seen the last blocks yet: review until the coin unlocks
-  waitUntil 120 "the recovery spend was not reviewed" (every := 3) do
+  waitUntil 120 "the recovery spend was not reviewed" (every := 1) do
     if ← exists? "sendButton" then return true
     let review ← state "reviewButton"
     if review.present && review.enabled && (← scrollTo "reviewButton") then tap "reviewButton"
-    exists? "sendButton" 2
+    exists? "sendButton" 0.5
   expectEq "the reviewed spend path" (← text "reviewSpendPath") "Recovery path"
   needScroll "sendButton" "no Sign and continue"
   expectEq "the review's button" (← text "sendButton") "Sign and continue"
@@ -555,13 +580,13 @@ account. -/
 def ledgerPairVerifySpend : Journey := ⟨"ledgerPairVerifySpend", do
   let r ← Run.new "ledger"
   let h := r.host
-  r.launch "ledger" [("WINNOW_E2E_LEDGER", ← randomHex 16)]
+  -- Advanced mode from launch: the multisig journey turns it on through its alert
+  r.launch "ledger" [("WINNOW_E2E_LEDGER", ← randomHex 16), ("WINNOW_E2E_ADVANCED", "1")]
   createWallet
   let walletAddress ← receiveAddress
   tap "closeReceiveButton"
   discard <| h.fund walletAddress (2 * funding)
   waitForBalance (2 * funding) "the wallet did not find its funding"
-  turnOnAdvanced
 
   -- Settings → Signers → Pair a Ledger
   tap (.tab "Settings")
