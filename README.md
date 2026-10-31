@@ -136,17 +136,17 @@ only the journeys named.
 ### CI and TestFlight
 
 `.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request that is ready for
-review and changes more than the docs, nightly on main and by hand, in two WarpBuild jobs that start at once and
-each build the Lean from the cache; every long step prints its progress as it goes. A pull request's run is the
-short one (marked *full run only* below); nightly and by hand run everything:
+review and changes more than the docs, on a push to main that does, nightly on main when its commit has not passed
+yet, and by hand, in two WarpBuild jobs that start at once and each build the Lean from the cache; every long step
+prints its progress as it goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test (its two slowest nested flows: *full run only*), ledger-transport-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases; 2 on a pull request) |
-| `app` | the same build and census import; Debug for the simulator, and (*full run only*) Release for the simulator and devices, each checked for Swift, and `verify-release-no-test-mode`; the UI journeys (`scripts/ui-fixture` as the hooks): a pull request runs `createReceiveSendConfirm`, a full run all five; (*full run only*) the website's media (`scripts/journey-media`) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases) |
+| `app` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and `verify-release-no-test-mode`; all five UI journeys (`scripts/ui-fixture` as the hooks); the website's media (`scripts/journey-media`) |
 
-`.github/workflows/release.yml`: a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (nightly or by hand,
-not a pull request's) on the same tree, then archives the app as
+`.github/workflows/release.yml`: a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (main's push, nightly
+or by hand: not a pull request's) on the same tree, then archives the app as
 `com.btcswift.app` (team 2858MX5336, the identity of the Swift app it replaces), checks the archive and
 the exported IPA (`verify-signed-archive`, `verify-exported-ipa`, `check-no-swift`), uploads it and adds
 it to TestFlight's internal group (`scripts/testflight.sh`, whose App Store Connect token comes from

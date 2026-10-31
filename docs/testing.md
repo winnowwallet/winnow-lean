@@ -12,16 +12,15 @@ history stays in [winnowwallet/winnow](https://github.com/winnowwallet/winnow).
 Every pull request that is ready for review and changes more than the docs (`*.md`,
 `docs/`) runs LeanNative's reusable `ios-app` workflow
 ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on WarpBuild runners,
-and so does main, nightly and by hand. A push to main does not. A pull request's
-run is the short one: Debug only, the first journey, two differential cases, and
-`multisig-app-test` without its two slowest nested flows. The nightly and manual
-runs do everything, and `release.yml` looks for one of those on the tag's tree.
+and so does main: on a push that changes more than the docs, nightly when its
+commit has not passed yet, and by hand. Every run is the same full run, and
+`release.yml` looks for one on the tag's tree that is not a pull request's.
 Two jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test` (`MULTISIG_APP_QUICK=1` on a pull request), `ledger-transport-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6, or 2 on a pull request). |
-| `app` | The same build and import; a Debug simulator build, checked for Swift; the UI journeys, `createReceiveSendConfirm` on a pull request and all five otherwise. A full run also makes the Release simulator and device builds, checks them for Swift, runs `verify-release-no-test-mode`, and produces the `journey-media` artifact. |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6). |
+| `app` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; `verify-release-no-test-mode`; all five UI journeys; the `journey-media` artifact. |
 
 `verify-release-no-test-mode` launches both simulator builds with test mode's
 environment: Debug must start the test run, Release must ignore it.

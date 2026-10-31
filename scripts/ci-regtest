@@ -6,7 +6,7 @@
 #
 #   scripts/ci-regtest [io] [backend] [differential]
 #
-#   MULTISIG_CASES  the differential's random cases (default 6; pull requests run 2)
+#   MULTISIG_CASES  the differential's random cases (default 6)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$("$ROOT/scripts/install-bitcoin")"
