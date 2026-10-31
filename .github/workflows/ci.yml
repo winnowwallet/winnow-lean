@@ -1,0 +1,75 @@
+name: CI
+# The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
+# two WarpBuild jobs that start at once, `lean` (the Lean built, every proof checked, then every test below at the
+# same time, the regtest node's among them) and `app` (the iOS builds and the UI journeys). It runs on pull
+# requests, nightly on main and by hand; not on a push to main, which only ever gets a tree a pull request
+# already passed (release.yml looks for that run instead of testing again). The LeanNative commit below is
+# the one LeanApp/lake-manifest.json pins; both jobs fail if they differ. Actions does not follow repository
+# redirects for reusable workflows, so the owner/repo here is the framework's real home.
+on:
+  pull_request:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  # nightly: nothing to run when this commit of main already passed (main changes only with a release; the first
+  # night after one runs, which gives the website main's journey media)
+  nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    outputs:
+      tested: ${{ steps.check.outputs.tested }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&head_sha=$GITHUB_SHA&status=success&per_page=1" --jq .total_count)
+          echo "successful runs on main at $GITHUB_SHA: $n"
+          if [ "$n" -gt 0 ]; then echo tested=true; else echo tested=false; fi >> "$GITHUB_OUTPUT"
+  app:
+    needs: nightly
+    if: ${{ !cancelled() && needs.nightly.outputs.tested != 'true' }}
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@2a6d129205e4d2bb1ab8b926fc864c9e44a76e52
+    with:
+      leannative: 2a6d129205e4d2bb1ab8b926fc864c9e44a76e52
+      runs-on: warp-macos-26-arm64-12x
+      # the UI journeys drive one simulator: half the runner, half the price
+      app-runs-on: warp-macos-26-arm64-6x
+      lean-packages: Lean LeanApp
+      build-targets: |
+        Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check
+        LeanApp records-test multisig-app-test ledger-transport-test backend-test
+      app-dir: LeanApp
+      app-root: WinnowApp
+      scheme: WinnowLean
+      # the census list the app bundles: signature verified, health filtered (each job imports it)
+      prepare: scripts/import-census && cp build/census/peers-source.txt "$CI_RESULTS/"
+      tests: |
+        . Lean/.lake/build/bin/census-check build/census/peers.json
+        . CENSUS_CHECK="$PWD/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s scripts/tests -v
+        Lean .lake/build/bin/multisig-test
+        Lean .lake/build/bin/ledger-test
+        Lean .lake/build/bin/silent-payment-test
+        Lean .lake/build/bin/crypto-test
+        LeanApp .lake/build/bin/records-test
+        LeanApp .lake/build/bin/multisig-app-test
+        LeanApp .lake/build/bin/ledger-transport-test
+        . scripts/ci-regtest
+      release-check: scripts/verify-release-no-test-mode
+      ui-name: journey
+      # the only iPhone the WarpBuild runner's newest iOS runtime (27.1) has; the website's screenshots are this size
+      ui-device-type: iPhone Duo
+      ui-before: scripts/ui-fixture start
+      ui-after: scripts/ui-fixture stop
+      # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run
+      after-ui: scripts/journey-media
+      publish-name: journey-media
+      publish-path: build/journey-media/

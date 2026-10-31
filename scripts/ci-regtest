@@ -1,0 +1,18 @@
+#!/bin/bash
+# Winnow's tests against a disposable regtest bitcoind of the pinned Bitcoin Core (scripts/install-bitcoin):
+# io-test, backend-test and the multisig differential. CI runs it as the `extra` job of LeanNative's ios-app
+# workflow (.github/workflows/ci.yml), after the build job has built the executables; locally, build them first
+# (README, "Tests").
+#
+#   scripts/ci-regtest
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BIN="$("$ROOT/scripts/install-bitcoin")"
+export WINNOW_BITCOIND="$BIN/bitcoind" WINNOW_BITCOIN_CLI="$BIN/bitcoin-cli"
+"$WINNOW_BITCOIND" -version | head -1
+echo "▶ io-test"
+(cd "$ROOT/Lean" && .lake/build/bin/io-test)
+echo "▶ backend-test"
+(cd "$ROOT/LeanApp" && .lake/build/bin/backend-test)
+echo "▶ multisig-differential"
+(cd "$ROOT/Lean" && .lake/build/bin/multisig-differential --cases "${MULTISIG_CASES:-6}")
