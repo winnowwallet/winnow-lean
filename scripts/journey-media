@@ -1,0 +1,16 @@
+#!/bin/bash
+# The website's media from a UI-journeys run: screenshots, the browser video and journey-provenance.json
+# (scripts/prepare-journey-media), which the website takes from main's newest successful CI run.
+#
+#   scripts/journey-media [<journeys' output> [<media directory>]]
+#
+# Defaults: $CI_RESULTS/journey (the `app` job of LeanNative's ios-app workflow) and build/journey-media.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+JOURNEY="${1:-${CI_RESULTS:?set CI_RESULTS or pass the journeys output}/journey}"
+MEDIA="${2:-$ROOT/build/journey-media}"
+# the recording is well over 25 MiB: the browser copy needs ffmpeg, and media without it is a failure
+command -v ffmpeg >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg >/dev/null
+command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null || { echo "journey-media: ffmpeg and ffprobe are needed" >&2; exit 1; }
+rm -rf "$MEDIA"
+"$ROOT/scripts/prepare-journey-media" "$JOURNEY" "$MEDIA"

@@ -1,0 +1,71 @@
+# Winnow in Lean: the port of Sources/WalletCore and Sources/WinnowApp (see ../PORT.md).
+name = "winnow"
+defaultTargets = ["Secp", "Winnow", "oracle-crypto", "oracle-keys", "oracle-tx", "oracle-net", "oracle-wallet", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
+
+[[lean_lib]]
+name = "Secp"
+
+[[lean_lib]]
+name = "Winnow"
+
+# The lockstep oracles (LeanOracle): one executable per area, so that areas build independently.
+[[lean_lib]]
+name = "Oracle"
+globs = ["Oracle.+"]
+
+[[lean_exe]]
+name = "oracle-crypto"
+root = "OracleCrypto"
+
+[[lean_exe]]
+name = "oracle-keys"
+root = "OracleKeys"
+
+[[lean_exe]]
+name = "oracle-tx"
+root = "OracleTx"
+
+[[lean_exe]]
+name = "oracle-net"
+root = "OracleNet"
+
+[[lean_exe]]
+name = "oracle-wallet"
+root = "OracleWallet"
+
+# Integration tests of the I/O area against a local bitcoind (Winnow/IO).
+[[lean_exe]]
+name = "io-test"
+root = "IOTest"
+
+# Upstream 1cf93fb's multisig tests ported (Taproot multisig accounts, timelocked recovery, history outputs,
+# script-path vectors in Vectors/). Run from Lean/.
+[[lean_exe]]
+name = "multisig-test"
+root = "MultisigTest"
+
+# Upstream's scripts/check-multisig-core in Lean: MultisigAccount held to a disposable regtest bitcoind.
+[[lean_exe]]
+name = "multisig-differential"
+root = "MultisigDifferential"
+
+# The Ledger signer's tests: upstream's LedgerTests, Ledger's vectors and recorded Swift sessions (Winnow/Ledger).
+[[lean_exe]]
+name = "ledger-test"
+root = "LedgerTest"
+
+# BIP352 silent payments, send side: every official sending vector and upstream's SilentPaymentTests.
+[[lean_exe]]
+name = "silent-payment-test"
+root = "SilentPaymentTest"
+
+# AES and AES-GCM (Winnow/Crypto/AES*.lean): FIPS 197, every Wycheproof AES-GCM test and CryptoKit's own
+# output; BIP340 signing against BIP340's test vectors (Vectors/). Run from Lean/; CI runs it.
+[[lean_exe]]
+name = "crypto-test"
+root = "CryptoTest"
+
+# The census list a build ships, held to CensusCatalog's rules (scripts/import-census and CI run it).
+[[lean_exe]]
+name = "census-check"
+root = "CensusCheck"

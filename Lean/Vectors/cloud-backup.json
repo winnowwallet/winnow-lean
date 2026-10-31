@@ -1,0 +1,32 @@
+{
+  "appState" : "7072697661746520636f6e7461637420616e6420696e766f696365206c6162656c202f2077697468206120736c617368",
+  "bundle" : "{\n  \"descriptor\" : \"tr([114cd667\/86'\/1'\/0']tpubDDHjkN6qykiA5Th665fMeWE8a2DXzmvcvNp39iMb1VowZpYb37XDan2Z77bMrUeTh5JSg2avC1nMsAJfjgKddoDi86AZ6jRTPfDJmEADxDY\/<0;1>\/*)#62d3lqhf\",\n  \"lastKnownHeight\" : 99,\n  \"mnemonic\" : \"alpha deal scrub asthma idea logic bright thought alpha deal scrub autumn\",\n  \"network\" : \"signet\",\n  \"nextChangeIndex\" : 8,\n  \"nextReceiveIndex\" : 19,\n  \"transactions\" : [\n\n  ],\n  \"utxos\" : [\n\n  ],\n  \"version\" : 2\n}",
+  "contentsJSON" : "{\"appState\":\"cHJpdmF0ZSBjb250YWN0IGFuZCBpbnZvaWNlIGxhYmVsIC8gd2l0aCBhIHNsYXNo\",\"bundle\":{\"descriptor\":\"tr([114cd667\\\/86'\\\/1'\\\/0']tpubDDHjkN6qykiA5Th665fMeWE8a2DXzmvcvNp39iMb1VowZpYb37XDan2Z77bMrUeTh5JSg2avC1nMsAJfjgKddoDi86AZ6jRTPfDJmEADxDY\\\/<0;1>\\\/*)#62d3lqhf\",\"lastKnownHeight\":99,\"network\":\"signet\",\"nextChangeIndex\":8,\"nextReceiveIndex\":19,\"transactions\":[],\"utxos\":[],\"version\":2}}",
+  "digestWithAppState" : "626cd6adcae669f16bb3ff9de245cdf5587f4218265ef2978b034e13b3c30508",
+  "digestWithoutAppState" : "b10bd598e8cf0c5e9fdef59ecb4f8187c004a4ea9472874e205bbacecf2eb618",
+  "key" : "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc",
+  "referenceDates" : [
+    0,
+    1,
+    783000000.123456,
+    783000000,
+    9.9999999999999995e-08,
+    0.10000000000000001,
+    783456789.98765433,
+    -5.5
+  ],
+  "source" : "Swift Version 27.0.1 (Build 26A434): upstream d2ca878 WalletCore and CloudWalletBackup.swift, verbatim",
+  "v1" : "{\"sealedWallet\":\"ArJ8LKVhyEb1U0Kzl5E0GXoZZWlo8vQ6czm8qPVCAYYIbHuiMxTvrCxrH0uVBJuy11wc2k88F7FBPR6lNNXZqTccQK\\\/dddhd\\\/JBmQnxMEsreT8L099v+GD23ISu5zV+pfNNR+a6dKcD\\\/A+koTdfJFpl44ayAok9TTiPJoZvIfMn3409vhkwlZkQxrogb5hegWlNaNvzOLoZCUSrf4a1pDXV9+NmD0gOQs51Ow2IkkAwCMYHRVvC\\\/TFKDl9cy8Ehdy1\\\/vGxCPc1SUR9sXsmIl4KBmT45Gs+Vi2XRwz2KBNBHzmuHV\\\/eMQlMBcpCNEYAYMTHn\\\/wDEO+rxMFosCCUgzUF8xYS2RZnMtMzNXwXY8yDwGiwLbp\\\/uR61XdQ7dkutorbjdgu0IHSOGxEWqKIZQCXj3FhhJSJWlUMo\\\/bFI4\\\/S86vypOQpxG6gmQNiLWv\\\/92RxUdZObOmZJGc0ZhvMHO8bEARp0Dw1GffzJFv5\\\/SvCWN\\\/\",\"savedAt\":721692800,\"version\":1,\"id\":\"C3F5C530-2529-488D-8B7A-03C12108BD86\",\"sealedPhrase\":\"9kiyarLt4Sig+588L9fylYieaXu3NU+Z1fIRox5BAVnEGpDZEkRrrVgublq1nOHwS9rvRGAZYB0qlQR8UQ7GWJEIF7J6U82LXWUJIaA2ZxAFTu66Bw8vWu86LmmEgSPCqB0SNhY=\",\"network\":\"signet\"}",
+  "v2" : "{\"sealedWallet\":\"s\\\/cwDE3mw+4nf+BaT23pW+oio8nd30wmG1unrajgQ8h3qXybS02mFvPO2C93qQVQMqrD7ddTUOqothnQ5ddCM+4Avgrlw4E6HG8sxABmd6rYXeL4XViUA03noBHIxdNyouunxzX0I8teuLQ5GmOOfpeyNzY4sZFuykXW9CUOwsW1AQ4mf0d3uC2cnS8TpDNOOVPsmL485bnIj37ztd9bhepfKCLJNO+XKw8CuYnbDqAl\\\/8jmmMjz4GUrG40tW2pS1CWCgKa+167GsGDCJFlQAhK3yF1ydVTK1vY9wgMflkWy5p5148FqAqDY3O9o7MNFud+sYtQzjByP0MoEdZj2HItbmKxwQlZJASFAcon6zDk7kpnx8wtCxy5HMMXBuPRL+4iitscCvByuD2b68S3iIF9exuuINJG\\\/qhOMPnVH9hA5ZrNIPFwmG5dDR9q9Rb8BmE3Tz5eFSh0YKZFH90xWoseuqtb8Aaat1N7oQdT4MWFEORAGNwPvQkOR5D5Gdgdu78MQYCiVDNHBaWRr0me7jUuTLaCb7h9C7SknUKe\\\/\",\"savedAt\":783000000.123456,\"version\":2,\"id\":\"ACB4C811-A811-40D2-BEEB-66333A628046\",\"sealedPhrase\":\"G99a6ktnqUDyJvh7P5HvTVCHqewI0w46PL2vbqXh9NT1izcB\\\/pbKDbiDb6ooJZAEJKr4QD5byfdXuIDOaHvqIsKfHvK0JANFAh4JoivEVlbYHR4WITlL5fz6QRubyp9OohBHKW4=\",\"network\":\"signet\"}",
+  "v2NoAppState" : "{\"sealedWallet\":\"Cwr5UfOJmC0XJmE6fuEfFJ5XGISetMO8yOF5EqlGbPAxwv83Z0oRAD86J+Eg1p6udLA3KZX\\\/LxMRubM8fXrZxkkxIBB9jV3R643fjQmFTXQiEAjy\\\/+z2TNwnPxRyLq6Ap8xVRGG\\\/EydFp+1CWr8iqqzbvR+xh71AusYMGKxiFYzvACH\\\/VGvizEPYFARptA5kPzDKLirPbMAPYSCE2MedQn529R2txK+ul687J9he3ZEn+9Q2Hq9K5fPZGFQDoQpFLFIMdnXP97IRrAWeMf6S1XLO6I15DLYm8qMs9sAHVj1ICUU4Wbj+SYAULlUajeyiwI0H\\\/Aue2XJQgqhI+hsZjI+H2oP8xtSbA2cBuqjM+E4O+8xx9w1caWm0P+zf0BxYuer5Yfxfs3fa881Ct54JXkNOAvsEV04\\\/8LqHKKGmGc2dfwdYaOLUcTbxU8YDbAeP\",\"savedAt\":814855973.486541,\"version\":2,\"id\":\"4D5D6CD5-8BDB-497B-BCAC-2DA5B1456F69\",\"sealedPhrase\":\"q7H7pFusGW2x4LiZZbn2rl3oPC9LI\\\/JaLX0HGv+UvsFvUyHz0PDXw+2v6bdB3S2rOl5v8RtDScbj\\\/xMMQZ4iEPNthAuAPYccEq7Cu85K2ObL1VVj8X0qn\\\/C\\\/9RcRrXWA4faSzpU=\",\"network\":\"signet\"}",
+  "walletPurposes" : [
+    "wallet-978307200.0",
+    "wallet-978307201.0",
+    "wallet-1761307200.123456",
+    "wallet-1761307200.0",
+    "wallet-978307200.0000001",
+    "wallet-978307200.1",
+    "wallet-1761763989.9876542",
+    "wallet-978307194.5"
+  ]
+}
