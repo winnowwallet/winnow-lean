@@ -141,6 +141,28 @@ class PrepareTests(unittest.TestCase):
     def manifest(self):
         return json.loads((self.out / media.MANIFEST).read_text())
 
+    def test_a_journeys_run_lists_the_journeys(self):
+        # LeanApp/Journeys.lean through LeanNative's driver: one XCTest, the journeys in journeys.json
+        (self.journey / "journeys.json").write_text(json.dumps([
+            {"name": "createReceiveSendConfirm", "passed": True, "seconds": 47.1, "screenshots": ["01-onboarding", "03-receive"]},
+            {"name": "silentPaymentSend", "passed": True, "seconds": 40.789, "screenshots": ["40-silent-review"]}]))
+        self.run_prepare()
+        evidence = self.manifest()
+        self.assertEqual(evidence["test"], media.JOURNEYS)
+        # the website's test names, and each screenshot under the journey that took it
+        self.assertEqual(evidence["tests"], [{"name": "testCreateReceiveSendConfirm", "result": "passed", "seconds": 47.1},
+                                             {"name": "testSilentPaymentSend", "result": "passed", "seconds": 40.789}])
+        self.assertEqual({s["name"]: s["test"] for s in evidence["screenshots"]},
+                         {"01-onboarding": "testCreateReceiveSendConfirm", "03-receive": "testCreateReceiveSendConfirm",
+                          "40-silent-review": "testSilentPaymentSend"})
+
+    def test_a_failed_journey_is_not_published(self):
+        (self.journey / "journeys.json").write_text(json.dumps([
+            {"name": "createReceiveSendConfirm", "passed": False, "seconds": 3, "failure": "no balance"}]))
+        with self.assertRaises(media.Failure) as caught:
+            self.run_prepare()
+        self.assertIn("createReceiveSendConfirm", str(caught.exception))
+
     def test_a_run_writes_a_version_2_manifest(self):
         # at least half the tests' 87.889 s, or the exporter omits it as truncated
         (self.journey / "journey.mp4").write_bytes(mp4(1206, 2622, 90.0, padding=1000))

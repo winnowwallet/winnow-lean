@@ -96,7 +96,7 @@ lake build backend-test records-test        # Lean toolchain leanprover/lean4:v4
 ./.lake/build/bin/records-test
 cd ..
 scripts/build-ios Debug                      # the app for the simulator, from a clean checkout
-scripts/ui-journeys                          # the Objective-C UI journeys against a regtest fixture
+scripts/ui-journeys                          # the UI journeys (Lean) against a regtest fixture
 ```
 
 LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
@@ -110,24 +110,28 @@ PATH; CI sets the first two to the pinned release `scripts/install-bitcoin` down
 
 ### UI tests
 
-`LeanApp/ios/UITests` holds XCUITest journeys in Objective-C (target `WinnowLeanUITests`). Each launches
-the app in test mode on the regtest node of `backend-test --fixture`, finds controls by the ids the views
-give them (`Html.identified`, the shell's `accessibilityIdentifier`) and checks the app against the node:
+The UI journeys are Lean (`LeanApp/Journeys.lean`, the `journeys` executable), run on the Mac: each step is
+one command to LeanNative's journey driver (`LNDriver`, the one XCUITest in the app's UI test target), each
+check is Lean against the node. Each launches the app in test mode on the regtest node of
+`backend-test --fixture`, finds controls by the ids the views give them (`Html.identified`, the shell's
+`accessibilityIdentifier`) and checks the app against the node:
 
-- `testCreateReceiveSendConfirm`: create a wallet, receive from the node, review and send a payment the
+- `createReceiveSendConfirm`: create a wallet, receive from the node, review and send a payment the
   node accepts, see it confirm;
-- `testMultisigTwoOfThreeWithRecovery`: a 2-of-3 with two Bitcoin Core wallets, built in the app; the
+- `multisigTwoOfThreeWithRecovery`: a 2-of-3 with two Bitcoin Core wallets, built in the app; the
   first address is Core's, the phone and both Cores sign, Core accepts a witness with exactly two
   signatures; after the one-day delay the phone alone spends on the recovery path;
-- `testLedgerPairVerifySpend`: pair test mode's simulated Ledger, have it verify the receive address,
+- `ledgerPairVerifySpend`: pair test mode's simulated Ledger, have it verify the receive address,
   and spend with the phone's and the Ledger's signatures;
-- `testShippedCensus`: the census peer list the build ships shows in Settings on mainnet;
-- `testSilentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
+- `shippedCensus`: the census peer list the build ships shows in Settings on mainnet;
+- `silentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
   receiver (written from the BIP's receiving side) finds, and the receipt shows its address.
 
-`scripts/ui-journeys` runs them as CI does: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`),
-with `scripts/ui-fixture` starting the node before and collecting the app's test-mode journals after; it
-keeps the result bundle, a screen recording, the screenshots and the journals.
+`scripts/ui-journeys` runs them as CI does: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
+with the journeys as `UI_JOURNEY`, and `scripts/ui-fixture` starting the node before and collecting the app's
+test-mode journals after; it keeps the result bundle, a screen recording, the screenshots, `journeys.json`
+(each journey's result and time) and the journals. `UI_JOURNEYS="silentPaymentSend" scripts/ui-journeys` runs
+only the journeys named.
 
 ### CI and TestFlight
 

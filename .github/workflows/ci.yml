@@ -20,9 +20,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   app:
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@eb09bea55d82212cfef846689102b3433d966885
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@134bea9b9f807df251fe9f1a6300bbba79794e6a
     with:
-      leannative: eb09bea55d82212cfef846689102b3433d966885
+      leannative: 134bea9b9f807df251fe9f1a6300bbba79794e6a
       # the Mac mini's runners by default; WarpBuild for forks, when CI_RUNNER is `hosted`, and when no mini
       # runner is online (with RUNNER_STATUS_TOKEN)
       self-hosted: '["self-hosted", "winnow-lean-mini"]'
@@ -55,6 +55,8 @@ jobs:
       ui-device-type: iPhone Duo
       ui-before: scripts/ui-fixture start
       ui-after: scripts/ui-fixture stop
+      # the journeys are Lean on the Mac (LeanApp/Journeys.lean); xcodebuild runs only LeanNative's driver
+      ui-journey: journeys
       # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run
       after-ui: scripts/journey-media
       publish-name: journey-media

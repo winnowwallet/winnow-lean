@@ -1,17 +1,21 @@
 #!/bin/bash
-# The Objective-C UI journeys (LeanApp/ios/UITests) in the simulator against a fresh regtest node, as CI runs
-# them: LeanNative's ui-tests with Winnow's fixture (scripts/ui-fixture) as its hooks.
+# The UI journeys (LeanApp/Journeys.lean, Lean on the Mac driving LeanNative's LNDriver in the simulator)
+# against a fresh regtest node, as CI runs them: LeanNative's ui-tests with Winnow's fixture (scripts/ui-fixture)
+# as its hooks and the journeys executable as UI_JOURNEY.
 #
-#   scripts/ui-journeys [xcodebuild test arguments, e.g. -only-testing:WinnowLeanUITests/WinnowLeanUITests/testCreateReceiveSendConfirm]
+#   scripts/ui-journeys                    every journey
+#   UI_JOURNEYS="silentPaymentSend" scripts/ui-journeys   only these (names from Journeys.lean's `all`)
 #
 # Evidence goes to $UI_OUT (default LeanApp/ios/build/ui-journey): journey.xcresult, journey.mp4, the
-# screenshots, the app's test-mode journals, xcodebuild.log and the fixture's log. ui-tests' variables apply
-# (UI_SIMULATOR, UI_RUNTIME, UI_DEVICE_TYPE); it uses a throwaway simulator unless UI_SIMULATOR names one.
+# screenshots, journeys.json and journey.log, the app's test-mode journals, xcodebuild.log and the fixture's
+# log. ui-tests' variables apply (UI_SIMULATOR, UI_RUNTIME, UI_DEVICE_TYPE); it uses a throwaway simulator
+# unless UI_SIMULATOR names one.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-(cd "$ROOT/LeanApp" && lake env true)
+(cd "$ROOT/LeanApp" && lake build journeys >/dev/null)
 export APP_DIR="$ROOT/LeanApp" APP_ROOT=WinnowApp SCHEME=WinnowLean
 export UI_OUT="${UI_OUT:-$ROOT/LeanApp/ios/build/ui-journey}" UI_NAME=journey
 export UI_BEFORE="$ROOT/scripts/ui-fixture start" UI_AFTER="$ROOT/scripts/ui-fixture stop"
+export UI_JOURNEY="$ROOT/LeanApp/.lake/build/bin/journeys${UI_JOURNEYS:+ $UI_JOURNEYS}"
 [ -f "$ROOT/build/census/peers.json" ] || "$ROOT/scripts/import-census"
 exec "$ROOT/LeanApp/.lake/packages/leannative/framework/native/ci/ui-tests" "$@"
