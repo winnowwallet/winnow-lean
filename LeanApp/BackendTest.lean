@@ -83,7 +83,8 @@ def startNode (dir : String) : IO Node := do
       cmd := bitcoind
       args := #["-regtest", s!"-datadir={datadir}", s!"-port={p2p}", s!"-rpcport={rpc}", "-bind=127.0.0.1",
         "-listen=1", "-server=1", "-blockfilterindex=1", "-peerblockfilters=1", "-fallbackfee=0.0002",
-        "-printtoconsole=0", "-dnsseed=0", "-discover=0", "-listenonion=0", "-whitelist=noban@127.0.0.1"]
+        "-printtoconsole=0", "-dnsseed=0", "-discover=0", "-listenonion=0", "-whitelist=noban@127.0.0.1",
+        "-keypool=1", "-unsafesqlitesync=1"]
       stdout := .null, stderr := .null, stdin := .null }
     let n : Node := { datadir, p2p, rpc, pid := child.pid }
     let mut ready := false
@@ -124,7 +125,7 @@ def waitUntil (ms : Nat) (cond : IO Bool) : IO Bool := do
   let deadline := (← IO.monoMsNow) + ms
   while (← IO.monoMsNow) < deadline do
     if ← cond then return true
-    IO.sleep 250
+    IO.sleep 100
   cond
 
 /-! ## The flow -/
@@ -173,7 +174,7 @@ def syncUntil (b : Backend) (ms : Nat) (cond : Status → SyncPhase → Bool) : 
     b.syncNow
     let (s, p) ← b.snapshot
     if cond s p || (← IO.monoMsNow) ≥ deadline then return (s, p)
-    IO.sleep 500
+    IO.sleep 150
   b.snapshot
 
 def history? (s : Status) (txid : String) : Option HistoryItem := s.history.find? (·.txid == txid)
@@ -473,7 +474,7 @@ def routingAndBackground (a : Backend) (envA : Real.Env) (n : Node) (settings : 
   let torGateway : Net.PeerEndpoint := { host := "127.0.0.1", port := 9 }
   let torManual : Winnow.IO.PeerGatewayConfiguration := { networks := [.tor], torProxy := some torGateway }
   a.reconnect { settings with peerGatewaySettings := { mode := "manual", manual := torManual } }
-  IO.sleep 3_000
+  IO.sleep 2_000
   let (sTor, _) ← a.snapshot
   check "Manual Tor only: the clearnet node is never dialled" (sTor.peerCount == 0 && sTor.activeGateways == torManual)
     s!"peers {sTor.peerCount}"
@@ -769,7 +770,8 @@ def flow (dir : String) (n : Node) : IO Unit := do
   let walletBefore ← IO.FS.readBinFile (System.FilePath.mk dirA / "wallet.json")
   let d0 ← envA.diagnostics
   n.mine 2 mineAddr
-  IO.sleep 6_000
+  -- long enough for two phase ticks (1 s each) and a sync pass, had the loop kept running
+  IO.sleep 2_500
   let d1 ← envA.diagnostics
   check "after stop: no sync pass and no phase tick while blocks arrive"
     (d1.syncPasses == d0.syncPasses && d1.phaseTicks == d0.phaseTicks && !d1.syncing) s!"{repr d0} → {repr d1}"
@@ -920,9 +922,10 @@ def main (args : List String) : IO UInt32 := do
     say s!"  FAIL exception: {e}"
   finally
     discard <| (n.cli #["stop"]).toBaseIO
+    -- gone, or a zombie: this process never reaps it, so `kill -0` would answer until the 10 s ran out
     discard <| waitUntil 10_000 (do
-      let r ← IO.Process.output { cmd := "kill", args := #["-0", toString n.pid] }
-      return r.exitCode != 0)
+      let r ← IO.Process.output { cmd := "ps", args := #["-o", "stat=", "-p", toString n.pid] }
+      return r.exitCode != 0 || r.stdout.trimAscii.toString.startsWith "Z")
     killPid n.pid "-KILL"
     try IO.FS.removeDirAll tmp catch _ => pure ()
   let fs ← failures.get

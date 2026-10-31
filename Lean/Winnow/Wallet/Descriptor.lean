@@ -617,15 +617,23 @@ def resolveExpression (e : ScriptExpression) (index : UInt32) (choice : Nat) : D
     (Taproot.scriptPubKey internal (some root)).mapError .taproot
   | .rawtr key => return ByteArray.mk #[0x51, 0x20] ++ xonly (← resolveKey key index choice)
 
+/-- A scriptPubKey with its address under the Bitcoin network's prefix. -/
+def outputOf (spk : ByteArray) (network : Tx.BitcoinNetwork) : DM DerivedOutput := do
+  let program := spk.extract (spk.size - min 32 spk.size) spk.size
+  let address ← (SegwitAddress.encode (AddressDecoder.hrp network) 1 program).mapError .bech32
+  return { scriptPubKey := spk, address }
+
 /-- The output(s) at `index`, one per multipath choice, with the Bitcoin network's address prefix. -/
 def derived (d : Descriptor) (index : UInt32) (network : Tx.BitcoinNetwork) : DM (Array DerivedOutput) := do
   let mut out := #[]
   for choice in [0:d.multipathCount] do
-    let spk ← resolveExpression d.expression index choice
-    let program := spk.extract (spk.size - min 32 spk.size) spk.size
-    let address ← (SegwitAddress.encode (AddressDecoder.hrp network) 1 program).mapError .bech32
-    out := out.push { scriptPubKey := spk, address }
+    out := out.push (← outputOf (← resolveExpression d.expression index choice) network)
   return out
+
+/-- `tr(KEY,TREE)`'s output from its already resolved internal key and tree (`resolvedTaproot`): what
+`derived` gives for that choice, without resolving the keys again. -/
+def taprootOutput (internal : ByteArray) (tree : Taproot.Tree) (network : Tx.BitcoinNetwork) : DM DerivedOutput := do
+  outputOf (← (Taproot.scriptPubKey internal (some (Taproot.merkleRoot tree))).mapError .taproot) network
 
 /-- `derived(index:network:)` for extended-key networks (testnet keys ↦ signet addresses). -/
 def derivedForKeyNetwork (d : Descriptor) (index : UInt32) (network : HDKey.Network := .mainnet) : DM (Array DerivedOutput) :=

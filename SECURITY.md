@@ -17,11 +17,20 @@ their disposition. What the wallet claims, and what it does not, is in
 Winnow's cryptography is written in Lean and is not constant-time. The
 secp256k1 code (`Lean/Secp`, used for BIP340 signing, Taproot tweaks
 and BIP32 key derivation) computes with Lean's `Nat`, which is backed by GMP and
-takes time that depends on the numbers, and its scalar multiplication branches on
-each bit of the scalar. The AES code behind backup encryption
+takes time that depends on the numbers, and its scalar multiplication picks a
+precomputed multiple for each 4-bit window of the scalar, so it branches on and
+indexes by the scalar's bits. The AES code behind backup encryption
 (`Lean/Winnow/Crypto/AES.lean`, `AESGCM.lean`) looks up tables by secret bytes.
 All of it is checked by proofs, published test vectors and lockstep tests against
 libsecp256k1 and CryptoKit, so its answers are right; only its timing can leak.
+
+One part is checked by tests rather than proofs: the scalar multiplication,
+lift_x and point addition the app runs (`Lean/Secp/Fast.lean`, four unboxed
+limbs and window tables). The proofs are about the slower definitions they stand
+in for (`@[implemented_by]` in `Lean/Secp/Keys.lean` and
+`Lean/Winnow/Keys/Secp256k1.lean`); `crypto-test` compares the two on edge and
+random inputs, and BIP340's vectors and every other test run through the fast
+path.
 
 That is an acceptable risk for this app because of how it is used:
 

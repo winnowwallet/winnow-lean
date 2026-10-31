@@ -111,7 +111,7 @@ def startNode (dir : String) : IO Node := do
       cmd := bitcoind
       args := #["-regtest", s!"-datadir={datadir}", s!"-port={p2p}", s!"-rpcport={rpc}", "-rpcbind=127.0.0.1", "-rpcallowip=127.0.0.1",
         "-listen=0", "-server=1", "-fallbackfee=0.0002", "-printtoconsole=0", "-dnsseed=0", "-discover=0",
-        "-listenonion=0"]
+        "-listenonion=0", "-keypool=1", "-unsafesqlitesync=1"]
       stdout := .null, stderr := .null, stdin := .null }
     let n : Node := { datadir, rpc, pid := child.pid }
     nodeRef.set (some n)
@@ -371,6 +371,24 @@ def signAs (p : PSBT) (s : Signer) (a : MultisigAccount) (coins : Array WalletUT
   | .winnow m => mam "sign" (a.sign p m coins owned tip (← IO.getRandomBytes 32))
   | .core c => c.process p
 
+/-- `psbt` signed by each of `subset`: each signer signs `psbt` alone once (kept in `copies` for the next
+trial) and the copies are combined, as a coordinator combines partial PSBTs. One signature per signer per
+spend, however many subsets try it. -/
+def signedBy (psbt : PSBT) (subset : Array Nat) (sign : Nat → IO PSBT) (copies : IO.Ref (Array (Option PSBT))) :
+    IO PSBT := do
+  let mut parts := #[]
+  for member in subset do
+    let part ← match (← copies.get)[member]?.join with
+      | some part => pure part
+      | none => do
+        let part ← sign member
+        copies.modify (·.set! member (some part))
+        pure part
+    parts := parts.push part
+  match psbt.combined parts with
+  | .ok p => pure p
+  | .error e => throw (IO.userError s!"combine: {e.name}")
+
 /-- Both finalizers on the same signed PSBT: raw transactions in hex, `none` where a side does not complete. -/
 def finalizeBoth (a : MultisigAccount) (p : PSBT) (coins : Array WalletUTXO) (owned : Array OutputCoordinate)
     (tip : UInt32) : IO (Option String × Option String) := do
@@ -520,11 +538,16 @@ def checkSignersPath (a : MultisigAccount) (c : Case) (tag : String) : IO Unit :
   let owned : Array OutputCoordinate := #[{ choice := 1, index := 0 }]
   let k := c.threshold
   let mut first : Option (String × String) := none
+  let copies ← IO.mkRef (Array.replicate c.signers.size (none : Option PSBT))
+  let mut sequential := true
   for trial in signerTrials c do
     let subset ← shuffle trial
     let label := s!"{tag} signers {subset.toList.map fun i => c.signers[i]!.label ++ toString i}"
-    let mut signed := psbt
-    for member in subset do signed ← signAs signed c.signers[member]! a coins owned tip
+    -- The first subset signs one after another, each on top of the signatures before it; the rest combine
+    -- each signer's own copy.
+    let signed ← if sequential then subset.foldlM (fun p m => signAs p c.signers[m]! a coins owned tip) psbt
+      else signedBy psbt subset (fun m => signAs psbt c.signers[m]! a coins owned tip) copies
+    sequential := false
     -- Every leaf must verify exactly the subset's keys that sit on it.
     for path in a.signersPaths do
       let approved ← mam "approvals" (a.approvals signed coins path)
@@ -571,11 +594,15 @@ def checkRecoveryPath (a : MultisigAccount) (c : Case) (tag : String) : IO Unit 
     -- key fewer on the first.
     let mut trials := if a.recoveryPaths.size == 1 then ((combinations all m).map List.toArray).toArray else #[all.toArray]
     if m > 1 && path == .recovery then trials := trials.push (all.take (m - 1)).toArray
+    let copies ← IO.mkRef (Array.replicate holders.size (none : Option PSBT))
+    let mut sequential := true
     for trial in trials do
       let subset ← shuffle trial
       let label := s!"{tag} {path} keys {subset}"
-      let mut signed := psbt
-      for member in subset do signed ← signAs signed holders[member]! a #[coin] owned openTip
+      -- As on the signers' path: the first subset signs in turn, the rest combine each holder's copy.
+      let signed ← if sequential then subset.foldlM (fun p m => signAs p holders[m]! a #[coin] owned openTip) psbt
+        else signedBy psbt subset (fun m => signAs psbt holders[m]! a #[coin] owned openTip) copies
+      sequential := false
       let approved ← mam "approvals" (a.approvals signed #[coin] path)
       tally (approved == sortedNat subset) "verified recovery signers"
         s!"{label}: Winnow verifies {approved}, signed by {sortedNat subset}"
@@ -671,8 +698,11 @@ def main (args : List String) : IO UInt32 := do
       catch e => tally false "case completed" s!"{tag}: {e}"
       say s!"  ({(← IO.monoMsNow) - start} ms)"
   finally
+    discard <| (cli #["stop"]).toBaseIO
+    -- at most 10 s for the node to exit (gone, or a zombie this process never reaps) before its directory goes
+    let exited := s!"i=0; while s=$(ps -o stat= -p {n.pid}) && case $s in *Z*) false;; esac && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done"
+    discard <| IO.Process.output { cmd := "/bin/sh", args := #["-c", exited] }
     killPid n.pid
-    IO.sleep 1000
     discard <| IO.Process.output { cmd := "rm", args := #["-rf", dir] }
   for (kind, k) in ← agreed.get do say s!"  {kind}: {k}"
   let d ← disagreements.get

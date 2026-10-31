@@ -161,21 +161,21 @@ def leafSigningContexts (p : PSBT) (index : Int) : RM (Nat × Array (TapLeafScri
 
 def isP2TR (s : ByteArray) : Bool := s.size == 34 && s[0]! == 0x51 && s[1]! == 0x20
 
-/-- One self-verified leaf signature, or `none` when the secret's key is not a leaf key. -/
-def selfVerifiedLeafSignature (secret : ByteArray) (k : Nat) (leaf : TapLeafScript) (leafKeys : Array ByteArray)
+/-- The x-only key of a private key. -/
+def xonlyOfSecret (secret : ByteArray) : RM ByteArray :=
+  match secretOf secret with
+  | .ok d => match pointOfSecret d with
+    | .ok pt => pure (xonlyBytes pt)
+    | .error _ => perr (.malformed "invalid private key")
+  | .error _ => perr (.malformed "invalid private key")
+
+/-- One leaf signature by `secret`, whose x-only key is `xonly`, or `none` when that is not a leaf key.
+`Secp.sign` verifies every signature under the signer's key before returning it. -/
+def selfVerifiedLeafSignature (secret xonly : ByteArray) (k : Nat) (leaf : TapLeafScript) (leafKeys : Array ByteArray)
     (tx : Transaction) (spent : Array SighashBIP341.SpentOutput) (hashType : SighashBIP341.HashType)
     (aux : ByteArray) : RM (Option (TapScriptSignatureID × ByteArray)) := do
-  let xonly ← match secretOf secret with
-    | .ok d => match pointOfSecret d with
-      | .ok pt => pure (xonlyBytes pt)
-      | .error _ => perr (.malformed "invalid private key")
-    | .error _ => perr (.malformed "invalid private key")
   if !leafKeys.contains xonly then return none
   let sig ← (Signer.scriptPathSignature tx k spent ⟨leaf.script⟩ leaf.leafVersion hashType none secret aux).mapError .sign
-  let sighash ← (SighashBIP341.sighash tx k spent hashType (some (SighashBIP341.ScriptPath.ofLeaf ⟨leaf.script⟩ leaf.leafVersion))).mapError
-    (PSBTRoleError.sign ∘ .sighash)
-  let ok ← (schnorrVerify xonly sighash (sig.extract 0 64)).mapError (PSBTRoleError.sign ∘ .crypto)
-  unless ok do perr (.malformed "self-produced signature failed verification")
   return some ({ publicKey := xonly, leafHash := leaf.leafHash }, sig)
 
 /-- PSBT_IN_TAP_SCRIPT_SIG for every given secret whose x-only key is a leaf key, on every leaf whose
@@ -184,12 +184,15 @@ def signScriptPath (p : PSBT) (index : Int) (privateKeys : Array ByteArray) (aux
   let tx ← liftP p.unsignedTransaction
   let spent ← liftP p.spentOutputs
   let (k, contexts, hashType) ← p.leafSigningContexts index
+  -- as before, a bad secret is refused only when some leaf can be signed
+  let keys ← if contexts.any (lockIsMet ·.2 k tx) then privateKeys.mapM fun secret => do pure (secret, ← xonlyOfSecret secret)
+    else pure #[]
   let mut signatures := p.inputs[k]!.tapScriptSignatures
   let mut signed := 0
   for (leaf, policy) in contexts do
     unless lockIsMet policy k tx do continue
-    for secret in privateKeys do
-      let some (id, sig) ← selfVerifiedLeafSignature secret k leaf policy.keys tx spent hashType auxiliaryRand | continue
+    for (secret, xonly) in keys do
+      let some (id, sig) ← selfVerifiedLeafSignature secret xonly k leaf policy.keys tx spent hashType auxiliaryRand | continue
       signatures := match signatures.findIdx? (fun (i, _) => i.publicKey == id.publicKey && i.leafHash == id.leafHash) with
         | some j => signatures.set! j (id, sig)
         | none => signatures.push (id, sig)

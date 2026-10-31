@@ -9,7 +9,8 @@ history stays in [winnowwallet/winnow](https://github.com/winnowwallet/winnow).
 
 ## CI
 
-Every pull request runs LeanNative's reusable `ios-app` workflow
+Every pull request that is ready for review and changes more than the docs (`*.md`,
+`docs/`) runs LeanNative's reusable `ios-app` workflow
 ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on WarpBuild runners,
 and so does main, nightly and by hand. A push to main does not. A pull request's
 run is the short one: Debug only, the first journey, two differential cases, and

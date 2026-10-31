@@ -1855,4 +1855,7 @@ def main : IO UInt32 := do
   try IO.FS.removeDirAll root catch _ => pure ()
   let failed ← failures.get
   IO.println s!"multisig-app-test: {← passed.get} passed, {failed.size} failed"
-  return if failed.isEmpty then 0 else 1
+  -- Exit at once: the app's peer pools leave monitor tasks that sleep 30 s between checks, and the runtime
+  -- waits for every task before the process ends.
+  (← IO.getStdout).flush
+  IO.Process.exit (if failed.isEmpty then 0 else 1)
