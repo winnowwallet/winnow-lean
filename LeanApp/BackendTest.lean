@@ -896,7 +896,9 @@ def fixture (dir : String) : IO UInt32 := do
   return 0
 
 def main (args : List String) : IO UInt32 := do
-  if let ["--fixture", dir] := args then return ← fixture dir
+  -- Exit at once: the app's peer pools leave monitor tasks that sleep 30 s between checks, and the runtime
+  -- waits for every task before the process ends (the UI journeys wait for the fixture).
+  if let ["--fixture", dir] := args then IO.Process.exit (← fixture dir).toUInt8
   -- for the UI journey: the test receiver's code, and the output it finds in a transaction on a fixture
   if let ["--sp-code"] := args then IO.println (← testReceiverCode); return 0
   if let ["--sp-expected", datadir, rpc, txid] := args then

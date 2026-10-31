@@ -443,12 +443,13 @@ def multisigTwoOfThreeWithRecovery : Journey := ⟨"multisigTwoOfThreeWithRecove
   let delay : Find := .text "^After about \\d+ days \\("
   let shown ← text delay
   expect (shown.startsWith "After about 181 days (26,000 blocks)") s!"the default delay: {shown}"
-  -- the stepper's step is a day: held down, it repeats to its least, one day (a tap per day took minutes)
+  -- the stepper's step is a day: held down, it repeats to its least, one day (a tap per day took minutes).
+  -- Its repeat speeds up: held 10 s it goes from 181 to 74 days, 14 s to one day; 16 s leaves a margin.
   let decrement : Find := "multisigBuildRecoveryDaysStepper-Decrement"
   for _ in [0:5] do
     let days := (digits ((← text delay).splitOn " days").head!).getD 0
     if days ≤ 1 then break
-    if days ≤ 5 then tap decrement (times := days - 1) else press decrement 25
+    if days ≤ 5 then tap decrement (times := days - 1) else press decrement 16
   expectEq "the delay" (← text delay) s!"After about 1 days ({recoveryBlocks} blocks)"
   shot "10-multisig-build"
   tap "multisigBuildCreateButton"
