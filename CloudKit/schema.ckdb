@@ -1,0 +1,9 @@
+// Hand-maintained schema. Wallet contents are encrypted before becoming an asset.
+// No public database permissions: the app uses only privateCloudDatabase.
+DEFINE SCHEMA
+    RECORD TYPE WalletBackup (
+        "___recordID" REFERENCE QUERYABLE,
+        network STRING QUERYABLE,
+        savedAt TIMESTAMP SORTABLE,
+        payload ASSET
+    );

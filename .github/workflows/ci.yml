@@ -1,0 +1,93 @@
+name: CI
+# The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
+# two WarpBuild jobs that start at once, `lean` (the Lean built, every proof checked, then every test below at the
+# same time, the regtest node's among them) and `app` (the iOS builds and the UI journeys). It runs on pull
+# requests that are ready for review and change more than the docs, nightly on main and by hand; not on a push to
+# main. A pull request's run is the short one (Debug only, one journey, the slowest Lean flows left out); nightly
+# and by hand run everything, and release.yml looks for such a run on the tag's tree instead of testing again.
+# The LeanNative commit below is the one LeanApp/lake-manifest.json pins; both jobs fail if they differ. Actions
+# does not follow repository redirects for reusable workflows, so the owner/repo here is the framework's real home.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  # nightly: nothing to run when this commit of main already passed (main changes only with a release; the first
+  # night after one runs, which gives the website main's journey media)
+  nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    outputs:
+      tested: ${{ steps.check.outputs.tested }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&head_sha=$GITHUB_SHA&status=success&per_page=1" --jq .total_count)
+          echo "successful runs on main at $GITHUB_SHA: $n"
+          if [ "$n" -gt 0 ]; then echo tested=true; else echo tested=false; fi >> "$GITHUB_OUTPUT"
+  app:
+    needs: nightly
+    # a draft pull request runs nothing until it is ready for review
+    if: >-
+      ${{ !cancelled() && needs.nightly.outputs.tested != 'true'
+      && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@053453515cf0dd5c73328436849c907d419b39fa
+    with:
+      leannative: 053453515cf0dd5c73328436849c907d419b39fa
+      runs-on: warp-macos-26-arm64-12x
+      # the UI journeys drive one simulator: half the runner, half the price
+      app-runs-on: warp-macos-26-arm64-6x
+      lean-packages: Lean LeanApp
+      build-targets: |
+        Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check
+        LeanApp records-test multisig-app-test ledger-transport-test backend-test
+      app-dir: LeanApp
+      app-root: WinnowApp
+      scheme: WinnowLean
+      # the census list the app bundles: signature verified, health filtered (each job imports it)
+      prepare: scripts/import-census && cp build/census/peers-source.txt "$CI_RESULTS/"
+      # a pull request skips the two slowest nested-multisig flows and runs two differential cases, not six;
+      # nightly and by hand run everything (release.yml wants one of those)
+      tests: |
+        . Lean/.lake/build/bin/census-check build/census/peers.json
+        . CENSUS_CHECK="$PWD/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s scripts/tests -v
+        Lean .lake/build/bin/multisig-test
+        Lean .lake/build/bin/ledger-test
+        Lean .lake/build/bin/silent-payment-test
+        Lean .lake/build/bin/crypto-test
+        LeanApp .lake/build/bin/records-test
+        LeanApp MULTISIG_APP_QUICK=${{ github.event_name == 'pull_request' && '1' || '' }} .lake/build/bin/multisig-app-test
+        LeanApp .lake/build/bin/ledger-transport-test
+        . scripts/ci-regtest io
+        . scripts/ci-regtest backend
+        . MULTISIG_CASES=${{ github.event_name == 'pull_request' && '2' || '6' }} scripts/ci-regtest differential
+      release-check: scripts/verify-release-no-test-mode
+      # the Release builds (and the check above) are for a release, which takes a nightly or manual run
+      release-builds: ${{ github.event_name != 'pull_request' }}
+      ui-name: journey
+      # the only iPhone the WarpBuild runner's newest iOS runtime (27.1) has; the website's screenshots are this size
+      ui-device-type: iPhone Duo
+      ui-before: scripts/ui-fixture start
+      ui-after: scripts/ui-fixture stop
+      # the journeys are Lean on the Mac (LeanApp/Journeys.lean); xcodebuild runs only LeanNative's driver. A pull
+      # request runs the first; nightly and by hand, all five
+      ui-journey: ${{ github.event_name == 'pull_request' && 'journeys createReceiveSendConfirm' || 'journeys' }}
+      # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful
+      # run, which is a nightly one: a pull request makes none
+      after-ui: ${{ github.event_name != 'pull_request' && 'scripts/journey-media' || '' }}
+      publish-name: ${{ github.event_name != 'pull_request' && 'journey-media' || '' }}
+      publish-path: build/journey-media/
