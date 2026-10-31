@@ -19,6 +19,10 @@ BIP340 signing against BIP340's own vectors.
   vector's exactly, so the nonce derivation is checked, not only that signatures verify (`sign_verifies`
   proves that much). Every vector's verification result must be the vector's. Then one message signed
   twice with `Signer.randomAuxiliaryRand` gives two different signatures that both verify.
+* The fast curve (`Secp.Fast`), which compiled code runs in place of the proved scalar multiplication,
+  lift_x and point addition (`@[implemented_by]`): each `…Fast` function against the proved code it stands in
+  for (`Secp.smul?`, `smulJ`, `Fq.sqrt?`), over edge scalars, seeded random ones and the points they give.
+  The BIP340 vectors above already run through it.
 
 Run from `Lean/`. Exits 1 on any failure. -/
 
@@ -171,11 +175,84 @@ def roundTrips : IO Unit := do
   check "constant-time compare" (AESGCM.constantTimeEqual "abc".toUTF8 "abc".toUTF8 &&
     !AESGCM.constantTimeEqual "abc".toUTF8 "abd".toUTF8 && !AESGCM.constantTimeEqual "abc".toUTF8 "ab".toUTF8)
 
+/-! ## The fast curve against the proved one -/
+
+section FastCurve
+open Secp
+
+def pointText : APoint → String
+  | .inf => "infinity"
+  | .pt x y => s!"({x.toNat}, {y.toNat})"
+
+def resultText {ε} : Except ε APoint → String
+  | .ok p => pointText p
+  | .error _ => "error"
+
+def optionText : Keys.PK (Option Keys.Point) → String
+  | .ok (some (x, y)) => s!"({x.toNat}, {y.toNat})"
+  | .ok none => "infinity"
+  | .error _ => "error"
+
+def liftedText : Option (Fq × Fq) → String
+  | some (x, y) => s!"({x.toNat}, {y.toNat})"
+  | none => "none"
+
+/-- The proved `lift_x` (`Secp.liftX?`'s body: compiled code runs `liftXFast?` for the name itself). -/
+def provedLiftX? (x : Nat) : Option (Fq × Fq) :=
+  if x < P then
+    let fx := Fq.ofNat x
+    match (fx * fx * fx + 7).sqrt? with
+    | some y => some (fx, if y.isOdd then -y else y)
+    | none => none
+  else none
+
+def fastCurve : IO Unit := do
+  let n := Secp.Spec.N
+  -- edges, then seeded random scalars (an LCG, so a failure names a scalar that reproduces it)
+  let mut ks : Array Nat := #[0, 1, 2, 3, 15, 16, 17, 255, 256, n - 2, n - 1, n, n + 1, n / 2, 2^128 + 1, 2^255,
+    2^256 - 1]
+  let mut seed := 0x243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89
+  for _ in [0:60] do
+    seed := (seed * 6364136223846793005 + 1442695040888963407) % 2^256
+    ks := ks.push seed
+  let points : Array APoint := (ks.extract 1 9).filterMap (smul? · Secp.Gpt) |>.push .inf
+  let mut bad : Array String := #[]
+  for k in ks do
+    let proved := match smul? k Secp.Gpt with | some q => pointText q | none => "error"
+    if resultText (Secp.mulGFast k) != proved then bad := bad.push s!"mulG {k}"
+    let provedGen := optionText (Keys.affine (smulJ k Secp.Gpt))
+    if optionText (Keys.mulGenFast k) != provedGen then bad := bad.push s!"mulGen {k}"
+  for h : i in [0:ks.size] do
+    let k := ks[i]
+    let pt := points[i % points.size]?.getD .inf
+    let provedPt := match smul? k pt with | some q => pointText q | none => "error"
+    if resultText (Secp.mulPtFast k pt) != provedPt then bad := bad.push s!"mulPt {k} {pointText pt}"
+    let provedAdd := match ((smulJ k Secp.Gpt).add pt).toAffine? with | some q => pointText q | none => "error"
+    if resultText (Secp.mulGAddFast k pt) != provedAdd then bad := bad.push s!"mulGAdd {k} {pointText pt}"
+    if let .pt x y := pt then
+      let provedMul := optionText (Keys.affine (smulJ k (.pt x y)))
+      if k % n != 0 && optionText (Keys.mulOptFast k (x, y)) != provedMul then bad := bad.push s!"mulOpt {k}"
+      for other in [points[(i + 1) % points.size]?.getD .inf, .inf, .pt x (-y), pt] do
+        let b : Option Keys.Point := match other with | .pt u v => some (u, v) | .inf => none
+        let provedSum := optionText (Keys.affine ((Jac.inf.add (.pt x y)).add (Keys.toA b)))
+        if optionText (Keys.addOptFast (some (x, y)) b) != provedSum then
+          bad := bad.push s!"addOpt {pointText pt} {pointText other}"
+  -- lift_x: every point's x, x + 1 (often not on the curve), 0, P - 1 and values past P
+  let xs := points.toList.filterMap (fun | .pt x _ => some x.toNat | .inf => none)
+  let edges : List Nat := [0, 1, Secp.P - 1, Secp.P, Secp.P + 1, 2^256 - 1]
+  for x in xs ++ xs.map (· + 1) ++ edges do
+    if liftedText (Secp.liftXFast? x) != liftedText (provedLiftX? x) then bad := bad.push s!"liftX {x}"
+  check "the fast curve agrees with the proved one" bad.isEmpty s!"{bad.size} disagreements, first {bad[0]?}"
+  IO.println s!"  fast curve: {ks.size} scalars, {points.size} points, {bad.size} disagreements"
+
+end FastCurve
+
 def main : IO UInt32 := do
   fips197
   wycheproof
   cryptokit
   bip340
+  fastCurve
   roundTrips
   let f ← failures.get
   IO.println s!"crypto-test: {← passed.get} passed, {f.size} failed"

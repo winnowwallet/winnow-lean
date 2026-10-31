@@ -2,13 +2,17 @@ name: CI
 # The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
 # two WarpBuild jobs that start at once, `lean` (the Lean built, every proof checked, then every test below at the
 # same time, the regtest node's among them) and `app` (the iOS builds and the UI journeys). It runs on pull
-# requests, nightly on main and by hand; not on a push to main. A pull request's run is the short one (Debug only,
-# one journey, the slowest Lean flows left out); nightly and by hand run everything, and release.yml looks for
-# such a run on the tag's tree instead of testing again. The LeanNative commit below is
-# the one LeanApp/lake-manifest.json pins; both jobs fail if they differ. Actions does not follow repository
-# redirects for reusable workflows, so the owner/repo here is the framework's real home.
+# requests that are ready for review and change more than the docs, nightly on main and by hand; not on a push to
+# main. A pull request's run is the short one (Debug only, one journey, the slowest Lean flows left out); nightly
+# and by hand run everything, and release.yml looks for such a run on the tag's tree instead of testing again.
+# The LeanNative commit below is the one LeanApp/lake-manifest.json pins; both jobs fail if they differ. Actions
+# does not follow repository redirects for reusable workflows, so the owner/repo here is the framework's real home.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
@@ -37,10 +41,13 @@ jobs:
           if [ "$n" -gt 0 ]; then echo tested=true; else echo tested=false; fi >> "$GITHUB_OUTPUT"
   app:
     needs: nightly
-    if: ${{ !cancelled() && needs.nightly.outputs.tested != 'true' }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@700b3889a99a55804bd7fd256fb4fd3f008e236b
+    # a draft pull request runs nothing until it is ready for review
+    if: >-
+      ${{ !cancelled() && needs.nightly.outputs.tested != 'true'
+      && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@053453515cf0dd5c73328436849c907d419b39fa
     with:
-      leannative: 700b3889a99a55804bd7fd256fb4fd3f008e236b
+      leannative: 053453515cf0dd5c73328436849c907d419b39fa
       runs-on: warp-macos-26-arm64-12x
       # the UI journeys drive one simulator: half the runner, half the price
       app-runs-on: warp-macos-26-arm64-6x

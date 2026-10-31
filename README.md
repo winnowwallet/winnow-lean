@@ -135,10 +135,10 @@ only the journeys named.
 
 ### CI and TestFlight
 
-`.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request, nightly on main
-and by hand, in two WarpBuild jobs that start at once and each build the Lean from the cache; every long step
-prints its progress as it goes. A pull request's run is the short one (marked *full run only* below); nightly and
-by hand run everything:
+`.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request that is ready for
+review and changes more than the docs, nightly on main and by hand, in two WarpBuild jobs that start at once and
+each build the Lean from the cache; every long step prints its progress as it goes. A pull request's run is the
+short one (marked *full run only* below); nightly and by hand run everything:
 
 | job | what |
 |---|---|

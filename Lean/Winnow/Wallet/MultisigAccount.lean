@@ -277,6 +277,27 @@ inductive RecoveryPlan where
   | separateKeys (threshold : Int) (keys : Array String) (blocks : UInt32)
   deriving Inhabited
 
+/-- One leaf at (choice, index), with its control block and the internal key. -/
+structure Leaf where
+  internalKey : ByteArray
+  version : UInt8
+  script : ByteArray
+  controlBlock : Tx.Taproot.ControlBlock
+  path : SpendPath
+  deriving Inhabited
+
+/-- One (choice, index) resolved: its output, every leaf in tree order, and the x-only key each of the
+account's keys (`allKeys` order) derives there. -/
+structure Resolved where
+  output : Descriptor.DerivedOutput
+  leaves : Array Leaf
+  keys : Array ByteArray
+  deriving Inhabited
+
+/-- How many indices per choice the account resolves at most once (`resolved`); past them it resolves on
+every call. -/
+def resolvedSpan : Nat := 64
+
 end MultisigAccount
 
 /-- A raw k-of-n Taproot script-path account `tr(NUMS, sortedmulti_a(k, XPUB/<0;1>/*, …))`, or a nested
@@ -292,6 +313,10 @@ structure MultisigAccount where
   recoveryLeaves : Array MultisigAccount.Recovery
   /-- Each leaf's path, in tree order. -/
   leafPaths : Array MultisigAccount.SpendPath
+  /-- (choice, index) for the first `resolvedSpan` indices of each choice, each resolved on first use and
+  then kept: a spend's review, signing, approvals and finalizing all read the same few. `make` fills it;
+  without it every call resolves the descriptor again. -/
+  resolvedCache : Array (Thunk (MAM MultisigAccount.Resolved)) := #[]
   deriving Inhabited
 
 namespace MultisigAccount
@@ -499,6 +524,50 @@ def recoveryOf (leaves : Array Descriptor.Leaf) (keys : AdmittedKeys) (network :
     recoveries := recoveries.push { threshold := condition.threshold, keys := condition.keys, blocks }
   return recoveries
 
+/-- Every key expression in the account: each signers' leaf's keys in tree order, then each recovery
+leaf's. A signer in several leaves is listed once per leaf, each time on that leaf's path. -/
+def allKeys (a : MultisigAccount) : Array Descriptor.SingleKey :=
+  a.signersLeaves.flatMap (·.keys) ++ a.recoveryLeaves.flatMap (·.keys)
+
+def treeLeaves : Taproot.Tree → List (UInt8 × ByteArray)
+  | .leaf v s => [(v, s)]
+  | .branch l r => treeLeaves l ++ treeLeaves r
+
+def txControlBlock (c : Taproot.ControlBlock) : Tx.Taproot.ControlBlock :=
+  { leafVersion := c.leafVersion, outputKeyParity := c.outputKeyParity, internalKey := c.internalKey, path := c.path.toArray }
+
+/-- (choice, index) resolved from the descriptor: the internal key and tree once, the output and every
+leaf's control block from them, and each key of `allKeys` derived. What `resolved` keeps. -/
+def resolve (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM Resolved := do
+  unless choice < a.descriptor.multipathCount do throw (.named "indexOutOfRange")
+  let (internalKey, tree) ← lift (·.name) (a.descriptor.resolvedTaproot index choice)
+  let output ← lift (·.name) (Descriptor.taprootOutput internalKey tree a.network)
+  let blocks ← lift (·.name) (Taproot.controlBlocks internalKey tree)
+  let scripts := treeLeaves tree
+  unless scripts.length == blocks.length && scripts.length == a.leafPaths.size do
+    invalid "the account's tree does not resolve to its leaves"
+  let leaves := ((scripts.zip blocks).zipIdx.map fun (((v, s), cb), position) =>
+    ({ internalKey, version := v, script := s, controlBlock := txControlBlock cb,
+       path := a.leafPaths[position]! } : Leaf)).toArray
+  let keys ← a.allKeys.mapM fun k => do
+    let pub ← lift (·.name) (Descriptor.publicKey k index choice)
+    pure (pub.extract 1 pub.size)
+  return { output, leaves, keys }
+
+/-- `resolve`, kept in `resolvedCache` for the first `resolvedSpan` indices of each choice. -/
+def resolved (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM Resolved :=
+  match (if index.toNat < resolvedSpan then a.resolvedCache[choice * resolvedSpan + index.toNat]? else none) with
+  | some t => t.get
+  | none => a.resolve choice index
+
+/-- Where `path`'s keys start in `allKeys`. -/
+def keyOffset (a : MultisigAccount) (path : SpendPath) : Nat :=
+  let signers := a.signersLeaves.foldl (· + ·.keys.size) 0
+  match path.signersLeaf, path.recoveryLeaf with
+  | some leaf, _ => (a.signersLeaves.extract 0 leaf).foldl (· + ·.keys.size) 0
+  | none, some leaf => signers + (a.recoveryLeaves.extract 0 leaf).foldl (· + ·.keys.size) 0
+  | none, none => 0
+
 /-- `MultisigAccount(descriptor:network:)`: admission (SEC-009, SEC-019, SEC-020). -/
 def make (descriptor : Descriptor) (network : BitcoinNetwork) : MAM MultisigAccount := do
   let .trTree internalKey tree := descriptor.expression | invalid "expected tr(NUMS, sortedmulti_a(k, …))"
@@ -507,7 +576,11 @@ def make (descriptor : Descriptor) (network : BitcoinNetwork) : MAM MultisigAcco
     invalid "the internal key can spend on its own, which would bypass the signers it lists"
   let keys ← admit signersLeaves network
   let recoveryLeaves ← recoveryOf recoveryLeaves keys network
-  return { descriptor, network, signersLeaves, recoveryLeaves, leafPaths }
+  let account : MultisigAccount := { descriptor, network, signersLeaves, recoveryLeaves, leafPaths }
+  let slots := descriptor.multipathCount * resolvedSpan
+  let resolvedCache := (Array.range slots).map fun slot =>
+    Thunk.mk fun _ => account.resolve (slot / resolvedSpan) (slot % resolvedSpan).toUInt32
+  return { account with resolvedCache }
 
 /-- `MultisigAccount(_ string:network:)`. -/
 def parse (string : String) (network : BitcoinNetwork) : MAM MultisigAccount := do
@@ -876,11 +949,6 @@ its leaf gave it: what the app pastes to make a whole account one member of anot
 def signerExpressions (a : MultisigAccount) : Array String :=
   a.signers.map fun s => Descriptor.serializeSingle { s with derivation := { elements := signerSuffix } }
 
-/-- Every key expression in the account: each signers' leaf's keys in tree order, then each recovery
-leaf's. A signer in several leaves is listed once per leaf, each time on that leaf's path. -/
-def allKeys (a : MultisigAccount) : Array Descriptor.SingleKey :=
-  a.signersLeaves.flatMap (·.keys) ++ a.recoveryLeaves.flatMap (·.keys)
-
 /-- The keys of `path`'s leaf, in descriptor order; none for a leaf the account does not have. -/
 def keysOn (a : MultisigAccount) (path : SpendPath) : Array Descriptor.SingleKey :=
   match path.signersLeaf, path.recoveryLeaf with
@@ -919,10 +987,8 @@ def hasSigner (a : MultisigAccount) (key : HDKey) : Bool :=
 
 /-! ### Watching -/
 
-def derivedOutput (a : MultisigAccount) (index : UInt32) (choice : Nat) : MAM Descriptor.DerivedOutput := do
-  let outputs ← lift (·.name) (a.descriptor.derived index a.network)
-  let some o := outputs[choice]? | throw (.named "indexOutOfRange")
-  return o
+def derivedOutput (a : MultisigAccount) (index : UInt32) (choice : Nat) : MAM Descriptor.DerivedOutput :=
+  return (← a.resolved choice index).output
 
 /-- scriptPubKey at (multipath choice, index): choice 0 receive, 1 change. -/
 def scriptPubKey (a : MultisigAccount) (index : UInt32) (choice : Nat := 0) : MAM ByteArray :=
@@ -935,39 +1001,16 @@ def address (a : MultisigAccount) (index : UInt32) (choice : Nat := 0) : MAM Str
 def watchScripts (a : MultisigAccount) (count : UInt32) : MAM (Array ByteArray) := do
   let mut scripts := #[]
   for index in [0:count.toNat] do
-    for o in ← lift (·.name) (a.descriptor.derived index.toUInt32 a.network) do
-      scripts := scripts.push o.scriptPubKey
+    for choice in [0:a.descriptor.multipathCount] do
+      scripts := scripts.push (← a.derivedOutput index.toUInt32 choice).scriptPubKey
   return scripts
-
-/-- One leaf at (choice, index), with its control block and the internal key. -/
-structure Leaf where
-  internalKey : ByteArray
-  version : UInt8
-  script : ByteArray
-  controlBlock : Tx.Taproot.ControlBlock
-  path : SpendPath
-  deriving Inhabited
 
 def Leaf.isRecovery (l : Leaf) : Bool := l.path.isRecovery
 def Leaf.hash (l : Leaf) : ByteArray := Taproot.leafHash l.version l.script
 
-def treeLeaves : Taproot.Tree → List (UInt8 × ByteArray)
-  | .leaf v s => [(v, s)]
-  | .branch l r => treeLeaves l ++ treeLeaves r
-
-def txControlBlock (c : Taproot.ControlBlock) : Tx.Taproot.ControlBlock :=
-  { leafVersion := c.leafVersion, outputKeyParity := c.outputKeyParity, internalKey := c.internalKey, path := c.path.toArray }
-
 /-- Every leaf at (choice, index) in tree order, with its control block. -/
-def leaves (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM (Array Leaf) := do
-  let (internalKey, tree) ← lift (·.name) (a.descriptor.resolvedTaproot index choice)
-  let blocks ← lift (·.name) (Taproot.controlBlocks internalKey tree)
-  let scripts := treeLeaves tree
-  unless scripts.length == blocks.length && scripts.length == a.leafPaths.size do
-    invalid "the account's tree does not resolve to its leaves"
-  return ((scripts.zip blocks).zipIdx.map fun (((v, s), cb), position) =>
-    ({ internalKey, version := v, script := s, controlBlock := txControlBlock cb,
-       path := a.leafPaths[position]! } : Leaf)).toArray
+def leaves (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM (Array Leaf) :=
+  return (← a.resolved choice index).leaves
 
 /-- The first signers' leaf at (choice, index). -/
 def signersLeaf (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM Leaf := do
@@ -1130,11 +1173,13 @@ and the leaf hashes the derived key signs for. A signer in several leaves derive
 so each entry names one leaf. -/
 def keyOrigins (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM (Array (ByteArray × PSBT.KeyOrigin)) := do
   let mut origins : Array (ByteArray × PSBT.KeyOrigin) := #[]
-  for leaf in ← a.leaves choice index do
-    for key in a.keysOn leaf.path do
+  let r ← a.resolved choice index
+  for leaf in r.leaves do
+    let offset := a.keyOffset leaf.path
+    for h : position in [0:(a.keysOn leaf.path).size] do
+      let key := (a.keysOn leaf.path)[position]
       let some origin := key.origin | continue
-      let pub ← lift (·.name) (Descriptor.publicKey key index choice)
-      let xonly := pub.extract 1 pub.size
+      let xonly := r.keys[offset + position]!
       let known := (origins.find? (·.1 == xonly)).map (·.2.leafHashes)
       let leafHashes := match known with
         | some hs => if hs.contains leaf.hash then hs else hs.push leaf.hash
@@ -1215,12 +1260,19 @@ input signs. -/
 def sign (a : MultisigAccount) (psbt : PSBT) (signingKey : HDKey) (knownUTXOs : Array WalletUTXO)
     (ownedOutputCoordinates : Array OutputCoordinate) (chainTip : UInt32) (auxiliaryRand : ByteArray) : MAM PSBT := do
   discard (a.reviewSpend psbt knownUTXOs ownedOutputCoordinates chainTip)
+  -- each of the account's keys `signingKey` holds, with its account key: derived once per key, however
+  -- many leaves it is in
+  let mut held : Array (Descriptor.SingleKey × HDKey) := #[]
+  for signer in a.allKeys do
+    let account ← match held.find? (identity ·.1 == identity signer) with
+      | some (_, account) => pure (some account)
+      | none => accountSecretKey signer signingKey
+    if let some account := account then held := held.push (signer, account)
   let mut signed := psbt
   for k in [0:signed.inputs.size] do
     let u ← coin signed k knownUTXOs
     let mut secrets : Array ByteArray := #[]
-    for signer in a.allKeys do
-      let some account ← accountSecretKey signer signingKey | continue
+    for (signer, account) in held do
       let child ← lift (·.name) (account.derivedPath (suffixSteps signer u.chain.rawValue u.index))
       let some secret := child.privateKey | continue
       secrets := secrets.push secret
@@ -1239,12 +1291,13 @@ def approvals (a : MultisigAccount) (psbt : PSBT) (knownUTXOs : Array WalletUTXO
   let mut approved : Option (Array Nat) := none
   for k in [0:psbt.inputs.size] do
     let u ← coin psbt k knownUTXOs
-    let some leaf := (← a.leaves u.chain.rawValue u.index).find? (·.path == path) | return #[]
+    let r ← a.resolved u.chain.rawValue u.index
+    let some leaf := r.leaves.find? (·.path == path) | return #[]
     let verified ← lift (·.name) (psbt.verifiedScriptPathSigners k leaf.hash tx spent)
+    let offset := a.keyOffset path
     let mut here : Array Nat := #[]
-    for h : position in [0:keys.size] do
-      let derived ← lift (·.name) (Descriptor.publicKey keys[position] u.index u.chain.rawValue)
-      if verified.contains (derived.extract 1 derived.size) then here := here.push position
+    for position in [0:keys.size] do
+      if verified.contains r.keys[offset + position]! then here := here.push position
     approved := some (match approved with | some prev => prev.filter here.contains | none => here)
   return approved.getD #[]
 
