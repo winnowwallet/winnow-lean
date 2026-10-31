@@ -2,8 +2,9 @@ name: Release
 
 # A vMAJOR.MINOR.PATCH tag builds the Lean app as com.btcswift.app (the Swift app it replaces: same
 # bundle identifier and team, meant to keep an installed wallet: not yet tried over a Swift build) and sends it to
-# TestFlight's internal group, once CI's full run (nightly or by hand, not a pull request's short one) has passed
-# on the same tree: the release finds that run instead of testing again.
+# TestFlight's internal group, once a CI run on main (a push, nightly or by hand) has passed on the same tree: the
+# release finds that run instead of testing again. A pull request's run does not count: it tests the merge of the
+# pull request into main as it was, whose tree need not be the tag's.
 # Manual dispatch runs the gates without signing or publishing.
 on:
   push:
