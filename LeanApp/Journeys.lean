@@ -1,4 +1,6 @@
 import LeanNative.Journey
+import LeanNative.Journey.Wire
+import WinnowApp.Main
 
 /-! # The UI journeys
 
@@ -763,4 +765,6 @@ def all : List Journey :=
 
 end WinnowJourneys
 
-def main (args : List String) : IO UInt32 := LeanNative.Journey.main WinnowJourneys.all args
+/-- The journeys, and the app itself for the headless driver (`LEANNATIVE_DRIVER=wire`: scripts/wire-journeys). -/
+def main (args : List String) : IO UInt32 :=
+  LeanNative.Journey.main WinnowJourneys.all args (wire := some (LeanNative.Journey.Wire.app WinnowApp.app))

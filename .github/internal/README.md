@@ -5,9 +5,9 @@
 - [Screenshot guidance](app-store-screenshots.md): selecting captures from the
   asserted app journey.
 
-These are public repository files. Same-repository validation uses disposable
-WarpBuild runners; fork PRs and the manual hosted option use GitHub-hosted Macs.
-Contributors do not need a private machine inventory. The
+These are public repository files. Every check runs on GitHub-hosted Macs, for a
+fork's pull request as for this repository's branches. Contributors do not need a
+private machine inventory. The
 [architecture](../../docs/architecture.md) and [testing](../../docs/testing.md)
 guides describe the app and its checks.
 

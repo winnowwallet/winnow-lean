@@ -11,7 +11,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$("$ROOT/scripts/install-bitcoin")"
 export WINNOW_BITCOIND="$BIN/bitcoind" WINNOW_BITCOIN_CLI="$BIN/bitcoin-cli"
-"$WINNOW_BITCOIND" -version | head -1
+# bitcoin-cli's banner, not bitcoind's: bitcoind -version writes a settings file in the default data directory,
+# and CI runs three of these lines at once (a race that lost one of them)
+"$WINNOW_BITCOIN_CLI" -version | head -1
 [ $# -gt 0 ] || set -- io backend differential
 for suite in "$@"; do
   case "$suite" in

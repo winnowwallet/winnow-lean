@@ -11,7 +11,7 @@ history stays in [winnowwallet/winnow](https://github.com/winnowwallet/winnow).
 
 Every pull request that is ready for review and changes more than the docs (`*.md`,
 `docs/`) runs LeanNative's reusable `ios-app` workflow
-([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on WarpBuild runners,
+([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on GitHub's hosted macOS runners,
 and so does main: on a push that changes more than the docs, nightly when its
 commit has not passed yet, and by hand. Every run is the same full run, and
 `release.yml` looks for one on the tag's tree that is not a pull request's.

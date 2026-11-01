@@ -1,7 +1,8 @@
 name: CI
 # The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
-# two WarpBuild jobs that start at once, `lean` (the Lean built, every proof checked, then every test below at the
-# same time, the regtest node's among them) and `app` (the iOS builds and the UI journeys). It runs on pull
+# two jobs on GitHub's own macOS runners (free for a public repository) that start at once, `lean` (the Lean
+# built, every proof checked, then every test below at the same time, the regtest node's among them) and `app`
+# (the iOS builds and the UI journeys). It runs on pull
 # requests that are ready for review and change more than the docs, on a push to main that does, nightly on main
 # when its commit has not passed yet, and by hand. Every run is the same full run: every test, all five journeys,
 # the Release builds and the website's media. release.yml looks for one on the tag's tree that is not a pull
@@ -51,16 +52,15 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.nightly.outputs.tested != 'true'
       && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@9ad37d52a08cd3768c72793cdb03c5457814ad8f
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@cbb2fac01a7bbb4665fea3b72b9b4bb96fbdc939
     with:
-      leannative: 9ad37d52a08cd3768c72793cdb03c5457814ad8f
-      runs-on: warp-macos-26-arm64-12x
-      # the UI journeys drive one simulator: half the runner, half the price
-      app-runs-on: warp-macos-26-arm64-6x
+      leannative: cbb2fac01a7bbb4665fea3b72b9b4bb96fbdc939
+      # GitHub's hosted macOS runner (macos-26: Xcode 26, iOS 26 simulators), the reusable workflow's default
+      runs-on: macos-26
       lean-packages: Lean LeanApp
       build-targets: |
         Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check
-        LeanApp records-test multisig-app-test ledger-transport-test backend-test
+        LeanApp records-test multisig-app-test ledger-transport-test backend-test journeys
       app-dir: LeanApp
       app-root: WinnowApp
       scheme: WinnowLean
@@ -79,20 +79,17 @@ jobs:
         . scripts/ci-regtest io
         . scripts/ci-regtest backend
         . scripts/ci-regtest differential
+        . scripts/wire-journeys
       release-check: scripts/verify-release-no-test-mode
       release-builds: true
       ui-name: journey
-      # the only iPhone the WarpBuild runner's newest iOS runtime (27.1) has; the website's screenshots are this size
-      ui-device-type: iPhone Duo
+      # the iPhone on the hosted runner's newest iOS runtime; the website's screenshots are this size
+      ui-device-type: iPhone 17 Pro
       ui-before: scripts/ui-fixture start
       ui-after: scripts/ui-fixture stop
-      # the journeys are Lean on the Mac (LeanApp/Journeys.lean), two simulators at once: the wallet journey with
-      # XCTest's real touches (its recording is the website's video), the other four on the app's own driver
-      # (LeanNative's LNAppDriver: no XCTest lookups or waits)
+      # the journeys are Lean on the Mac (LeanApp/Journeys.lean), all five with XCTest's real touches
+      # (LeanNative's LNDriver, one snapshot per step) on one simulator: a hosted runner has the cores for one
       ui-journey: journeys
-      ui-lanes: >-
-        xctest:createReceiveSendConfirm
-        app:multisigTwoOfThreeWithRecovery,ledgerPairVerifySpend,shippedCensus,silentPaymentSend
       # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run
       after-ui: scripts/journey-media
       publish-name: journey-media
