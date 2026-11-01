@@ -20,7 +20,14 @@ case "$action" in
   start)
     BIN="$("$ROOT/scripts/install-bitcoin")"
     export WINNOW_BITCOIND="$BIN/bitcoind" WINNOW_BITCOIN_CLI="$BIN/bitcoin-cli"
-    (cd "$APP" && lake build backend-test >/dev/null)
+    # one lake at a time: ui-tests' lanes start their fixtures at once (a lock left by a killed run is
+    # given up on after two minutes)
+    LOCK="$APP/.lake/ui-fixture.lock"
+    for ((i = 0; i < 600; i++)); do mkdir "$LOCK" 2>/dev/null && break; sleep 0.2; done
+    built=0
+    (cd "$APP" && lake build backend-test >/dev/null) || built=$?
+    rmdir "$LOCK" 2>/dev/null || true
+    [ "$built" = 0 ] || exit "$built"
     mkdir -p "$OUT/private" "$OUT/screenshots"
     "$APP/.lake/build/bin/backend-test" --fixture "$OUT/private/fixture" > "$OUT/fixture.log" 2>&1 \
       || { cat "$OUT/fixture.log"; exit 1; }

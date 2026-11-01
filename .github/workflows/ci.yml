@@ -51,9 +51,9 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.nightly.outputs.tested != 'true'
       && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@709c84f760cfc6f3af8447981c2a097d041954b9
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@300cfa3025dff1cb265fa2999c75a77bafc04a49
     with:
-      leannative: 709c84f760cfc6f3af8447981c2a097d041954b9
+      leannative: 300cfa3025dff1cb265fa2999c75a77bafc04a49
       runs-on: warp-macos-26-arm64-12x
       # the UI journeys drive one simulator: half the runner, half the price
       app-runs-on: warp-macos-26-arm64-6x
@@ -86,8 +86,13 @@ jobs:
       ui-device-type: iPhone Duo
       ui-before: scripts/ui-fixture start
       ui-after: scripts/ui-fixture stop
-      # the journeys are Lean on the Mac (LeanApp/Journeys.lean); xcodebuild runs only LeanNative's driver
+      # the journeys are Lean on the Mac (LeanApp/Journeys.lean), two simulators at once: the wallet journey with
+      # XCTest's real touches (its recording is the website's video), the other four on the app's own driver
+      # (LeanNative's LNAppDriver: no XCTest lookups or waits)
       ui-journey: journeys
+      ui-lanes: >-
+        xctest:createReceiveSendConfirm
+        app:multisigTwoOfThreeWithRecovery,ledgerPairVerifySpend,shippedCensus,silentPaymentSend
       # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run
       after-ui: scripts/journey-media
       publish-name: journey-media
