@@ -573,6 +573,9 @@ def backgroundRuns (t : T) : IO Unit := do
     Real.startNetworking env settings
     t.check "cold background run: the foreground still starts normally" ((← env.get).stack.bind (·.filters)).isSome
     Real.stopNetworking env
+    -- the loops see the stop at their next slice, and a pass still running saves the wallet into `root`
+    t.check "cold background run: no loop thread outlives the stop"
+      (← waitFor 5_000 do return (← env.get).liveLoops == 0)
     IO.FS.removeDirAll root
   | _ => t.check "cold background run: test mode resolves" false
   -- testBackgroundIdentifiersAreDeclaredInBuiltApplication: the Info.plist the app's manifest generates
