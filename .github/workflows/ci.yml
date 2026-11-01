@@ -51,9 +51,9 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.nightly.outputs.tested != 'true'
       && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@300cfa3025dff1cb265fa2999c75a77bafc04a49
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@2d8709e0d024af213c92f4c986ee3b7180099b4f
     with:
-      leannative: 300cfa3025dff1cb265fa2999c75a77bafc04a49
+      leannative: 2d8709e0d024af213c92f4c986ee3b7180099b4f
       runs-on: warp-macos-26-arm64-12x
       # the UI journeys drive one simulator: half the runner, half the price
       app-runs-on: warp-macos-26-arm64-6x
