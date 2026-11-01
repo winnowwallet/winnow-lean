@@ -1,13 +1,16 @@
 import LeanNative.Journey
+import TestKit.Regtest
 
 /-! # The journeys' host side: the fixture's regtest node, Bitcoin Core as a co-signer, backend-test's receiver
 
 Everything a journey checks the app against lives on the Mac: the node `scripts/ui-fixture start` left running
-(its config in `WINNOW_UI_CONFIG`), `bitcoin-cli` against it, Bitcoin Core wallets that sign an account's PSBTs
-with their own libsecp256k1, and backend-test's silent payment receiver. Nothing here touches the app. -/
+(its config in `WINNOW_UI_CONFIG`), reached as a `TestKit.Regtest.Node` (bitcoin-cli, mining, the filter index,
+funding), Bitcoin Core wallets that sign an account's PSBTs with their own libsecp256k1, and backend-test's silent
+payment receiver. Nothing here touches the app. -/
 
 namespace WinnowJourneys
 open Lean LeanNative.Journey
+open TestKit.Regtest (Node)
 
 def readJson (path : String) : IO Json := do
   match Json.parse (← IO.FS.readFile path) with
@@ -25,15 +28,12 @@ def strings (j : Json) : List String :=
   | .error _ => []
 
 /-- The fixture `scripts/ui-fixture start` left: its ui.json (WINNOW_UI_CONFIG, from test-env) and the node's
-fixture.json. -/
-structure Host where
-  bitcoinCli : String
+fixture.json. The node's own calls (`cli`, `json`, `wallet`, `walletJson`, `height`, `mempool`, `fund`, …) are
+`Node`'s. -/
+structure Host extends Node where
   /-- LeanApp's backend-test: the silent payment test receiver -/
   backendTest : String
   fixture : String
-  datadir : String
-  rpc : Nat
-  p2p : Nat
 
 namespace Host
 
@@ -43,8 +43,10 @@ def load : IO Host := do
   let c ← readJson path
   let fixture : String ← field c "fixture"
   let f ← readJson s!"{fixture}/fixture.json"
+  let rpc : Nat ← field f "rpc"
+  let p2p : Nat ← field f "p2p"
   return { bitcoinCli := ← field c "bitcoinCli", backendTest := ← field c "backendTest", fixture,
-           datadir := ← field f "datadir", rpc := ← field f "rpc", p2p := ← field f "p2p" }
+           datadir := ← field f "datadir", rpc := rpc.toUInt16, p2p := p2p.toUInt16 }
 
 /-- A host program's standard output, trimmed; a nonzero exit fails the journey with its standard error.
 backend-test reaches the node through the same pinned Core (WINNOW_BITCOIN_CLI). -/
@@ -54,69 +56,30 @@ def run (h : Host) (cmd : String) (args : Array String) : IO String := do
     failure s!"{(cmd.splitOn "/").getLast!} {" ".intercalate args.toList} exited {out.exitCode}: {out.stderr.trimAscii}"
   return out.stdout.trimAscii.copy
 
-def cli (h : Host) (args : Array String) : IO String :=
-  h.run h.bitcoinCli (#["-regtest", s!"-datadir={h.datadir}", s!"-rpcport={h.rpc}"] ++ args)
+def bankAddress (h : Host) : IO String := h.wallet #["getnewaddress"]
 
-/-- bitcoin-cli with -rpcwallet (the fixture's funded wallet is `w`). -/
-def wallet (h : Host) (wallet : String) (args : Array String) : IO String :=
-  h.cli (#[s!"-rpcwallet={wallet}"] ++ args)
-
-private def parseCli (args : Array String) (text : String) : IO Json :=
-  match Json.parse text with
-  | .ok j => pure j
-  | .error _ => failure s!"bitcoin-cli {args}: not JSON: {text.take 300}"
-
-def cliJson (h : Host) (args : Array String) : IO Json := do parseCli args (← h.cli args)
-def walletJson (h : Host) (wallet : String) (args : Array String) : IO Json := do
-  parseCli args (← h.wallet wallet args)
-
-def mempool (h : Host) : IO (List String) := do return strings (← h.cliJson #["getrawmempool"])
-def bankAddress (h : Host) : IO String := h.wallet "w" #["getnewaddress"]
-def height (h : Host) : IO Nat := do return (← h.cli #["getblockcount"]).toNat!
-
-/-- Until the node's block filter index reaches its tip. The app asks for filters up to the tip it has
-synced; a request past the index goes unanswered until it times out, and the app then drops its only peer. -/
-def waitFilterIndex (h : Host) : IO Unit := do
-  let tip ← h.height
-  for _ in [0:600] do
-    let info ← h.cliJson #["getindexinfo", "basic block filter index"]
-    let best := ((info.getObjValD "basic block filter index").getObjValAs? Nat "best_block_height").toOption.getD 0
-    if best ≥ tip then return
-    IO.sleep 50
-  failure "the node's block filter index did not reach its tip in 30 s"
-
+/-- `blocks` blocks to the funded wallet, and the node's block filter index at its tip: the app asks for filters
+up to the tip it has synced, and a request past the index goes unanswered until the app drops its only peer. -/
 def mine (h : Host) (blocks : Nat) : IO Unit := do
-  discard <| h.cli #["generatetoaddress", toString blocks, ← h.bankAddress]
+  h.toNode.mine blocks (← h.bankAddress)
   h.waitFilterIndex
 
 /-- `blocks` blocks paying an anyone-can-spend script: no wallet on the node scans them in, so many blocks mine
 in a moment. -/
 def mineElsewhere (h : Host) (blocks : Nat) : IO Unit := do
-  let some d := ((← h.cliJson #["getdescriptorinfo", "raw(51)"]).getObjValAs? String "descriptor").toOption
-    | failure "getdescriptorinfo raw(51)"
-  discard <| h.cli #["generatetodescriptor", toString blocks, d]
+  h.toNode.mineElsewhere blocks
   h.waitFilterIndex
-
-def btc (sats : Nat) : String :=
-  let frac := toString (sats % 100000000)
-  s!"{sats / 100000000}.{String.ofList (List.replicate (8 - frac.length) '0')}{frac}"
-
-/-- Pays `sats` from the funded wallet to `address` and mines it; the payment's txid. -/
-def fund (h : Host) (address : String) (sats : Nat) : IO String := do
-  let txid ← h.wallet "w" #["sendtoaddress", address, btc sats]
-  h.mine 1
-  return txid
 
 /-- A transaction in the mempool, decoded by the node (a confirmed one needs a wallet's gettransaction: the
 node keeps no txindex). -/
-def transaction (h : Host) (txid : String) : IO Json := h.cliJson #["getrawtransaction", txid, "true"]
+def transaction (h : Host) (txid : String) : IO Json := h.json #["getrawtransaction", txid, "true"]
 
 def scriptPubKey (h : Host) (address : String) : IO String := do
-  field (← h.cliJson #["validateaddress", address]) "scriptPubKey"
+  field (← h.json #["validateaddress", address]) "scriptPubKey"
 
 /-- Whether the node's wallet `w` has the payment confirmed. -/
 def confirmed (h : Host) (txid : String) : IO Bool := do
-  let confirmations : Nat ← field (← h.walletJson "w" #["gettransaction", txid]) "confirmations"
+  let confirmations : Nat ← field (← h.walletJson #["gettransaction", txid]) "confirmations"
   return confirmations > 0
 
 /-- backend-test's silent payment test receiver (written from BIP352's receiving side): its code, and the
@@ -127,10 +90,10 @@ def silentPaymentExpectedScript (h : Host) (txid : String) : IO String :=
 
 /-- The transactions in the tip block. -/
 def tipTransactions (h : Host) : IO (List String) := do
-  return strings ((← h.cliJson #["getblock", ← h.cli #["getbestblockhash"]]).getObjValD "tx")
+  return strings ((← h.json #["getblock", ← h.cli #["getbestblockhash"]]).getObjValD "tx")
 
 /-- The one transaction that enters the mempool after `before`, within `within` seconds. -/
-def newMempoolTransaction (h : Host) (before : List String) (within : Float) : UI String := do
+def newMempoolTransaction (h : Host) (before : Array String) (within : Float) : UI String := do
   let found ← IO.mkRef (none : Option String)
   waitUntil within "the node never received the payment" (every := 0.25) do
     let now ← h.mempool
@@ -194,7 +157,7 @@ def accountID (descriptor : String) : String :=
 /-- A descriptor with its checksum, as the node computes it. -/
 def Host.withChecksum (h : Host) (descriptor : String) : IO String := do
   let b := body descriptor
-  let checksum : String ← field (← h.cliJson #["getdescriptorinfo", b]) "checksum"
+  let checksum : String ← field (← h.json #["getdescriptorinfo", b]) "checksum"
   return s!"{b}#{checksum}"
 
 /-- Each `<a;b>` read as `a`: a descriptor's first branch. -/
@@ -211,7 +174,7 @@ def firstBranch (s : String) : String := Id.run do
 
 /-- The descriptor's address at `index` on its first branch, derived by the node. -/
 def Host.deriveAddress (h : Host) (descriptor : String) (index : Nat) : IO String := do
-  let addresses ← h.cliJson #["deriveaddresses", ← h.withChecksum (firstBranch (body descriptor)), s!"[{index},{index}]"]
+  let addresses ← h.json #["deriveaddresses", ← h.withChecksum (firstBranch (body descriptor)), s!"[{index},{index}]"]
   let some a := (strings addresses).head? | failure s!"the node derived no address from {descriptor}"
   return a
 
@@ -228,7 +191,7 @@ def CoreSigner.keyExpression (c : CoreSigner) : String := s!"[{c.fingerprint}/86
 
 /-- The Taproot (BIP86) descriptor of the wallet's receive branch, public or private. -/
 def Host.taprootDescriptor (h : Host) (wallet : String) (priv : Bool) : IO String := do
-  let list ← h.walletJson wallet #["listdescriptors", toString priv]
+  let list ← h.walletJson #["listdescriptors", toString priv] wallet
   let ds := ((list.getObjValD "descriptors").getArr?.toOption.getD #[]).toList
   for d in ds do
     let desc := (d.getObjValAs? String "desc").toOption.getD ""
@@ -257,13 +220,13 @@ def Host.importAccount (h : Host) (c : CoreSigner) (descriptor : String) : IO Un
   if mine == b then failure s!"{c.wallet}'s key is not in {descriptor}"
   let request := Json.arr #[Json.mkObj [("desc", Json.str (← h.withChecksum mine)), ("timestamp", "now"),
                                         ("range", Json.arr #[0, 50])]]
-  let result ← h.walletJson c.wallet #["importdescriptors", request.compress]
+  let result ← h.walletJson #["importdescriptors", request.compress] c.wallet
   for r in (result.getArr?.toOption.getD #[]) do
     unless (r.getObjValAs? Bool "success").toOption.getD false do failure s!"importdescriptors: {r.compress}"
 
 /-- The PSBT with this wallet's signatures added. -/
 def Host.sign (h : Host) (c : CoreSigner) (psbt : String) : IO String := do
-  field (← h.walletJson c.wallet #["walletprocesspsbt", psbt, "true", "DEFAULT", "true", "false"]) "psbt"
+  field (← h.walletJson #["walletprocesspsbt", psbt, "true", "DEFAULT", "true", "false"] c.wallet) "psbt"
 
 /-- The Core signers are done: their wallets unloaded. -/
 def Host.unload (h : Host) (signers : List CoreSigner) : IO Unit := do
