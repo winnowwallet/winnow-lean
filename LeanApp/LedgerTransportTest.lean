@@ -1,6 +1,8 @@
 import Lean.Data.Json
 import Winnow.Ledger
 import WinnowApp.Real.LedgerTransport
+import TestKit.Check
+import TestKit.Fixtures
 
 /-! `ledger-transport-test`: the app's Ledger transport (`WinnowApp.Real.LedgerTransport`) against a
 fake Bluetooth peripheral that speaks the shell's `ble.*` capabilities. The peripheral is the Lean
@@ -9,12 +11,7 @@ it is written, hands each APDU to the simulator and notifies the framed reply. T
 the same answers as the simulator called directly, at a small frame size (many frames per APDU) and a
 real one, and report Swift's messages for each failure. -/
 
-open Lean Winnow Winnow.Keys Winnow.Ledger WinnowApp.Real
-
-def master (byte : UInt8) : HDKey :=
-  match BIP39.mnemonic (ByteArray.mk (Array.replicate 16 byte)) with
-  | .ok words => (HDKey.ofSeed (BIP39.seed words)).toOption.get!
-  | .error _ => default
+open Lean Winnow Winnow.Keys Winnow.Ledger WinnowApp.Real TestKit
 
 /-- What the fake peripheral does differently, to exercise each failure. -/
 inductive Fault where
@@ -73,14 +70,8 @@ def fakeAsk (state : IO.Ref Peripheral) (sim : IO.Ref Simulator) (frameSize : Na
       | _ => pure (Json.mkObj [("error", .str s!"unknown capability {name}")])
     pure (Task.pure answer)
 
-def main : IO UInt32 := do
-  let passed ← IO.mkRef 0
-  let failed ← IO.mkRef 0
-  let check (label : String) (ok : Bool) : IO Unit := do
-    if ok then passed.modify (· + 1) else
-      failed.modify (· + 1)
-      IO.eprintln s!"FAIL {label}"
-  let device := master 0xB2
+def main : IO UInt32 := runMain "ledger-transport-test" do
+  let device ← master 0xB2
   -- the same answers over Bluetooth as from the simulator directly, at two frame sizes
   let direct ← (Program.runIO (Simulator.transport (← IO.mkRef (Simulator.new device)))
     (Multisig.signerExpression .signet)).run
@@ -118,7 +109,3 @@ def main : IO UInt32 := do
   let _ ← (try (some <$> withLedger (openLedger (fakeAsk state sim 153 .silentAfterSubscribe)) Client.masterFingerprint)
     catch _ => pure none)
   check "a failed open closes the connection" ((← state.get).closed == 1)
-  let p ← passed.get
-  let f ← failed.get
-  IO.println s!"ledger-transport-test: {p} passed, {f} failed"
-  return (if f == 0 then 0 else 1)

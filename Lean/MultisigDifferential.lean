@@ -1,11 +1,14 @@
 import Winnow
 import Lean.Data.Json
+import TestKit.Check
+import TestKit.Fixtures
+import TestKit.Regtest
 
 /-! `multisig-differential`: the Lean port of upstream's `winnow-fixture multisig-differential`
 (Tools/Fixture/MultisigDifferential.swift, run by scripts/check-multisig-core at d2ca878): Winnow's Taproot
 script-path multisig (`MultisigAccount`) held to Bitcoin Core on a disposable regtest node.
 
-The node is started here (temp datadir, random ports, `bitcoind -regtest`) and killed at
+The node is TestKit.Regtest's without P2P (temp datadir, random ports, `bitcoind -regtest`), stopped at
 the end, also on failure. Seeded cases vary the threshold, the number of signers (two to six), which
 signers are Bitcoin Core wallets (keys Core generated, signing through `walletprocesspsbt` with its own
 libsecp256k1), the order the signers are listed in, and the recovery leaf (none, fewer of the same signers,
@@ -37,39 +40,24 @@ disagreement. -/
 
 open Winnow Keys Lean
 open MultisigAccount (OutputCoordinate SpendPath RecoveryPlan)
-
-/-- A Bitcoin Core binary: `$WINNOW_BITCOIND` / `$WINNOW_BITCOIN_CLI`, else Homebrew's, else the PATH. -/
-def findTool (env name : String) : IO String := do
-  if let some path := (← IO.getEnv env) then return path
-  for dir in ["/opt/homebrew/bin", "/usr/local/bin"] do
-    if ← System.FilePath.pathExists s!"{dir}/{name}" then return s!"{dir}/{name}"
-  return name
-
-initialize bitcoind : String ← findTool "WINNOW_BITCOIND" "bitcoind"
-initialize bitcoinCli : String ← findTool "WINNOW_BITCOIN_CLI" "bitcoin-cli"
-
-def say (s : String) : IO Unit := do IO.println s; (← IO.getStdout).flush
+open TestKit
 
 /-! ## The tally -/
 
 initialize agreed : IO.Ref (Array (String × Nat)) ← IO.mkRef #[]
-initialize disagreements : IO.Ref (Array String) ← IO.mkRef #[]
 
+/-- One comparison with Core, a check of its kind: the agreements counted by kind (printed at the end), a
+disagreement a failure with its seed and case. -/
 def tally (agrees : Bool) (kind : String) (detail : String) : IO Unit := do
   if agrees then
     agreed.modify fun a => match a.findIdx? (·.1 == kind) with
       | some j => a.modify j fun (k, n) => (k, n + 1)
       | none => a.push (kind, 1)
-  else
-    disagreements.modify (·.push s!"{kind}: {detail}")
-    say s!"  DISAGREE {kind}: {detail}"
+  check kind agrees detail
 
 /-! ## The node -/
 
-structure Node where
-  datadir : String
-  rpc : UInt16
-  pid : UInt32
+open TestKit.Regtest (Node startNode)
 
 initialize nodeRef : IO.Ref (Option Node) ← IO.mkRef none
 
@@ -79,11 +67,9 @@ def node : IO Node := do
 
 def cli (args : Array String) (wallet : Option String := none) : IO String := do
   let n ← node
-  let w := match wallet with | some w => #[s!"-rpcwallet={w}"] | none => #[]
-  let out ← IO.Process.output
-    { cmd := bitcoinCli, args := #["-regtest", s!"-datadir={n.datadir}", s!"-rpcport={n.rpc}"] ++ w ++ args }
-  if out.exitCode != 0 then throw (IO.userError s!"bitcoin-cli {args}: {out.stderr.trimAscii}")
-  return out.stdout.trimAscii.toString
+  match wallet with
+  | some w => n.wallet args w
+  | none => n.cli args
 
 def cliJson (args : Array String) (wallet : Option String := none) : IO Json := do
   match Json.parse (← cli args wallet) with
@@ -92,39 +78,6 @@ def cliJson (args : Array String) (wallet : Option String := none) : IO Json := 
 
 def jstr (j : Json) (k : String) : IO String := match j.getObjValAs? String k with
   | .ok s => pure s | .error e => throw (IO.userError s!"{k}: {e}")
-
-def randomU64 : IO UInt64 := do
-  let b ← IO.getRandomBytes 8
-  return (List.range 8).foldl (fun a i => (a <<< 8) ||| b[i]!.toUInt64) 0
-
-def killPid (pid : UInt32) (signal : String := "-TERM") : IO Unit :=
-  discard <| IO.Process.output { cmd := "kill", args := #[signal, toString pid] }
-
-def startNode (dir : String) : IO Node := do
-  for attempt in [0:5] do
-    let r ← randomU64
-    let p2p := (30000 + r.toNat % 25000).toUInt16
-    let rpc := p2p + 1
-    let datadir := s!"{dir}/node{attempt}"
-    IO.FS.createDirAll datadir
-    let child ← IO.Process.spawn {
-      cmd := bitcoind
-      args := #["-regtest", s!"-datadir={datadir}", s!"-port={p2p}", s!"-rpcport={rpc}", "-rpcbind=127.0.0.1", "-rpcallowip=127.0.0.1",
-        "-listen=0", "-server=1", "-fallbackfee=0.0002", "-printtoconsole=0", "-dnsseed=0", "-discover=0",
-        "-listenonion=0", "-keypool=1", "-unsafesqlitesync=1"]
-      stdout := .null, stderr := .null, stdin := .null }
-    let n : Node := { datadir, rpc, pid := child.pid }
-    nodeRef.set (some n)
-    let mut ready := false
-    for _ in [0:150] do
-      IO.sleep 200
-      if (← child.tryWait).isSome then break
-      match ← (cli #["getblockchaininfo"]).toBaseIO with
-      | .ok _ => ready := true; break
-      | .error _ => pure ()
-    if ready then return n
-    killPid child.pid "-KILL"
-  throw (IO.userError "bitcoind did not start")
 
 def height : IO UInt32 := do return (← cli #["getblockcount"]).toNat!.toUInt32
 
@@ -195,11 +148,6 @@ def combinations : List Nat → Nat → List (List Nat)
 
 def hex8 (n : UInt32) : String := Descriptor.hex8 n
 
-def keyExpressionOf (master : HDKey) : IO String := do
-  let account ← match master.derived "m/86'/1'/0'" with
-    | .ok k => pure k | .error e => throw (IO.userError e.name)
-  return s!"[{hex8 master.fingerprint}/86'/1'/0']{account.neutered.serialized .testnet}/<0;1>/*"
-
 /-- A Bitcoin Core signer: a Core wallet's own tr() account key; Core signs with `walletprocesspsbt`. -/
 structure CoreSigner where
   wallet : String
@@ -261,7 +209,7 @@ inductive Signer where
   deriving Inhabited
 
 def Signer.expression : Signer → IO String
-  | .winnow m => keyExpressionOf m
+  | .winnow m => keyExpression m
   | .core c => pure c.signerExpression
 
 def Signer.label : Signer → String | .core _ => "Core" | .winnow _ => "Winnow"
@@ -359,7 +307,7 @@ def generate (number : Nat) : IO Case := do
     | _ =>
       let k := 1 + (← count 3)
       for _ in [0:k] do recoveryMasters := recoveryMasters.push (← randomMaster)
-      let keys ← recoveryMasters.mapM keyExpressionOf
+      let keys ← recoveryMasters.mapM keyExpression
       pure (some (RecoveryPlan.separateKeys (1 + (← count recoveryMasters.size)) keys blocks))
   return { number, threshold, signers, groups, thresholds, recovery, recoveryMasters }
 
@@ -679,33 +627,27 @@ def main (args : List String) : IO UInt32 := do
     | "--cases" :: v :: r => cases := v.toNat!; rest := r
     | x :: _ => IO.eprintln s!"unknown argument {x}"; return 2
     | [] => pure ()
-  let dir := s!"/tmp/winnow-multisig-core-{← IO.monoNanosNow}"
-  IO.FS.createDirAll dir
-  let n ← startNode dir
-  try
-    let chain ← jstr (← cliJson #["getblockchaininfo"]) "chain"
-    unless chain == "regtest" do throw (IO.userError s!"the node reports {chain}")
-    ensureWallet bank
-    mine 110
-    for number in [0:cases] do
-      rngState.set (seed + number.toUInt64 * 0x9E37_79B9)
-      let tag := s!"seed {String.ofList (Nat.toDigits 16 seed.toNat)} case {number}"
-      let start ← IO.monoMsNow
-      try
-        let c ← generate number
-        say s!"case {number}: {c.summary}"
-        checkCase c tag
-      catch e => tally false "case completed" s!"{tag}: {e}"
-      say s!"  ({(← IO.monoMsNow) - start} ms)"
-  finally
-    discard <| (cli #["stop"]).toBaseIO
-    -- at most 10 s for the node to exit (gone, or a zombie this process never reaps) before its directory goes
-    let exited := s!"i=0; while s=$(ps -o stat= -p {n.pid}) && case $s in *Z*) false;; esac && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done"
-    discard <| IO.Process.output { cmd := "/bin/sh", args := #["-c", exited] }
-    killPid n.pid
-    discard <| IO.Process.output { cmd := "rm", args := #["-rf", dir] }
-  for (kind, k) in ← agreed.get do say s!"  {kind}: {k}"
-  let d ← disagreements.get
-  say s!"multisig-differential: {(← agreed.get).foldl (· + ·.2) 0} agreements, {d.size} disagreements"
-  for x in d do say s!"  {x}"
-  return if d.isEmpty then 0 else 1
+  runMain "multisig-differential" do
+    let dir := s!"/tmp/winnow-multisig-core-{← IO.monoNanosNow}"
+    IO.FS.createDirAll dir
+    let n ← startNode dir (filters := false)
+    nodeRef.set (some n)
+    try
+      let chain ← jstr (← cliJson #["getblockchaininfo"]) "chain"
+      unless chain == "regtest" do throw (IO.userError s!"the node reports {chain}")
+      ensureWallet bank
+      mine 110
+      for number in [0:cases] do
+        rngState.set (seed + number.toUInt64 * 0x9E37_79B9)
+        let tag := s!"seed {String.ofList (Nat.toDigits 16 seed.toNat)} case {number}"
+        let start ← IO.monoMsNow
+        try
+          let c ← generate number
+          say s!"case {number}: {c.summary}"
+          checkCase c tag
+        catch e => tally false "case completed" s!"{tag}: {e}"
+        say s!"  ({(← IO.monoMsNow) - start} ms)"
+    finally
+      n.stop
+      discard <| IO.Process.output { cmd := "rm", args := #["-rf", dir] }
+    for (kind, k) in ← agreed.get do say s!"  {kind}: {k}"

@@ -1,10 +1,13 @@
 import WinnowApp.Real
-open Lean Winnow Winnow.IO Winnow.Net WinnowApp
+import TestKit.Check
+import TestKit.Fixtures
+import TestKit.Regtest
+open Lean Winnow Winnow.IO Winnow.Net WinnowApp TestKit TestKit.Regtest
 
 /-! `backend-test`: `Backend.real` end to end against a disposable regtest bitcoind, through the
 Backend fields only (plus the diagnostics handle for "no loop survives a stop").
 
-The node is started as `Lean/IOTest.lean` does (temp datadir, random free ports, compact-filter
+The node is TestKit.Regtest's, as io-test's (temp datadir, random free ports, compact-filter
 serving) and killed by PID at the end, also on failure. The backend runs with an in-memory key store
 and `curlFetch`, the app's settings on the regtest network with the node as the manual peer.
 
@@ -16,117 +19,15 @@ combined, finalized, broadcast, confirmed) → export (carrying the account) →
 directory (same balance, the account restored) → stop networking (no loop, no peer, no file change while blocks arrive) → reopen from
 disk → delete. One `ok`/`FAIL` line per check; the exit code is the verdict. -/
 
-/-- A Bitcoin Core binary: `$WINNOW_BITCOIND` / `$WINNOW_BITCOIN_CLI`, else Homebrew's, else the PATH. -/
-def findTool (env name : String) : IO String := do
-  if let some path := (← IO.getEnv env) then return path
-  for dir in ["/opt/homebrew/bin", "/usr/local/bin"] do
-    if ← System.FilePath.pathExists s!"{dir}/{name}" then return s!"{dir}/{name}"
-  return name
-
-initialize bitcoind : String ← findTool "WINNOW_BITCOIND" "bitcoind"
-initialize bitcoinCli : String ← findTool "WINNOW_BITCOIN_CLI" "bitcoin-cli"
-
-initialize failures : IO.Ref (Array String) ← IO.mkRef #[]
 /-- Every `Deps.journal` line of the run: which backend (A, B, C), the event, its fields. -/
 initialize journalEvents : IO.Ref (Array (String × String × List (String × String))) ← IO.mkRef #[]
-initialize passes : IO.Ref Nat ← IO.mkRef 0
 
-def say (s : String) : IO Unit := do IO.println s; (← IO.getStdout).flush
+/-! ## The node -/
 
-def check (name : String) (cond : Bool) (detail : String := "") : IO Unit := do
-  if cond then
-    passes.modify (· + 1)
-    say s!"  ok   {name}{if detail.isEmpty then "" else " — " ++ detail}"
-  else
-    failures.modify (·.push name)
-    say s!"  FAIL {name}{if detail.isEmpty then "" else " — " ++ detail}"
-
-/-! ## The node (as IOTest) -/
-
-structure Node where
-  datadir : String
-  p2p : UInt16
-  rpc : UInt16
-  pid : UInt32
-
-def Node.cli (n : Node) (args : Array String) : IO String := do
-  let out ← IO.Process.output { cmd := bitcoinCli, args := #["-regtest", s!"-datadir={n.datadir}", s!"-rpcport={n.rpc}"] ++ args }
-  if out.exitCode != 0 then throw (IO.userError s!"bitcoin-cli {args}: {out.stderr.trimAscii}")
-  return out.stdout.trimAscii.toString
-
-def Node.wallet (n : Node) (args : Array String) : IO String := n.cli (#["-rpcwallet=w"] ++ args)
-
-def Node.json (n : Node) (args : Array String) : IO Json := do
-  match Json.parse (← n.cli args) with
-  | .ok j => return j
-  | .error e => throw (IO.userError s!"json {args}: {e}")
-
-def Node.height (n : Node) : IO Nat := do return (← n.cli #["getblockcount"]).toNat!
-def Node.mine (n : Node) (count : Nat) (addr : String) : IO Unit := do
-  let mut left := count
-  while left > 0 do
-    let k := min left 500
-    discard <| n.cli #["generatetoaddress", toString k, addr]
-    left := left - k
-
-def killPid (pid : UInt32) (signal : String := "-TERM") : IO Unit := do
-  discard <| IO.Process.output { cmd := "kill", args := #[signal, toString pid] }
-
-def startNode (dir : String) : IO Node := do
-  for attempt in [0:5] do
-    let r ← randomU64
-    let p2p := (30000 + r.toNat % 25000).toUInt16
-    let rpc := p2p + 1
-    let datadir := s!"{dir}/node{attempt}"
-    IO.FS.createDirAll datadir
-    let child ← IO.Process.spawn {
-      cmd := bitcoind
-      args := #["-regtest", s!"-datadir={datadir}", s!"-port={p2p}", s!"-rpcport={rpc}", "-bind=127.0.0.1",
-        "-listen=1", "-server=1", "-blockfilterindex=1", "-peerblockfilters=1", "-fallbackfee=0.0002",
-        "-printtoconsole=0", "-dnsseed=0", "-discover=0", "-listenonion=0", "-whitelist=noban@127.0.0.1",
-        "-keypool=1", "-unsafesqlitesync=1"]
-      stdout := .null, stderr := .null, stdin := .null }
-    let n : Node := { datadir, p2p, rpc, pid := child.pid }
-    let mut ready := false
-    for _ in [0:100] do
-      IO.sleep 200
-      if (← child.tryWait).isSome then break
-      match ← (n.cli #["getblockchaininfo"]).toBaseIO with
-      | .ok _ => ready := true; break
-      | .error _ => pure ()
-    if ready then return n
-    killPid child.pid "-KILL"
-  throw (IO.userError "bitcoind did not start")
-
-def Node.waitFilterIndex (n : Node) : IO Unit := do
-  for _ in [0:300] do
-    let tip ← n.height
-    let info ← n.json #["getindexinfo"]
-    match info.getObjVal? "basic block filter index" with
-    | .ok idx =>
-      let synced := (idx.getObjValAs? Bool "synced").toOption.getD false
-      let best := (idx.getObjValAs? Nat "best_block_height").toOption.getD 0
-      if synced && best == tip then return
-    | .error _ => pure ()
-    IO.sleep 100
-  throw (IO.userError "filter index did not catch up")
-
-def Node.mempool (n : Node) : IO (Array String) := do
-  match ← n.json #["getrawmempool"] with
-  | .arr xs => return xs.filterMap fun | .str s => some s | _ => none
-  | _ => return #[]
-
-def Node.winnowPeers (n : Node) : IO Nat := do
+def TestKit.Regtest.Node.winnowPeers (n : Node) : IO Nat := do
   match ← n.json #["getpeerinfo"] with
   | .arr xs => return (xs.filter fun p => (p.getObjValAs? String "subver").toOption == some "/winnow:0.1/").size
   | _ => return 0
-
-def waitUntil (ms : Nat) (cond : IO Bool) : IO Bool := do
-  let deadline := (← IO.monoMsNow) + ms
-  while (← IO.monoMsNow) < deadline do
-    if ← cond then return true
-    IO.sleep 100
-  cond
 
 /-! ## The flow -/
 
@@ -194,11 +95,8 @@ structure MultisigResult where
 
 /-- `[fp/86'/1'/0']tpub…/<0;1>/*` of a master from 16 repeated bytes (TestKeys), and the master. -/
 def testSigner (entropyByte : UInt8) : IO (Keys.HDKey × String) := do
-  let some words := (Keys.BIP39.mnemonic (ByteArray.mk (Array.replicate 16 entropyByte))).toOption
-    | throw (IO.userError "mnemonic")
-  let some master := (Keys.HDKey.ofSeed (Keys.BIP39.seed words)).toOption | throw (IO.userError "master")
-  let some account := (master.derived "m/86'/1'/0'").toOption | throw (IO.userError "account")
-  return (master, s!"[{Descriptor.hex8 master.fingerprint}/86'/1'/0']{account.neutered.serialized .testnet}/<0;1>/*")
+  let m ← master entropyByte
+  return (m, ← keyExpression m)
 
 def multisigAccount? (b : Backend) (id : String) : IO (Option MultisigInfo) := do
   return (← b.multisigOverview).accounts.find? (·.id == id)
@@ -902,34 +800,12 @@ def main (args : List String) : IO UInt32 := do
   -- for the UI journey: the test receiver's code, and the output it finds in a transaction on a fixture
   if let ["--sp-code"] := args then IO.println (← testReceiverCode); return 0
   if let ["--sp-expected", datadir, rpc, txid] := args then
-    let n : Node := { datadir, p2p := 0, rpc := rpc.toNat!.toUInt16, pid := 0 }
+    let n ← Node.attach datadir rpc.toNat!.toUInt16
     IO.println (hex (← testReceiverScript n (← n.json #["getrawtransaction", txid, "true"])))
     return 0
-  let tmp ← IO.FS.createTempDir
-  let dir := tmp.toString
-  say s!"backend-test: work dir {dir}"
-  let node ← (startNode dir).toBaseIO
-  let n ← match node with
-    | .ok n => pure n
-    | .error e => say s!"FAIL could not start bitcoind: {e}"; return 1
-  spawn do
-    IO.sleep 900_000
-    say "FAIL watchdog: the test ran for 15 minutes"
-    killPid n.pid "-KILL"
-    IO.Process.exit 2
-  try
-    flow dir n
-  catch e =>
-    failures.modify (·.push s!"exception: {e}")
-    say s!"  FAIL exception: {e}"
-  finally
-    discard <| (n.cli #["stop"]).toBaseIO
-    -- gone, or a zombie: this process never reaps it, so `kill -0` would answer until the 10 s ran out
-    discard <| waitUntil 10_000 (do
-      let r ← IO.Process.output { cmd := "ps", args := #["-o", "stat=", "-p", toString n.pid] }
-      return r.exitCode != 0 || r.stdout.trimAscii.toString.startsWith "Z")
-    killPid n.pid "-KILL"
-    try IO.FS.removeDirAll tmp catch _ => pure ()
-  let fs ← failures.get
-  say s!"backend-test: {← passes.get} passed, {fs.size} failed{if fs.isEmpty then "" else ": " ++ ", ".intercalate fs.toList}"
-  IO.Process.exit (if fs.isEmpty then 0 else 1)
+  runMain "backend-test" (progress := true) do
+    let tmp ← IO.FS.createTempDir
+    let dir := tmp.toString
+    say s!"backend-test: work dir {dir}"
+    try withNode dir (flow dir)
+    finally try IO.FS.removeDirAll tmp catch _ => pure ()
