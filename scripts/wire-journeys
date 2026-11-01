@@ -1,0 +1,37 @@
+#!/bin/bash
+# The UI journeys (LeanApp/Journeys.lean) against the app itself, headless: no simulator, no XCTest. The journeys
+# executable runs the app as a child of itself (LeanNative.Journey.Wire: the app's Lean, a fake shell for the
+# Keychain, paths and clipboard, the view tree in place of a screen) against a fresh regtest node, the same
+# fixture the simulator journeys use (scripts/ui-fixture). What this does not test is the renderer and the shell;
+# the simulator run (scripts/ui-journeys) still does, with the website's screenshots and video.
+#
+#   scripts/wire-journeys                                 every journey
+#   scripts/wire-journeys silentPaymentSend shippedCensus  only these (names from Journeys.lean's `all`)
+#
+# Evidence goes to $UI_OUT (default LeanApp/build/wire-journeys): journeys.json, journey.log, the app's files
+# under wire/, each `shot` as screenshots/<name>.wire.json (the visible tree), the fixture's log and the app's
+# test-mode journals. CI runs it as one line of the `lean` job's tests (.github/workflows/ci.yml).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT="${UI_OUT:-${CI_RESULTS:-$ROOT/LeanApp/build}/wire-journeys}"
+rm -rf "$OUT"
+mkdir -p "$OUT"
+(cd "$ROOT/LeanApp" && lake build journeys backend-test >/dev/null)
+[ -f "$ROOT/build/census/peers.json" ] || "$ROOT/scripts/import-census"
+# the census list the app bundles: CensusCatalog.bundled reads peers.json beside the executable
+cp "$ROOT/build/census/peers.json" "$ROOT/LeanApp/.lake/build/bin/peers.json"
+status=0
+"$ROOT/scripts/ui-fixture" start "$OUT"
+# the fixture's config reaches the journeys as ui-tests passes it: test-env's KEY=VALUE lines
+set -a
+# shellcheck disable=SC1091
+. "$OUT/test-env"
+set +a
+LEANNATIVE_DRIVER=wire "$ROOT/LeanApp/.lake/build/bin/journeys" "$@" "$OUT" 2>&1 | tee "$OUT/journey.log" || status=${PIPESTATUS[0]}
+# the app's test-mode journals (Application Support/BTCSwiftE2E-<run>/story-events.jsonl), then the node stopped
+for j in "$OUT"/wire/Library/Application\ Support/BTCSwiftE2E-*/story-events.jsonl; do
+  [ -f "$j" ] && cp "$j" "$OUT/journal-$(basename "$(dirname "$j")").jsonl"
+done
+"$ROOT/scripts/ui-fixture" stop "$OUT"
+echo "wire journeys: exit $status"
+exit "$status"

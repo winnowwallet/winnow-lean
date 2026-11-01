@@ -17,6 +17,9 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   found on the PATH.
 - [ui-fixture](ui-fixture) starts the UI journeys' regtest node and config, and afterwards collects the app's
   journals and stops the node (`ui-tests`' hooks); [ui-journeys](ui-journeys) runs the journeys locally as CI does.
+- [wire-journeys](wire-journeys) runs the same journeys against the app itself, headless (LeanNative's
+  `LEANNATIVE_DRIVER=wire`: no simulator, no XCTest; the app as a child of the journeys executable with a fake
+  shell), against the fixture's node: under a minute for all five. CI runs it as a `tests` line of the `lean` job.
 - [journey-media](journey-media) makes the website's media from a journeys run with prepare-journey-media.
 - [prepare-journey-media](prepare-journey-media) turns a UI-journeys output into the website's media
   (`prepare-journey-media <journey-out> <media-out>`): the screenshots, a browser copy of the recording (ffmpeg,

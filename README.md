@@ -127,7 +127,12 @@ check is Lean against the node. Each launches the app in test mode on the regtes
 - `silentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
   receiver (written from the BIP's receiving side) finds, and the receipt shows its address.
 
-`scripts/ui-journeys` runs them as CI does: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
+They run two ways. `scripts/wire-journeys` runs them against the app itself, headless: the journeys executable
+runs the app as a child of itself with a fake shell (LeanNative's `LEANNATIVE_DRIVER=wire`: a Keychain in a file,
+paths under the evidence directory, no network, no Bluetooth) and finds each element in the app's view tree, so
+the five take under a minute against the fixture's node, with no simulator; CI runs this in the `lean` job. What
+it does not test is the renderer and real touches, which the simulator run does.
+`scripts/ui-journeys` runs them as CI does in the `app` job: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
 with the journeys as `UI_JOURNEY`, and `scripts/ui-fixture` starting the node before and collecting the app's
 test-mode journals after; it keeps the result bundle, a screen recording, the screenshots, `journeys.json`
 (each journey's result and time) and the journals. `UI_JOURNEYS="silentPaymentSend" scripts/ui-journeys` runs
@@ -137,8 +142,9 @@ only the journeys named.
 
 `.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request that is ready for
 review and changes more than the docs, on a push to main that does, nightly on main when its commit has not passed
-yet, and by hand, in two WarpBuild jobs that start at once and each build the Lean from the cache; every long step
-prints its progress as it goes. Every run is the same, full run:
+yet, and by hand, in two jobs on GitHub's own macOS runners (free for a public repository; a fork's pull request
+gets them too) that start at once and each build the Lean from the cache; every long step prints its progress as it
+goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
