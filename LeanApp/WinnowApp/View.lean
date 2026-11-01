@@ -1,4 +1,5 @@
 import WinnowApp.Update
+import WinnowApp.Ids
 
 /-! The root view (WinnowApp.swift: loading, onboarding, ready as beginner home or the three tabs,
 StorageDamagedView, the Tor alert), the onboarding screen and sheets, and the presentation stack: each
@@ -16,9 +17,9 @@ def importSheet (m : Model) (inner : List H) : H :=
          [ .input .multiline "" "Paste your backup file (JSON)" m.onboarding.importText Msg.setImportText none
          , Html.symbol "doc.on.clipboard" (.button "Paste from clipboard" .plain (some .pasteImport)) ] ] ++
      (match m.onboarding.importReport with
-      | some r => [.identified "importReportSection" (.section "Verification report" "" [body r]),
-                   .section "" "" [.identified "importContinueButton" (.button "Continue" .primary (some .finishOnboarding))]]
-      | none => [.section "" "" [.identified "importVerifyButton" (.button "Import and verify" .primary
+      | some r => [.identified Ids.importReportSection (.section "Verification report" "" [body r]),
+                   .section "" "" [.identified Ids.importContinueButton (.button "Continue" .primary (some .finishOnboarding))]]
+      | none => [.section "" "" [.identified Ids.importVerifyButton (.button "Import and verify" .primary
                   (if m.onboarding.busy || m.onboarding.importText.trimAscii.isEmpty then none else some .importWallet))]]) ++
      (if m.onboarding.busy then [.progress "Importing and verifying…"] else []) ++
      errorRows m.onboarding.error) inner (largeTitle := true)
@@ -70,10 +71,10 @@ def confirms (m : Model) : List H :=
        [.button s!"Look up with {host}" .plain (some (.people .infer)), cancel]]
   | some (.discardDraft _) =>
     [.alert "Discard this payment?" "The account keeps its coins. The signatures collected so far are lost."
-       [.identified "multisigConfirmDiscardButton" (.button "Discard" .destructive (some (.multisig .discard))), cancel] .actionSheet]
+       [.identified Ids.multisigConfirmDiscardButton (.button "Discard" .destructive (some (.multisig .discard))), cancel] .actionSheet]
   | some (.abandonSpend _ _) =>
     [.alert "Give up on this payment?" "Its coins become the account's again. If the network confirms it after all, it shows up here again as a spend."
-       [.identified "abandonConfirmButton" (.button "Give up" .destructive (some (.multisig .abandon))), cancel] .actionSheet]
+       [.identified Ids.abandonConfirmButton (.button "Give up" .destructive (some (.multisig .abandon))), cancel] .actionSheet]
   | some (.removeMultisig _) =>
     [.alert "Remove this account from this phone?" "Only an empty account can be removed. The other signers keep theirs."
        [.button "Remove" .destructive (some (.multisig .remove)), cancel] .actionSheet]
@@ -109,18 +110,18 @@ def onboardingView (m : Model) : H :=
          , .section "" "No iCloud? Your wallet still works. You can save a backup file instead. Recovery words and backup controls are in Advanced."
              (match m.walletID with
               | some _ =>
-                [ .identified "resumeImportedWalletButton" (Html.symbol "arrow.right.circle" (.button "Continue with your wallet" .primary (act .finishOnboarding))) ]
+                [ .identified Ids.resumeImportedWalletButton (Html.symbol "arrow.right.circle" (.button "Continue with your wallet" .primary (act .finishOnboarding))) ]
               | none =>
                 (if c.available.isEmpty then [] else
-                  [ .identified "restoreCloudBackupButton" (Html.symbol "icloud.and.arrow.down" (.button "Restore your iCloud wallet" .primary (act (.cloud .openRestore))))
+                  [ .identified Ids.restoreCloudBackupButton (Html.symbol "icloud.and.arrow.down" (.button "Restore your iCloud wallet" .primary (act (.cloud .openRestore))))
                   , caption s!"{c.available.length} saved backup(s) found." ]) ++
-                [ .identified "createWalletButton" (Html.symbol "plus.circle" (.button "Create new wallet" .primary (act .createWallet)))
-                , .identified "importWalletButton" (Html.symbol "square.and.arrow.down" (.button "Restore from a file" .plain (act .openImport))) ]) ] ++
+                [ .identified Ids.createWalletButton (Html.symbol "plus.circle" (.button "Create new wallet" .primary (act .createWallet)))
+                , .identified Ids.importWalletButton (Html.symbol "square.and.arrow.down" (.button "Restore from a file" .plain (act .openImport))) ]) ] ++
          (if c.busy then [.section "" "" [.progress "Checking iCloud…"]] else []) ++
          (match c.message with | some t => [.section "" "" [caption t]] | none => []) ++
          (if m.settings.showsNetworkPicker then
            [.section "" "Each network has its own wallet. Signet uses test coins with no value."
-             [.identified "onboardingNetworkPicker"
+             [.identified Ids.onboardingNetworkPicker
                (if o.busy then .labeled "Network" m.settings.network.label else networkPicker m)]]
           else []) ++
          (if o.busy then [.section "" "" [.progress "Creating your wallet…"]] else []) ++
@@ -159,12 +160,12 @@ def mainScreen (m : Model) : H :=
   | none =>
     if m.settings.advancedMode then
       .screen "Winnow" none
-        ([ .toolbar [.identified "simpleModeButton" (.button "Simple" .plain (some (.setAdvanced false)))] .leading
-         , .toolbar [.identified "receiveButton" (.button "Receive" .plain (some .openReceive))]
+        ([ .toolbar [.identified Ids.simpleModeButton (.button "Simple" .plain (some (.setAdvanced false)))] .leading
+         , .toolbar [.identified Ids.receiveButton (.button "Receive" .plain (some .openReceive))]
          , .list (walletSections m) ] ++ overlays m) (onRefresh := some .syncNow)
     else
       .screen "Winnow" none
-        ([ .toolbar [.identified "advancedModeButton" (.button "Advanced" .plain (some .askAdvanced))],
+        ([ .toolbar [.identified Ids.advancedModeButton (.button "Advanced" .plain (some .askAdvanced))],
            .list (beginnerSections m) ] ++ overlays m)
         (onRefresh := some .syncNow)
 

@@ -67,8 +67,13 @@ root = "MultisigAppTest"
 name = "cloud-backup-test"
 root = "CloudBackupTest"
 
-# The UI journeys (Journeys.lean), run on the Mac by LeanNative's ui-tests as UI_JOURNEY (scripts/ui-journeys;
-# CI: ios-app.yml's ui-journey)
+# The UI journeys: Journeys.lean (the five, as named steps) over Journeys/Screens.lean (what a person does on
+# each screen) and Journeys/Host.lean (the fixture's node and Core as a co-signer); run on the Mac by
+# LeanNative's ui-tests as UI_JOURNEY (scripts/ui-journeys; CI: ios-app.yml's ui-journey) and headless by
+# scripts/wire-journeys
+[[lean_lib]]
+name = "Journeys"
+
 [[lean_exe]]
 name = "journeys"
 root = "Journeys"

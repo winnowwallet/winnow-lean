@@ -1,4 +1,5 @@
 import WinnowApp.Common
+import WinnowApp.Ids
 
 /-! ReceiveView.swift (label editor first, QR, copy/share/new address, explorer link, the mempool
 window's unconfirmed rows), ReceiveAddressLabelEditor.swift and ShareMyCardView. -/
@@ -70,15 +71,15 @@ def labelEditorView (m : Model) : List H :=
   [ .section "" "Name the person you’re sharing it with, or what the payment is for. This note will appear beside payments to this address."
       [.text "Who is this address for?" .headline]
   , .section "" "Only saved on this device. The label is not included when you copy or share the address, and does not verify who paid you."
-      ([ .identified "receiveAddressLabelField"
+      ([ .identified Ids.receiveAddressLabelField
           (.input .plain "" "Alice · invoice 12" e.draft (fun s => .receive (.setLabelDraft s)) (some (.receive .saveLabel))) ] ++
        (match valid with | .error msg => [body msg] | .ok _ => []) ++
        (match notice with | some n => [body n] | none => []) ++
        errorRows e.error)
   , .section "" ""
-      ([ .identified "saveReceiveAddressLabelButton"
+      ([ .identified Ids.saveReceiveAddressLabelButton
           (.button (if existing.isNone then "Save and show address" else "Save label") .primary (if canSave then some (.receive .saveLabel) else none))
-       , .identified "skipReceiveAddressLabelButton"
+       , .identified Ids.skipReceiveAddressLabelButton
           (.button (if existing.isNone then "Skip for now" else "Cancel") .plain (if e.saving then none else some (.receive .finishLabel))) ] ++
        (if existing.isSome then
          [.button "Remove label" .destructive (if e.saving || notice.isSome then none else some (.receive .removeLabel))] else [])) ]
@@ -94,17 +95,17 @@ def receiveSheet (m : Model) (inner : List H) : H :=
           ((match label with | some l => [Html.symbol "tag" (.text l .headline)] | none => []) ++
            [ Html.symbol "tag" (.button (if label.isNone then "Label this address" else "Edit label") .plain (some (.receive .editLabel))) ])
       , .section "" "While this screen is open, incoming payments appear as unconfirmed within seconds. Everything else appears once it confirms in a block."
-          ([ .col [.qr a, .identified "receiveAddress" (Html.centered (Html.mono (.text a .callout)))]
+          ([ .col [.qr a, .identified Ids.receiveAddress (Html.centered (Html.mono (.text a .callout)))]
            , .row [.button (if m.copied == some "receive.address" then "Copied" else "Copy") .plain (some (.copy "receive.address" a)),
                    .share "Share" a,
-                   .identified "freshAddressButton" (.button "New address" .plain (if r.changing then none else some (.receive .freshAddress)))]
+                   .identified Ids.freshAddressButton (.button "New address" .plain (if r.changing then none else some (.receive .freshAddress)))]
            , explorerButton "View address" (m.settings.addressURL a) "address" ] ++
            (r.unconfirmed.map fun (_, amount) =>
              Html.symbol "clock" (Html.tone .warning (body s!"Unconfirmed: +{satsText amount} — awaiting confirmation")))) ]
     else if r.error.isNone then [.progress ""]
     else []
   formSheet "Receive" (some .closeSheet)
-    [ closeBar "Done" "closeReceiveButton"
+    [ closeBar "Done" Ids.closeReceiveButton
     , .toolbar [.button "Share my card" .plain (some (.receive .openCard))] ]
     (content ++ errorRows r.error) inner
 
