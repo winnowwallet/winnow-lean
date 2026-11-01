@@ -20,8 +20,8 @@ case "$action" in
   start)
     BIN="$("$ROOT/scripts/install-bitcoin")"
     export WINNOW_BITCOIND="$BIN/bitcoind" WINNOW_BITCOIN_CLI="$BIN/bitcoin-cli"
-    # one lake at a time: ui-tests' lanes start their fixtures at once (a lock left by a killed run is
-    # given up on after two minutes)
+    # one lake at a time: scripts/wire-journeys and scripts/ui-journeys may start fixtures at once (a lock left
+    # by a killed run is given up on after two minutes)
     LOCK="$APP/.lake/ui-fixture.lock"
     for ((i = 0; i < 600; i++)); do mkdir "$LOCK" 2>/dev/null && break; sleep 0.2; done
     built=0
