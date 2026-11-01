@@ -8,10 +8,12 @@
 #
 # Evidence goes to $UI_OUT (default LeanApp/ios/build/ui-journey): journey.xcresult, journey.mp4, the
 # screenshots, journeys.json and journey.log, the app's test-mode journals, xcodebuild.log and the fixture's
-# log. ui-tests' variables apply (UI_SIMULATOR, UI_RUNTIME, UI_DEVICE_TYPE, UI_DRIVER, UI_LANES); it uses a
-# throwaway simulator unless UI_SIMULATOR names one. CI's lanes (ci.yml's ui-lanes), run here:
+# log. ui-tests' variables apply (UI_SIMULATOR, UI_RUNTIME, UI_DEVICE_TYPE); it uses a throwaway simulator
+# unless UI_SIMULATOR names one. CI's simulator, run here:
 #
-#   UI_LANES="xctest:createReceiveSendConfirm app:multisigTwoOfThreeWithRecovery,ledgerPairVerifySpend,shippedCensus,silentPaymentSend" scripts/ui-journeys
+#   UI_RUNTIME=com.apple.CoreSimulator.SimRuntime.iOS-26-5 UI_DEVICE_TYPE="iPhone 17 Pro" scripts/ui-journeys
+#
+# scripts/wire-journeys runs the same journeys headless, with no simulator.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 (cd "$ROOT/LeanApp" && lake build journeys >/dev/null)
