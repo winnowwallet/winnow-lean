@@ -155,13 +155,14 @@ goes. Every run is the same, full run:
 | `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases) |
 | `app` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and `verify-release-no-test-mode`; all five UI journeys (`scripts/ui-fixture` as the hooks); the website's media (`scripts/journey-media`) |
 
-`.github/workflows/release.yml`: a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (main's push, nightly
-or by hand: not a pull request's) on the same tree, then archives the app as
-`com.btcswift.app` (team 2858MX5336, the identity of the Swift app it replaces), checks the archive and
-the exported IPA (`verify-signed-archive`, `verify-exported-ipa`, `check-no-swift`), uploads it and adds
-it to TestFlight's internal group (`scripts/testflight.sh`, whose App Store Connect token comes from
-`scripts/asc-jwt`). It uses the repository's secrets `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`,
-`DEV_CERT_P12` and `DEV_CERT_P12_PASSWORD`. Dispatched by hand it runs the gates only.
+`.github/workflows/release.yml` calls LeanNative's release workflow (`ios-release.yml`, at the pinned commit):
+a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (main's push, nightly or by hand: not a pull
+request's) on the same tree, then archives the app as `com.btcswift.app` (team 2858MX5336, the identity of the
+Swift app it replaces), checks the archive and the exported IPA, uploads it and adds it to TestFlight's internal
+group. Every step is LeanNative's `leannative-release` (Lean), which LeanNative's README describes. It uses the
+repository's secrets `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`, `DEV_CERT_P12` and
+`DEV_CERT_P12_PASSWORD`. Dispatched by hand it does everything but the upload: the build, signing, the archive
+and export with their checks, and a read-only App Store Connect call.
 
 The public website is maintained in
 [winnowwallet/website](https://github.com/winnowwallet/website). This repository

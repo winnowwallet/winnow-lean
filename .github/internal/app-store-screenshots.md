@@ -16,4 +16,4 @@ secret, debugging failure capture, or private node configuration.
 
 The former `store-*.png` candidates were retired; images in old artifacts or
 Git history are not evidence of the current app. No screenshot upload is performed by tests or site generation.
-scripts/testflight.sh appstore-status reports the sets already uploaded.
+`leannative-release testflight appstore-status` reports the sets already uploaded.

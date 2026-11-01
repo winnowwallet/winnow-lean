@@ -98,8 +98,9 @@ resolved dependencies and supply-chain metadata. After upload it waits for
 processing, sets notes and assigns the internal group. It never requests
 external beta distribution: a review request cannot be withdrawn, so that is a
 person's decision once the internal group has used the build, made with
-`scripts/testflight.sh external` and the exact version and build number, or by
-dispatching TestFlight recovery with `external_review` ticked. External
+`leannative-release testflight external` (LeanNative's release tool, built by
+`lake build leannative/leannative-release` in `LeanApp`) and the exact version
+and build number. External
 **WAITING_FOR_REVIEW** or **IN_REVIEW** means Apple review is pending; a green
 Release run never means external testers can install.
 The final job publishes a GitHub release with SPDX and provenance artifacts.
@@ -110,16 +111,13 @@ genesis-validated header file and a reviewed vector update. See the
 
 ## Resume an existing upload
 
-Use [TestFlight recovery](../workflows/testflight-recover.yml) with the exact
-marketing version and build number from the original run, when processing
-outlasts the release or App Store Connect fails mid-run. It waits for
-processing, sets notes and assigns the internal group for that upload. It does
-not rearchive or reupload the same build number, and it requests external
-review only when `external_review` is ticked. Check the status it prints.
-
-Prefer these workflows over calling `scripts/testflight.sh` without an explicit
-operation: the helper defaults to `all`, which performs setup and upload.
-The [script index](../../scripts/README.md#release-helpers) lists its operations.
+When processing outlasts the release or App Store Connect fails mid-run, finish
+that upload by hand with `leannative-release testflight wait-processing`, then
+`notes` and `internal`, with `TESTFLIGHT_MARKETING_VERSION` and
+`TESTFLIGHT_BUILD_NUMBER` set to the original run's version and build number.
+Never rerun the release for the same build number: it would upload again. Do not
+use `leannative-release testflight all`, which performs setup and upload.
+LeanNative's README lists the steps.
 
 ## App Store and feedback
 

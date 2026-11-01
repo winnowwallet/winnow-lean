@@ -26,12 +26,6 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   at most 25 MiB) and `journey-provenance.json` (version 2: the run, source, device, each test's result and
   seconds, each file's SHA-256). CI publishes it as the `journey-media` artifact, which winnowwallet.com fetches;
   its tests are in [tests](tests) (`python3 -m unittest discover -s scripts/tests`).
-- [install-lean](install-lean) installs elan and the Lean toolchain on CI and release runners.
-- [testflight.sh](testflight.sh) drives App Store Connect (processing, notes, the internal group);
-  [asc-jwt](asc-jwt) mints its token, [ci-sign.sh](ci-sign.sh) writes the API key,
-  [check-release-policy](check-release-policy) checks the tag, and
-  [verify-signed-archive](verify-signed-archive) / [verify-exported-ipa](verify-exported-ipa) check what
-  is uploaded.
 - [ios-simulator](ios-simulator) prints one available iPhone (default) or iPad on the newest iOS runtime.
 - [signet-fixture](signet-fixture) provisions a disposable custom-signet bitcoind (`up`, `down`, `status`,
   `snapshot DIR`, `destroy`). For a regtest node with a funded wallet, use `LeanApp`'s `backend-test --fixture <dir>`.
