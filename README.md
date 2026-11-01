@@ -110,11 +110,15 @@ PATH; CI sets the first two to the pinned release `scripts/install-bitcoin` down
 
 ### UI tests
 
-The UI journeys are Lean (`LeanApp/Journeys.lean`, the `journeys` executable), run on the Mac: each step is
-one command to LeanNative's journey driver (`LNDriver`, the one XCUITest in the app's UI test target), each
-check is Lean against the node. Each launches the app in test mode on the regtest node of
-`backend-test --fixture`, finds controls by the ids the views give them (`Html.identified`, the shell's
-`accessibilityIdentifier`) and checks the app against the node:
+The UI journeys are Lean, run on the Mac: `LeanApp/Journeys.lean` holds the five as named steps of what a
+person does on each screen, `LeanApp/Journeys/Screens.lean` those screens (create the wallet, fill the Send
+form, build an account, set the recovery delay: the controls and the driver mechanics), and
+`LeanApp/Journeys/Host.lean` the other side (the fixture's node through `bitcoin-cli`, Bitcoin Core wallets as
+co-signers, backend-test's silent payment receiver). Controls are named by `LeanApp/WinnowApp/Ids.lean`, the
+same definitions the views give their nodes (`Html.identified`), so a control a journey names but no view has
+does not compile. Each journey launches the app in test mode on the regtest node of `backend-test --fixture`
+and checks the app against the node; a step that cannot be done fails with its name, the driver's reason and
+what was on screen, and the log shows each step's time:
 
 - `createReceiveSendConfirm`: create a wallet, receive from the node, review and send a payment the
   node accepts, see it confirm;

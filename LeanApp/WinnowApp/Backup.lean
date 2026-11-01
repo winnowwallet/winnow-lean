@@ -1,4 +1,5 @@
 import WinnowApp.Common
+import WinnowApp.Ids
 
 /-! BackupSection.swift (the backup file and the recovery words, on beginner mode's Back up page and in
 Settings), ExportBundleView, RevealPhraseView, and CloudBackupView.swift (CloudBackupView, Advanced's
@@ -68,13 +69,13 @@ def backupSection (m : Model) : H :=
     (if advanced then "iCloud backup keeps this wallet automatically. A backup file is a copy you keep yourself."
      else "A backup file is a copy of this wallet you keep yourself.")
     ((if advanced then
-       [.identified "cloudBackupRow"
+       [.identified Ids.cloudBackupRow
          (.row [navLink "iCloud backup" (if m.walletID.isNone then none else some (.cloud .openBackup)) (symbol := "icloud"), .spacer,
-                .identified "cloudBackupRowStatus" (Html.tone .secondary (body (cloudRowStatus m.cloud)))])]
+                .identified Ids.cloudBackupRowStatus (Html.tone .secondary (body (cloudRowStatus m.cloud)))])]
       else []) ++
-     [ .identified "exportBundleButton" (Html.symbol "doc.badge.arrow.up" (.button "Save a backup file" .plain (if m.walletID.isNone then none else some (.backup .openExport)))) ] ++
+     [ .identified Ids.exportBundleButton (Html.symbol "doc.badge.arrow.up" (.button "Save a backup file" .plain (if m.walletID.isNone then none else some (.backup .openExport)))) ] ++
      (if advanced then
-       [.identified "revealPhraseButton"
+       [.identified Ids.revealPhraseButton
          (Html.symbol "key" (.button "Show recovery phrase" .plain (if m.walletID.isNone || m.reveal.revealing then none else some (.backup .reveal))))]
       else []) ++
      (if m.hasSheet .revealPhrase then [] else errorRows m.reveal.error))
@@ -84,12 +85,12 @@ backed up. -/
 def beginnerBackupSection (m : Model) : H :=
   let c := m.cloud
   .section "Backup" ""
-    ([ .identified "cloudBackupStatus" (Html.symbol (if c.statusTitle == "Backed up" then "checkmark.icloud" else "icloud") (body c.statusTitle)) ] ++
+    ([ .identified Ids.cloudBackupStatus (Html.symbol (if c.statusTitle == "Backed up" then "checkmark.icloud" else "icloud") (body c.statusTitle)) ] ++
      (match c.lastSavedText with | some t => [caption s!"Last saved {t}"] | none => []) ++
      (match c.message with | some t => [caption t] | none => []) ++
      (if c.statusTitle == "Not backed up" then
        [ caption "Your wallet still works. Until iCloud backup works, keep a backup file yourself."
-       , .identified "backupButton" (navLink "Save a backup file" (some (.home .openBackup)) (symbol := "doc.badge.arrow.up")) ]
+       , .identified Ids.backupButton (navLink "Save a backup file" (some (.home .openBackup)) (symbol := "doc.badge.arrow.up")) ]
       else []))
 
 /-- CloudBackupView (Advanced): the switch and the state; Simple only shows the state. -/
@@ -97,8 +98,8 @@ def cloudBackupSheet (m : Model) (inner : List H) : H :=
   let c := m.cloud
   formSheet "iCloud backup" (some .closeSheet) [closeBar "Close"]
     [ .section "" "Includes this phone’s signing key, wallet history, saved people and labels. Updates while Winnow is open, after pending payments confirm."
-         ([ .identified "automaticCloudBackupToggle" (.toggle "Automatic iCloud backup" c.automaticEnabled fun b => .cloud (.setAutomatic b))
-          , .identified "cloudBackupStatus" (.labeled "Status" (cloudRowStatus c)) ] ++
+         ([ .identified Ids.automaticCloudBackupToggle (.toggle "Automatic iCloud backup" c.automaticEnabled fun b => .cloud (.setAutomatic b))
+          , .identified Ids.cloudBackupStatus (.labeled "Status" (cloudRowStatus c)) ] ++
           (match c.lastSavedText with | some t => [.labeled "Last saved to iCloud" t] | none => []) ++
           (match c.message with | some t => [caption t] | none => []))
      , .section "" ""
@@ -133,7 +134,7 @@ def exportSheet (m : Model) (inner : List H) : H :=
   let e := m.exportState
   formSheet "Backup file" (some .closeSheet) [closeBar "Close"]
     ([ .section "" "Without the recovery phrase the file restores your history but not the ability to spend."
-         ([ .identified "exportExplanation" (body "Saves a file you can keep in Files or send to yourself. Restore it from Restore from a file.")
+         ([ .identified Ids.exportExplanation (body "Saves a file you can keep in Files or send to yourself. Restore it from Restore from a file.")
           , .toggle "Include recovery phrase" e.includeMnemonic (fun b => .backup (.setIncludeMnemonic b))] ++
           (if e.includeMnemonic then [body "This file includes your phone’s signing key. Keep it as private as your recovery words."] else [])) ] ++
      (match e.error with | some err => [.section "" "" (errorRows (some err))] | none => []) ++

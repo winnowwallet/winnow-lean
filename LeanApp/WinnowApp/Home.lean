@@ -1,6 +1,7 @@
 import WinnowApp.Multisig
 import WinnowApp.Backup
 import WinnowApp.Payments
+import WinnowApp.Ids
 
 /-! HomeView.swift and BeginnerHomeView.swift: the balance, sync and activity; HistoryRow,
 PaymentDetailView (recipients, receive labels, sender, details, transaction) and FeeBumpView. -/
@@ -110,7 +111,7 @@ def historyRow (m : Model) (h : HistoryItem) (tappable := true) : H × List H :=
       (match h.fee with | some f => [caption s!"fee {groupDigits f.natAbs} sats"] | none => [])
     else
       [caption (if h.replacedBy.isSome then "Replaced" else if h.height > 0 then "Confirmed" else "Pending")]
-  (.row [ .col ([.identified s!"historyPayment-{h.txid}"
+  (.row [ .col ([.identified (Ids.historyPayment (h.txid))
                   (if tappable then navLink title (some (.home (.openPayment h.txid))) else body title)] ++
                (if labels.isEmpty then [] else [caption labels]))
        , .spacer
@@ -140,11 +141,11 @@ def paymentRow (m : Model) (p : DisplayedPayment) (tappable := true) : H :=
       | .draft .., some id => if advanced then some (.multisig (.openPSBT id)) else none
       | .wallet, _ => some (.home (.openPayment h.txid))
       | _, _ => if advanced then some (.home (.openPayment h.txid)) else none
-  let rowID := if p.isDraft then s!"historyDraft-{p.accountID.getD ""}" else s!"historyPayment-{h.txid}"
+  let rowID := if p.isDraft then (Ids.historyDraft (p.accountID.getD "")) else (Ids.historyPayment (h.txid))
   let status : List H :=
     match p.source with
     | .draft _ signatures =>
-      [.identified s!"transactionDraft-{h.txid}"
+      [.identified (Ids.transactionDraft (h.txid))
         (caption (if advanced then s!"{signatures} signed · tap to continue" else "Awaiting signatures · collected in Advanced mode"))]
     | _ => (historyRow m h).2
   let amount : H := match p.source with
@@ -152,7 +153,7 @@ def paymentRow (m : Model) (p : DisplayedPayment) (tappable := true) : H :=
     | _ => amountText h.net
   .row [ .col ([.identified rowID (match action with | some a => navLink title (some a) | none => body title)] ++
                (match p.source with
-                | .account name => [.identified s!"paymentAccount-{h.txid}" (caption name)]
+                | .account name => [.identified (Ids.paymentAccount (h.txid)) (caption name)]
                 | _ => []) ++
                (if labels.isEmpty then [] else [caption labels]))
        , .spacer
@@ -160,16 +161,16 @@ def paymentRow (m : Model) (p : DisplayedPayment) (tappable := true) : H :=
 
 def syncLine (m : Model) : H :=
   match m.phase.summary m.status.syncing with
-  | .synced => .row [Html.tone .positive (.icon "checkmark.circle"), .identified "syncSummaryText" (caption "Up to date")]
-  | .peersUnavailable => .identified "syncSummaryText" (body "Couldn't reach the Bitcoin network — check your connection.")
-  | .syncing => .identified "syncSummaryText" (.progress "Syncing…")
+  | .synced => .row [Html.tone .positive (.icon "checkmark.circle"), .identified Ids.syncSummaryText (caption "Up to date")]
+  | .peersUnavailable => .identified Ids.syncSummaryText (body "Couldn't reach the Bitcoin network — check your connection.")
+  | .syncing => .identified Ids.syncSummaryText (.progress "Syncing…")
 
 /-- `AccountsBalanceLine`: how much of the headline sits in multisig accounts, which need co-signers to move;
 nothing when the phone has no account. -/
 def accountsBalanceLine (m : Model) : List H :=
   let count := m.multisig.accounts.length
   if count == 0 then [] else
-  [.identified "accountsBalanceText"
+  [.identified Ids.accountsBalanceText
     (caption s!"of which {satsText m.status.accountsBalance} in {count} multisig account{if count == 1 then "" else "s"}, needs co-signers")]
 
 /-- The headline: the wallet's and the accounts' coins together. -/
@@ -179,20 +180,20 @@ def totalBalance (m : Model) : Int := m.status.balance + m.status.accountsBalanc
 when any peer can see the phone's IP address). -/
 def peerRoutingBanner (m : Model) : H :=
   let state := PeerRoutingState.current m.settings.peerGatewaySettings.mode m.status.activeGateways m.status.discoveringGateways
-  .identified "peerRoutingBanner" (.row [.icon state.symbol, caption state.message])
+  .identified Ids.peerRoutingBanner (.row [.icon state.symbol, caption state.message])
 
 /-- The headline balance: the largest type in the app. -/
-def balanceText (m : Model) : H := .identified "balanceText" (.text (satsText (totalBalance m)) .largeTitle)
+def balanceText (m : Model) : H := .identified Ids.balanceText (.text (satsText (totalBalance m)) .largeTitle)
 
 /-- The balance card: one cell, the amount large, then its status line and the network's badge. -/
 def balanceSection (m : Model) : H :=
   .section "" "" [.col ([ caption "Balance", balanceText m ] ++
                   accountsBalanceLine m ++ [
                     .row ([syncLine m] ++ (if m.settings.network == .mainnet then [] else
-                      [.spacer, .identified "networkTag" (Html.badge (Html.tone .warning (caption s!"{m.settings.network.label} · test coins")))])) ] ++
+                      [.spacer, .identified Ids.networkTag (Html.badge (Html.tone .warning (caption s!"{m.settings.network.label} · test coins")))])) ] ++
                   (if m.settings.network == .mainnet then [peerRoutingBanner m] else []) ++
                   (if m.phase.summary m.status.syncing == .peersUnavailable then
-                    [.identified "retryPeersButton" (.button "Retry" .plain (some .retryPeers))] else []) ++
+                    [.identified Ids.retryPeersButton (.button "Retry" .plain (some .retryPeers))] else []) ++
                   -- Simple mode waits out a dropped peer or two; Advanced shows every error
                   errorRows (simpleSyncError m.status.lastSyncError m.status.transientSyncError m.status.transientSyncFailures))]
 
@@ -203,15 +204,15 @@ def activitySection (m : Model) : H :=
 
 def beginnerSections (m : Model) : List H :=
   [ balanceSection m
-  , .section "" "" [.row [.identified "receiveButton" (.button "Receive" .plain (some .openReceive)),
-                          .identified "openSendButton" (.button "Send" .primary (some .openSend))]]
+  , .section "" "" [.row [.identified Ids.receiveButton (.button "Receive" .plain (some .openReceive)),
+                          .identified Ids.openSendButton (.button "Send" .primary (some .openSend))]]
   , activitySection m
   , beginnerBackupSection m ]
 
 /-- `ChainCheckStatus`: when a scan last reached the tip, and whether iOS may check in the background
 (background checks are requests; iOS decides when they run). -/
 def chainCheckStatus (m : Model) : List H :=
-  [ .identified "lastCompleteChainCheck" (caption (match m.status.lastCheckedAgo with
+  [ .identified Ids.lastCompleteChainCheck (caption (match m.status.lastCheckedAgo with
       | some ago => s!"Chain last checked {ago} ago"
       | none => "Chain not fully checked yet"))
   , caption (if m.backgroundRefreshAvailable then
@@ -231,11 +232,11 @@ def syncSection (m : Model) : H :=
       | some e => warn e
       | none => .labeled "Status" (if m.phase == .synced then "Up to date" else "Waiting to sync")
   .section "Sync" ""
-    ([ .identified "syncStatus" status
+    ([ .identified Ids.syncStatus status
      , .labeled "Filter scan" ((filterScanText m.phase m.status.nextScanHeight m.status.tipHeight).getD "—")
      , .labeled "Peers" s!"{m.status.peerCount}" ] ++ chainCheckStatus m ++
      (match m.status.relayStoreQuarantined with | some q => [body q] | none => []) ++
-     [if failed then .identified "retryPeersButton" (.button "Retry" .plain (some .retryPeers))
+     [if failed then .identified Ids.retryPeersButton (.button "Retry" .plain (some .retryPeers))
       else .button "Sync now" .plain (if m.status.syncing then none else some .syncNow)])
 
 def walletSections (m : Model) : List H :=
@@ -274,14 +275,14 @@ def accountSection (m : Model) (p : DisplayedPayment) : List H :=
     let actions : List H :=
       if p.isDraft then
         if m.settings.advancedMode then
-          [.identified "collectSignaturesButton" (.button "Collect signatures" .plain (some (.multisig (.openPSBT a.id))))]
+          [.identified Ids.collectSignaturesButton (.button "Collect signatures" .plain (some (.multisig (.openPSBT a.id))))]
         else [caption "This payment is waiting for the other signers. Signatures are collected in Advanced mode."]
       else if m.settings.advancedMode && p.item.height == 0 && a.inFlight.contains txid then
-        [ .identified "rebroadcastSpendButton" (.button "Rebroadcast" .plain (some (.multisig (.rebroadcast a.id txid))))
-        , .identified "abandonSpendButton" (.button "Give up on this payment" .destructive (some (.multisig (.askAbandon a.id txid))))
+        [ .identified Ids.rebroadcastSpendButton (.button "Rebroadcast" .plain (some (.multisig (.rebroadcast a.id txid))))
+        , .identified Ids.abandonSpendButton (.button "Give up on this payment" .destructive (some (.multisig (.askAbandon a.id txid))))
         , caption "No block has taken this payment yet. Rebroadcast announces it to the network again; giving up frees its coins for another payment." ]
       else []
-    [.section "Account" "" ([.identified "paymentAccountName" (.text a.name .title)] ++ actions)]
+    [.section "Account" "" ([.identified Ids.paymentAccountName (.text a.name .title)] ++ actions)]
 
 def paymentSections (m : Model) (txid : String) : List H :=
   match m.payment? txid with

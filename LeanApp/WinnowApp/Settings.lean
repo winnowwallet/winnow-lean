@@ -1,5 +1,6 @@
 import WinnowApp.Backup
 import WinnowApp.Signers
+import WinnowApp.Ids
 
 /-! SettingsView.swift: network, backup, the census peer list, manual peers, the external block
 explorer, chain verification, connected peers (with the reset confirmation), about and the design
@@ -124,27 +125,27 @@ def peerGatewaysSection (m : Model) : H :=
   let off := d.applyingGateways
   let act (msg : SettingsMsg) : Option Msg := if off then none else some (.settings msg)
   let networkRow (n : Winnow.IO.PeerNetwork) : H :=
-    .identified s!"peerType_{n.rawValue}"
+    .identified (Ids.peerType (n.rawValue))
       (.toggle (match n with | .clearnet => "Clearnet peers" | .tor => "Tor peers" | .i2p => "I2P peers")
         (d.gatewayNetworks.contains n) fun on => .settings (.setGatewayNetwork n on))
   .section "Peer networks" "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does, in both simple and advanced mode. Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Manual settings stay in effect in simple mode. Tor and I2P peers always use their gateway. The peer list ships with the app, so finding peers downloads nothing. Explorer requests use clearnet when selected, Tor otherwise; with I2P alone they are unavailable. A SOCKS check does not guarantee overlay connectivity."
-    ([ .identified "gatewayRoutingMode"
+    ([ .identified Ids.gatewayRoutingMode
          (.picker "Gateway routing" ["Automatic", "Direct only", "Manual"] d.gatewayMode fun i => .settings (.setGatewayMode i)) ] ++
      (if d.gatewayMode == 2 then
        (Winnow.IO.PeerNetwork.allCases.map networkRow) ++
        (if d.gatewayNetworks.contains .tor then
-         [.identified "torGatewayAddress" (.input .plain "" "Tor SOCKS gateway — host:port" d.torAddress (fun t => .settings (.setTorAddress t)) none)] else []) ++
+         [.identified Ids.torGatewayAddress (.input .plain "" "Tor SOCKS gateway — host:port" d.torAddress (fun t => .settings (.setTorAddress t)) none)] else []) ++
        (if d.gatewayNetworks.contains .i2p then
-         [.identified "i2pGatewayAddress" (.input .plain "" "I2P SOCKS gateway — host:port" d.i2pAddress (fun t => .settings (.setI2PAddress t)) none)] else [])
+         [.identified Ids.i2pGatewayAddress (.input .plain "" "I2P SOCKS gateway — host:port" d.i2pAddress (fun t => .settings (.setI2PAddress t)) none)] else [])
       else []) ++
-     [ .identified "applyPeerRouting" (.button (if off then "Applying…" else "Apply routing") .plain (act .applyGateways)) ] ++
+     [ .identified Ids.applyPeerRouting (.button (if off then "Applying…" else "Apply routing") .plain (act .applyGateways)) ] ++
      errorRows d.gatewayError ++
      (if m.status.discoveringGateways then [.progress "Checking Tailscale gateways…"] else
        (match active.torProxy with | some e => [.labeled "Active Tor gateway" (gatewayAddressText e)] | none => []) ++
        (match active.i2pProxy with | some e => [.labeled "Active I2P gateway" (gatewayAddressText e)] | none => []) ++
        (if active.networks == [.clearnet] then [caption "Using clearnet peers."] else []) ++
        (if !active.isValid then errorRows (some "Gateway settings are invalid. Networking is offline.") else [])) ++
-     [ .identified "checkPeerGateways" (.button "Check gateways and reconnect" .plain
+     [ .identified Ids.checkPeerGateways (.button "Check gateways and reconnect" .plain
          (if m.status.discoveringGateways || off then none else some (.settings .checkGateways))) ])
 
 def settingsSections (m : Model) : List H :=
@@ -157,7 +158,7 @@ def settingsSections (m : Model) : List H :=
   (if s.advancedMode then [signersSection m] else []) ++
   (if s.advancedMode then
     [peerGatewaysSection m, .section "Mainnet peer list" "Each release carries the census of its day, the list it starts from. Every selected peer still undergoes Winnow's normal checks."
-      (match d.catalog with | some line => [.identified "censusCatalogText" (body line)] | none => [])] else []) ++
+      (match d.catalog with | some line => [.identified Ids.censusCatalogText (body line)] | none => [])] else []) ++
   (if s.showsManualPeers then
     [.section "Manual peers" "Manual peers are tried first when their network is enabled. Clearnet seeds resolve over HTTPS (Cloudflare 1.1.1.1), with system DNS as the fallback. Overlay names are resolved by their SOCKS gateway. The default port is 8333 (mainnet) / 38333 (signet). Peers must advertise compact filters and pass Winnow's checks."
       ((s.manualPeers.zipIdx.map fun (p, i) => .row [literal p, .spacer, .button "Remove" .destructive (some (.settings (.removeManualPeer i)))]) ++
@@ -179,8 +180,8 @@ def settingsSections (m : Model) : List H :=
   (if s.advancedMode then
     [.section "Connected peers" ""
       ((d.peers.map fun p =>
-          .col [.identified "peerNetwork" (Html.tone (if p.network == .clearnet then .warning else .secondary) (caption (peerNetworkLabel p.network))),
-                .identified "peerEndpoint" (literal p.endpoint),
+          .col [.identified Ids.peerNetwork (Html.tone (if p.network == .clearnet then .warning else .secondary) (caption (peerNetworkLabel p.network))),
+                .identified Ids.peerEndpoint (literal p.endpoint),
                 caption (s!"{p.userAgent} · height {p.startHeight}" ++ (match p.feeFilter with | some f => s!" · floor {f} sat/kvB" | none => ""))]) ++
        (if d.peers.isEmpty then [caption "No peers connected."] else []) ++
        [ .button "Refresh" .plain (some (.settings .refreshPeers))

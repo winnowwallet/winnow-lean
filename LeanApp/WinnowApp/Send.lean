@@ -1,4 +1,5 @@
 import WinnowApp.Multisig
+import WinnowApp.Ids
 
 /-! SendView.swift: the form (address or saved person, amount, Advanced fee controls), the review with
 Winnow's four warnings, and the status with the relay log. -/
@@ -97,22 +98,22 @@ def sourceSection (m : Model) : List H :=
       (.row ([.button s!"{title} · {satsText balance}" .plain (some (.send (.setSource id))), .spacer] ++
              (if selected == id then [.icon "checkmark"] else [])))
   [.section "From" ""
-    ([row "Wallet" m.status.balance none "sendFromWallet"] ++
+    ([row "Wallet" m.status.balance none Ids.sendFromWallet] ++
      (m.multisig.accounts.map fun a =>
-        row (a.name ++ (if a.draft.isNone then "" else " · awaiting signatures")) a.balance (some a.id) s!"sendFrom-{a.id}") ++
+        row (a.name ++ (if a.draft.isNone then "" else " · awaiting signatures")) a.balance (some a.id) (Ids.sendFrom (a.id))) ++
      (match selected.bind m.multisigInfo? with
       | some a =>
         let recovery := m.sendInputs.recovery
         -- the recovery path, here and not on the account page (PORT.md: one Send)
         (match a.recovery with
          | some r =>
-           [ .identified "multisigPathPicker"
+           [ .identified Ids.multisigPathPicker
                (.picker "Spend with" ["Signers now", "Recovery path"] (if recovery then 1 else 0) (fun i => .send (.setRecovery (i == 1))))
            ] ++ (if recovery then
-             [.identified "sendRecoveryNote" (caption s!"Only coins that have not moved for the recovery delay can be spent this way ({r}).")]
+             [.identified Ids.sendRecoveryNote (caption s!"Only coins that have not moved for the recovery delay can be spent this way ({r}).")]
             else [])
          | none => []) ++
-        [.identified "sendSourceNote"
+        [.identified Ids.sendSourceNote
           (caption (if recovery then "You sign here; the payment goes out once the recovery path's signatures are in."
                     else s!"Needs {a.policy.getD "?"}. You sign here; the payment goes out once the other signatures are in."))]
       | none => []))]
@@ -127,12 +128,12 @@ def sendForm (m : Model) : List H :=
       (match person with
        | some p => [.row [body p.name, .spacer, .button "Change" .plain (some (.send .clearPerson))]]
        | none =>
-         [ .row [.identified "destinationField" (.input .plain "" "Bitcoin address" i.destination (send .setDestination) none),
-                 .identified "pasteDestinationButton" (.button "Paste" .plain (some (.send .pasteDestination)))]
+         [ .row [.identified Ids.destinationField (.input .plain "" "Bitcoin address" i.destination (send .setDestination) none),
+                 .identified Ids.pasteDestinationButton (.button "Paste" .plain (some (.send .pasteDestination)))]
          , .button "Saved recipients" .plain (some (.send .openRecipients)) ])
   sourceSection m ++ [toSection,
     .section "Amount" "You'll see the network fee before you send."
-      [ .row [.identified "amountField" (.input .number "" "0" i.amount (send .setAmount) none), caption "sats"] ] ] ++
+      [ .row [.identified Ids.amountField (.input .number "" "0" i.amount (send .setAmount) none), caption "sats"] ] ] ++
   (if m.settings.advancedMode then
     [ .section "Fee" "The rate uses your override, recent confirmed fees, or a preset, never below the peers' relay floor. It is not a live fee-market estimate."
         [ .picker "Priority" ["Low", "Medium", "High"] i.priority (fun n => .send (.setPriority n))
@@ -142,13 +143,13 @@ def sendForm (m : Model) : List H :=
         , .input .decimal "" "Override (sat/vB, optional)" i.override (send .setOverride) none ] ]
    else []) ++
   [ .section "" ""
-      [ .identified "reviewButton" (.button (if m.send.reviewing then "Preparing review…" else "Review payment") .primary
+      [ .identified Ids.reviewButton (.button (if m.send.reviewing then "Preparing review…" else "Review payment") .primary
           (if m.send.reviewing || !canReview inputs then none else some (.send .review))) ] ]
 
 def paymentAmounts (p : Preview) : H :=
-  .section "" "" [ .identified "reviewAmount" (.labeled "Amount" (satsText p.amount)),
-                   .identified "reviewFee" (.labeled "Network fee" (satsText p.fee)),
-                   .identified "reviewTotal" (.labeled "Total" (satsText (p.amount + p.fee))) ]
+  .section "" "" [ .identified Ids.reviewAmount (.labeled "Amount" (satsText p.amount)),
+                   .identified Ids.reviewFee (.labeled "Network fee" (satsText p.fee)),
+                   .identified Ids.reviewTotal (.labeled "Total" (satsText (p.amount + p.fee))) ]
 
 def warning (iconName text : String) : H := .section "" "" [.row [Html.tone .warning (.icon iconName), caption text]]
 
@@ -167,10 +168,10 @@ def sendReview (m : Model) (p : Preview) : List H :=
      else [])
   let action := if m.send.sending then "Working…" else if p.account.isSome then "Sign and continue" else "Send payment"
   [ .section "To" "" ((match p.recipient with | some r => [body r.name] | none => []) ++
-                      [.identified "reviewDestination" (literal p.destination)] ++
+                      [.identified Ids.reviewDestination (literal p.destination)] ++
                       -- the one visible difference of a BIP352 send: the chain shows an address never typed
                       (if p.silent then
-                        [.identified "silentPaymentNote"
+                        [.identified Ids.silentPaymentNote
                           (caption "Silent payment: the Bitcoin address this pays is created for this transaction only.")]
                        else []))
   , paymentAmounts p ] ++
@@ -178,11 +179,11 @@ def sendReview (m : Model) (p : Preview) : List H :=
    | some a =>
      [.section "" "Sign and continue adds this phone's signature and keeps the payment under Transactions until the other signers have signed."
        ([ .labeled "From" a.name ] ++
-        (if a.recovery then [.identified "reviewSpendPath" (.labeled "Spend with" "Recovery path")]
-         else [.identified "reviewSignatures" (.labeled "Signatures" s!"needs {a.threshold} of {a.signerCount}")]))]
+        (if a.recovery then [.identified Ids.reviewSpendPath (.labeled "Spend with" "Recovery path")]
+         else [.identified Ids.reviewSignatures (.labeled "Signatures" s!"needs {a.threshold} of {a.signerCount}")]))]
    | none => []) ++ warnings ++
   [ .section "" ""
-      [ .identified "sendButton" (.button action .primary (if m.send.sending then none else some (.send .sendPayment)))
+      [ .identified Ids.sendButton (.button action .primary (if m.send.sending then none else some (.send .sendPayment)))
       , .button "Edit payment" .plain (if m.send.sending then none else some (.send .editPayment)) ] ] ++
   (if m.settings.advancedMode then
     [ .section "Transaction details" ""
@@ -193,8 +194,8 @@ def sendReview (m : Model) (p : Preview) : List H :=
 def sendStatus (m : Model) (txid : String) : List H :=
   let s := m.send
   [ .section ""  ""
-      ((if s.confirmedHeight.isSome then [.row [Html.tone .positive (.icon "checkmark.circle.fill"), .identified "broadcastConfirmed" (body "Payment confirmed")]]
-        else [.row [Html.tone .warning (.icon "clock"), .identified "broadcastPending" (body "Waiting for confirmation")],
+      ((if s.confirmedHeight.isSome then [.row [Html.tone .positive (.icon "checkmark.circle.fill"), .identified Ids.broadcastConfirmed (body "Payment confirmed")]]
+        else [.row [Html.tone .warning (.icon "clock"), .identified Ids.broadcastPending (body "Waiting for confirmation")],
               caption (if m.settings.advancedMode then "You can leave this screen. Follow this payment in Wallet."
                        else "You can close this screen. The payment stays in Activity until it confirms.")]) ++
        (if s.feeFloorNotice then
@@ -207,8 +208,8 @@ def sendStatus (m : Model) (txid : String) : List H :=
    | none => []) ++
   -- Activity and explorers show the derived address, not the code: the receipt is where the two meet
   (if s.derivedAddresses.isEmpty then [] else
-    [.section "Paid on chain to" "" (s.derivedAddresses.map fun a => .identified "derivedOutputAddress" (literal a))]) ++
-  [ .section "" "" [ .identified "newPaymentButton" (.button "New payment" .primary (some (.send .newPayment))) ]
+    [.section "Paid on chain to" "" (s.derivedAddresses.map fun a => .identified Ids.derivedOutputAddress (literal a))]) ++
+  [ .section "" "" [ .identified Ids.newPaymentButton (.button "New payment" .primary (some (.send .newPayment))) ]
   , .section "" ""
       [ .disclosure "Transaction details" (m.isExpanded "send.details") (Msg.setExpanded "send.details")
           ([ copyableIdentifier m "send.txid" txid ] ++
@@ -235,8 +236,8 @@ def sendTitle (m : Model) : String :=
 /-- Beginner mode's Send sheet. -/
 def sendSheet (m : Model) (inner : List H) : H :=
   formSheet (sendTitle m) (if m.send.sending then none else some .closeSheet)
-    [if m.send.sentTxid.isNone then closeBar "Cancel" "closeSendButton"
-     else .toolbar [.identified "closeSendButton" (.button "Done" .primary (some .closeSheet))] .confirm]
+    [if m.send.sentTxid.isNone then closeBar "Cancel" Ids.closeSendButton
+     else .toolbar [.identified Ids.closeSendButton (.button "Done" .primary (some .closeSheet))] .confirm]
     (sendContent m) inner
 
 end WinnowApp
