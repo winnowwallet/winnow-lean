@@ -2,21 +2,14 @@ import Lean.Data.Json
 import Winnow.Keys
 import Winnow.Keys.BIP86
 import Winnow.Wallet.People
+import TestKit.Check
 
 /-! `silent-payment-test`: upstream's `SilentPaymentTests`: every sending case of the official BIP352
 vectors (`Vectors/bip352-send-receive-vectors.json`: eligibility, the key sum, the shared secrets and the
 output set), address round trips and negatives, the same code paid twice, and the sender's view of an
 unsigned P2TR input. Run from `Lean/`. -/
 
-open Lean Winnow Winnow.Keys Winnow.Keys.SilentPaymentSending
-
-initialize passes : IO.Ref Nat ← IO.mkRef 0
-initialize failures : IO.Ref Nat ← IO.mkRef 0
-
-def check (name : String) (ok : Bool) : IO Unit := do
-  if ok then passes.modify (· + 1) else
-    failures.modify (· + 1)
-    IO.eprintln s!"FAIL {name}"
+open Lean Winnow Winnow.Keys Winnow.Keys.SilentPaymentSending TestKit
 
 def hx (s : String) : ByteArray := (ofHex? s).getD .empty
 
@@ -101,7 +94,7 @@ def errOf {α} (r : Except String α) : Option String := match r with | .error e
 
 def sameSet (a b : List String) : Bool := a.length == b.length && a.all b.contains && b.all a.contains
 
-def main : IO UInt32 := do
+def main : IO UInt32 := runMain "silent-payment-test" do
   let all ← cases
   check "28 sending cases" (all.length == 28)
   for c in all do
@@ -210,7 +203,3 @@ def main : IO UInt32 := do
   check "person: a code-shaped paste that is not one" (errOf (PersonPaste.parse "sp1qqexample" .signet) == some "unrecognised")
   let card : PersonCard := { network := "signet", name := "Robin", payTo := some signet }
   check "person: a card paying a code" ((PersonPaste.parse card.serialized .signet).toOption.bind (·.payTo) == some (.silentPayment signet))
-  let p ← passes.get
-  let f ← failures.get
-  IO.println s!"silent-payment-test: {p} passed, {f} failed"
-  return if f == 0 then 0 else 1

@@ -1,5 +1,7 @@
 import Winnow
 import Lean.Data.Json
+import TestKit.Check
+import TestKit.Fixtures
 
 /-! `multisig-test`: upstream 1cf93fb's multisig tests, ported.
 
@@ -23,33 +25,10 @@ auxiliary randomness zero. Run from `Lean/` (reads `Vectors/`). Exits 1 on any f
 open Winnow Keys
 open Tx (BitcoinNetwork)
 open MultisigAccount (OutputCoordinate SpendPath RecoveryPlan)
+open TestKit
 
-initialize passed : IO.Ref Nat ← IO.mkRef 0
-initialize failures : IO.Ref (Array String) ← IO.mkRef #[]
-
-abbrev TM := ExceptT String IO
-
-def check (name : String) (ok : Bool) (detail : String := "") : TM Unit := do
-  if ok then passed.modify (· + 1)
-  else
-    failures.modify (·.push name)
-    IO.println s!"FAIL {name}{if detail.isEmpty then "" else ": " ++ detail}"
-
-def need {α} (name : String) (r : MAM α) : TM α :=
-  match r with
-  | .ok a => pure a
-  | .error e => throw s!"{name}: {e.name}{match e with | .account a => " (" ++ a.description ++ ")" | _ => ""}"
-
-def needE {ε α} (name : String) (render : ε → String) (r : Except ε α) : TM α :=
-  match r with | .ok a => pure a | .error e => throw s!"{name}: {render e}"
-
-/-- Expects a failure; `kind` the case name, `account` an account error (any case), or neither (any). -/
-def refused {α} (name : String) (r : MAM α) (kind : Option String := none) (account : Bool := false) : TM Unit :=
-  match r with
-  | .ok _ => check name false "accepted"
-  | .error e =>
-    let isAccount := match e with | .account _ => true | _ => false
-    check name ((kind.map (· == e.name)).getD true && (!account || isAccount)) s!"got {e.name}"
+/-- A failure of the account's own rules (`refused … (matching := accountError)`). -/
+def accountError : MultisigFailure → Bool | .account _ => true | _ => false
 
 def refusedWith {α} (name : String) (r : MAM α) (expected : MultisigAccountError) : TM Unit :=
   match r with
@@ -57,48 +36,16 @@ def refusedWith {α} (name : String) (r : MAM α) (expected : MultisigAccountErr
   | .error (.account e) => check name (e == expected) s!"got {e.description}"
   | .error e => check name false s!"got {e.name}"
 
-def runTest (name : String) (t : TM Unit) : IO Unit := do
-  let start ← IO.monoMsNow
-  match ← t.run with
-  | .ok () => pure ()
-  | .error msg =>
-    failures.modify (·.push name)
-    IO.println s!"FAIL {name} (aborted): {msg}"
-  IO.println s!"  {name}: {(← IO.monoMsNow) - start} ms"
-  (← IO.getStdout).flush
-
 /-! ## Fixtures -/
 
 def testChainTip : UInt32 := 840_000
-def aux0 : ByteArray := ByteArray.mk (Array.replicate 32 0)
-def destination : ByteArray := ByteArray.mk (#[0x51, 0x20] ++ Array.replicate 32 0x77)
 def owned : Array OutputCoordinate := #[{ choice := 1, index := 0 }]
-
-initialize masterCache : IO.Ref (Array (UInt8 × HDKey)) ← IO.mkRef #[]
-
-/-- BIP39 seeds take 2048 PBKDF2 rounds, so each master is made once. -/
-def master (entropyByte : UInt8) : TM HDKey := do
-  if let some (_, m) := (← masterCache.get).find? (·.1 == entropyByte) then return m
-  let words ← needE "mnemonic" (fun _ => "bip39") (BIP39.mnemonic (ByteArray.mk (Array.replicate 16 entropyByte)))
-  let m ← needE "master" (·.name) (HDKey.ofSeed (BIP39.seed words))
-  masterCache.modify (·.push (entropyByte, m))
-  return m
-
-def masters : TM (Array HDKey) := #[0xA1, 0xB2, 0xC3].mapM master
-
-def accountKeyOf (m : HDKey) : TM HDKey := needE "account key" (·.name) (m.derived "m/86'/1'/0'")
-
-def bareKeyExpression (m : HDKey) : TM String := do
-  let account ← accountKeyOf m
-  return s!"[{Descriptor.hex8 m.fingerprint}/86'/1'/0']{account.neutered.serialized .testnet}"
-
-def keyExpression (m : HDKey) : TM String := return (← bareKeyExpression m) ++ "/<0;1>/*"
 
 /-- `masters` in the order the account lists their keys. -/
 def inSignerOrder (ms : Array HDKey) (a : MultisigAccount) : TM (Array HDKey) := do
   let listed := a.signers.filterMap fun s => (MultisigAccount.extendedKey? s).map (·.1.publicKey)
   let keyed ← ms.mapM fun m => do
-    let pub := (← accountKeyOf m).publicKey
+    let pub := (← accountKey m).publicKey
     return (m, (listed.findIdx? (· == pub)).getD 1_000_000)
   return (keyed.toList.mergeSort (fun a b => a.2 ≤ b.2)).toArray.map (·.1)
 
@@ -184,7 +131,7 @@ def twoOfThree : TM Unit := do
   let base64 := created.base64
   check "2of3: base64 round trip" (match PSBT.ofBase64 base64 with | .ok p => sameP p created | .error _ => false)
   let wrongCoin := { utxo with amount := utxo.amount + 1 }
-  refused "2of3: review refuses a wrong coin" (sign account created ms[0]! #[wrongCoin]) (account := true)
+  refused "2of3: review refuses a wrong coin" (sign account created ms[0]! #[wrongCoin]) (matching := accountError)
   let partialC ← need "sign C" (sign account created ms[2]! #[utxo])
   let partialA ← need "sign A" (sign account created ms[0]! #[utxo])
   check "2of3: one signature" (partialA.inputs[0]!.tapScriptSignatures.size == 1)
@@ -198,7 +145,7 @@ def twoOfThree : TM Unit := do
                         internalKey := ByteArray.mk (Array.replicate 32 0), path := #[] },
       script := realLeaf.script, leafVersion := realLeaf.leafVersion }
   let hostile := combined.modifyInput 0 (·.setTapLeafScripts #[bogus, realLeaf])
-  refused "2of3: hostile leaf refused" (finalize account hostile #[utxo]) (account := true)
+  refused "2of3: hostile leaf refused" (finalize account hostile #[utxo]) (matching := accountError)
   let generic ← need "generic finalize" (MultisigAccount.lift (·.name) hostile.finalize)
   let genericTx ← need "extract" (MultisigAccount.lift (·.name) generic.extractedTransaction)
   check "2of3: generic finalizer picks the committing leaf" ((← verifiedSignatures genericTx utxo.spentOutput) == 2)
@@ -231,7 +178,7 @@ def threeOfThree : TM Unit := do
 
 def accountKeySigning : TM Unit := do
   let (account, ms) ← accountWith
-  let accountKey ← accountKeyOf ms[1]!
+  let accountKey ← accountKey ms[1]!
   check "account key: hasSigner" (account.hasSigner accountKey)
   check "account key: includes" (account.includes accountKey.neutered)
   let stranger ← master 0x0D
@@ -293,11 +240,11 @@ def reviewRefusals : TM Unit := do
   let (account, _) ← accountWith
   let utxo ← funding account 100_000
   let psbt ← need "create" (spend account utxo)
-  refused "review: unknown coin" (account.reviewSpend psbt #[] owned testChainTip) (account := true)
+  refused "review: unknown coin" (account.reviewSpend psbt #[] owned testChainTip) (matching := accountError)
   let none2 := psbt.modifyInput 0 (·.setSighashType (some 2))
-  refused "review: SIGHASH_NONE" (account.reviewSpend none2 #[utxo] owned testChainTip) (account := true)
+  refused "review: SIGHASH_NONE" (account.reviewSpend none2 #[utxo] owned testChainTip) (matching := accountError)
   let young := { utxo with isCoinbase := true, height := testChainTip - 10 }
-  refused "review: immature coinbase" (account.reviewSpend psbt #[young] owned testChainTip) (account := true)
+  refused "review: immature coinbase" (account.reviewSpend psbt #[young] owned testChainTip) (matching := accountError)
   let mature := { young with height := testChainTip - Wallet.coinbaseMaturity }
   check "review: mature coinbase" (account.reviewSpend psbt #[mature] owned testChainTip).toBool
   refused "review: creator refuses a big fee"
@@ -308,9 +255,9 @@ def realInternalKeyRefused : TM Unit := do
   let signers ← ms.mapM keyExpression
   let internalKey := hex (← needE "key" (·.name) (ms[0]!.derived "m/86'/1'/0'/0/0")).publicKey
   refused "internal: a real key" (MultisigAccount.parse s!"tr({internalKey},sortedmulti_a(2,{",".intercalate signers.toList}))" .signet)
-    (account := true)
+    (matching := accountError)
   refused "internal: a signer" (MultisigAccount.parse s!"tr({signers[0]!},sortedmulti_a(2,{signers[1]!},{signers[2]!}))" .signet)
-    (account := true)
+    (matching := accountError)
 
 def unspendableXpubInternalKey : TM Unit := do
   let (account, _) ← accountWith
@@ -338,21 +285,21 @@ def unspendableXpubLookAlikesRefused : TM Unit := do
   let chainCode := ByteArray.mk (Array.replicate 32 0x42)
   let nums : HDKey := { depth := 0, parentFingerprint := 0, childIndex := 0, chainCode, privateKey := none,
                         publicKey := ByteArray.mk #[0x02] ++ Taproot.unspendableInternalKey }
-  let held ← accountKeyOf ms[0]!
+  let held ← accountKey ms[0]!
   let realKey : HDKey := { nums with publicKey := held.publicKey }
   check "look-alikes: any chain code on H" (MultisigAccount.parse s!"tr({nums.serialized .testnet}/<0;1>/*,{leaf})" .signet).toBool
   let refusedKeys := [s!"{realKey.serialized .testnet}/<0;1>/*", s!"[00000000]{nums.serialized .testnet}/<0;1>/*",
     s!"{nums.serialized .testnet}/0/*", nums.serialized .testnet, s!"{nums.serialized .mainnet}/<0;1>/*"]
   for (k, n) in refusedKeys.zipIdx do
-    refused s!"look-alikes: refused {n}" (MultisigAccount.parse s!"tr({k},{leaf})" .signet) (account := true)
+    refused s!"look-alikes: refused {n}" (MultisigAccount.parse s!"tr({k},{leaf})" .signet) (matching := accountError)
 
 def repeatedSignerRefused : TM Unit := do
   let ms ← masters
   let first ← keyExpression ms[0]!
   let second ← keyExpression ms[1]!
-  refused "repeat: same key twice" (MultisigAccount.makeDescriptor 2 #[first, first, second] none .signet) (account := true)
+  refused "repeat: same key twice" (MultisigAccount.makeDescriptor 2 #[first, first, second] none .signet) (matching := accountError)
   let relabelled := "[00000001" ++ String.ofList (first.toList.dropWhile (· != '/'))
-  refused "repeat: relabelled" (MultisigAccount.makeDescriptor 2 #[first, relabelled, second] none .signet) (account := true)
+  refused "repeat: relabelled" (MultisigAccount.makeDescriptor 2 #[first, relabelled, second] none .signet) (matching := accountError)
   check "repeat: distinct accepted" (MultisigAccount.makeDescriptor 2 (← ms.mapM keyExpression) none .signet).toBool
 
 def suffixPinned : TM Unit := do
@@ -366,22 +313,22 @@ def signerKeyShape : TM Unit := do
   let ms ← masters
   let m := ms[0]!
   let other ← keyExpression ms[1]!
-  let account ← accountKeyOf m
+  let account ← accountKey m
   let fp := Descriptor.hex8 m.fingerprint
   let bad := [s!"[{fp}/86'/1'/0']{account.serialized .testnet}/<0;1>/*", s!"{account.neutered.serialized .testnet}/<0;1>/*",
     s!"[{fp}/86'/1']{account.neutered.serialized .testnet}/<0;1>/*"]
   for (b, n) in bad.zipIdx do
     refused s!"key shape: refused {n}" (MultisigAccount.makeDescriptor 1 #[b, other] none .signet)
-  refused "key shape: other network" (MultisigAccount.makeDescriptor 1 #[← keyExpression m, other] none .mainnet) (account := true)
+  refused "key shape: other network" (MultisigAccount.makeDescriptor 1 #[← keyExpression m, other] none .mainnet) (matching := accountError)
 
 def shapeRefusals : TM Unit := do
   let signers ← (← masters).mapM keyExpression
   let nums := hex Taproot.unspendableInternalKey
   refused "shape: threshold 0" (MultisigAccount.makeDescriptor 0 signers none .signet)
   refused "shape: threshold 4" (MultisigAccount.makeDescriptor 4 signers none .signet)
-  refused "shape: one signer" (MultisigAccount.makeDescriptor 1 #[signers[0]!] none .signet) (account := true)
+  refused "shape: one signer" (MultisigAccount.makeDescriptor 1 #[signers[0]!] none .signet) (matching := accountError)
   refused "shape: a pk leaf beside"
-    (MultisigAccount.parse s!"tr({nums},\{sortedmulti_a(1,{signers[0]!},{signers[1]!}),pk({signers[2]!})})" .signet) (account := true)
+    (MultisigAccount.parse s!"tr({nums},\{sortedmulti_a(1,{signers[0]!},{signers[1]!}),pk({signers[2]!})})" .signet) (matching := accountError)
   let unsorted ← need "unsorted" (MultisigAccount.parse s!"tr({nums},multi_a(2,{",".intercalate signers.toList}))" .signet)
   check "shape: multi_a accepted, unsorted" (!unsorted.isSorted)
 
@@ -516,11 +463,11 @@ def fewerSigners : TM Unit := do
     ((witnessSize fast.inputs[0]!.witness : Int) ≤ (← need "w" (account.witnessBytesPerInput .signers)))
   check "fewer: unlock height 110" (account.recoveryUnlockHeight coin == some 110)
   check "fewer: unlock boundary" (!account.isUnlockedForRecovery coin 108 && account.isUnlockedForRecovery coin 109)
-  refused "fewer: young coin refused" (tspend account coin 108 .recovery) (account := true)
+  refused "fewer: young coin refused" (tspend account coin 108 .recovery) (matching := accountError)
   let later ← need "create recovery" (tspend account coin 109 .recovery)
   check "fewer: review path recovery"
     ((← need "review" (account.reviewSpend later #[coin] owned 109)).path == .recovery)
-  refused "fewer: review at 108 refused" (account.reviewSpend later #[coin] owned 108) (account := true)
+  refused "fewer: review at 108 refused" (account.reviewSpend later #[coin] owned 108) (matching := accountError)
   let later ← need "sign 1" (sign account later ms[1]! #[coin] 109)
   check "fewer: recovery approvals" ((← need "ap" (account.approvals later #[coin] .recovery)) == #[1])
   let slow ← need "finalize slow" (finalize account later #[coin] 109)
@@ -599,7 +546,7 @@ def timelockedReviewRefusals : TM Unit := do
     ((← need "review" (account.reviewSpend rebuilt #[first, second] owned 200)).path == .signers)
   let stripped ← need "create" (tspend account first 200 .signers)
   let stripped := stripped.modifyInput 0 fun i => i.setTapLeafScripts (i.tapLeafScripts.extract 0 1)
-  refused "tl review: a missing leaf" (account.reviewSpend stripped #[first] owned 200) (account := true)
+  refused "tl review: a missing leaf" (account.reviewSpend stripped #[first] owned 200) (matching := accountError)
 
 def topOfHeightRange : TM Unit := do
   let ms ← masters
@@ -712,11 +659,6 @@ def scriptPathVectors : TM Unit := do
 
 def p2trDestination : ByteArray := ByteArray.mk (#[0x51, 0x20] ++ Array.replicate 32 0x99)
 
-def wmT {α} (name : String) (x : WM α) : TM α := do
-  match ← x.run with
-  | .ok a => pure a
-  | .error e => throw s!"{name}: {e.name}"
-
 def fakeMatch (height : UInt32) (txs : Array Transaction) : Net.BlockMatch :=
   let header := Net.BlockHeader.mk' 2 (ByteArray.mk (Array.replicate 32 0)) (ByteArray.mk (Array.replicate 32 0xAA))
     (1_700_000_000 + height) 0x207F_FFFF 0
@@ -736,11 +678,11 @@ def newKeyStore : IO (KeyStore IO) := do return inMemoryKeyStore (← IO.mkRef {
 /-- `fundedWallet(coins: [(.receive, 0, 150_000, 100)])`: the test mnemonic, creation height 100, one coin,
 matured. -/
 def fundedWallet (keyStore : KeyStore IO) (storagePath : Option System.FilePath := none) : TM Wallet := do
-  let w ← wmT "create" (Wallet.create .signet keyStore storagePath (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
-  let script ← wmT "spk" (w.scriptPubKey .receive 0)
+  let w ← need "create" (Wallet.create .signet keyStore storagePath (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
+  let script ← need "spk" (w.scriptPubKey .receive 0)
   let funding : Transaction := { version := 2, inputs := #[coinbaseInput], outputs := #[{ value := 150_000, scriptPubKey := script }], locktime := 0 }
-  discard (wmT "fund" (w.apply (fakeMatch 100 #[funding])))
-  wmT "mature" (w.recordScanHeight (100 + Wallet.coinbaseMaturity))
+  discard (need "fund" (w.apply (fakeMatch 100 #[funding])))
+  need "mature" (w.recordScanHeight (100 + Wallet.coinbaseMaturity))
   return w
 
 def makeFakeSegwitTx (value : Int64 := 50_000) : Transaction :=
@@ -758,11 +700,11 @@ def tempPath (name : String) : IO System.FilePath := do
 
 /-- The wallet funded with one matured coin of `amount` at receive 0, and that coin's txid. -/
 def fundedWalletWith (amount : Int64) : TM (Wallet × ByteArray) := do
-  let w ← wmT "create" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
-  let script ← wmT "spk" (w.scriptPubKey .receive 0)
+  let w ← need "create" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
+  let script ← need "spk" (w.scriptPubKey .receive 0)
   let funding : Transaction := { version := 2, inputs := #[coinbaseInput], outputs := #[{ value := amount, scriptPubKey := script }], locktime := 0 }
-  discard (wmT "fund" (w.apply (fakeMatch 100 #[funding])))
-  wmT "mature" (w.recordScanHeight (100 + Wallet.coinbaseMaturity))
+  discard (need "fund" (w.apply (fakeMatch 100 #[funding])))
+  need "mature" (w.recordScanHeight (100 + Wallet.coinbaseMaturity))
   return (w, funding.txid)
 
 /-- m/86'/1'/0'/0/0 of the test mnemonic, BIP86-tweaked: derived here, not by the wallet. -/
@@ -781,22 +723,22 @@ def spRecipient (mainnet : Bool := false) : TM SilentPaymentAddress := do
 
 def expectedSPScripts (w : Wallet) (funding : ByteArray) (recipients : List SilentPaymentAddress) : TM (List ByteArray) := do
   let input : SilentPaymentSending.Input :=
-    { txid := funding, vout := 0, prevoutScriptPubKey := ← wmT "spk" (w.scriptPubKey .receive 0), privateKey := ← tweakedReceiveKey0 }
+    { txid := funding, vout := 0, prevoutScriptPubKey := ← need "spk" (w.scriptPubKey .receive 0), privateKey := ← tweakedReceiveKey0 }
   needE "derive" (·.name) (SilentPaymentSending.outputScripts [input] recipients)
 
 def silentPaymentSend : TM Unit := do
   let (w, funding) ← fundedWalletWith 150_000
   let address ← spRecipient
-  let prepared ← wmT "send" (w.buildSend #[] 2 testChainTip (silentPayments := #[{ amount := 100_000, address }]))
+  let prepared ← need "send" (w.buildSend #[] 2 testChainTip (silentPayments := #[{ amount := 100_000, address }]))
   let tx := prepared.built.transaction
   check "sp send: one signed input" (tx.inputs.size == 1 && tx.inputs[0]!.witness.size == 1)
   check "sp send: change" prepared.built.changeAmount.isSome
   let expected ← expectedSPScripts w funding [address]
   check "sp send: pays the independently derived script" (tx.outputs.any fun o => o.value == 100_000 && o.scriptPubKey == expected[0]!)
-  check "sp send: a P2TR script, not the change" (expected[0]!.size == 34 && expected[0]! != (← wmT "spk" (w.scriptPubKey .change 0)))
+  check "sp send: a P2TR script, not the change" (expected[0]!.size == 34 && expected[0]! != (← need "spk" (w.scriptPubKey .change 0)))
   check "sp send: the review gate gets the same script"
     (prepared.resolvedSilentPayments.map (fun p => (p.amount, p.scriptPubKey)) == #[((100_000 : Int64), expected[0]!)])
-  wmT "commit" (w.commit prepared)
+  need "commit" (w.commit prepared)
   let some outputs := ((← w.history).back?).bind (·.outputs) | throw "no outputs"
   check "sp send: the history names the code"
     (outputs.external.size == 1 && outputs.external[0]!.scriptPubKey == expected[0]! &&
@@ -805,7 +747,7 @@ def silentPaymentSend : TM Unit := do
 def silentPaymentSameCodeTwice : TM Unit := do
   let (w, funding) ← fundedWalletWith 250_000
   let address ← spRecipient
-  let tx := (← wmT "send" (w.buildSend #[] 2 testChainTip
+  let tx := (← need "send" (w.buildSend #[] 2 testChainTip
     (silentPayments := #[{ amount := 100_000, address }, { amount := 50_000, address }]))).built.transaction
   let expected ← expectedSPScripts w funding [address, address]
   check "sp twice: distinct scripts" (expected[0]! != expected[1]!)
@@ -815,7 +757,7 @@ def silentPaymentSameCodeTwice : TM Unit := do
 def silentPaymentMixed : TM Unit := do
   let (w, _) ← fundedWalletWith 250_000
   let address ← spRecipient
-  let tx := (← wmT "send" (w.buildSend #[{ amount := 40_000, scriptPubKey := p2trDestination }] 2 testChainTip
+  let tx := (← need "send" (w.buildSend #[{ amount := 40_000, scriptPubKey := p2trDestination }] 2 testChainTip
     (silentPayments := #[{ amount := 100_000, address }]))).built.transaction
   check "sp mixed: the ordinary payment" (tx.outputs.any fun o => o.value == 40_000 && o.scriptPubKey == p2trDestination)
   check "sp mixed: the silent payment" (tx.outputs.any fun o => o.value == 100_000 && o.scriptPubKey != p2trDestination)
@@ -835,15 +777,15 @@ def silentPaymentValidation : TM Unit := do
 
 def sendRecordsItsOutputs : TM Unit := do
   let w ← fundedWallet (← newKeyStore)
-  let prepared ← wmT "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
-  wmT "commit" (w.commit prepared)
+  let prepared ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit prepared)
   let signed := prepared.built.transaction
   let some paid := signed.outputs.findIdx? (·.scriptPubKey == p2trDestination) | throw "no payment"
   let some change := signed.outputs.findIdx? (·.scriptPubKey != p2trDestination) | throw "no change"
   let some outputs := ((← w.history).find? (·.txid == signed.txid)).bind (·.outputs) | throw "no outputs"
   check "history: external" (outputs.external == #[{ vout := paid.toUInt32, amount := 100_000, scriptPubKey := p2trDestination }])
   check "history: change" (outputs.change == #[change.toUInt32])
-  discard (wmT "confirm" (w.apply (fakeMatch 150 #[signed])))
+  discard (need "confirm" (w.apply (fakeMatch 150 #[signed])))
   let some confirmed := (← w.history).find? (·.txid == signed.txid) | throw "no entry"
   check "history: confirmed height" (confirmed.height == 150)
   check "history: no longer bumpable" (← w.feeBumpableTxids).isEmpty
@@ -851,9 +793,9 @@ def sendRecordsItsOutputs : TM Unit := do
 
 def sendToOwnAddressIsNotExternal : TM Unit := do
   let w ← fundedWallet (← newKeyStore)
-  let ours ← wmT "spk" (w.scriptPubKey .receive 1)
-  let prepared ← wmT "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := ours }] 2 testChainTip)
-  wmT "commit" (w.commit prepared)
+  let ours ← need "spk" (w.scriptPubKey .receive 1)
+  let prepared ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := ours }] 2 testChainTip)
+  need "commit" (w.commit prepared)
   let signed := prepared.built.transaction
   check "own: two outputs" (signed.outputs.size == 2)
   let some outputs := ((← w.history).find? (·.txid == signed.txid)).bind (·.outputs) | throw "no outputs"
@@ -862,12 +804,12 @@ def sendToOwnAddressIsNotExternal : TM Unit := do
 
 def feeBumpRecordsItsOutputs : TM Unit := do
   let w ← fundedWallet (← newKeyStore)
-  let original ← wmT "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
-  wmT "commit" (w.commit original)
+  let original ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit original)
   let txid := original.built.transaction.txid
-  let rate ← wmT "rate" (w.pendingFeeRate txid)
-  let replacement ← wmT "bump" (w.buildFeeBump txid (rate + 1))
-  wmT "commit bump" (w.commitFeeBump replacement)
+  let rate ← need "rate" (w.pendingFeeRate txid)
+  let replacement ← need "bump" (w.buildFeeBump txid (rate + 1))
+  need "commit bump" (w.commitFeeBump replacement)
   let signed := replacement.built.transaction
   let some outputs := ((← w.history).find? (·.txid == signed.txid)).bind (·.outputs) | throw "no outputs"
   check "bump: external amount" (outputs.external.map (·.amount) == #[100_000])
@@ -878,8 +820,8 @@ def recordedOutputsRoundTrip : TM Unit := do
   let path ← tempPath "history-outputs-wallet.json"
   let keyStore ← newKeyStore
   let w ← fundedWallet keyStore (some path)
-  let prepared ← wmT "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
-  wmT "commit" (w.commit prepared)
+  let prepared ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit prepared)
   let text ← IO.FS.readFile path
   let scriptHex : Option String := do
     let .obj top ← SwiftJSON.parse? text | none
@@ -891,19 +833,19 @@ def recordedOutputsRoundTrip : TM Unit := do
     let (_, .str s) ← first.find? (·.1 == "scriptPubKey") | none
     some s
   check "file: script as hex" (scriptHex == some (hex p2trDestination))
-  let reopened ← wmT "open" (Wallet.open path keyStore pinned)
+  let reopened ← need "open" (Wallet.open path keyStore pinned)
   let some entry := (← reopened.history).find? (·.txid == prepared.built.transaction.txid) | throw "no entry"
   check "file: outputs reopen" (entry.outputs == ((← w.history).back?.bind (·.outputs)))
   check "file: amount" ((entry.outputs.bind (·.external[0]?)).map (·.amount) == some 100_000)
 
 def backupCompatibility : TM Unit := do
   let w ← fundedWallet (← newKeyStore)
-  let send ← wmT "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
-  wmT "commit" (w.commit send)
-  discard (wmT "confirm" (w.apply (fakeMatch 150 #[send.built.transaction])))
-  let backup ← wmT "export" w.exportBundle
+  let send ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit send)
+  discard (need "confirm" (w.apply (fakeMatch 150 #[send.built.transaction])))
+  let backup ← need "export" w.exportBundle
   let decoded ← needE "decode" (·.name) (ImportBundle.decode backup.serialized)
-  let restored ← wmT "import" (Wallet.importing decoded (← newKeyStore) none pinned)
+  let restored ← need "import" (Wallet.importing decoded (← newKeyStore) none pinned)
   let some entry := (← restored.history).find? (·.txid == send.built.transaction.txid) | throw "no entry"
   check "backup: recipient script" ((entry.outputs.bind (·.external[0]?)).map (·.scriptPubKey) == some p2trDestination)
   check "backup: block hash" entry.blockHash.isSome
@@ -935,7 +877,7 @@ def contradictedImportedMetadataIsDropped : TM Unit := do
   let path ← tempPath "contradicted-outputs-wallet.json"
   let keyStore ← newKeyStore
   let tx := makeFakeSegwitTx
-  let source ← wmT "source" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0))) 400 0 pinned)
+  let source ← need "source" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0))) 400 0 pinned)
   let wrongClaim : HistoryEntry.Outputs :=
     { external := #[{ vout := 0, amount := tx.outputs[0]!.value + 1, scriptPubKey := tx.outputs[0]!.scriptPubKey }] }
   let claimed : ImportBundle.KnownTransaction :=
@@ -944,14 +886,14 @@ def contradictedImportedMetadataIsDropped : TM Unit := do
     { network := "signet", descriptor := some source.descriptor.serialized,
       mnemonic := some "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
       lastKnownHeight := 500, transactions := #[claimed] }
-  let w ← wmT "import" (Wallet.importing bundle keyStore (some path) pinned)
+  let w ← need "import" (Wallet.importing bundle keyStore (some path) pinned)
   check "imported: metadata without bytes accepted" (((← w.history)[0]?.bind (·.outputs)).isSome)
-  discard (wmT "confirm" (w.apply (fakeMatch 600 #[tx])))
+  discard (need "confirm" (w.apply (fakeMatch 600 #[tx])))
   let some confirmed := (← w.history).find? (·.txid == tx.txid) | throw "no entry"
   check "imported: confirmed" (confirmed.height == 600)
   check "imported: bytes" confirmed.rawTransaction.isSome
   check "imported: contradicted breakdown dropped" confirmed.outputs.isNone
-  let reopened ← wmT "open" (Wallet.open path keyStore pinned)
+  let reopened ← need "open" (Wallet.open path keyStore pinned)
   let some entry := (← reopened.history).find? (·.txid == tx.txid) | throw "no entry"
   check "imported: reopened without outputs" entry.outputs.isNone
   check "imported: transaction" ((entry.transaction.toOption.bind id).map (·.txid) == some tx.txid)
@@ -983,17 +925,17 @@ def accountSecrets : TM Unit := do
 /-- An account-key wallet signs its own sends and, as a multisig signer, an account's spend. -/
 def accountKeyWallet : TM Unit := do
   let ms ← masters
-  let accountKey ← accountKeyOf ms[0]!
+  let accountKey ← accountKey ms[0]!
   let keyStore ← newKeyStore
-  let w ← wmT "create" (Wallet.createFromAccountKey accountKey ms[0]!.fingerprint .signet keyStore none 100 0 pinned)
+  let w ← need "create" (Wallet.createFromAccountKey accountKey ms[0]!.fingerprint .signet keyStore none 100 0 pinned)
   let words ← needE "mnemonic" (fun _ => "bip39") (BIP39.mnemonic (ByteArray.mk (Array.replicate 16 0xA1)))
-  let fromSeed ← wmT "create" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0xA1))) 100 0 pinned)
+  let fromSeed ← need "create" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0xA1))) 100 0 pinned)
   check "account wallet: same descriptor as the seed wallet" (w.descriptor.serialized == fromSeed.descriptor.serialized) words
-  let signing ← wmT "signing key" w.multisigSigningKey
+  let signing ← need "signing key" w.multisigSigningKey
   check "account wallet: signing key" (signing.publicKey == accountKey.publicKey && signing.isPrivate)
   let (account, _) ← accountWith
   check "account wallet: signs as a signer" (account.hasSigner signing)
-  let wrong ← accountKeyOf ms[1]!
+  let wrong ← TestKit.accountKey ms[1]!
   match ← (Wallet.createFromAccountKey wrong.neutered 0 .signet (← newKeyStore) none 100 0 pinned).run with
   | .error (.wallet .accountKeyMismatch) => check "account wallet: public key refused" true
   | _ => check "account wallet: public key refused" false
@@ -1051,7 +993,7 @@ structure Family where
 
 /-- The signers' leaf whose keys are exactly these masters', by position. -/
 def Family.leafOf (f : Family) (holders : List Nat) : TM SpendPath := do
-  let wanted := MultisigAccount.asSet (← holders.toArray.mapM fun h => return (← accountKeyOf f.masters[h]!).publicKey)
+  let wanted := MultisigAccount.asSet (← holders.toArray.mapM fun h => return (← accountKey f.masters[h]!).publicKey)
   let some position := f.account.signersLeaves.findIdx? fun leaf =>
       MultisigAccount.asSet (leaf.keys.map MultisigAccount.identity) == wanted
     | throw s!"no leaf of {holders}"
@@ -1059,7 +1001,7 @@ def Family.leafOf (f : Family) (holders : List Nat) : TM SpendPath := do
 
 /-- The pairs `holder`'s key takes in the leaves it sits in, signers' or recovery, in tree order. -/
 def Family.appearances (f : Family) (holder : Nat) : TM (Array Nat) := do
-  let id := (← accountKeyOf f.masters[holder]!).publicKey
+  let id := (← accountKey f.masters[holder]!).publicKey
   return (f.account.allKeys.filter (MultisigAccount.identity · == id)).filterMap
     (MultisigAccount.appearance? ·.derivation.elements)
 
@@ -1115,7 +1057,7 @@ def nestedBuilder : TM Unit := do
   let again ← need "reparse" (MultisigAccount.parse text .signet)
   check "nested builder: round trip" (again.signersLeaves == a.signersLeaves)
   check "nested builder: same addresses" ((← need "a" (again.address 3 1)) == (← need "a" (a.address 3 1)))
-  check "nested builder: includes" (a.includes (← accountKeyOf f.masters[3]!).neutered)
+  check "nested builder: includes" (a.includes (← accountKey f.masters[3]!).neutered)
   check "nested builder: hasSigner" (a.hasSigner f.masters[1]!)
 
 def nestedOrderDoesNotMatter : TM Unit := do
@@ -1142,7 +1084,7 @@ def thresholdMember : TM Unit := do
   check "threshold member: thresholds" (sortedNats members.thresholds == [1, 1, 2])
   let some family := members.thresholdGroups[0]? | throw "no threshold group"
   check "threshold member: one threshold group of three" (members.thresholdGroups.size == 1 && members.groups[family]!.size == 3)
-  let familyKeys ← (e.masters.extract 0 3).mapM fun m => return (← accountKeyOf m).publicKey
+  let familyKeys ← (e.masters.extract 0 3).mapM fun m => return (← accountKey m).publicKey
   check "threshold member: the family's keys"
     (MultisigAccount.asSet (members.groups[family]!.map MultisigAccount.identity) == MultisigAccount.asSet familyKeys)
   for pair in [[0, 1], [0, 2], [1, 2]] do
@@ -1199,7 +1141,7 @@ def nestedBuilderRefusals : TM Unit := do
     (.invalidDescriptor "a member's threshold must be between one and its number of keys")
   refused "nested refusals: one member alone, one key signing"
     (MultisigAccount.makeNestedDescriptor #[{ keys := pairs.extract 0 3, threshold := 1 }, .all #[pairs[3]!, pairs[4]!]] 1 none .signet)
-    (account := true)
+    (matching := accountError)
   let anyFamily ← need "any family" (do
     MultisigAccount.make (← MultisigAccount.makeNestedDescriptor #[{ keys := pairs.extract 0 3, threshold := 2 }, .all #[pairs[3]!, pairs[4]!]] 1 none .signet) .signet)
   check "nested refusals: one of two members" (anyFamily.signersLeaves.size == 4 && anyFamily.policySummary == "1 of 2 members, one of them 2 of 3")
@@ -1209,13 +1151,13 @@ def nestedBuilderRefusals : TM Unit := do
   check "nested refusals: four leaves" ((← need "leaves" (separate.account.leaves 0 0)).size == 4)
   let f ← nestedFamily
   refused "nested refusals: a member's key as the separate recovery key"
-    (MultisigAccount.makeNestedDescriptor (f.members.map .all) 2 (some (.separateKeys 1 #[f.members[1]![0]!] 10)) .signet) (account := true)
+    (MultisigAccount.makeNestedDescriptor (f.members.map .all) 2 (some (.separateKeys 1 #[f.members[1]![0]!] 10)) .signet) (matching := accountError)
   refused "nested refusals: a key in two members"
-    (MultisigAccount.makeNestedDescriptor (#[#[pairs[0]!, pairs[1]!], #[pairs[1]!]].map .all) 1 none .signet) (account := true)
+    (MultisigAccount.makeNestedDescriptor (#[#[pairs[0]!, pairs[1]!], #[pairs[1]!]].map .all) 1 none .signet) (matching := accountError)
   refused "nested refusals: one member"
-    (MultisigAccount.makeNestedDescriptor (#[#[pairs[0]!, pairs[1]!]].map .all) 1 none .signet) (account := true)
+    (MultisigAccount.makeNestedDescriptor (#[#[pairs[0]!, pairs[1]!]].map .all) 1 none .signet) (matching := accountError)
   refused "nested refusals: one of three, one-key members"
-    (MultisigAccount.makeNestedDescriptor (#[#[pairs[0]!, pairs[1]!], #[pairs[2]!], #[pairs[3]!]].map .all) 1 none .signet) (account := true)
+    (MultisigAccount.makeNestedDescriptor (#[#[pairs[0]!, pairs[1]!], #[pairs[2]!], #[pairs[3]!]].map .all) 1 none .signet) (matching := accountError)
   let anyPair ← need "any pair" (do MultisigAccount.make (← MultisigAccount.makeNestedDescriptor ((members.extract 0 3).map .all) 1 none .signet) .signet)
   check "nested refusals: any one of three pairs" (anyPair.signersLeaves.size == 3 && (anyPair.members.map (·.threshold)) == some 1)
   let everyone ← need "everyone" (do MultisigAccount.make (← MultisigAccount.makeNestedDescriptor ((members.extract 0 2).map .all) 2 none .signet) .signet)
@@ -1251,7 +1193,7 @@ def nestedAdmissionRefusals : TM Unit := do
     s!"\{\{sortedmulti_a(2,{k0}/<0;1>/*,{k1}/<0;1>/*),and_v(v:pk({k2}/<0;1>/*),older(10))},and_v(v:pk({k2}/<2;3>/*),older(10))}",
     s!"\{\{sortedmulti_a(2,{k0}/<0;1>/*,{k1}/<0;1>/*),and_v(v:pk({k2}/<0;1>/*),older(10))},and_v(v:pk({k0}/<4;5>/*),older(10))}"]
   for (tree, n) in refusedTrees.zipIdx do
-    refused s!"nested admission: refused {n}" (MultisigAccount.parse s!"tr({nums},{tree})" .signet) (account := true)
+    refused s!"nested admission: refused {n}" (MultisigAccount.parse s!"tr({nums},{tree})" .signet) (matching := accountError)
   let withRecovery := s!"tr({nums},\{\{sortedmulti_a(2,{k0}/<0;1>/*,{k1}/<0;1>/*),sortedmulti_a(2,{k0}/<2;3>/*,{k2}/<0;1>/*)},and_v(v:pk({k0}/<4;5>/*),older(10))})"
   let recovering ← need "with recovery" (MultisigAccount.parse withRecovery .signet)
   check "nested admission: a recovery leaf beside two signers' leaves"
@@ -1351,7 +1293,7 @@ def fewerMembersRecovery : TM Unit := do
   let text := a.descriptor.serialized
   check "fewer members: text" (hasText text "and_v(v:multi_a(2," && hasText text "/<10;11>/*")
   let coin ← nfunding a
-  refused "fewer members: no recovery yet" (nspend a coin .recovery) (account := true)
+  refused "fewer members: no recovery yet" (nspend a coin .recovery) (matching := accountError)
   let recoverySpend : TM PSBT := need "create recovery" (nspend a coin .recovery 109)
   let signAs (holder : Nat) (p : PSBT) : TM PSBT := need s!"sign {holder}" (sign a p e.masters[holder]! #[coin] 109)
   let mut later ← recoverySpend
@@ -1389,7 +1331,7 @@ def nestedSeparateRecovery : TM Unit := do
   let f ← nestedFamily (recovery := some (.separateKeys 1 #[← keyExpression recoveryMaster] 10))
   let a := f.account
   let coin ← nfunding a
-  refused "nested recovery: not yet" (nspend a coin .recovery) (account := true)
+  refused "nested recovery: not yet" (nspend a coin .recovery) (matching := accountError)
   let later ← need "create" (nspend a coin .recovery 109)
   check "nested recovery: review path" ((← need "review" (a.reviewSpend later #[coin] owned 109)).path == .recovery)
   let later ← need "sign" (sign a later recoveryMaster #[coin] 109)
@@ -1604,7 +1546,7 @@ def bundleSigners : TM Unit := do
 
 def testWallet (storagePath : Option System.FilePath := none) (keyStore : Option (KeyStore IO) := none) : TM Wallet := do
   let ks ← match keyStore with | some k => pure k | none => newKeyStore
-  wmT "create" (Wallet.create .signet ks storagePath (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
+  need "create" (Wallet.create .signet ks storagePath (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
 
 def failed {α} (x : WM α) : IO (Option String) := do
   match ← x.run with | .ok _ => return none | .error e => return some e.name
@@ -1618,28 +1560,28 @@ def durableReservations : TM Unit := do
   let file ← tempPath "wallet.json"
   let store ← newKeyStore
   let w ← testWallet (some file) (some store)
-  wmT "scan height" (w.recordScanHeight 500)
-  wmT "advance" (w.advanceCursors (some 12) (some 8))
-  let scripts ← wmT "watch" w.watchScripts
+  need "scan height" (w.recordScanHeight 500)
+  need "advance" (w.advanceCursors (some 12) (some 8))
+  let scripts ← need "watch" w.watchScripts
   for (chain, cursor) in [(AddressChain.receive, (12 : UInt32)), (.change, 8)] do
     let mut all := true
     for i in [0:(cursor + Wallet.gapLimit).toNat] do
-      all := all && scripts.contains (← wmT "spk" (w.scriptPubKey chain i.toUInt32))
+      all := all && scripts.contains (← need "spk" (w.scriptPubKey chain i.toUInt32))
     check s!"cursors: every reserved {repr chain} address and its lookahead is watched" all
-  let reopened ← wmT "open" (Wallet.open file store)
+  let reopened ← need "open" (Wallet.open file store)
   check "cursors: reopened keeps both cursors and the scan height"
     ((← reopened.nextReceiveIndex) == 12 && (← reopened.nextChangeIndex) == 8 && (← reopened.nextScanHeight) == 500)
   check "cursors: the next fresh address is past the reservation"
-    ((← wmT "fresh" reopened.freshReceiveAddress) == (← wmT "address" (w.address .receive 12)))
-  let bundle ← wmT "export" reopened.exportBundle
-  let restored ← wmT "import" (Wallet.importing bundle (← newKeyStore))
+    ((← need "fresh" reopened.freshReceiveAddress) == (← need "address" (w.address .receive 12)))
+  let bundle ← need "export" reopened.exportBundle
+  let restored ← need "import" (Wallet.importing bundle (← newKeyStore))
   check "cursors: a restored backup reissues no reserved address"
     ((← restored.nextReceiveIndex) == 13 && (← restored.nextChangeIndex) == 8 && (← restored.nextScanHeight) == 500)
 
 def monotonicNoOp : TM Unit := do
   let file ← tempPath "wallet.json"
   let w ← testWallet (some file)
-  wmT "advance" (w.advanceCursors (some 4) (some 9))
+  need "advance" (w.advanceCursors (some 4) (some 9))
   blockWrites file
   -- a no-op works even when writing would fail
   check "cursors: omitted cursors write nothing" (← failed (w.advanceCursors)).isNone
@@ -1656,10 +1598,10 @@ def atomicFailure : TM Unit := do
   check "cursors: a failed write moves neither cursor" ((← w.nextReceiveIndex) == 0 && (← w.nextChangeIndex) == 0)
   IO.FS.removeDir file
   IO.FS.writeBinFile file previous
-  let reopened ← wmT "open" (Wallet.open file store)
+  let reopened ← need "open" (Wallet.open file store)
   check "cursors: the file kept the old cursors" ((← reopened.nextReceiveIndex) == 0 && (← reopened.nextChangeIndex) == 0)
-  wmT "retry" (w.advanceCursors (some 12) (some 8))
-  let retried ← wmT "open" (Wallet.open file store)
+  need "retry" (w.advanceCursors (some 12) (some 8))
+  let retried ← need "open" (Wallet.open file store)
   check "cursors: the reservation can be retried" ((← retried.nextReceiveIndex) == 12 && (← retried.nextChangeIndex) == 8)
 
 def invalidCursor : TM Unit := do
@@ -1686,17 +1628,17 @@ def cursorPastTheWindowIsDamage : TM Unit := do
   let file ← tempPath "wallet.json"
   let store ← newKeyStore
   let w ← testWallet (some file) (some store)
-  wmT "advance" (w.advanceCursors (some 3))
+  need "advance" (w.advanceCursors (some 3))
   let json : Lean.Json ← match Lean.Json.parse (← IO.FS.readFile file) with
     | .ok j => pure j | .error e => throw s!"wallet.json: {e}"
   IO.FS.writeFile file (json.setObjVal! "nextReceiveIndex" (0xFFFF_FFFF : Nat)).compress
   check "cursors: a state file past the gap-limit window does not open" (← failed (Wallet.open file store)).isSome
   let edge := HDKey.hardenedOffset - Wallet.gapLimit
   IO.FS.writeFile file (json.setObjVal! "nextReceiveIndex" edge.toNat).compress
-  let reopened ← wmT "open" (Wallet.open file store)
+  let reopened ← need "open" (Wallet.open file store)
   check "cursors: the window's last cursor opens" ((← reopened.nextReceiveIndex) == edge)
 
-def main : IO UInt32 := do
+def main : IO UInt32 := runMain "multisig-test" do
   runTest "feeResolution" feeResolution
   runTest "twoOfThree" twoOfThree
   runTest "everyPairCanSpend" everyPairCanSpend
@@ -1762,6 +1704,3 @@ def main : IO UInt32 := do
   runTest "invalidCursor" invalidCursor
   runTest "concurrentReservations" concurrentReservations
   runTest "cursorPastTheWindowIsDamage" cursorPastTheWindowIsDamage
-  let f ← failures.get
-  IO.println s!"multisig-test: {← passed.get} passed, {f.size} failed"
-  return if f.isEmpty then 0 else 1

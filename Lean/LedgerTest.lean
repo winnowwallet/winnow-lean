@@ -1,5 +1,7 @@
 import Winnow.Ledger
-open Winnow Winnow.Ledger Winnow.Keys Winnow.SwiftJSON
+import TestKit.Check
+import TestKit.Fixtures
+open Winnow Winnow.Ledger Winnow.Keys Winnow.SwiftJSON TestKit
 
 /-! `ledger-test`: the Ledger signer's tests (Phase C).
 
@@ -24,18 +26,6 @@ and checks the port against Swift itself through recorded sessions:
   - live: the Lean client against the Lean simulator.
 
 Usage: `lake exe ledger-test [vectors directory]` (default `Vectors`, run from `Lean/`). -/
-
-initialize failures : IO.Ref (Array String) ← IO.mkRef #[]
-initialize passes : IO.Ref Nat ← IO.mkRef 0
-
-def say (s : String) : IO Unit := do IO.println s; (← IO.getStdout).flush
-
-def check (name : String) (cond : Bool) (detail : String := "") : IO Unit := do
-  if cond then
-    passes.modify (· + 1)
-  else
-    failures.modify (·.push name)
-    say s!"  FAIL {name}{if detail.isEmpty then "" else " — " ++ detail}"
 
 def h (s : String) : ByteArray := ofHex! s
 def bytes (xs : List Nat) : ByteArray := ByteArray.mk (xs.map (·.toUInt8)).toArray
@@ -92,13 +82,8 @@ def replaySimulator (s : Simulator) (log : Array (ByteArray × ByteArray)) : Sim
 
 /-! ## Fixtures -/
 
-/-- `TestKeys.master(entropyByte:)`: an HD master from a repeated one-byte 16-byte entropy, via BIP39. -/
-def master (byte : UInt8) : HDKey :=
-  match BIP39.mnemonic (ByteArray.mk (Array.replicate 16 byte)) with
-  | .ok words => (HDKey.ofSeed (BIP39.seed words)).toOption.get!
-  | .error _ => default
-
-def masters : Array HDKey := #[master 0xA1, master 0xB2, master 0xC3]
+/-- The three signers (`TestKit.masters`): the phone 0xA1, the Ledger 0xB2, a third 0xC3. -/
+initialize testMasters : Array HDKey ← masters
 
 def get! {α} [Inhabited α] (e : Except LedgerError α) : α := match e with | .ok a => a | .error _ => default
 
@@ -294,7 +279,7 @@ def unitTests : IO Unit := do
       keyPath := Multisig.keyPath .signet }
   check "registration JSON round trip" ((LedgerRegistration.ofJV r.toJV).toOption == some r)
   -- The step interface gives what `run` gives.
-  let sim := Simulator.new masters[1]!
+  let sim := Simulator.new testMasters[1]!
   let mut p := Client.masterFingerprint
   let mut s := sim
   let mut sent := 0
@@ -304,7 +289,7 @@ def unitTests : IO Unit := do
     s := s'
     p := p.feed reply
     sent := sent + 1
-  check "step interface" (sent == 1 && (match p with | .done fp => fp == masters[1]!.fingerprint | _ => false))
+  check "step interface" (sent == 1 && (match p with | .done fp => fp == testMasters[1]!.fingerprint | _ => false))
 
 /-! ## Recorded Swift sessions -/
 
@@ -360,7 +345,7 @@ def sessionTests (dir : String) : IO Unit := do
   check "client replay: a mainnet key request" ((match r6 with | .error (.status 0x6A82) => true | _ => false) && used6) s!"{match r6 with | .error e => toString e | _ => "ok"} {used6}"
 
   -- The same recordings into the Lean simulator.
-  let mut s := Simulator.new masters[1]!
+  let mut s := Simulator.new testMasters[1]!
   for (label, log) in [("signer expression", steps (field c "signerExpression")), ("register", steps (field c "register")),
       ("display", steps d), ("sign", steps sf)] do
     let (s', bad) := replaySimulator s log
@@ -376,12 +361,12 @@ def sessionTests (dir : String) : IO Unit := do
 
   -- Live: the Lean client against the Lean simulator.
   say "live: Lean client and Lean simulator"
-  let sim := Simulator.new masters[1]!
+  let sim := Simulator.new testMasters[1]!
   match runSim (Multisig.signerExpression .signet) sim with
   | .error e => check "live: signer expression" false e.name
   | .ok ((expr, fp), sim) =>
-    check "live: signer expression" (expr == expression && fp == masters[1]!.fingerprint &&
-      expr.startsWith s!"[{Descriptor.hex8 masters[1]!.fingerprint}/87'/1'/0']tpub")
+    check "live: signer expression" (expr == expression && fp == testMasters[1]!.fingerprint &&
+      expr.startsWith s!"[{Descriptor.hex8 testMasters[1]!.fingerprint}/87'/1'/0']tpub")
     match runSim (Multisig.registerWith signers .signet makePolicy name fp firstAddress) sim with
     | .error e => check "live: register" false e.name
     | .ok (reg, sim) =>
@@ -418,11 +403,11 @@ def sessionTests (dir : String) : IO Unit := do
         match runSim (Multisig.displayAddressWith makePolicy reg 0 5 (expected4.getD "")) sim with
         | .error (.mismatch m) => check "live: a different address is refused" (m == "the Ledger shows a different address")
         | _ => check "live: a different address is refused" false
-  check "live: a mainnet key is refused" (isErr (runSim (Multisig.signerExpression .mainnet) (Simulator.new masters[1]!)))
+  check "live: a mainnet key is refused" (isErr (runSim (Multisig.signerExpression .mainnet) (Simulator.new testMasters[1]!)))
   check "live: an account without this Ledger" (match runSim (Multisig.registerWith #[] .signet makePolicy name fingerprint firstAddress)
-    (Simulator.new masters[1]!) with | .error (.mismatch m) => m == "this account has no signer for this Ledger" | _ => false)
+    (Simulator.new testMasters[1]!) with | .error (.mismatch m) => m == "this account has no signer for this Ledger" | _ => false)
   check "live: a wrong first address" (match runSim (Multisig.registerWith signers .signet makePolicy name fingerprint "tb1q")
-    (Simulator.new masters[1]!) with | .error (.mismatch m) => m == "the Ledger derives a different first address" | _ => false)
+    (Simulator.new testMasters[1]!) with | .error (.mismatch m) => m == "the Ledger derives a different first address" | _ => false)
 
   -- 2-of-3 with a recovery leaf.
   say "swift sessions: 2-of-3 with recovery"
@@ -473,7 +458,7 @@ def sessionTests (dir : String) : IO Unit := do
   -- which the simulator derives through a descriptor with the recovery leaf (Phase B).
   let registerLog := steps (field c "register")
   let registered := (registerLog.findIdx? fun (_, reply) => reply.size ≥ 2 && reply[reply.size - 2]! == 0x90).getD 0
-  let mut s3 := Simulator.new masters[1]!
+  let mut s3 := Simulator.new testMasters[1]!
   for (label, log) in [("signer expression", steps (field c "signerExpression")),
       (s!"registration ({registered + 1} of {registerLog.size} exchanges)", registerLog.extract 0 (registered + 1))] do
     let (s', bad) := replaySimulator s3 log
@@ -482,21 +467,15 @@ def sessionTests (dir : String) : IO Unit := do
 
 def ioTests : IO Unit := do
   say "IO transport"
-  let ref ← IO.mkRef (Simulator.new masters[1]!)
+  let ref ← IO.mkRef (Simulator.new testMasters[1]!)
   let r ← (Multisig.signerExpression .signet |>.runIO (Simulator.transport ref)).run
-  check "runIO over the shared simulator" ((r.toOption.map (·.2)) == some masters[1]!.fingerprint)
+  check "runIO over the shared simulator" ((r.toOption.map (·.2)) == some testMasters[1]!.fingerprint)
   let r ← (Multisig.signerExpression .mainnet |>.runIO (Simulator.transport ref)).run
   check "runIO returns the device's refusal" (match r with | .error (.status 0x6A82) => true | _ => false)
 
 /-! ## Over `MultisigAccount` (upstream's account-level Ledger tests) -/
 
-def aux0 : ByteArray := ByteArray.mk (Array.replicate 32 0)
-def destination : ByteArray := ByteArray.mk (#[0x51, 0x20] ++ Array.replicate 32 0x77)
 def ownedChange : Array MultisigAccount.OutputCoordinate := #[{ choice := 1, index := 0 }]
-
-def keyExpression (m : HDKey) : String :=
-  let account := (m.derived "m/86'/1'/0'").toOption.get!
-  s!"[{Descriptor.hex8 m.fingerprint}/86'/1'/0']{account.neutered.serialized .testnet}/<0;1>/*"
 
 def mam {α} [Inhabited α] (r : MAM α) : α := match r with | .ok a => a | .error _ => default
 def mamOk {α} (r : MAM α) : Bool := match r with | .ok _ => true | .error _ => false
@@ -517,9 +496,9 @@ structure Pairing where
 
 /-- Upstream's `pair`: the Ledger's key, a 2-of-2 with the phone's, registered on the simulator. -/
 def pair (sessions : JV) : IO (Option Pairing) := do
-  let sim := Simulator.new masters[1]!
+  let sim := Simulator.new testMasters[1]!
   let .ok ((ledgerKey, fingerprint), sim) := runSim (Multisig.signerExpression .signet) sim | return none
-  let .ok d := MultisigAccount.makeDescriptor 2 #[keyExpression masters[0]!, ledgerKey] none .signet | return none
+  let .ok d := MultisigAccount.makeDescriptor 2 #[← keyExpression testMasters[0]!, ledgerKey] none .signet | return none
   let .ok account := MultisigAccount.make d .signet | return none
   check "pair: the account is the one Swift built" (d.serialized == str (field (field sessions "twoOfTwo") "descriptor"))
   match runSim (Multisig.register account "Winnow 2-of-2" fingerprint) sim with
@@ -539,7 +518,7 @@ def accountTests (dir : String) : IO Unit := do
   | .error e => check "display address 4" false e.name
   let utxos := twoCoins p.account
   let unsigned := mam (twoCoinSpend p.account utxos)
-  let phoneSigned := mam (p.account.sign unsigned masters[0]! utxos ownedChange 200 aux0)
+  let phoneSigned := mam (p.account.sign unsigned testMasters[0]! utxos ownedChange 200 aux0)
   check "the phone's approval" ((p.account.approvals phoneSigned utxos).toOption == some #[0])
   match runSim (Multisig.sign phoneSigned p.account p.registration) p.sim with
   | .ok (.ok (both, added), _) =>
@@ -554,7 +533,7 @@ def accountTests (dir : String) : IO Unit := do
   match runSim (Multisig.sign unsigned p.account p.registration) p.sim with
   | .ok (.ok (ledgerSigned, _), _) =>
     check "the Ledger's approval" ((p.account.approvals ledgerSigned utxos).toOption == some #[1])
-    let both := mam (p.account.sign ledgerSigned masters[0]! utxos ownedChange 200 aux0)
+    let both := mam (p.account.sign ledgerSigned testMasters[0]! utxos ownedChange 200 aux0)
     check "the phone completes it" (mamOk (p.account.finalizeSpend both utxos ownedChange 200))
   | _ => check "the Ledger signs first" false
 
@@ -590,9 +569,9 @@ def accountTests (dir : String) : IO Unit := do
   check "no registration" (mamOk (MultisigAccountRecord.checkLedgerRegistration { record with ledger := none } p.account))
 
   say "two Winnows and a Ledger: 2-of-3 now, the Ledger alone after 10 blocks"
-  let sim := Simulator.new masters[1]!
+  let sim := Simulator.new testMasters[1]!
   let .ok ((ledgerKey, fingerprint), sim) := runSim (Multisig.signerExpression .signet) sim | check "signer" false; return
-  let .ok d := MultisigAccount.makeDescriptor 2 #[keyExpression masters[0]!, keyExpression masters[2]!, ledgerKey]
+  let .ok d := MultisigAccount.makeDescriptor 2 #[← keyExpression testMasters[0]!, ← keyExpression testMasters[2]!, ledgerKey]
     (some (.fewerSigners 1 10)) .signet | check "2-of-3 descriptor" false; return
   check "the account is the one Swift built" (d.serialized == str (field (field sessions "twoOfThreeRecovery") "descriptor"))
   let account := mam (MultisigAccount.make d .signet)
@@ -607,12 +586,12 @@ def accountTests (dir : String) : IO Unit := do
     { txid := ByteArray.mk (Array.replicate 32 0x61), vout := 0, amount := 90_000,
       scriptPubKey := mam (account.scriptPubKey 0 0), chain := .receive, index := 0, height := 100 }
   let payment : Payment := { amount := 50_000, scriptPubKey := destination }
-  let phoneKey := ((masters[0]!.derived "m/86'/1'/0'").toOption.get!).publicKey
+  let phoneKey := ((testMasters[0]!.derived "m/86'/1'/0'").toOption.get!).publicKey
   let phone := (account.signers.findIdx? fun s => (MultisigAccount.extendedKey? s).map (·.1.publicKey) == some phoneKey).getD 99
   let ledger := (account.signers.findIdx? fun s => s.origin.map (fun o => o.fingerprint == registration.masterFingerprint
     && o.path == registration.keyPath) == some true).getD 99
   let now := mam (account.createSpend #[coin] #[payment] 0 2 101)
-  let now := mam (account.sign now masters[0]! #[coin] ownedChange 101 aux0)
+  let now := mam (account.sign now testMasters[0]! #[coin] ownedChange 101 aux0)
   match runSim (Multisig.sign now account registration) sim with
   | .ok (.ok (now, _), _) =>
     check "now: one Winnow and the Ledger" ((account.approvals now #[coin]).toOption == some (#[phone, ledger].qsort (· < ·)))
@@ -643,7 +622,7 @@ def accountTests (dir : String) : IO Unit := do
   check "client replay: the recovery-path signatures are applied as Swift applies them" (used4 && match r4 with
     | .ok (.ok (signed, added)) => hex signed.serialized == str (field sf "signed") && added == num (field sf "added")
     | _ => false)
-  let mut s := Simulator.new masters[1]!
+  let mut s := Simulator.new testMasters[1]!
   for (label, log) in [("signer expression", steps (field c "signerExpression")), ("register", steps (field c "register")),
       ("display", steps dj), ("sign", steps sf)] do
     let (s', bad) := replaySimulator s log
@@ -682,10 +661,10 @@ def phoneSign (a : MultisigAccount) (p : PSBT) (m : HDKey) (coin : WalletUTXO) :
 
 def nestedLedgerTests : IO Unit := do
   say "nested: the Ledger policy carries the whole tree; a Ledger signs both leaves it is in"
-  let ms := #[master 0xA1, master 0xB2, master 0xC3, master 0xD4]
+  let ms ← #[0xA1, 0xB2, 0xC3, 0xD4].mapM master
   let sim := Simulator.new ms[1]!
   let .ok ((ledgerKey, fingerprint), sim) := runSim (Multisig.signerExpression .signet) sim | check "nested: signer" false; return
-  let keys := ms.map keyExpression
+  let keys ← ms.mapM keyExpression
   let .ok d := MultisigAccount.makeNestedDescriptor (#[#[keys[0]!, ledgerKey], #[keys[2]!], #[keys[3]!]].map .all) 2 none .signet
     | check "nested: descriptor" false; return
   let account := mam (MultisigAccount.make d .signet)
@@ -720,10 +699,10 @@ def nestedLedgerTests : IO Unit := do
   | _ => check "nested: the Ledger signs" false
 
   say "nested: a Ledger inside the 2-of-3 member: the policy fits 512 characters; 27 leaves do not"
-  let ms := #[master 0xA1, master 0xB2, master 0xC3, master 0xD4, master 0xE5]
+  let ms ← #[0xA1, 0xB2, 0xC3, 0xD4, 0xE5].mapM master
   let sim := Simulator.new ms[1]!
   let .ok ((ledgerKey, fingerprint), sim) := runSim (Multisig.signerExpression .signet) sim | check "estate: signer" false; return
-  let keys := ms.map keyExpression
+  let keys ← ms.mapM keyExpression
   let members : Array MultisigAccount.Member :=
     #[{ keys := #[keys[0]!, ledgerKey, keys[2]!], threshold := 2 }, .all #[keys[3]!], .all #[keys[4]!]]
   let account := mam (do MultisigAccount.make (← MultisigAccount.makeNestedDescriptor members 2 none .signet) .signet)
@@ -750,7 +729,7 @@ def nestedLedgerTests : IO Unit := do
     | .ok (_, tx) => check "estate: five witness items" (tx.inputs[0]!.witness.size == 5)
     | .error e => check "estate: finalize" false e.name
   | _ => check "estate: the Ledger signs" false
-  let more := (Array.range 4).map fun i => keyExpression (master (0x20 + i.toUInt8))
+  let more ← (Array.range 4).mapM fun i => do keyExpression (← master (0x20 + i.toUInt8))
   let families : Array MultisigAccount.Member := #[members[0]!, { keys := #[keys[3]!, keys[4]!, more[0]!], threshold := 2 },
     { keys := more.extract 1 4, threshold := 2 }]
   let large := mam (do MultisigAccount.make (← MultisigAccount.makeNestedDescriptor families 2 none .signet) .signet)
@@ -769,14 +748,14 @@ def nestedLedgerTests : IO Unit := do
   check "estate: registered once" (sim.registeredNames == #["Estate"])
 
   say "nested: two phones, each with its Ledger, and a third key"
-  let phones := #[master 0xA1, master 0xC3]
-  let sims := #[Simulator.new (master 0xB2), Simulator.new (master 0xD5)]
+  let phones ← #[0xA1, 0xC3].mapM master
+  let sims := #[Simulator.new (← master 0xB2), Simulator.new (← master 0xD5)]
   let mut ledgerKeys : Array (String × UInt32) := #[]
   for s in sims do
     let .ok (key, _) := runSim (Multisig.signerExpression .signet) s | check "two ledgers: signer" false; return
     ledgerKeys := ledgerKeys.push key
-  let third := master 0xD4
-  let members := #[#[keyExpression phones[0]!, ledgerKeys[0]!.1], #[keyExpression phones[1]!, ledgerKeys[1]!.1], #[keyExpression third]]
+  let third ← master 0xD4
+  let members := #[#[← keyExpression phones[0]!, ledgerKeys[0]!.1], #[← keyExpression phones[1]!, ledgerKeys[1]!.1], #[← keyExpression third]]
   let account := mam (do MultisigAccount.make (← MultisigAccount.makeNestedDescriptor (members.map .all) 2 none .signet) .signet)
   let mut registrations : Array Registration := #[]
   for (s, (_, fp)) in sims.zip ledgerKeys do
@@ -797,7 +776,7 @@ def nestedLedgerTests : IO Unit := do
   | .ok (_, tx) => check "two ledgers: six witness items" (tx.inputs[0]!.witness.size == 6)
   | .error e => check "two ledgers: finalize" false e.name
 
-def main (args : List String) : IO UInt32 := do
+def main (args : List String) : IO UInt32 := runMain "ledger-test" do
   let dir := args.headD "Vectors"
   ioTests
   vectorTests dir
@@ -808,6 +787,3 @@ def main (args : List String) : IO UInt32 := do
   sessionTests dir
   accountTests dir
   nestedLedgerTests
-  let fails ← failures.get
-  say s!"ledger-test: {← passes.get} passed, {fails.size} failed"
-  return if fails.isEmpty then 0 else 1

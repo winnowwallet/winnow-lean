@@ -5,6 +5,9 @@ import WinnowApp.E2E
 import LeanNative.Erase
 import LeanNative.Json
 import Lean.Data.Json
+import TestKit.Check
+import TestKit.Fixtures
+import TestKit.Regtest
 
 /-! `cloud-backup-test`: the encrypted iCloud recovery formats, headless.
 
@@ -18,52 +21,27 @@ import Lean.Data.Json
 `--write <dir>` also leaves a Lean-made backup (`lean-backup.json`) and its key (`lean-backup.key`) there for
 the Swift side to open. Run from `LeanApp/`. Exits 1 on any failure. -/
 
-open Winnow WinnowApp WinnowApp.RecordsReal Keys
+open Winnow WinnowApp WinnowApp.RecordsReal Keys TestKit
+open TestKit.Regtest (waitUntil)
 open Tx (BitcoinNetwork)
 
-initialize passed : IO.Ref Nat ← IO.mkRef 0
-initialize failures : IO.Ref (Array String) ← IO.mkRef #[]
-
-def check (name : String) (ok : Bool) (detail : String := "") : IO Unit := do
-  if ok then passed.modify (· + 1)
-  else
-    failures.modify (·.push name)
-    IO.println s!"FAIL {name}{if detail.isEmpty then "" else ": " ++ detail}"
-
-abbrev TM := ExceptT String IO
-
-def wm {α} (name : String) (x : WM α) : TM α := do
-  match ← x.run with
-  | .ok a => pure a
-  | .error e => throw s!"{name}: {e.name}"
-
-def rm {α} (name : String) (x : RM α) : TM α := do
-  match ← x.run with
-  | .ok a => pure a
-  | .error e => throw s!"{name}: {e.name}: {e.description}"
+instance : Describe RecordsError := ⟨(·.name), fun e => s!"{e.name}: {e.description}"⟩
 
 def refusedW {α} (x : WM α) : IO Bool := do return (← x.run).toOption.isNone
 def refusedR {α} (x : RM α) : IO Bool := do return (← x.run).toOption.isNone
 
-def runTest (name : String) (t : TM Unit) : IO Unit := do
-  match ← t.run with
-  | .ok () => pure ()
-  | .error msg =>
-    failures.modify (·.push name)
-    IO.println s!"FAIL {name} (aborted): {msg}"
-
 def newKeys : IO (KeyStore IO) := do return inMemoryKeyStore (← IO.mkRef {})
 
 def walletBundle (network : BitcoinNetwork) (fill : UInt8) : TM ImportBundle := do
-  let w ← wm "create" (Wallet.create network (← newKeys) none (some (ByteArray.mk (Array.replicate 16 fill))) 100)
-  wm "export" (w.exportBundle (includeMnemonic := true))
+  let w ← need "create" (Wallet.create network (← newKeys) none (some (ByteArray.mk (Array.replicate 16 fill))) 100)
+  need "export" (w.exportBundle (includeMnemonic := true))
 
 def randomKey : IO ByteArray := IO.getRandomBytes 32
 
 def contains (haystack needle : String) : Bool := (haystack.splitOn needle).length > 1
 
 def jsonOf (b : CloudWalletBackup) : TM Lean.Json := do
-  let text := String.fromUTF8! (← wm "encode" b.encoded)
+  let text := String.fromUTF8! (← need "encode" b.encoded)
   match Lean.Json.parse text with | .ok j => pure j | .error e => throw e
 
 def bytesOfJson (j : Lean.Json) : ByteArray := j.compress.toUTF8
@@ -73,31 +51,31 @@ def bytesOfJson (j : Lean.Json) : ByteArray := j.compress.toUTF8
 def roundTripRestoresSigningAndAddressCounters : TM Unit := do
   let original := { (← walletBundle .signet 7) with nextReceiveIndex := some 19, nextChangeIndex := some 8 }
   let key ← randomKey
-  let encrypted ← wm "create" (CloudWalletBackup.create original key)
-  let data ← wm "encode" encrypted.encoded
+  let encrypted ← need "create" (CloudWalletBackup.create original key)
+  let data ← need "encode" encrypted.encoded
   check "round trip: the file does not hold the words" (!contains (String.fromUTF8! data) original.mnemonic.get!)
-  let restored ← wm "restore" ((← wm "decode" (CloudWalletBackup.decode data)).restoredBundle key)
+  let restored ← need "restore" ((← need "decode" (CloudWalletBackup.decode data)).restoredBundle key)
   check "round trip: the bundle comes back whole" (restored == original)
   let keys ← newKeys
-  let wallet ← wm "import" (Wallet.importing restored keys)
+  let wallet ← need "import" (Wallet.importing restored keys)
   check "round trip: importing it stores the words" (match ← (keys.load wallet.id).run with
     | .ok s => s == .mnemonic original.mnemonic.get! | .error _ => false)
 
 def automaticUpdateKeepsTheSealedKeyAndNewHistoryFrontier : TM Unit := do
   let original ← walletBundle .signet 7
   let key ← randomKey
-  let first ← wm "create" (CloudWalletBackup.create original key)
+  let first ← need "create" (CloudWalletBackup.create original key)
   let next := { original with mnemonic := none, lastKnownHeight := 123, nextReceiveIndex := some 5 }
-  let updated ← wm "update" (first.updating next key)
+  let updated ← need "update" (first.updating next key)
   check "update: the phrase box is kept" (updated.sealedPhrase == first.sealedPhrase)
-  let restored ← wm "restore" (updated.restoredBundle key)
+  let restored ← need "restore" (updated.restoredBundle key)
   check "update: the words, the new frontier and the new cursor"
     (restored.mnemonic == original.mnemonic && restored.lastKnownHeight == 123 && restored.nextReceiveIndex == some 5)
 
 def wrongKeyAndModifiedMetadataAreRejected : TM Unit := do
   let key ← randomKey
   let original ← walletBundle .signet 7
-  let backup ← wm "create" (CloudWalletBackup.create original key)
+  let backup ← need "create" (CloudWalletBackup.create original key)
   check "tamper: a wrong key" (← refusedW (backup.restoredBundle (← randomKey)))
   let json ← jsonOf backup
   let zeros := Base64.encode (ByteArray.mk (Array.replicate 40 0))
@@ -112,15 +90,15 @@ def appContextIsEncryptedAndUpdatesWithoutReadingThePhrase : TM Unit := do
   let original ← walletBundle .signet 7
   let key ← randomKey
   let metadata := "private contact and invoice label".toUTF8
-  let first ← wm "create" (CloudWalletBackup.create original key (appState := some metadata))
-  check "app data: not in the clear" (!contains (String.fromUTF8! (← wm "encode" first.encoded)) "invoice label")
-  check "app data: restored" ((← wm "app state" (first.restoredAppState key)) == some metadata)
+  let first ← need "create" (CloudWalletBackup.create original key (appState := some metadata))
+  check "app data: not in the clear" (!contains (String.fromUTF8! (← need "encode" first.encoded)) "invoice label")
+  check "app data: restored" ((← need "app state" (first.restoredAppState key)) == some metadata)
   let publicBundle := { original with mnemonic := none }
   let edited := "edited local notes".toUTF8
-  let second ← wm "update" (first.updating publicBundle key (appState := some edited))
+  let second ← need "update" (first.updating publicBundle key (appState := some edited))
   check "app data: the phrase box is kept" (second.sealedPhrase == first.sealedPhrase)
-  check "app data: replaced" ((← wm "app state" (second.restoredAppState key)) == some edited)
-  check "app data: the bundle is unchanged" ((← wm "restore" (second.restoredBundle key)) == original)
+  check "app data: replaced" ((← need "app state" (second.restoredAppState key)) == some edited)
+  check "app data: the bundle is unchanged" ((← need "restore" (second.restoredBundle key)) == original)
   check "app data: past 10 MiB is refused"
     (← refusedW (first.updating publicBundle key
       (appState := some (ByteArray.mk (Array.replicate (CloudWalletBackup.maximumAppStateBytes + 1) 0)))))
@@ -142,13 +120,13 @@ def legacyBackupRestoresAndUpgradesWithoutLosingItsKey : TM Unit := do
   let key ← randomKey
   -- Date(timeIntervalSince1970: 1_700_000_000)
   let legacy ← legacyBackup original key (← UUIDText.random) (1_700_000_000 - 978_307_200)
-  let loaded ← wm "decode" (CloudWalletBackup.decode (← wm "encode" legacy.encoded))
-  check "legacy: restores" ((← wm "restore" (loaded.restoredBundle key)) == original)
-  check "legacy: has no app data" ((← wm "app state" (loaded.restoredAppState key)) == none)
-  let upgraded ← wm "upgrade" (loaded.updating { original with mnemonic := none } key (appState := some "notes".toUTF8))
+  let loaded ← need "decode" (CloudWalletBackup.decode (← need "encode" legacy.encoded))
+  check "legacy: restores" ((← need "restore" (loaded.restoredBundle key)) == original)
+  check "legacy: has no app data" ((← need "app state" (loaded.restoredAppState key)) == none)
+  let upgraded ← need "upgrade" (loaded.updating { original with mnemonic := none } key (appState := some "notes".toUTF8))
   check "legacy: upgrades to version 2 with its phrase box" (upgraded.version == 2 && upgraded.sealedPhrase == legacy.sealedPhrase)
-  check "legacy: the upgrade restores" ((← wm "restore" (upgraded.restoredBundle key)) == original &&
-    (← wm "app state" (upgraded.restoredAppState key)) == some "notes".toUTF8)
+  check "legacy: the upgrade restores" ((← need "restore" (upgraded.restoredBundle key)) == original &&
+    (← need "app state" (upgraded.restoredAppState key)) == some "notes".toUTF8)
   let downgraded := bytesOfJson ((← jsonOf upgraded).setObjVal! "version" (1 : Nat))
   check "legacy: a version 2 box called version 1 does not restore"
     (← refusedW (do (← CloudWalletBackup.decode downgraded).restoredBundle key))
@@ -156,7 +134,7 @@ def legacyBackupRestoresAndUpgradesWithoutLosingItsKey : TM Unit := do
 def mismatchedWalletAndMissingPhraseAreRefused : TM Unit := do
   let original ← walletBundle .signet 7
   let key ← randomKey
-  let backup ← wm "create" (CloudWalletBackup.create original key)
+  let backup ← need "create" (CloudWalletBackup.create original key)
   let other := { original with descriptor := some "different wallet" }
   check "mismatch: another wallet does not update it" (← refusedW (backup.updating other key))
   check "mismatch: no words, no backup" (← refusedW (CloudWalletBackup.create { other with mnemonic := none } key))
@@ -168,17 +146,17 @@ def mismatchedWalletAndMissingPhraseAreRefused : TM Unit := do
 def cloudBackupRestores : TM Unit := do
   let bundle ← walletBundle .signet 9
   let key ← randomKey
-  let first ← wm "enable" (CloudWalletBackup.create bundle key (appState := some "before".toUTF8))
+  let first ← need "enable" (CloudWalletBackup.create bundle key (appState := some "before".toUTF8))
   let watchOnly := { bundle with mnemonic := none }
   let before : CloudBackupContents := { bundle := watchOnly, appState := some "before".toUTF8 }
   let after : CloudBackupContents := { bundle := watchOnly, appState := some "after".toUTF8 }
   check "contents: only changing the app data changes the digest" (before.digest != after.digest)
   check "contents: the words are not part of the digest"
     (({ before with bundle := bundle } : CloudBackupContents).digest == before.digest)
-  let second ← wm "update" (first.updating watchOnly key (appState := after.appState))
+  let second ← need "update" (first.updating watchOnly key (appState := after.appState))
   check "contents: the app data and the whole bundle restore"
-    ((← wm "app state" (second.restoredAppState key)) == some "after".toUTF8 &&
-     (← wm "restore" (second.restoredBundle key)) == bundle)
+    ((← need "app state" (second.restoredAppState key)) == some "after".toUTF8 &&
+     (← need "restore" (second.restoredBundle key)) == bundle)
 
 /-! ## CloudAppStateTests -/
 
@@ -208,22 +186,22 @@ def peopleStore (dir : System.FilePath) : TM PeopleStore := do
 
 def cloudContextRoundTrips : TM Unit := do
   let f ← fixture
-  let restored ← match ← rm "decode" (CloudAppState.decode (some f.state.encoded) f.bundle) with
+  let restored ← match ← need "decode" (CloudAppState.decode (some f.state.encoded) f.bundle) with
     | some r => pure r | none => throw "no context"
   check "context: round trips" (restored == f.state)
   let vault := StoreKeyVault.inMemory (← IO.mkRef {})
   let (people, _) ← PeopleStore.configure vault (some (f.dir / "people.json")) .mainnet
-  let plan ← rm "plan" (people.planRestore restored.people)
-  let people ← rm "restore" (people.restore vault writeAtomically plan)
-  check "context: the address book restores" ((← rm "backup" people.backup) == f.state.people)
+  let plan ← need "plan" (people.planRestore restored.people)
+  let people ← need "restore" (people.restore vault writeAtomically plan)
+  check "context: the address book restores" ((← need "backup" people.backup) == f.state.people)
   let labels ← LabelStore.open (some (f.dir / "labels.json")) "restored" .mainnet
-  let labels ← rm "labels restore" (labels.restore writeAtomically restored.receiveLabels)
+  let labels ← need "labels restore" (labels.restore writeAtomically restored.receiveLabels)
   let sorted (xs : Array (String × String)) := (xs.toList.mergeSort fun a b => !(b.1 < a.1)).toArray
-  check "context: the receive notes restore" (sorted (← rm "labels backup" labels.backup) == sorted f.state.receiveLabels)
+  check "context: the receive notes restore" (sorted (← need "labels backup" labels.backup) == sorted f.state.receiveLabels)
   let reopened ← LabelStore.open (some (f.dir / "labels.json")) "restored" .mainnet
-  check "context: the receive notes are on disk" (sorted (← rm "reopened" reopened.backup) == sorted f.state.receiveLabels)
+  check "context: the receive notes are on disk" (sorted (← need "reopened" reopened.backup) == sorted f.state.receiveLabels)
   check "context: the manual export stays without the address book" (!contains f.bundle.serialized "Saved friend")
-  check "context: older backups have none" ((← rm "none" (CloudAppState.decode none f.bundle)).isNone)
+  check "context: older backups have none" ((← need "none" (CloudAppState.decode none f.bundle)).isNone)
 
 def existingContactsAndNewerPaymentCounterSurviveRestore : TM Unit := do
   let f ← fixture
@@ -232,8 +210,8 @@ def existingContactsAndNewerPaymentCounterSurviveRestore : TM Unit := do
   let p := f.state.people.people[0]!
   let mine : PeopleStore.Backup :=
     { people := #[{ p with id := ← UUIDText.random, name := "Current local name", nextPaymentIndex := 24 }], senderByTxid := #[] }
-  let store ← rm "restore local" (store.restore vault writeAtomically mine)
-  let merged ← rm "plan" (store.planRestore f.state.people)
+  let store ← need "restore local" (store.restore vault writeAtomically mine)
+  let merged ← need "plan" (store.planRestore f.state.people)
   check "merge: one person, by key" (merged.people.size == 1)
   check "merge: the local name stays" (merged.people[0]!.name == "Current local name")
   check "merge: the newer counter stays" (merged.people[0]!.nextPaymentIndex == 24)
@@ -248,11 +226,11 @@ def wrongNetworkOrMalformedLabelsAreRejectedBeforeStoreChanges : TM Unit := do
   check "context: a malformed note is refused" (← refusedR (CloudAppState.decode (some (bytesOfJson badLabels)) f.bundle))
   let vault := StoreKeyVault.inMemory (← IO.mkRef {})
   let (store, _) ← PeopleStore.configure vault (some (f.dir / "people.json")) .mainnet
-  let store ← rm "restore" (store.restore vault writeAtomically f.state.people)
+  let store ← need "restore" (store.restore vault writeAtomically f.state.people)
   let invalid := { f.state.people with
     senderByTxid := f.state.people.senderByTxid.push (String.join (List.replicate 32 "02"), "unknown person") }
   check "context: a dangling sender name fails validation" (← refusedR (store.planRestore invalid))
-  check "context: the store is unchanged" ((← rm "backup" store.backup) == f.state.people)
+  check "context: the store is unchanged" ((← need "backup" store.backup) == f.state.people)
 
 /-! ## Swift's own output (`Vectors/cloud-backup.json`) -/
 
@@ -263,16 +241,16 @@ def swiftVectors (writeDir : Option String) : TM Unit := do
   let bundle ← match ImportBundle.decode (← str "bundle") with | .ok b => pure b | .error e => throw e.name
   let key := ofHex! (← str "key")
   let appState := ofHex! (← str "appState")
-  let v2 ← wm "swift v2" (CloudWalletBackup.decode (← str "v2").toUTF8)
-  check "swift v2: restores the bundle" ((← wm "restore" (v2.restoredBundle key)) == bundle)
-  check "swift v2: restores the app data" ((← wm "app state" (v2.restoredAppState key)) == some appState)
+  let v2 ← need "swift v2" (CloudWalletBackup.decode (← str "v2").toUTF8)
+  check "swift v2: restores the bundle" ((← need "restore" (v2.restoredBundle key)) == bundle)
+  check "swift v2: restores the app data" ((← need "app state" (v2.restoredAppState key)) == some appState)
   check "swift v2: savedAt and the id read back" (v2.savedAt == 783_000_000.123456 && (UUIDText.canonical? v2.id) == some v2.id)
-  let plain ← wm "swift v2 plain" (CloudWalletBackup.decode (← str "v2NoAppState").toUTF8)
-  check "swift v2 without app data" ((← wm "restore" (plain.restoredBundle key)) == bundle &&
-    (← wm "app state" (plain.restoredAppState key)).isNone)
-  let v1 ← wm "swift v1" (CloudWalletBackup.decode (← str "v1").toUTF8)
-  check "swift v1: restores" (v1.version == 1 && (← wm "restore" (v1.restoredBundle key)) == bundle &&
-    (← wm "app state" (v1.restoredAppState key)).isNone)
+  let plain ← need "swift v2 plain" (CloudWalletBackup.decode (← str "v2NoAppState").toUTF8)
+  check "swift v2 without app data" ((← need "restore" (plain.restoredBundle key)) == bundle &&
+    (← need "app state" (plain.restoredAppState key)).isNone)
+  let v1 ← need "swift v1" (CloudWalletBackup.decode (← str "v1").toUTF8)
+  check "swift v1: restores" (v1.version == 1 && (← need "restore" (v1.restoredBundle key)) == bundle &&
+    (← need "app state" (v1.restoredAppState key)).isNone)
   let dates ← match j.getObjValAs? (Array Float) "referenceDates" with | .ok d => pure d | .error e => throw e
   let purposes ← match j.getObjValAs? (Array String) "walletPurposes" with | .ok d => pure d | .error e => throw e
   for (d, p) in dates.zip purposes do
@@ -285,18 +263,10 @@ def swiftVectors (writeDir : Option String) : TM Unit := do
     (SwiftJSON.write ({ withApp with bundle := { bundle with mnemonic := none } }).toJV == (← str "contentsJSON"))
   -- A Lean-made backup of the same bundle for Swift to open.
   if let some dir := writeDir then
-    let mine ← wm "create" (CloudWalletBackup.create bundle key (appState := some appState))
-    IO.FS.writeBinFile (System.FilePath.mk dir / "lean-backup.json") (← wm "encode" mine.encoded)
+    let mine ← need "create" (CloudWalletBackup.create bundle key (appState := some appState))
+    IO.FS.writeBinFile (System.FilePath.mk dir / "lean-backup.json") (← need "encode" mine.encoded)
     IO.FS.writeFile (System.FilePath.mk dir / "lean-backup.key") (hex key)
     IO.println s!"  wrote {dir}/lean-backup.json"
-
-def waitUntil (ms : Nat) (cond : IO Bool) : IO Bool := do
-  let deadline := (← IO.monoMsNow) + ms
-  repeat
-    if ← cond then return true
-    if (← IO.monoMsNow) ≥ deadline then return false
-    IO.sleep 10
-  return false
 
 /-! ## CloudBackupTests: the controller (memory store and keys for CloudKit and iCloud Keychain) -/
 
@@ -311,9 +281,9 @@ def ctlFixture : TM CtlFixture := do
   let cloud ← MemoryCloud.new
   let controller ← CloudBackupController.new cloud.store (← memoryCloudKeys) (scheduleDelayMs := 50)
   let dir ← IO.FS.createTempDir
-  let w ← wm "create" (Wallet.create .signet (← newKeys) none (some (ByteArray.mk (Array.replicate 16 9))) 100)
+  let w ← need "create" (Wallet.create .signet (← newKeys) none (some (ByteArray.mk (Array.replicate 16 9))) 100)
   controller.configure (some dir) (some "test-wallet")
-  return { controller, cloud, bundle := ← wm "export" (w.exportBundle (includeMnemonic := true)), dir }
+  return { controller, cloud, bundle := ← need "export" (w.exportBundle (includeMnemonic := true)), dir }
 
 def failsWith {α} (x : IO α) (text : String) : IO Bool := do
   match ← x.toBaseIO with
@@ -374,7 +344,7 @@ def controllerTests : TM Unit := do
   let gate ← IO.Promise.new
   f.cloud.hold.set (some gate)
   let enable ← IO.asTask (f.controller.enable f.bundle (walletID := "test-wallet"))
-  discard <| waitUntil 2000 f.cloud.holding.get
+  discard <| waitUntil 2000 (every := 10) f.cloud.holding.get
   f.controller.configure (some f.dir) (some "another-wallet")
   gate.resolve ()
   check "a late acknowledgement is cancelled" (match ← IO.wait enable with | .error e => toString e == cancelledText | .ok _ => false)
@@ -450,7 +420,7 @@ def controllerTests : TM Unit := do
   f.controller.prepare { bundle := f.bundle } "test-wallet"
   f.cloud.failing.set true
   f.controller.schedule (pure { bundle := f.bundle })
-  discard <| waitUntil 8000 do return (← f.controller.get).message.isSome
+  discard <| waitUntil 8000 (every := 10) do return (← f.controller.get).message.isSome
   let st ← f.controller.get
   check "a scheduled failure says so" st.message.isSome
   check "the automatic preference stays" (st.automaticEnabled && st.statusTitle == "Not backed up")
@@ -512,7 +482,7 @@ def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO
 
 /-- Boot with a wallet already on disk, scene active. -/
 def CloudPhone.bootExisting (p : CloudPhone) : TM Unit := do
-  discard <| wm "create" (Wallet.create .signet p.keys (some (System.FilePath.mk p.dir / "wallet.json")) (some (ByteArray.mk (Array.replicate 16 4))))
+  discard <| need "create" (Wallet.create .signet p.keys (some (System.FilePath.mk p.dir / "wallet.json")) (some (ByteArray.mk (Array.replicate 16 4))))
   discard <| p.backend.openWallet .signet p.dir
 
 def CloudPhone.activate (p : CloudPhone) : IO Unit := do
@@ -525,7 +495,7 @@ def automaticCloudTests (root : System.FilePath) : TM Unit := do
   let p ← cloudPhone root "declined" (← newKeys) false
   p.bootExisting
   p.activate
-  discard <| waitUntil 3000 do return (← p.app.controller.get).message.isSome
+  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).message.isSome
   check "declined: one authentication prompt" ((← p.authAttempts.get) == 1)
   check "declined: not backed up" ((← p.backend.cloudStatus).statusTitle == "Not backed up")
   p.backend.cloudTick
@@ -539,7 +509,7 @@ def automaticCloudTests (root : System.FilePath) : TM Unit := do
   p.cloud.accountUnavailable.set true
   p.bootExisting
   p.activate
-  discard <| waitUntil 3000 do return (← p.app.controller.get).message.isSome
+  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).message.isSome
   let st ← p.backend.cloudStatus
   check "unavailable iCloud: no authentication prompt" ((← p.authAttempts.get) == 0)
   check "unavailable iCloud: says so, not backed up, still automatic"
@@ -588,7 +558,7 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
   discard <| a.backend.openWallet .signet a.dir
   a.activate
   let id ← a.backend.createWallet .signet a.dir
-  let bob ← wm "bob" (Wallet.create .signet (← newKeys) none (some (ByteArray.mk (Array.replicate 16 0xB0))))
+  let bob ← need "bob" (Wallet.create .signet (← newKeys) none (some (ByteArray.mk (Array.replicate 16 0xB0))))
   let card ← match ← (RecordsReal.ownPersonCard bob "Bob").run with
     | .ok c => pure c.serialized | .error _ => throw "card"
   discard <| a.backend.addPerson "Bob" (some card) none none none
@@ -792,7 +762,7 @@ def scopedPreparationTests (root : System.FilePath) : TM Unit := do
       (whileAuthenticating := do prompted.resolve (); discard <| IO.wait answer.result?)
     p.bootExisting
     p.activate
-    let asked ← waitUntil 5000 prompted.isResolved
+    let asked ← waitUntil 5000 (every := 10) prompted.isResolved
     let before ← loads.get
     change p
     answer.resolve ()
@@ -808,7 +778,7 @@ def scopedPreparationTests (root : System.FilePath) : TM Unit := do
     p.backend.cloudScene false
     p.backend.stopNetworking
 
-def main (args : List String) : IO UInt32 := do
+def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
   let writeDir := match args with | "--write" :: d :: _ => some d | _ => none
   runTest "roundTripRestoresSigningAndAddressCounters" roundTripRestoresSigningAndAddressCounters
   runTest "automaticUpdateKeepsTheSealedKeyAndNewHistoryFrontier" automaticUpdateKeepsTheSealedKeyAndNewHistoryFrontier
@@ -830,6 +800,3 @@ def main (args : List String) : IO UInt32 := do
   runTest "scopedPreparation" (scopedPreparationTests root)
   runTest "restoreFromICloud" (restoreFromICloud root)
   try IO.FS.removeDirAll root catch _ => pure ()
-  let f ← failures.get
-  IO.println s!"cloud-backup-test: {← passed.get} passed, {f.size} failed"
-  return if f.isEmpty then 0 else 1

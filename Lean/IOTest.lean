@@ -1,5 +1,7 @@
 import Winnow.IO
-open Winnow Winnow.Net Winnow.IO Lean
+import TestKit.Check
+import TestKit.Regtest
+open Winnow Winnow.Net Winnow.IO Lean TestKit TestKit.Regtest
 
 /-! `io-test`: integration tests of the I/O area against a disposable regtest bitcoind.
 
@@ -15,29 +17,6 @@ census catalog (the list each build ships). The node is killed by PID at the end
 
 Usage: `io-test [--swift <oracle-io binary>]` (the binary compares Winnow's Swift side on the same node). -/
 
-/-- A Bitcoin Core binary: `$WINNOW_BITCOIND` / `$WINNOW_BITCOIN_CLI`, else Homebrew's, else the PATH. -/
-def findTool (env name : String) : IO String := do
-  if let some path := (← IO.getEnv env) then return path
-  for dir in ["/opt/homebrew/bin", "/usr/local/bin"] do
-    if ← System.FilePath.pathExists s!"{dir}/{name}" then return s!"{dir}/{name}"
-  return name
-
-initialize bitcoind : String ← findTool "WINNOW_BITCOIND" "bitcoind"
-initialize bitcoinCli : String ← findTool "WINNOW_BITCOIN_CLI" "bitcoin-cli"
-
-initialize failures : IO.Ref (Array String) ← IO.mkRef #[]
-initialize passes : IO.Ref Nat ← IO.mkRef 0
-
-def say (s : String) : IO Unit := do IO.println s; (← IO.getStdout).flush
-
-def check (name : String) (cond : Bool) (detail : String := "") : IO Unit := do
-  if cond then
-    passes.modify (· + 1)
-    say s!"  ok   {name}{if detail.isEmpty then "" else " — " ++ detail}"
-  else
-    failures.modify (·.push name)
-    say s!"  FAIL {name}{if detail.isEmpty then "" else " — " ++ detail}"
-
 def runNet {α} (what : String) (x : NetM α) : IO α := do
   match ← x.attempt with
   | .ok a => return a
@@ -45,96 +24,9 @@ def runNet {α} (what : String) (x : NetM α) : IO α := do
 
 /-! ## The node -/
 
-structure Node where
-  datadir : String
-  p2p : UInt16
-  rpc : UInt16
-  pid : UInt32
-
-def Node.cli (n : Node) (args : Array String) : IO String := do
-  let out ← IO.Process.output { cmd := bitcoinCli, args := #["-regtest", s!"-datadir={n.datadir}", s!"-rpcport={n.rpc}"] ++ args }
-  if out.exitCode != 0 then throw (IO.userError s!"bitcoin-cli {args}: {out.stderr.trimAscii}")
-  return out.stdout.trimAscii.toString
-
-def Node.wallet (n : Node) (args : Array String) : IO String := n.cli (#["-rpcwallet=w"] ++ args)
-
-def Node.json (n : Node) (args : Array String) : IO Json := do
-  match Json.parse (← n.cli args) with
-  | .ok j => return j
-  | .error e => throw (IO.userError s!"json {args}: {e}")
-
-def Node.height (n : Node) : IO Nat := do return (← n.cli #["getblockcount"]).toNat!
-def Node.mine (n : Node) (count : Nat) (addr : String) : IO Unit := do
-  let mut left := count
-  while left > 0 do
-    let k := min left 500
-    discard <| n.cli #["generatetoaddress", toString k, addr]
-    left := left - k
-
-/-- `count` blocks paying an anyone-can-spend script, so the node's wallet records none of them. -/
-def Node.mineElsewhere (n : Node) (count : Nat) : IO Unit := do
-  let some d := ((← n.json #["getdescriptorinfo", "raw(51)"]).getObjValAs? String "descriptor").toOption
-    | throw (IO.userError "getdescriptorinfo raw(51)")
-  let mut left := count
-  while left > 0 do
-    let k := min left 500
-    discard <| n.cli #["generatetodescriptor", toString k, d]
-    left := left - k
-
-def Node.endpoint (n : Node) : PeerEndpoint := { host := "127.0.0.1", port := n.p2p }
-
-def killPid (pid : UInt32) (signal : String := "-TERM") : IO Unit := do
-  discard <| IO.Process.output { cmd := "kill", args := #[signal, toString pid] }
-
-def startNode (dir : String) : IO Node := do
-  for attempt in [0:5] do
-    let r ← randomU64
-    let p2p := (30000 + r.toNat % 25000).toUInt16
-    let rpc := p2p + 1
-    let datadir := s!"{dir}/node{attempt}"
-    IO.FS.createDirAll datadir
-    let child ← IO.Process.spawn {
-      cmd := bitcoind
-      args := #["-regtest", s!"-datadir={datadir}", s!"-port={p2p}", s!"-rpcport={rpc}", "-bind=127.0.0.1",
-        "-listen=1", "-server=1", "-blockfilterindex=1", "-peerblockfilters=1", "-fallbackfee=0.0002",
-        "-printtoconsole=0", "-dnsseed=0", "-discover=0", "-listenonion=0", "-whitelist=noban@127.0.0.1",
-        "-keypool=1", "-unsafesqlitesync=1"]
-      stdout := .null, stderr := .null, stdin := .null }
-    let n : Node := { datadir, p2p, rpc, pid := child.pid }
-    let mut ready := false
-    for _ in [0:100] do
-      IO.sleep 200
-      if (← child.tryWait).isSome then break
-      match ← (n.cli #["getblockchaininfo"]).toBaseIO with
-      | .ok _ => ready := true; break
-      | .error _ => pure ()
-    if ready then return n
-    killPid child.pid "-KILL"
-  throw (IO.userError "bitcoind did not start")
-
-/-- Waits until the block-filter index has caught up with the tip. -/
-def Node.waitFilterIndex (n : Node) : IO Unit := do
-  for _ in [0:300] do
-    let tip ← n.height
-    let info ← n.json #["getindexinfo"]
-    match info.getObjVal? "basic block filter index" with
-    | .ok idx =>
-      let synced := (idx.getObjValAs? Bool "synced").toOption.getD false
-      let best := (idx.getObjValAs? Nat "best_block_height").toOption.getD 0
-      if synced && best == tip then return
-    | .error _ => pure ()
-    IO.sleep 100
-  throw (IO.userError "filter index did not catch up")
+def TestKit.Regtest.Node.endpoint (n : Node) : PeerEndpoint := { host := "127.0.0.1", port := n.p2p }
 
 def jsonStr (j : Json) (k : String) : String := (j.getObjValAs? String k).toOption.getD ""
-
-/-- Waits for a condition, polling. -/
-def waitUntil (ms : Nat) (cond : IO Bool) : IO Bool := do
-  let deadline := (← IO.monoMsNow) + ms
-  while (← IO.monoMsNow) < deadline do
-    if ← cond then return true
-    IO.sleep 200
-  cond
 
 /-! ## Offline checks -/
 
@@ -1054,39 +946,17 @@ def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
       check "swift reads Lean's peers.json" ((j.getObjValAs? (Array String) "peers").toOption ==
         some #[s!"{n.endpoint.description}/persisted"])
     | .error e => check "swift read output" false e
-def main (args : List String) : IO UInt32 := do
+def main (args : List String) : IO UInt32 := runMain "io-test" (progress := true) do
   let swift := match args with | "--swift" :: b :: _ => some b | _ => none
   let tmp ← IO.FS.createTempDir
   let dir := tmp.toString
   say s!"io-test: work dir {dir}"
-  let node ← (startNode dir).toBaseIO
-  let n ← match node with
-    | .ok n => pure n
-    | .error e => say s!"FAIL could not start bitcoind: {e}"; return 1
-  -- A watchdog: never leave the node behind.
-  spawn do
-    IO.sleep 900_000
-    say "FAIL watchdog: the test ran for 15 minutes"
-    killPid n.pid "-KILL"
-    IO.Process.exit 2
   try
-    offlineChecks dir
-    fakeChecks dir
-    routedHTTPChecks dir
-    nodeChecks dir n swift
-    gatewayChecks n
-  catch e =>
-    failures.modify (·.push s!"exception: {e}")
-    say s!"  FAIL exception: {e}"
+    withNode dir fun n => do
+      offlineChecks dir
+      fakeChecks dir
+      routedHTTPChecks dir
+      nodeChecks dir n swift
+      gatewayChecks n
   finally
-    discard <| (n.cli #["stop"]).toBaseIO
-    -- gone, or a zombie: this process never reaps it, so `kill -0` would answer until the 10 s ran out
-    discard <| waitUntil 10_000 (do
-      let r ← IO.Process.output { cmd := "ps", args := #["-o", "stat=", "-p", toString n.pid] }
-      return r.exitCode != 0 || r.stdout.trimAscii.toString.startsWith "Z")
-    killPid n.pid "-KILL"
     try IO.FS.removeDirAll tmp catch _ => pure ()
-  let fs ← failures.get
-  say s!"io-test: {← passes.get} passed, {fs.size} failed{if fs.isEmpty then "" else ": " ++ ", ".intercalate fs.toList}"
-  -- Exit explicitly: the watchdog and the peers' timer chains would otherwise keep the process alive.
-  IO.Process.exit (if fs.isEmpty then 0 else 1)

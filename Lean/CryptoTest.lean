@@ -1,5 +1,6 @@
 import Winnow
 import Lean.Data.Json
+import TestKit.Check
 
 /-! `crypto-test`: AES (FIPS 197) and AES-GCM (SP 800-38D) against published and CryptoKit vectors, and
 BIP340 signing against BIP340's own vectors.
@@ -26,16 +27,7 @@ BIP340 signing against BIP340's own vectors.
 
 Run from `Lean/`. Exits 1 on any failure. -/
 
-open Winnow Winnow.Keys Lean
-
-initialize passed : IO.Ref Nat ← IO.mkRef 0
-initialize failures : IO.Ref (Array String) ← IO.mkRef #[]
-
-def check (name : String) (ok : Bool) (detail : String := "") : IO Unit := do
-  if ok then passed.modify (· + 1)
-  else
-    failures.modify (·.push name)
-    IO.println s!"FAIL {name}{if detail.isEmpty then "" else ": " ++ detail}"
+open Winnow Winnow.Keys Lean TestKit
 
 def field (j : Json) (k : String) : String := (j.getObjValAs? String k).toOption.getD ""
 def bytesOf (j : Json) (k : String) : ByteArray := ofHex! (field j k)
@@ -247,13 +239,10 @@ def fastCurve : IO Unit := do
 
 end FastCurve
 
-def main : IO UInt32 := do
+def main : IO UInt32 := runMain "crypto-test" do
   fips197
   wycheproof
   cryptokit
   bip340
   fastCurve
   roundTrips
-  let f ← failures.get
-  IO.println s!"crypto-test: {← passed.get} passed, {f.size} failed"
-  return if f.isEmpty then 0 else 1
