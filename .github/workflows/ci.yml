@@ -53,9 +53,9 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.nightly.outputs.tested != 'true'
       && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@abb163671c0d8fbb55150d37f0e7dc10bb21ab7a
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@ceb003c5dbb8593113c460ea018c37bb222280bb
     with:
-      leannative: abb163671c0d8fbb55150d37f0e7dc10bb21ab7a
+      leannative: ceb003c5dbb8593113c460ea018c37bb222280bb
       # GitHub's hosted macOS runner (macos-26: Xcode 26, iOS 26 simulators), the reusable workflow's default
       runs-on: macos-26
       lean-packages: Lean LeanApp
