@@ -15,12 +15,13 @@ Every pull request that is ready for review and changes more than the docs (`*.m
 and so does main: on a push that changes more than the docs, nightly when its
 commit has not passed yet, and by hand. Every run is the same full run, and
 `release.yml` looks for one on the tag's tree that is not a pull request's.
-Two jobs start at once, and each builds the Lean from the cache.
+Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
 | `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6); and the five journeys headless against the app itself (LeanNative's `wire-journey`). |
-| `app` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check; all five UI journeys; the `journey-media` artifact. |
+| `app` | The same build and import; the Debug simulator build, checked for Swift; all five UI journeys; the `journey-media` artifact. |
+| `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
 
 The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
 `test-mode-env`) launches both simulator builds with test mode's environment:

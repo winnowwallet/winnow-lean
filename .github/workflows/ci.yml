@@ -1,13 +1,14 @@
 name: CI
 # The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
-# two jobs on GitHub's own macOS runners (free for a public repository) that start at once, `lean` (the Lean
-# built, every proof checked, then every test below at the same time, the regtest node's among them) and `app`
-# (the iOS builds and the UI journeys). It runs on pull
+# three jobs on GitHub's own macOS runners (free for a public repository) that start at once, `lean` (the Lean
+# built, every proof checked, then every test below at the same time, the regtest node's among them), `app`
+# (the Debug simulator build and the UI journeys) and `release` (the Release builds and the test-mode check).
+# It runs on pull
 # requests that are ready for review and change more than the docs, on a push to main that does, nightly on main
 # when its commit has not passed yet, and by hand. Every run is the same full run: every test, all five journeys,
 # the Release builds and the website's media. release.yml looks for one on the tag's tree that is not a pull
 # request's instead of testing again.
-# The LeanNative commit below is the one LeanApp/lake-manifest.json pins; both jobs fail if they differ. Actions
+# The LeanNative commit below is the one LeanApp/lake-manifest.json pins; every job fails if they differ. Actions
 # does not follow repository redirects for reusable workflows, so the owner/repo here is the framework's real home.
 on:
   pull_request:
@@ -52,9 +53,9 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.nightly.outputs.tested != 'true'
       && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@97a6f7c6f5f76e6e01fcd24cec48d5caffb1e79a
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@abb163671c0d8fbb55150d37f0e7dc10bb21ab7a
     with:
-      leannative: 97a6f7c6f5f76e6e01fcd24cec48d5caffb1e79a
+      leannative: abb163671c0d8fbb55150d37f0e7dc10bb21ab7a
       # GitHub's hosted macOS runner (macos-26: Xcode 26, iOS 26 simulators), the reusable workflow's default
       runs-on: macos-26
       lean-packages: Lean LeanApp

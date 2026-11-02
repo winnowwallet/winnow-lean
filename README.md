@@ -147,14 +147,15 @@ named.
 
 `.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request that is ready for
 review and changes more than the docs, on a push to main that does, nightly on main when its commit has not passed
-yet, and by hand, in two jobs on GitHub's own macOS runners (free for a public repository; a fork's pull request
+yet, and by hand, in three jobs on GitHub's own macOS runners (free for a public repository; a fork's pull request
 gets them too) that start at once and each build the Lean from the cache; every long step prints its progress as it
 goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
 | `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases); and the five journeys headless (LeanNative's `wire-journey`) |
-| `app` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`); all five UI journeys (`scripts/ui-fixture` as the hooks); the website's media (LeanNative's `journey-media`) |
+| `app` | the same build and census import; Debug for the simulator, checked for Swift; all five UI journeys (`scripts/ui-fixture` as the hooks); the website's media (LeanNative's `journey-media`) |
+| `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |
 
 `.github/workflows/release.yml` calls LeanNative's release workflow (`ios-release.yml`, at the pinned commit):
 a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (main's push, nightly or by hand: not a pull
