@@ -19,11 +19,13 @@ Two jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6). |
-| `app` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; `verify-release-no-test-mode`; all five UI journeys; the `journey-media` artifact. |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6); and the five journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `app` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check; all five UI journeys; the `journey-media` artifact. |
 
-`verify-release-no-test-mode` launches both simulator builds with test mode's
-environment: Debug must start the test run, Release must ignore it.
+The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
+`test-mode-env`) launches both simulator builds with test mode's environment:
+Debug must start the test run and journal it, Release must ignore it and boot
+into its ordinary storage.
 
 ## The five journeys
 
@@ -66,22 +68,25 @@ lake build backend-test records-test
 ./.lake/build/bin/records-test
 cd ..
 scripts/build-ios Debug                      # the app for the simulator, from a clean checkout
-scripts/ui-journeys                          # the UI journeys against a regtest fixture
+scripts/journeys                             # the UI journeys against a regtest fixture
 ```
 
-`scripts/ui-journeys` runs the journeys as CI does, on a throwaway simulator
+`scripts/journeys` runs the journeys as CI does, on a throwaway simulator
 unless `UI_SIMULATOR` names one, and keeps the result bundle, a screen
 recording, the screenshots, `journeys.json` (each journey's result and time)
 and the app's test-mode journals in `LeanApp/ios/build/ui-journey`. Name
 journeys to run only those, for example
-`UI_JOURNEYS="createReceiveSendConfirm" scripts/ui-journeys`.
+`scripts/journeys createReceiveSendConfirm`; `scripts/journeys --wire` runs
+them headless against the app itself, in under a minute, into
+`LeanApp/build/wire-journeys`.
 Tests find Bitcoin Core through `WINNOW_BITCOIND` and `WINNOW_BITCOIN_CLI`,
 Homebrew or the PATH; `scripts/ci-regtest` uses the pinned release that
 `scripts/install-bitcoin` downloads.
 
 ## The journey media
 
-After the journeys, `scripts/journey-media` turns the run into the
+After the journeys, LeanNative's `journey-media` (`ci.yml`'s `journey-media`
+input, with the website's names as its options) turns the run into the
 `journey-media` artifact: the screenshots, a browser copy of the recording and
 `journey-provenance.json` (the run, source commit, device, each test's result
 and seconds, and each file's SHA-256).

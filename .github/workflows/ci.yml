@@ -79,8 +79,20 @@ jobs:
         . scripts/ci-regtest io
         . scripts/ci-regtest backend
         . scripts/ci-regtest differential
-        . scripts/wire-journeys
-      release-check: scripts/verify-release-no-test-mode
+      # the journeys headless against the app itself (LeanNative's wire-journeys), one more line of the tests above,
+      # with the simulator run's fixture as its hooks
+      wire-journey: journeys
+      # the Release build ignores test mode's environment: launched with it, Debug (the control) starts a test-mode
+      # run and journals it, and Release boots into its ordinary storage (LeanNative's test-mode-check)
+      test-mode-env: |
+        WINNOW_E2E=1
+        WINNOW_E2E_RUN=releasecheck
+        WINNOW_E2E_RESET=1
+        WINNOW_E2E_ENTROPY=000102030405060708090a0b0c0d0e0f
+        WINNOW_LEAN_SAMPLE=1
+        WINNOW_LEAN_TRACE=1
+      test-mode-marker: Library/Application Support/BTCSwiftE2E-releasecheck/story-events.jsonl
+      release-marker: Library/Application Support/BTCSwift
       release-builds: true
       ui-name: journey
       # the iPhone on the hosted runner's newest iOS runtime; the website's screenshots are this size
@@ -90,7 +102,10 @@ jobs:
       # the journeys are Lean on the Mac (LeanApp/Journeys.lean), all five with XCTest's real touches
       # (LeanNative's LNDriver, one snapshot per step) on one simulator: a hosted runner has the cores for one
       ui-journey: journeys
-      # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run
-      after-ui: scripts/journey-media
+      # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run:
+      # LeanNative's journey-media, in the layout and names the website reads
+      journey-media: build/journey-media
+      journey-media-args: >-
+        --video videos/wallet-journey.mp4 --journeys LeanApp/Journeys.lean --test-prefix test --field network=regtest
       publish-name: journey-media
       publish-path: build/journey-media/

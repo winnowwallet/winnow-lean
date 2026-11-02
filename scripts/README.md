@@ -8,24 +8,15 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 
 - [build-ios](build-ios) builds the Lean app from a clean checkout with LeanNative's `build-ios`, after the census
   list (`build-ios <Debug|Release> [iossim|ios]`; `PREPARE_ONLY=1` stops before xcodebuild).
-- [verify-release-no-test-mode](verify-release-no-test-mode) launches the Release and Debug simulator builds
-  with test mode's environment: Debug must start the test run, Release must ignore it (CI's `release-check`).
 - [ci-regtest](ci-regtest) runs io-test, backend-test and multisig-differential against a disposable regtest
   bitcoind (CI's `extra` job).
 - [install-bitcoin](install-bitcoin) downloads the pinned Bitcoin Core release (31.1) from bitcoincore.org, checks
   its SHA-256 and prints its bin directory; `ci-regtest` and `ui-fixture` run against it, never a bitcoind
   found on the PATH.
 - [ui-fixture](ui-fixture) starts the UI journeys' regtest node and config, and afterwards collects the app's
-  journals and stops the node (`ui-tests`' hooks); [ui-journeys](ui-journeys) runs the journeys locally as CI does.
-- [wire-journeys](wire-journeys) runs the same journeys against the app itself, headless (LeanNative's
-  `LEANNATIVE_DRIVER=wire`: no simulator, no XCTest; the app as a child of the journeys executable with a fake
-  shell), against the fixture's node: under a minute for all five. CI runs it as a `tests` line of the `lean` job.
-- [journey-media](journey-media) makes the website's media from a journeys run with prepare-journey-media.
-- [prepare-journey-media](prepare-journey-media) turns a UI-journeys output into the website's media
-  (`prepare-journey-media <journey-out> <media-out>`): the screenshots, a browser copy of the recording (ffmpeg,
-  at most 25 MiB) and `journey-provenance.json` (version 2: the run, source, device, each test's result and
-  seconds, each file's SHA-256). CI publishes it as the `journey-media` artifact, which winnowwallet.com fetches;
-  its tests are in [tests](tests) (`python3 -m unittest discover -s scripts/tests`).
+  journals and stops the node: the hooks of LeanNative's `ui-tests` and `wire-journeys`.
+- [journeys](journeys) runs the journeys locally as CI does: in the simulator, or `--wire` headless against the
+  app itself (no simulator, no XCTest: under a minute for all five).
 - [ios-simulator](ios-simulator) prints one available iPhone (default) or iPad on the newest iOS runtime.
 - [signet-fixture](signet-fixture) provisions a disposable custom-signet bitcoind (`up`, `down`, `status`,
   `snapshot DIR`, `destroy`). For a regtest node with a funded wallet, use `LeanApp`'s `backend-test --fixture <dir>`.
