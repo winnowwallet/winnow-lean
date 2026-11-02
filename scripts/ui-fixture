@@ -5,12 +5,12 @@
 #   scripts/ui-fixture start <out>             a fresh regtest node of the pinned Bitcoin Core
 #                                              (scripts/install-bitcoin) with a funded wallet `w` (backend-test
 #                                              --fixture, random ports) and <out>/ui.json, the journeys' config
-#   scripts/ui-fixture stop <out> [simulator]  the app's test-mode journals copied out of the simulator, and
-#                                              the node stopped
+#   scripts/ui-fixture stop <out> [simulator]  the app's test-mode journals copied out of the simulator (or,
+#                                              headless, out of <out>/wire), and the node stopped
 #
 # The journeys (LeanApp/Journeys.lean, on the Mac) find ui.json through WINNOW_UI_CONFIG, which `start` leaves in
 # <out>/test-env (ui-tests passes test-env to them). The node's data directory is <out>/private/fixture, which CI keeps out of the evidence.
-# scripts/ui-journeys runs the whole thing locally.
+# The same hooks serve LeanNative's wire-journeys (the headless run); scripts/journeys runs either locally.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/LeanApp"
@@ -20,7 +20,7 @@ case "$action" in
   start)
     BIN="$("$ROOT/scripts/install-bitcoin")"
     export WINNOW_BITCOIND="$BIN/bitcoind" WINNOW_BITCOIN_CLI="$BIN/bitcoin-cli"
-    # one lake at a time: scripts/wire-journeys and scripts/ui-journeys may start fixtures at once (a lock left
+    # one lake at a time: a headless and a simulator run may start fixtures at once (a lock left
     # by a killed run is given up on after two minutes)
     LOCK="$APP/.lake/ui-fixture.lock"
     for ((i = 0; i < 600; i++)); do mkdir "$LOCK" 2>/dev/null && break; sleep 0.2; done
@@ -29,6 +29,8 @@ case "$action" in
     rmdir "$LOCK" 2>/dev/null || true
     [ "$built" = 0 ] || exit "$built"
     mkdir -p "$OUT/private" "$OUT/screenshots"
+    # headless, the app reads the census list it bundles (CensusCatalog.bundled) beside the journeys executable
+    cp "$ROOT/build/census/peers.json" "$APP/.lake/build/bin/peers.json"
     "$APP/.lake/build/bin/backend-test" --fixture "$OUT/private/fixture" > "$OUT/fixture.log" 2>&1 \
       || { cat "$OUT/fixture.log"; exit 1; }
     tail -1 "$OUT/fixture.log"
@@ -46,7 +48,12 @@ PY
     ;;
   stop)
     UDID="${3:-}"
-    if [ -n "$UDID" ]; then
+    if [ -z "$UDID" ]; then
+      # headless: the app's files are under <out>/wire
+      for j in "$OUT"/wire/Library/Application\ Support/BTCSwiftE2E-*/story-events.jsonl; do
+        [ -f "$j" ] && cp "$j" "$OUT/journal-$(basename "$(dirname "$j")").jsonl"
+      done
+    else
       # the app's bundle id, from the spec LeanNative's build-ios wrote from WinnowApp/Project.lean
       BUNDLE_ID=$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["targets"]["WinnowLean"]["settings"]["base"]["PRODUCT_BUNDLE_IDENTIFIER"])' "$APP/ios/build/project.json")
       # the app's test-mode journals (Application Support/BTCSwiftE2E-<run>/story-events.jsonl)

@@ -96,7 +96,7 @@ lake build backend-test records-test        # Lean toolchain leanprover/lean4:v4
 ./.lake/build/bin/records-test
 cd ..
 scripts/build-ios Debug                      # the app for the simulator, from a clean checkout
-scripts/ui-journeys                          # the UI journeys (Lean) against a regtest fixture
+scripts/journeys                             # the UI journeys (Lean) against a regtest fixture (--wire: headless)
 ```
 
 LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
@@ -131,16 +131,17 @@ what was on screen, and the log shows each step's time:
 - `silentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
   receiver (written from the BIP's receiving side) finds, and the receipt shows its address.
 
-They run two ways. `scripts/wire-journeys` runs them against the app itself, headless: the journeys executable
+They run two ways, both LeanNative's runners with `scripts/ui-fixture` as their hooks. `scripts/journeys --wire`
+(LeanNative's `wire-journeys`) runs them against the app itself, headless: the journeys executable
 runs the app as a child of itself with a fake shell (LeanNative's `LEANNATIVE_DRIVER=wire`: a Keychain in a file,
 paths under the evidence directory, no network, no Bluetooth) and finds each element in the app's view tree, so
 the five take under a minute against the fixture's node, with no simulator; CI runs this in the `lean` job. What
 it does not test is the renderer and real touches, which the simulator run does.
-`scripts/ui-journeys` runs them as CI does in the `app` job: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
+`scripts/journeys` runs them as CI does in the `app` job: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
 with the journeys as `UI_JOURNEY`, and `scripts/ui-fixture` starting the node before and collecting the app's
 test-mode journals after; it keeps the result bundle, a screen recording, the screenshots, `journeys.json`
-(each journey's result and time) and the journals. `UI_JOURNEYS="silentPaymentSend" scripts/ui-journeys` runs
-only the journeys named.
+(each journey's result and time) and the journals. `scripts/journeys silentPaymentSend` runs only the journeys
+named.
 
 ### CI and TestFlight
 
@@ -152,8 +153,8 @@ goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases) |
-| `app` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and `verify-release-no-test-mode`; all five UI journeys (`scripts/ui-fixture` as the hooks); the website's media (`scripts/journey-media`) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases); and the five journeys headless (LeanNative's `wire-journey`) |
+| `app` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`); all five UI journeys (`scripts/ui-fixture` as the hooks); the website's media (LeanNative's `journey-media`) |
 
 `.github/workflows/release.yml` calls LeanNative's release workflow (`ios-release.yml`, at the pinned commit):
 a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (main's push, nightly or by hand: not a pull

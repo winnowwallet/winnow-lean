@@ -10,8 +10,8 @@ Five journeys of the app in the simulator (or headless, against the app itself) 
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
 launches the app in test mode with a fresh random seed, so a reused node never shows an earlier run's coins.
-scripts/ui-journeys runs them in the simulator and scripts/wire-journeys headless; CI runs both. The
-screenshots' names are the website's (scripts/journey-media). -/
+scripts/journeys runs them in the simulator and `scripts/journeys --wire` headless; CI runs both. The
+screenshots' names are the website's (ci.yml's journey-media). -/
 
 namespace WinnowJourneys
 open Lean LeanNative LeanNative.Journey WinnowApp.Ids
@@ -380,6 +380,6 @@ def all : List Journey :=
 
 end WinnowJourneys
 
-/-- The journeys, and the app itself for the headless driver (`LEANNATIVE_DRIVER=wire`: scripts/wire-journeys). -/
+/-- The journeys, and the app itself for the headless driver (`LEANNATIVE_DRIVER=wire`: `scripts/journeys --wire`). -/
 def main (args : List String) : IO UInt32 :=
   LeanNative.Journey.main WinnowJourneys.all args (wire := some (LeanNative.Journey.Wire.app WinnowApp.app))

@@ -55,7 +55,7 @@ def manifest : Manifest where
   iCloudContainers := ["iCloud.com.btcswift.app"]
   info := [("ITSAppUsesNonExemptEncryption", false)]
   -- the UI test target holds only LeanNative's test kit and its journey driver (LNDriver): the journeys are Lean,
-  -- on the Mac (Journeys.lean), run by scripts/ui-journeys (CI: LeanNative's ui-tests with scripts/ui-fixture)
+  -- on the Mac (Journeys.lean), run by scripts/journeys (CI: LeanNative's ui-tests with scripts/ui-fixture)
   -- against a regtest fixture
   uiTests := some { sources := [] }
 

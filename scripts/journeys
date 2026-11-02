@@ -1,0 +1,29 @@
+#!/bin/bash
+# The UI journeys (LeanApp/Journeys.lean) locally, as CI runs them: LeanNative's runners with Winnow's fixture
+# (scripts/ui-fixture: a fresh regtest node, the census list the app bundles) as their hooks.
+#
+#   scripts/journeys [names]          on a throwaway simulator with XCTest's real touches (LeanNative's ui-tests)
+#   scripts/journeys --wire [names]   headless against the app itself (LeanNative's wire-journeys): no simulator,
+#                                     under a minute for all five
+#
+# Names come from Journeys.lean's `all`; none runs every journey. Evidence goes to $UI_OUT (default
+# LeanApp/ios/build/ui-journey, or LeanApp/build/wire-journeys headless): the screenshots, journeys.json and
+# journey.log, the app's test-mode journals and the fixture's log, and in the simulator journey.xcresult,
+# journey.mp4 and xcodebuild.log. ui-tests' variables apply (UI_SIMULATOR, UI_RUNTIME, UI_DEVICE_TYPE); it uses
+# a throwaway simulator unless UI_SIMULATOR names one. CI's simulator, run here:
+#
+#   UI_RUNTIME=com.apple.CoreSimulator.SimRuntime.iOS-26-5 UI_DEVICE_TYPE="iPhone 17 Pro" scripts/journeys
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CI="$ROOT/LeanApp/.lake/packages/leannative/framework/native/ci"
+export APP_DIR="$ROOT/LeanApp" APP_ROOT=WinnowApp SCHEME=WinnowLean
+export UI_BEFORE="$ROOT/scripts/ui-fixture start" UI_AFTER="$ROOT/scripts/ui-fixture stop"
+[ -f "$ROOT/build/census/peers.json" ] || "$ROOT/scripts/import-census"
+if [ "${1:-}" = --wire ]; then
+  shift
+  exec "$CI/wire-journeys" journeys "$@"
+fi
+(cd "$APP_DIR" && lake build journeys >/dev/null)
+export UI_OUT="${UI_OUT:-$APP_DIR/ios/build/ui-journey}" UI_NAME=journey
+export UI_JOURNEY="$APP_DIR/.lake/build/bin/journeys${*:+ $*}"
+exec "$CI/ui-tests"
