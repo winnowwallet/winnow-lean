@@ -25,9 +25,9 @@ concurrency:
 
 jobs:
   release:
-    uses: LeanNative/leannative/.github/workflows/ios-release.yml@aca7d8c7f02599e342683ddf400c88f58fb7dc43
+    uses: LeanNative/leannative/.github/workflows/ios-release.yml@a58c728c64d701fca225c722c6f8a62b997b7855
     with:
-      leannative: aca7d8c7f02599e342683ddf400c88f58fb7dc43
+      leannative: a58c728c64d701fca225c722c6f8a62b997b7855
       lean-packages: Lean LeanApp
       app-dir: LeanApp
       app-root: WinnowApp
