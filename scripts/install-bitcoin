@@ -30,14 +30,15 @@ if ! installed; then
     "https://bitcoincore.org/bin/bitcoin-core-$VERSION/$NAME" --output "$WORK/$NAME"
   verified "$WORK/$NAME" || { echo "Bitcoin Core archive checksum mismatch: expected $ARCHIVE_SHA256" >&2; exit 1; }
   tar -xzf "$WORK/$NAME" -C "$WORK"
-  # a copy without both programs is a leftover from an interrupted install; one with them may be another suite's
-  # finished copy, in use, so it stays
-  { [ -x "$BIN/bitcoind" ] && [ -x "$BIN/bitcoin-cli" ]; } || rm -rf "$ROOT/bitcoin-$VERSION"
-  # rename(2) refuses a directory onto one that exists, where `mv` would move it inside
+  # Nothing here deletes a copy in place: one that is not finished when this looks may be another suite's,
+  # renamed in a moment later and in use by then (a check-then-delete that failed two CI lines at once).
+  # A copy only ever arrives whole, by the rename; rename(2) refuses a directory onto one that exists, where
+  # `mv` would move it inside.
   /usr/bin/python3 -I -c 'import os, sys
 try: os.rename(sys.argv[1], sys.argv[2])
 except OSError: pass' "$WORK/bitcoin-$VERSION" "$ROOT/bitcoin-$VERSION"
   mv -f "$WORK/$NAME" "$ARCHIVE"
 fi
-test -x "$BIN/bitcoind" && test -x "$BIN/bitcoin-cli"
+{ test -x "$BIN/bitcoind" && test -x "$BIN/bitcoin-cli"; } ||
+  { echo "install-bitcoin: $ROOT/bitcoin-$VERSION is there without bitcoind and bitcoin-cli (not made by this script): delete it" >&2; exit 1; }
 printf '%s\n' "$BIN"

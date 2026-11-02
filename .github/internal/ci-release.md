@@ -11,7 +11,9 @@ its limits.
 [ci.yml](../workflows/ci.yml) calls LeanNative's reusable `ios-app` workflow
 ([LeanNative/leannative](https://github.com/LeanNative/leannative), formerly posix4e/elmlean;
 `.github/workflows/ios-app.yml`), pinned to the commit `LeanApp/lake-manifest.json` pins: `lean`, `app` and `release` at once,
-on GitHub's hosted Apple silicon runners (`macos-26`), a fork's pull request included.
+on GitHub's hosted Apple silicon runners (`macos-26`), a fork's pull request included. While the repository
+variable `MACOS_RUNNER` is set, this repository's own branches run on that label instead (a self-hosted Mac, when
+GitHub's are backed up); a fork's pull request never does.
 
 The rest of this file describes the Swift app's CI and is kept for its history.
 

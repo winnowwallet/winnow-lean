@@ -57,8 +57,11 @@ jobs:
     uses: LeanNative/leannative/.github/workflows/ios-app.yml@5afb3ece8412cd74f3cb4a505b2ff209c8c99758
     with:
       leannative: 5afb3ece8412cd74f3cb4a505b2ff209c8c99758
-      # GitHub's hosted macOS runner (macos-26: Xcode 26, iOS 26 simulators), the reusable workflow's default
-      runs-on: macos-26
+      # GitHub's hosted macOS runner (macos-26: Xcode 26, iOS 26 simulators), the reusable workflow's default; or,
+      # when the repository variable MACOS_RUNNER is set, that label (a self-hosted Mac while GitHub's are backed
+      # up: delete the variable before it goes away, or the jobs wait for it). A fork's pull request always runs
+      # on GitHub's: a self-hosted runner never runs code from outside the repository.
+      runs-on: ${{ (github.event.pull_request.head.repo.fork && 'macos-26') || vars.MACOS_RUNNER || 'macos-26' }}
       lean-packages: Lean LeanApp
       build-targets: |
         Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check
