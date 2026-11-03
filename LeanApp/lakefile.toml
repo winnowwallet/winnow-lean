@@ -14,7 +14,7 @@ path = "../Lean"
 [[require]]
 name = "leannative"
 git = "https://github.com/LeanNative/leannative.git"
-rev = "5afb3ece8412cd74f3cb4a505b2ff209c8c99758"
+rev = "59f62db5059597093b8318941e5e6e02ae745704"
 subDir = "framework/lean"
 
 [[lean_lib]]

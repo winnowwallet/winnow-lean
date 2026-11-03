@@ -272,9 +272,11 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       return .snapshot g st p
   | .startNetworking g s => do
       discard <| IO.asTask (b.startNetworking s)
-      -- AppModel's 1 s `phaseTask`: what the sync loop changed reaches the model as a snapshot
+      -- AppModel's 1 s `phaseTask`: what the sync loop changed reaches the model as a snapshot.
+      -- It runs while the scene is active, so it gets its own thread: on Lean's shared pool a task
+      -- queued right behind it can wait forever (LeanNative's `Native.App.perform` says why)
       let token ← watcherToken.modifyGet fun t => (t + 1, t + 1)
-      discard <| IO.asTask do
+      discard <| IO.asTask (prio := .dedicated) do
         let mut last := ""
         let mut lastMultisig : Option MultisigOverview := none
         while (← watcherToken.get) == token do
