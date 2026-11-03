@@ -5,10 +5,11 @@ name: CI
 # (the Debug simulator build and the UI journeys, split across two runners; `media` joins their recordings) and
 # `release` (the Release builds and the test-mode check).
 # It runs on pull
-# requests that are ready for review and change more than the docs, on a push to main that does, nightly on main
-# when its commit has not passed yet, and by hand. Every run is the same full run: every test, all five journeys,
-# the Release builds and the website's media. release.yml looks for one on the tag's tree that is not a pull
-# request's instead of testing again.
+# requests that are ready for review and change more than the docs, on every push to main, and by hand. Every
+# run is the same full run: every test, all five journeys, the Release builds and the website's media.
+# release.yml looks for one on the tag's tree that is not a pull request's instead of testing again: main's
+# commit has one once its push run passes; after a push run that failed, or a force-push (which starts no push
+# run), run this by hand before tagging.
 # The LeanNative commit below is the one LeanApp/lake-manifest.json pins; every job fails if they differ. Actions
 # does not follow repository redirects for reusable workflows, so the owner/repo here is the framework's real home.
 on:
@@ -17,13 +18,9 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+  # every push, docs included, so that main's commit always has a run a tag can use
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-  schedule:
-    - cron: '23 3 * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,29 +28,9 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  # nightly: nothing to run when this commit of main already passed, as it has when its push run succeeded; the
-  # night after a push whose run failed, or that changed only the docs, runs it
-  nightly:
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: read
-    outputs:
-      tested: ${{ steps.check.outputs.tested }}
-    steps:
-      - id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&head_sha=$GITHUB_SHA&status=success&per_page=1" --jq .total_count)
-          echo "successful runs on main at $GITHUB_SHA: $n"
-          if [ "$n" -gt 0 ]; then echo tested=true; else echo tested=false; fi >> "$GITHUB_OUTPUT"
   app:
-    needs: nightly
     # a draft pull request runs nothing until it is ready for review
-    if: >-
-      ${{ !cancelled() && needs.nightly.outputs.tested != 'true'
-      && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     uses: LeanNative/leannative/.github/workflows/ios-app.yml@59f62db5059597093b8318941e5e6e02ae745704
     with:
       leannative: 59f62db5059597093b8318941e5e6e02ae745704

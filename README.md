@@ -146,8 +146,7 @@ named.
 ### CI and TestFlight
 
 `.github/workflows/ci.yml` calls LeanNative's reusable `ios-app` workflow on every pull request that is ready for
-review and changes more than the docs, on a push to main that does, nightly on main when its commit has not passed
-yet, and by hand, in three jobs on GitHub's own macOS runners (free for a public repository; a fork's pull request
+review and changes more than the docs, on every push to main, and by hand, in three jobs on GitHub's own macOS runners (free for a public repository; a fork's pull request
 gets them too) that start at once and each build the Lean from the cache; every long step prints its progress as it
 goes. Every run is the same, full run:
 
@@ -159,7 +158,7 @@ goes. Every run is the same, full run:
 | `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |
 
 `.github/workflows/release.yml` calls LeanNative's release workflow (`ios-release.yml`, at the pinned commit):
-a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (main's push, nightly or by hand: not a pull
+a `vMAJOR.MINOR.PATCH` tag finds a successful full CI run (main's push or one by hand: not a pull
 request's) on the same tree, then archives the app as `com.btcswift.app` (team 2858MX5336, the identity of the
 Swift app it replaces), checks the archive and the exported IPA, uploads it and adds it to TestFlight's internal
 group. Every step is LeanNative's `leannative-release` (Lean), which LeanNative's README describes. It uses the

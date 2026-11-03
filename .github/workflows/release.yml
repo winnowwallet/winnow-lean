@@ -2,7 +2,7 @@ name: Release
 
 # A vMAJOR.MINOR.PATCH tag builds the Lean app as com.btcswift.app (the Swift app it replaces: same bundle
 # identifier and team, meant to keep an installed wallet) and sends it to TestFlight's internal group, once a CI
-# run outside a pull request (a push to main, nightly or by hand) has passed on the same tree: the release finds
+# run outside a pull request (a push to main, or by hand) has passed on the same tree: the release finds
 # that run instead of testing again. It is LeanNative's release workflow (ios-release.yml) at the commit the app
 # pins; the steps are LeanNative's `leannative-release`. A manual run does everything up to the upload (the
 # build, signing, the archive and export with their checks, a read-only App Store Connect call) and publishes
