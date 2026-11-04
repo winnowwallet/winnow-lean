@@ -42,7 +42,7 @@ jobs:
       lean-packages: Lean LeanApp
       build-targets: |
         Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check
-        LeanApp records-test multisig-app-test ledger-transport-test backend-test journeys
+        LeanApp records-test multisig-app-test ledger-transport-test backend-test cloud-backup-test journeys
       app-dir: LeanApp
       app-root: WinnowApp
       scheme: WinnowLean
@@ -58,6 +58,7 @@ jobs:
         LeanApp .lake/build/bin/records-test
         LeanApp .lake/build/bin/multisig-app-test
         LeanApp .lake/build/bin/ledger-transport-test
+        LeanApp .lake/build/bin/cloud-backup-test
         . scripts/ci-regtest io
         . scripts/ci-regtest backend
         . scripts/ci-regtest differential
