@@ -19,7 +19,7 @@ Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6); and the five journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6); and the six journeys headless against the app itself (LeanNative's `wire-journey`). |
 | `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send and the 2-of-3 on one runner; Ledger, census and silent payments on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
@@ -29,7 +29,7 @@ The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
 Debug must start the test run and journal it, Release must ignore it and boot
 into its ordinary storage.
 
-## The five journeys
+## The six journeys
 
 The UI journeys are Lean (`LeanApp/Journeys.lean`), run on the Mac. Each step
 is one command to LeanNative's journey driver, the one XCUITest in the app's UI
@@ -52,6 +52,12 @@ against the node.
 - `silentPaymentSend`: pay a BIP352 code. The node's transaction pays the
   one output that backend-test's receiver, written from the BIP's receiving
   side, finds, and the receipt shows its address.
+- `feeBumpReplaceConfirm`: send at a low rate (an override under the node's
+  relay floor resolves to the floor first), then bump the fee from the
+  unconfirmed payment's screen. Core checks the replacement: the same coins,
+  the same payment, a higher fee, the original gone from the mempool, and
+  the replacement is the one that confirms. The Transactions list shows it
+  confirmed with its fee and the original's row marked replaced.
 
 What the journeys do not cover: a physical Ledger (CI's is simulated; the
 owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift

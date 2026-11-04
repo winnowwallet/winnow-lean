@@ -4,7 +4,7 @@
 #
 #   scripts/journeys [names]          on a throwaway simulator with XCTest's real touches (LeanNative's ui-tests)
 #   scripts/journeys --wire [names]   headless against the app itself (LeanNative's wire-journeys): no simulator,
-#                                     under a minute for all five
+#                                     about a minute for all six
 #
 # Names come from Journeys.lean's `all`; none runs every journey. Evidence goes to $UI_OUT (default
 # LeanApp/ios/build/ui-journey, or LeanApp/build/wire-journeys headless): the screenshots, journeys.json and

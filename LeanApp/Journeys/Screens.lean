@@ -171,7 +171,76 @@ def fromAccount (r : Run) (account destination : String) (sats : Nat) (needs : S
     return (← exists? multisigSignatureCount) || (← exists? (.nav "Collect signatures"))
   scrolled multisigSignatureCount
 
+/-- A rate as the app shows it ("0.1 sat/vB", "1,000 sat/vB"), in thousandths of sat/vB. -/
+def rateMilli (shown : String) : Option Nat :=
+  let n := ((shown.splitOn " sat/vB").head!).replace "," ""
+  match n.splitOn "." with
+  | [w] => w.toNat?.map (· * 1000)
+  | [w, f] => do
+    let w ← w.toNat?
+    let f ← (String.ofList ((f ++ "000").toList.take 3)).toNat?
+    pure (w * 1000 + f)
+  | _ => none
+
+/-- Thousandths of sat/vB as a rate to type: `50` is "0.05". -/
+def rateText (milli : Nat) : String :=
+  let frac := milli % 1000
+  if frac == 0 then toString (milli / 1000) else
+  let three := (toString (1000 + frac)).toList.drop 1
+  s!"{milli / 1000}.{String.ofList (three.reverse.dropWhile (· == '0')).reverse}"
+
+/-- Advanced mode's Network floor, once the peers have reported one (their BIP133 feefilter), in
+thousandths of sat/vB. -/
+def floorMilli : UI Nat := do
+  scrolled feeFloorText
+  let found ← IO.mkRef 0
+  waitUntil 60 "the peers reported no relay floor" do
+    found.set ((rateMilli (← text feeFloorText)).getD 0)
+    return (← found.get) > 0
+  found.get
+
+/-- Advanced mode's fee override typed; the rate the form resolves it to, once it has. -/
+def override (rate : String) : UI String := do
+  scrolled feeOverrideField
+  type feeOverrideField rate
+  let resolved ← IO.mkRef ""
+  waitUntil 30 s!"the override {rate} resolved to no rate" do
+    resolved.set (← text resolvedRateText)
+    return (← resolved.get).endsWith " sat/vB"
+  resolved.get
+
 end Send
+
+/-! ## A fee bump -/
+
+namespace Bump
+
+/-- Bump fee on the payment screen, once the wallet offers it for this payment (Advanced mode, a payment of
+its own still awaiting confirmation): the sheet with the payment's current rate. -/
+def start : UI Unit := do
+  waitUntil 30 "the payment screen offers no Bump fee" do scrollTo bumpFeeButton
+  tap bumpFeeButton
+  waitUntil 30 "the sheet shows no current rate" do return (← text bumpCurrentRate) != "—"
+
+/-- A higher rate typed (over the suggestion the sheet filled in) and reviewed: the replacement's fee. -/
+def review (rate : String) : UI Nat := do
+  type bumpRateField rate
+  tap bumpReviewButton
+  waitFor bumpReplacementFee 30
+  let some fee ← amount bumpReplacementFee | failure "the review shows no replacement fee"
+  return fee
+
+/-- Signs and broadcasts the replacement; the transaction the node receives. -/
+def replace (h : Host) : UI String := do
+  scrolled bumpSignButton
+  expectEq "the sheet's button" (← text bumpSignButton) "Sign & replace"
+  let before ← h.mempool
+  tap bumpSignButton
+  let replacement ← h.newMempoolTransaction before 60
+  waitFor (.button "Done") 30
+  return replacement
+
+end Bump
 
 /-! ## The collection step -/
 

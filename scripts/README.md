@@ -16,7 +16,7 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 - [ui-fixture](ui-fixture) starts the UI journeys' regtest node and config, and afterwards collects the app's
   journals and stops the node: the hooks of LeanNative's `ui-tests` and `wire-journeys`.
 - [journeys](journeys) runs the journeys locally as CI does: in the simulator, or `--wire` headless against the
-  app itself (no simulator, no XCTest: under a minute for all five).
+  app itself (no simulator, no XCTest: about a minute for all six).
 - [ios-simulator](ios-simulator) prints one available iPhone (default) or iPad on the newest iOS runtime.
 - [signet-fixture](signet-fixture) provisions a disposable custom-signet bitcoind (`up`, `down`, `status`,
   `snapshot DIR`, `destroy`). For a regtest node with a funded wallet, use `LeanApp`'s `backend-test --fixture <dir>`.
