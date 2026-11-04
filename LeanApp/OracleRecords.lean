@@ -201,7 +201,7 @@ def peopleScript (j : Json) : IO Json := do
       let after ← afterJ path "people" network ref
       let payload := match (after.getObjValAs? String "payload").toOption.bind ofHex? with
         | some b =>
-          let t := Keys.Unicode.decodeUTF8Lossy b
+          let t := Text.decodeUTF8Lossy b
           jstr (ids.toList.zipIdx.foldl (fun acc (id, i) => replaceAll acc id s!"#{i}") t)
         | none => .null
       replies := replies.push (Json.mkObj (extra ++ [("people", arr (store.records.toList.map (personJ · rename))),
@@ -260,7 +260,7 @@ def labelsRun (j : Json) : IO Json := do
       match ← (store.setLabel writeAtomically ((optS step "label").getD "") ((optS step "address").getD "")).run with
       | .ok s => store := s; reply := [("ok", .bool true)]
       | .error e => reply := [("error", jstr e.name)]
-      let file ← if ← path.pathExists then pure (jstr (Keys.Unicode.decodeUTF8Lossy (← IO.FS.readBinFile path))) else pure .null
+      let file ← if ← path.pathExists then pure (jstr (Text.decodeUTF8Lossy (← IO.FS.readBinFile path))) else pure .null
       replies := replies.push (Json.mkObj (reply ++ [("labels", labelsOut store), ("file", file)]))
     return ok (Json.mkObj [("notice", jopt jstr store.notice), ("labels", labelsOut store), ("steps", .arr replies)])
 
