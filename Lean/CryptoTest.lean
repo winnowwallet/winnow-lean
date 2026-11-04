@@ -20,6 +20,11 @@ BIP340 signing against BIP340's own vectors.
   vector's exactly, so the nonce derivation is checked, not only that signatures verify (`sign_verifies`
   proves that much). Every vector's verification result must be the vector's. Then one message signed
   twice with `Signer.randomAuxiliaryRand` gives two different signatures that both verify.
+* `Vectors/swift-utf8-decoding.json`: what Swift's `String(decoding:as: UTF8.self)` makes of well-formed text,
+  truncated sequences, overlongs, surrogates, code points past U+10FFFF, lone continuation bytes and seeded
+  runs of high bytes, written by `scripts/swift-utf8-vectors`. `Text.decodeUTF8Lossy` must give Swift's
+  scalars for every vector (one U+FFFD per maximal subpart), and so must `ByteReader.readVarString`, the
+  version message's user agent, which reads through it.
 * The fast curve (`Secp.Fast`), which compiled code runs in place of the proved scalar multiplication,
   lift_x and point addition (`@[implemented_by]`): each `…Fast` function against the proved code it stands in
   for (`Secp.smul?`, `smulJ`, `Fq.sqrt?`), over edge scalars, seeded random ones and the points they give.
@@ -169,6 +174,22 @@ def roundTrips : IO Unit := do
 
 /-! ## The fast curve against the proved one -/
 
+def utf8 : IO Unit := do
+  let j ← IO.ofExcept (Json.parse (← IO.FS.readFile "Vectors/swift-utf8-decoding.json"))
+  let vectors ← IO.ofExcept (j.getObjValAs? (Array Json) "vectors")
+  let mut wire := 0
+  for v in vectors do
+    let name := field v "name"
+    let b := bytesOf v "bytes"
+    let want ← IO.ofExcept (v.getObjValAs? (List Nat) "scalars")
+    let got := (Text.decodeUTF8Lossy b).toList.map Char.toNat
+    check s!"utf8: {name}" (got == want) s!"{got} for Swift's {want}"
+    if b.size ≤ 1_000 then
+      let read := (ByteReader.M.runAll ByteReader.readVarString (varBytes b)).toOption.map (·.toList.map Char.toNat)
+      check s!"utf8: {name}, read as a var string" (read == some want) s!"{read}"
+      wire := wire + 1
+  IO.println s!"  utf8: {vectors.size} vectors from Swift, {wire} also read off the wire"
+
 section FastCurve
 open Secp
 
@@ -246,3 +267,4 @@ def main : IO UInt32 := runMain "crypto-test" do
   bip340
   fastCurve
   roundTrips
+  utf8

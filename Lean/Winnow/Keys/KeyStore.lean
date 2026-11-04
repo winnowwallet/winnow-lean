@@ -1,5 +1,6 @@
 import Std.Data.HashMap
 import Winnow.Keys.Unicode
+import Winnow.Text.UTF8
 
 /-! # Wallet secret storage (port of `Keys/KeyStore.swift`)
 
@@ -81,7 +82,7 @@ def decodeAccount (lines : List String) : Except KeyStoreError WalletSecret := d
 end a line). A header `account/<digits>` other than this build's `account/1` is an unsupported version,
 reported by its bounded label (at most eight digits) alone; any other `account/…` header is damage. -/
 def parse (b : ByteArray) : Except KeyStoreError WalletSecret := do
-  let lines := Unicode.splitCharacters (Unicode.decodeUTF8Lossy b) '\n'
+  let lines := Unicode.splitCharacters (Text.decodeUTF8Lossy b) '\n'
   let some first := lines.head? | throw .malformedSecret
   if first == "mnemonic" && lines.length == 2 then return .mnemonic lines[1]!
   if first == "xprv" && lines.length == 2 then return .masterKey lines[1]!
