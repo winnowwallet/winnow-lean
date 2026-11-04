@@ -48,6 +48,7 @@ def Model.sendTo (m : Model) (personID : Option String) : Model × List Cmd :=
     let m := if m.hasSheet .send then m else m.present .send
     (m, [.resolveRate m.generation inputs m.status.feeFloorMilli])
 
+/-- Home and the payment screen (records-test's `homeScreens`). -/
 def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   match msg with

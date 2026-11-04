@@ -55,6 +55,7 @@ def Model.popSigner (m : Model) : Model × List Cmd :=
   | some .signers => ({ m with routes := m.routes.dropLast }, [])
   | _ => (m, [])
 
+/-- Settings → Signers (multisig-app-test's `testSignersAddOpenRenameRemove`). -/
 def stepSigner (msg : SignerMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   let keys := m.signerKeys

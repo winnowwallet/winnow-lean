@@ -59,6 +59,7 @@ def Model.applyGateways (m : Model) : Model × List Cmd :=
     ({ m with settings := s, settingsDraft := { d with gatewayError := none, applyingGateways := false } },
      [.saveSettings s, .reconnect m.generation s])
 
+/-- The Settings tab's controls (records-test's `settingsScreen` and `peerGatewayModel`). -/
 def stepSettings (msg : SettingsMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   let d := m.settingsDraft

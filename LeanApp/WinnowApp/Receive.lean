@@ -14,6 +14,7 @@ def Model.finishLabel (m : Model) : Model × List Cmd :=
   if m.topSheet == some .labelEditor then m.closeTop
   else ({ m with receive := { m.receive with editingLabel := false }, labelEditor := { m.labelEditor with saving := false, error := none } }, [])
 
+/-- Receive, its label editor and the share card (records-test's `receiveScreen`). -/
 def stepReceive (msg : ReceiveMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   match msg with
