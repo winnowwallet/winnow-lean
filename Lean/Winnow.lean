@@ -6,3 +6,4 @@ import Winnow.Net
 import Winnow.Wallet
 import Winnow.IO
 import Winnow.Ledger
+import Winnow.Text.UTF8

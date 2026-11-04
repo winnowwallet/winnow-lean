@@ -1,10 +1,11 @@
 import Winnow.Bytes
+import Winnow.Text.UTF8
 
 /-! # Wire: the byte-level helpers of the P2P wire format
 
 Port of `Sources/WalletCore/Network/Protocol/Wire.swift`: `WireError`, the sequential little-endian
 `ByteReader` (CompactSize refusing non-minimal encodings, bounded var data, UTF-8 strings decoded the
-way Swift's `String(decoding:as:)` does), the `Data.append…` writers, and `Data(hex:)` / `Data.hex`.
+way Swift's `String(decoding:as:)` does, by `Text.decodeUTF8Lossy`), the `Data.append…` writers, and `Data(hex:)` / `Data.hex`.
 
 `ByteReader.M` is the reader as a state monad; `ByteReader.M.run` hands back the value and the reader
 (its offset says how much was consumed), so another module can parse a prefix and continue. -/
@@ -95,50 +96,9 @@ def readVarData (maxLength : Nat := 4_000_000) : M ByteArray := do
   if length.toNat > maxLength then throw (.malformed s!"var data length {length} exceeds {maxLength}")
   readBytes length.toNat
 
-/-- `String(decoding:as: UTF8.self)`: ill-formed sequences become U+FFFD, one per maximal subpart. -/
-def decodeUTF8Lossy (b : ByteArray) : String := Id.run do
-  let n := b.size
-  let cont (i : Nat) (lo hi : UInt8) : Bool := i < n && lo ≤ b[i]! && b[i]! ≤ hi
-  let mut out := ""
-  let mut i := 0
-  while i < n do
-    let b0 := b[i]!
-    if b0 < 0x80 then
-      out := out.push (Char.ofNat b0.toNat); i := i + 1
-    else
-      -- (sequence length, allowed range of the second byte)
-      let spec : Option (Nat × UInt8 × UInt8) :=
-        if 0xC2 ≤ b0 && b0 ≤ 0xDF then some (2, 0x80, 0xBF)
-        else if b0 == 0xE0 then some (3, 0xA0, 0xBF)
-        else if b0 == 0xED then some (3, 0x80, 0x9F)
-        else if 0xE1 ≤ b0 && b0 ≤ 0xEF then some (3, 0x80, 0xBF)
-        else if b0 == 0xF0 then some (4, 0x90, 0xBF)
-        else if b0 == 0xF4 then some (4, 0x80, 0x8F)
-        else if 0xF1 ≤ b0 && b0 ≤ 0xF3 then some (4, 0x80, 0xBF)
-        else none
-      match spec with
-      | none => out := out.push '�'; i := i + 1
-      | some (len, lo, hi) =>
-        -- how many bytes of the sequence are well-formed so far
-        let mut good := 1
-        if cont (i + 1) lo hi then
-          good := 2
-          if len ≥ 3 && cont (i + 2) 0x80 0xBF then
-            good := 3
-            if len ≥ 4 && cont (i + 3) 0x80 0xBF then good := 4
-        if good == len then
-          let mask : Nat := if len == 2 then 0x1F else if len == 3 then 0x0F else 0x07
-          let mut cp := b0.toNat &&& mask
-          for k in [1:len] do cp := cp * 64 + (b[i + k]!.toNat &&& 0x3F)
-          out := out.push (Char.ofNat cp)
-          i := i + len
-        else
-          out := out.push '�'; i := i + good
-  return out
-
 /-- CompactSize-prefixed UTF-8 string. -/
 def readVarString (maxLength : Nat := 1_000) : M String := do
-  return decodeUTF8Lossy (← readVarData maxLength)
+  return Text.decodeUTF8Lossy (← readVarData maxLength)
 
 /-- Throws `trailingBytes` unless the buffer was consumed exactly. -/
 def requireEnd : M Unit := do
