@@ -27,6 +27,9 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   checks the result with Lean's `census-check` and records its provenance in `build/census/peers-source.txt`.
   CI runs it once per run (the `build` job's `prepare`); `build-ios` runs it for Release builds and when the
   list is missing; `IMPORT_CENSUS=1` forces it, `IMPORT_CENSUS=0` keeps an existing list.
+- [foundation-vectors](foundation-vectors) regenerates `LeanApp/FoundationVectors.lean`: what Foundation's `URL`
+  and the Swift app's rules answer for custom explorer URLs and manual peers, which records-test checks the
+  Lean rules against (macOS, `xcrun swift`).
 - [tests/](tests) holds the scripts' unit tests: `python3 -m unittest discover -s scripts/tests`.
 
 Run commands from the repository root unless their help specifies otherwise.

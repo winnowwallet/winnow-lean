@@ -245,18 +245,14 @@ private def pinFilterHeaders (f : FilterSyncIO) (batchStart batchStop : UInt32) 
   let mut sourced := #[]
   for c in peers do sourced := sourced.push (c, ← f.pool.source c.endpoint)
   let queryPeers := crossSourceSet sourced
-  let mut start := requestStart stored batchStart
   let mut headers := stored
-  while start ≤ batchStop do
-    let stop := (min (start.toNat + maxRangePerRequest.toNat - 1) batchStop.toNat).toUInt32
+  for (start, stop) in batches (requestStart stored batchStart) batchStop do
     let some hash ← (if stop == batchStop then pure (some stopHash) else f.chain.blockHash stop)
       | throw (.filters (.badPeerResponse "missing reconstruction header"))
     let message ← f.crossCheckedCFHeaders start stop hash queryPeers
     headers ← match walkFilterHeaders message start stored headers with
       | .ok h => pure h
       | .error e => throw (.filters e)
-    if stop == batchStop then break
-    start := stop + 1
   return headers
 
 private def verifiedBlock (f : FilterSyncIO) (peer : PeerConnection) (height : UInt32) (blockHash : ByteArray)
@@ -266,13 +262,11 @@ private def verifiedBlock (f : FilterSyncIO) (peer : PeerConnection) (height : U
     #["block", "notfound"] limit
   match response with
   | .block b =>
-    if !(b.hash == blockHash) then
-      f.pool.misbehaving peer s!"block hash mismatch at {height}"
-      throw (.filters (.badPeerResponse s!"block hash mismatch at {height}"))
-    if !b.hasValidMerkleRoot then
-      f.pool.misbehaving peer s!"merkle root mismatch at {height}"
-      throw (.filters (.badPeerResponse s!"merkle root mismatch at {height}"))
-    return b
+    match FilterSync.verifiedBlock b blockHash height with
+    | .ok b => return b
+    | .error e =>
+      f.pool.misbehaving peer (match e with | .badPeerResponse why => why | e => FilterSyncError.description e)
+      throw (.filters e)
   | .notfound _ => throw (.filters (.badPeerResponse s!"peer lost block at {height}"))
   | _ => throw (.filters (.badPeerResponse "expected block"))
 
@@ -371,7 +365,7 @@ def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option
     while (← f.progress.get).nextScanHeight ≤ ceiling do
       let progress ← f.progress.get
       let batchStart := progress.nextScanHeight
-      let batchStop := (min (batchStart.toNat + maxRangePerRequest.toNat - 1) ceiling.toNat).toUInt32
+      let batchStop := FilterSync.batchStop batchStart ceiling
       let some stopHash ← f.chain.blockHash batchStop | throw (.filters (.badPeerResponse s!"missing header at {batchStop}"))
       let proposed ← f.pinFilterHeaders batchStart batchStop stopHash peers progress.filterHeaders
       if let .error e := checkPinnedBoundaries proposed reference tip then throw (.filters e)
@@ -454,7 +448,7 @@ private def runRange (f : FilterSyncIO) (initial : RangeScanProgress) (tip : UIn
   while record.nextScanHeight ≤ record.toHeight do
     f.checkRangeDeadline
     let batchStart := record.nextScanHeight
-    let batchStop := (min (batchStart.toNat + maxRangePerRequest.toNat - 1) record.toHeight.toNat).toUInt32
+    let batchStop := FilterSync.batchStop batchStart record.toHeight
     let some stopHash ← f.chain.blockHash batchStop | throw (.filters (.badPeerResponse s!"missing header at {batchStop}"))
     -- read before the peer is asked: pinning writes the announced previous header when the record holds none
     let anchored := batchStart == 0 || record.filterHeaders.contains (toString (batchStart - 1).toNat)

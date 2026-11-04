@@ -485,16 +485,19 @@ def parseUInt16 (s : String) : Option Nat :=
   if neg then (if v == 0 then some 0 else none) else if v > 65535 then none else some v
 
 /-- `AppModel.parsePeer` (AppModel.swift:2555): the text trimmed of spaces (not newlines), split at `:` with
-empty pieces dropped, exactly a host and a port in 1…65535; the endpoint as `PeerEndpoint.description`
-spells it (`host:port`). -/
-def parsePeer (text : String) : Except String String :=
-  let bad := Except.error s!"Invalid peer “{text}” — use host:port."
+empty pieces dropped, exactly a host and a port in 1…65535. Settings validates a manual peer with it and
+the sync stack reads the saved ones with it (`Real.parsePeerEndpoint`). records-test's
+`foundationURLRules` checks it against the Swift app's answers. -/
+def peerHostPort (text : String) : Option (String × Nat) :=
   match (trimWhitespaces text).splitOn ":" |>.filter (!·.isEmpty) with
-  | [host, port] =>
-    match parseUInt16 port with
-    | some p => if p == 0 then bad else .ok s!"{host}:{p}"
-    | none => bad
-  | _ => bad
+  | [host, port] => (parseUInt16 port).bind fun p => if p == 0 then none else some (host, p)
+  | _ => none
+
+/-- `parsePeer`'s endpoint as `PeerEndpoint.description` spells it (`host:port`), or the error Settings shows. -/
+def parsePeer (text : String) : Except String String :=
+  match peerHostPort text with
+  | some (host, p) => .ok s!"{host}:{p}"
+  | none => .error s!"Invalid peer “{text}” — use host:port."
 
 /-! ## Labels -/
 

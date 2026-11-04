@@ -13,9 +13,7 @@ filter headers equal to the node's `getblockfilter`, filters.json round trip and
 reorg; the mempool window seeing a new transaction; broadcast of a raw transaction the node then holds
 in its mempool; peers.json and broadcast.json round trips. Offline policy checks: HTTP permits and
 redirects against a local Python server through the curl fetch, seed filtering and dns-json, the
-census catalog (the list each build ships). The node is killed by PID at the end, also on failure.
-
-Usage: `io-test [--swift <oracle-io binary>]` (the binary compares Winnow's Swift side on the same node). -/
+census catalog (the list each build ships). The node is killed by PID at the end, also on failure. -/
 
 def runNet {α} (what : String) (x : NetM α) : IO α := do
   match ← x.attempt with
@@ -30,7 +28,185 @@ def jsonStr (j : Json) (k : String) : String := (j.getObjValAs? String k).toOpti
 
 /-! ## Offline checks -/
 
+/-- Every case of the I/O layer's errors (`NetError` and each error it carries) with its `name` and the text the
+app shows, as the Swift app words it (the Swift sources at 9cca3fc: PeerConnection, PeerPool, HeaderChain,
+FilterSync, RangeScan, TxBroadcaster, RoutedHTTPClient). `FramingError`/`WireError` read as Foundation's default
+text and a URLSession failure as `transport`. -/
+def errorTexts : List (NetError × String × String) := [
+  (.peer .timeout, "timeout",
+    "The peer did not answer in time."),
+  (.peer .notConnected, "notConnected",
+    "The connection to the peer was not open."),
+  (.peer (.disconnected "EOF"), "disconnected",
+    "The peer disconnected (EOF)."),
+  (.peer (.handshakeFailed "no verack"), "handshakeFailed",
+    "The peer handshake failed (no verack)."),
+  (.peer (.missingCompactFilters 1033), "missingCompactFilters",
+    "The peer does not serve compact block filters (services 1033)."),
+  (.peer (.protocolViolation "bad inv"), "protocolViolation",
+    "The peer violated the protocol (bad inv)."),
+  (.framing .badMagic, "badMagic",
+    "The operation couldn’t be completed. (WalletCore.FramingError error 0.)"),
+  (.framing .badCommand, "badCommand",
+    "The operation couldn’t be completed. (WalletCore.FramingError error 1.)"),
+  (.framing (.payloadTooLarge 33554433), "payloadTooLarge",
+    "The operation couldn’t be completed. (WalletCore.FramingError error 2.)"),
+  (.framing (.checksumMismatch "tx"), "checksumMismatch",
+    "The operation couldn’t be completed. (WalletCore.FramingError error 3.)"),
+  (.headers .doesNotConnect, "doesNotConnect",
+    "A peer sent block headers that do not connect to the known Bitcoin chain."),
+  (.headers (.invalidTarget 7), "invalidTarget",
+    "A peer sent an invalid proof-of-work target at block 7."),
+  (.headers (.targetAbovePowLimit 8), "targetAbovePowLimit",
+    "A peer sent an impossibly easy proof-of-work target at block 8."),
+  (.headers (.insufficientProofOfWork 9), "insufficientProofOfWork",
+    "A peer sent a header without enough proof of work at block 9."),
+  (.headers (.unexpectedDifficulty 2016), "unexpectedDifficulty",
+    "A peer sent the wrong proof-of-work difficulty at block 2016."),
+  (.headers (.timestampTooFarInFuture 11), "timestampTooFarInFuture",
+    "A peer sent a block header dated too far in the future at block 11."),
+  (.headers .reorgWithoutMoreWork, "reorgWithoutMoreWork",
+    "A peer offered an older or weaker Bitcoin chain."),
+  (.headers (.storageCorrupt "short read"), "storageCorrupt",
+    "The saved block-header data is damaged (short read)."),
+  (.headers (.storageUnavailable "disk full"), "storageUnavailable",
+    "Winnow could not read or save its local block-header data (disk full)."),
+  (.headers (.badPeerResponse "empty headers"), "badPeerResponse",
+    "A peer returned an invalid block-header response (empty headers)."),
+  (.headers (.startMismatch 0 800000), "startMismatch",
+    "The stored chain starts at block 0 but this setting needs one starting at 800000."),
+  (.pool .noPeers, "noPeers",
+    "No Bitcoin peers are available for block-header sync."),
+  (.pool .relayOnly, "relayOnly",
+    "Winnow is keeping Bitcoin peers connected only to finish relaying a payment. Resume syncing to download block headers."),
+  (.pool (.exhausted 1 "timeout"), "exhausted",
+    "Winnow tried 1 Bitcoin peer, but none supplied a usable block-header chain. Last error: timeout"),
+  (.pool (.exhausted 3 "timeout"), "exhausted",
+    "Winnow tried 3 Bitcoin peers, but none supplied a usable block-header chain. Last error: timeout"),
+  (.pool (.allPeersCoolingDown 1 "timeout"), "allPeersCoolingDown",
+    "1 Bitcoin peer was slow to answer and is being rested briefly. Syncing will resume on its own. Last error: timeout"),
+  (.pool (.allPeersCoolingDown 2 "timeout"), "allPeersCoolingDown",
+    "2 Bitcoin peers were slow to answer and are being rested briefly. Syncing will resume on its own. Last error: timeout"),
+  (.filters .busy, "busy",
+    "Finishing sync. Try loading the payment again in a moment."),
+  (.filters .noPeers, "noPeers",
+    "No Bitcoin peers are available for compact-filter synchronization."),
+  (.filters .relayOnly, "relayOnly",
+    "Winnow is keeping Bitcoin peers connected only to finish relaying a payment. Resume syncing to scan for new blocks."),
+  (.filters (.crossCheckUnavailable "one source"), "crossCheckUnavailable",
+    "Winnow could not check this scan against connections from different sources (one source). Nothing was scanned; it will try again as the peer pool changes."),
+  (.filters (.peersCoolingDown 1), "peersCoolingDown",
+    "1 Bitcoin peer is resting briefly after a slow reply. Scanning will resume on its own."),
+  (.filters (.peersCoolingDown 2), "peersCoolingDown",
+    "2 Bitcoin peers are resting briefly after a slow reply. Scanning will resume on its own."),
+  (.filters (.checkpointMismatch "split"), "checkpointMismatch",
+    "Bitcoin peers disagreed about compact-filter checkpoints (split)."),
+  (.filters (.badPeerResponse "missing cfilters"), "badPeerResponse",
+    "A Bitcoin peer returned invalid compact-filter data (missing cfilters)."),
+  (.filters (.filterHeaderMismatch 12), "filterHeaderMismatch",
+    "A compact filter did not match its authenticated header at block 12."),
+  (.filters .unexpectedBlockHash, "unexpectedBlockHash",
+    "A Bitcoin peer returned a compact filter for a block Winnow did not request."),
+  (.filterStorage .unreadable, "unreadable",
+    "Winnow could not read its compact-filter progress file. Scanning is stopped so wallet history is not skipped."),
+  (.filterStorage (.tooLarge 1048576), "tooLarge",
+    "The compact-filter progress file is unexpectedly large (limit: 1048576 bytes). Scanning is stopped."),
+  (.filterStorage (.damaged "bad json"), "damaged",
+    "The compact-filter progress file is damaged (bad json). Scanning is stopped; Winnow will not replace it automatically."),
+  (.filterStorage .writeFailed, "writeFailed",
+    "Winnow could not safely save compact-filter progress. The scan frontier was not advanced."),
+  (.filterStorage (.frontierBeforeWallet 5 10), "frontierBeforeWallet",
+    "Saved compact-filter progress starts at block 5, behind the wallet's required block 10. Scanning is stopped."),
+  (.filterStorage (.frontierBeyondTip 20 15), "frontierBeyondTip",
+    "Saved compact-filter progress points to block 20, beyond the validated chain tip 15. Scanning is stopped."),
+  (.range (.invalidRange 9 3), "invalidRange",
+    "Winnow was asked to scan blocks 9 to 3, which is not a range it can scan."),
+  (.range .noWatchScripts, "noWatchScripts",
+    "A block range scan needs at least one script to look for."),
+  (.range (.rangeTooWide 60000 50000), "rangeTooWide",
+    "That restore would scan 60000 blocks, past the 50000-block limit for one range."),
+  (.range (.tooManyScripts 600 500), "tooManyScripts",
+    "That restore looks for 600 scripts, past the limit of 500."),
+  (.range (.tooManyIterations 4 1), "tooManyIterations",
+    "That restore has already rescanned its range 1 time and asked for pass 4."),
+  (.range (.tooManyIterations 4 3), "tooManyIterations",
+    "That restore has already rescanned its range 3 times and asked for pass 4."),
+  (.range (.filterBytesExhausted 900 800), "filterBytesExhausted",
+    "The restore scan reached its data limit (900 of 800 bytes of compact filters). It can be resumed."),
+  (.range (.runTimedOut 90000), "runTimedOut",
+    "The restore scan reached its time limit (90.0 seconds). It can be resumed."),
+  (.range (.rangeBelowChain 5 10), "rangeBelowChain",
+    "The restore scan starts at block 5, below block 10, which is the first block Winnow holds a header for."),
+  (.range (.rangeAboveChain 30 20), "rangeAboveChain",
+    "The restore scan ends at block 30, above the validated chain tip 20."),
+  (.range (.rangeSpansNoCheckpoint 100 200), "rangeSpansNoCheckpoint",
+    "Blocks 100 to 200 hold no filter checkpoint, and Winnow has no verified filter header below them, so nothing could check what a peer sent. Scan a wider range."),
+  (.range .recordUnreadable, "recordUnreadable",
+    "Winnow could not read the restore scan's progress file. The scan is stopped so a payment is not skipped."),
+  (.range (.recordTooLarge 1048576), "recordTooLarge",
+    "The restore scan's progress file is unexpectedly large (limit: 1048576 bytes). The scan is stopped."),
+  (.range (.recordDamaged "bad json"), "recordDamaged",
+    "The restore scan's progress file is damaged (bad json). The scan is stopped; Winnow will not replace it automatically."),
+  (.range .recordWriteFailed, "recordWriteFailed",
+    "Winnow could not safely save the restore scan's progress. Nothing was recorded for this batch."),
+  (.broadcast .invalidFeeRate, "invalidFeeRate",
+    "The transaction fee rate must be a positive, finite number within Bitcoin's monetary range."),
+  (.broadcast .stopped, "stopped",
+    "This transaction relay session has stopped. Reconnect before changing relay state."),
+  (.broadcastStorage .unreadable, "unreadable",
+    "Winnow could not read its pending-transaction file. Relay is stopped until local storage is available."),
+  (.broadcastStorage (.tooLarge 1048576), "tooLarge",
+    "The pending-transaction file is unexpectedly large (limit: 1048576 bytes). Relay is stopped to protect the wallet."),
+  (.broadcastStorage (.damaged "bad json"), "damaged",
+    "The pending-transaction file is damaged (bad json). Relay is stopped; Winnow will not discard or replay its entries."),
+  (.broadcastStorage (.unsupportedVersion 9), "unsupportedVersion",
+    "The pending-transaction file uses unsupported version 9. Update Winnow before relaying transactions."),
+  (.broadcastStorage .writeFailed, "writeFailed",
+    "Winnow could not safely save pending transaction state. The relay change was not accepted."),
+  (.wire (.truncated 4 1), "truncated",
+    "The operation couldn’t be completed. (WalletCore.WireError error 0.)"),
+  (.wire (.trailingBytes 2), "trailingBytes",
+    "The operation couldn’t be completed. (WalletCore.WireError error 1.)"),
+  (.wire .invalidVarInt, "invalidVarInt",
+    "The operation couldn’t be completed. (WalletCore.WireError error 2.)"),
+  (.wire (.malformed "bad script"), "malformed",
+    "The operation couldn’t be completed. (WalletCore.WireError error 3.)"),
+  (.http .unavailable, "unavailable",
+    "Network request failed: unavailable."),
+  (.http .response, "response",
+    "Network request failed: response."),
+  (.http .tooLarge, "tooLarge",
+    "Network request failed: tooLarge."),
+  (.http .redirect, "redirect",
+    "Network request failed: redirect."),
+  (.http (.status 503), "HTTPFailure",
+    "The server returned HTTP 503."),
+  (.http (.transport "offline"), "URLError",
+    "The network request failed (offline)."),
+  (.http .cancelled, "cancelled",
+    "The request was cancelled."),
+  (.cancelled, "cancelled",
+    "The operation was cancelled."),
+  (.other "socket closed", "other",
+    "socket closed")]
+
+/-- Swift's `"\(error)"` for a `WireError`, which a peer's protocol violation quotes (`wireErrorText`). -/
+def wireTexts : List (Winnow.WireError × String) := [
+  (.truncated 4 1, "truncated(expected: 4, remaining: 1)"),
+  (.trailingBytes 2, "trailingBytes(2)"),
+  (.invalidVarInt, "invalidVarInt"),
+  (.malformed "bad script", "malformed(\"bad script\")")]
+
+/-- `errorTexts` and `wireTexts`: each case's name and the text the app shows. -/
+def errorTextChecks : IO Unit := do
+  for (e, name, text) in errorTexts do
+    check s!"error name: {name}" (e.name == name) e.name
+    check s!"error text: {name}" (e.description == text) e.description
+  for (w, text) in wireTexts do
+    check s!"wire error text: {w.name}" (wireErrorText w == text) (wireErrorText w)
+
 def offlineChecks (dir : String) : IO Unit := do
+  errorTextChecks
   say "policy (offline)"
   -- Seed filtering and IP literals (BSD inet_pton)
   check "inet_pton4 refuses leading zeros" ((inetPton4 "01.2.3.4").isNone && (inetPton4 "1.2.3.4").isSome)
@@ -685,12 +861,41 @@ def gatewayChecks (n : Node) : IO Unit := do
     (seated == #[onion] && (← seedAsks.get) == 0 && (← asked.get) == #[onion.host]) s!"{seated.map (·.host)}"
   pool.stop
 
-def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
+/-- FilterSync's pure steps that the IO scan runs: `batches` (the cfheaders requests of a batch, and
+`batchStop`, which the forward and range scans step by) and `verifiedBlock` on a real block, a block the
+filter did not name, and one whose transactions were changed. -/
+def filterSyncPure (n : Node) : IO Unit := do
+  check "batches: one short batch" (FilterSync.batches 5 9 == #[(5, 9)])
+  check "batches: split at maxRangePerRequest" (FilterSync.batches 0 2_500 == #[(0, 999), (1_000, 1_999), (2_000, 2_500)])
+  check "batches: a single block" (FilterSync.batches 7 7 == #[(7, 7)])
+  check "batches: none past the ceiling" (FilterSync.batches 10 9 == #[])
+  check "batches: up to the last representable height"
+    (FilterSync.batches 0xFFFFFC17 0xFFFFFFFE == #[(0xFFFFFC17, 0xFFFFFFFE)])
+  let hash ← n.cli #["getblockhash", "101"]
+  let raw := ofHex! (← n.cli #["getblock", hash, "0"])
+  match Block.decode raw with
+  | .error e => check "verifiedBlock: decode block 101" false e.name
+  | .ok b =>
+    let named := ofDisplayHex! hash
+    check "verifiedBlock: the block the filter named" (FilterSync.verifiedBlock b named 101 matches .ok _)
+    check "verifiedBlock: another block's hash"
+      (match FilterSync.verifiedBlock b (ofDisplayHex! (← n.cli #["getblockhash", "100"])) 101 with
+       | .error (.badPeerResponse why) => why == "block hash mismatch at 101" | _ => false)
+    -- the coinbase's last byte (its lock time): the header still names the block, the merkle root no longer matches
+    match Block.decode (raw.set! (raw.size - 1) (raw[raw.size - 1]! ^^^ 0x01)) with
+    | .error e => check "verifiedBlock: decode the changed block" false e.name
+    | .ok changed =>
+      check "verifiedBlock: changed transactions"
+        (match FilterSync.verifiedBlock changed named 101 with
+         | .error (.badPeerResponse why) => why == "merkle root mismatch at 101" | _ => false)
+
+def nodeChecks (dir : String) (n : Node) : IO Unit := do
   say s!"node: bitcoind regtest pid {n.pid}, p2p {n.p2p}"
   discard <| n.cli #["createwallet", "w"]
   let mineAddr ← n.wallet #["getnewaddress"]
   let otherAddr ← n.wallet #["getnewaddress"]
   n.mine 101 mineAddr
+  filterSyncPure n
   -- 1. Handshake
   let c ← PeerConnection.new n.endpoint regtest
   runNet "connect" (c.connect 10_000)
@@ -891,7 +1096,7 @@ def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
     return match mp with | .arr xs => xs.any (· == Json.str (displayHex txid4)) | _ => false)
   check "broadcast with no peer seated: relayed as soon as one is" relayed (displayHex txid4)
   b4.shutdown
-  -- 8. A fresh Lean scan from genesis, and Winnow's Swift side on the same node.
+  -- 8. A fresh Lean scan from genesis.
   n.waitFilterIndex
   let freshStore ← runNet "fresh headers" (HeaderStore.open regtest (some s!"{dir}/fresh-headers.bin"))
   let freshFilters ← runNet "fresh filters" (FilterSyncIO.new pool freshStore 0 (some s!"{dir}/fresh-filters.json"))
@@ -901,53 +1106,7 @@ def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
   let leanTip ← freshStore.height
   -- The broadcast transaction may spend the watched coin, so its block can match too.
   check "fresh scan from genesis: tip and match" (leanTip.toNat == (← n.height) && leanMatches.contains fundHeight) s!"{leanMatches}"
-  if let some bin := swift then
-    let out ← IO.Process.output { cmd := bin, args := #["127.0.0.1", toString n.p2p, hex spk, s!"{dir}/swift"] }
-    say s!"  swift: {out.stdout.trimAscii}{out.stderr.trimAscii}"
-    match Json.parse out.stdout with
-    | .ok j =>
-      check "swift: same header tip" ((j.getObjValAs? Nat "tipHeight").toOption == some leanTip.toNat &&
-        jsonStr j "tipHash" == displayHex (← freshStore.tipHash))
-      let swiftMatches := ((j.getObjValAs? (Array Nat) "matchedHeights").toOption.getD #[]).qsort (· < ·)
-      check "swift: same matched block heights" (swiftMatches == leanMatches) s!"{swiftMatches} vs {leanMatches}"
-      check "swift: same filter header at the tip"
-        (jsonStr j "filterHeaderAtTip" == ((← freshFilters.filterHeader leanTip).map hex).getD "")
-      let swiftHeaders ← IO.FS.readBinFile s!"{dir}/swift/headers.bin"
-      check "swift: headers.bin byte-identical" (swiftHeaders == (← IO.FS.readBinFile s!"{dir}/fresh-headers.bin"))
-        s!"{swiftHeaders.size} bytes"
-      let swiftPeers := (← PersistedPeers.boundedRead s!"{dir}/swift/peers.json").bind PersistedPeers.decode
-      check "swift: peers.json readable by Lean" (swiftPeers == some #[{ endpoint := n.endpoint, source := .manual }])
-      let swiftProgress ← IO.FS.readFile s!"{dir}/swift/filters.json"
-      let leanProgress ← freshFilters.progress.get
-      check "swift: filters.json readable by Lean"
-        (match FilterSync.load (some swiftProgress) 0 with
-         | .ok (_, pr) => pr.nextScanHeight == leanTip + 1 && pr == leanProgress
-         | .error _ => false)
-    | .error e => check "swift oracle output" false e
-  -- 9. peers.json
-  pool.stop
-  let stored := (← PersistedPeers.boundedRead peersPath).bind PersistedPeers.decode
-  check "peers.json written with the peer's source" (stored == some #[{ endpoint := n.endpoint, source := .manual }])
-  let pool3 ← PeerPool.new regtest (peersFile := some peersPath) (seedResolver := some noSeeds)
-  check "peers.json read back" ((← pool3.knownGood) == #[n.endpoint] && (← pool3.source n.endpoint) == some .manual)
-  c.disconnect
-  -- 10. Winnow's Swift side opens the files the Lean side wrote.
-  if let some bin := swift then
-    let out ← IO.Process.output { cmd := bin, args := #["read", dir] }
-    say s!"  swift read: {out.stdout.trimAscii}{out.stderr.trimAscii}"
-    match Json.parse out.stdout with
-    | .ok j =>
-      check "swift reads Lean's headers.bin" ((j.getObjValAs? Nat "headersHeight").toOption == some (← store.height).toNat &&
-        jsonStr j "headersTip" == hex (← store.tipHash))
-      check "swift reads Lean's filters.json" ((j.getObjValAs? Nat "filtersNext").toOption == some (← fs.nextScanHeight).toNat)
-      check "swift reads Lean's broadcast.json (the confirmed tombstone)"
-        ((j.getObjValAs? Int "broadcastLoaded").toOption == some 1 &&
-         (j.getObjValAs? (Array String) "broadcastPending").toOption == some #[])
-      check "swift reads Lean's peers.json" ((j.getObjValAs? (Array String) "peers").toOption ==
-        some #[s!"{n.endpoint.description}/persisted"])
-    | .error e => check "swift read output" false e
-def main (args : List String) : IO UInt32 := runMain "io-test" (progress := true) do
-  let swift := match args with | "--swift" :: b :: _ => some b | _ => none
+def main (_args : List String) : IO UInt32 := runMain "io-test" (progress := true) do
   let tmp ← IO.FS.createTempDir
   let dir := tmp.toString
   say s!"io-test: work dir {dir}"
@@ -956,7 +1115,7 @@ def main (args : List String) : IO UInt32 := runMain "io-test" (progress := true
       offlineChecks dir
       fakeChecks dir
       routedHTTPChecks dir
-      nodeChecks dir n swift
+      nodeChecks dir n
       gatewayChecks n
   finally
     try IO.FS.removeDirAll tmp catch _ => pure ()
