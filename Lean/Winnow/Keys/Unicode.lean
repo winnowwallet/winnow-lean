@@ -8,7 +8,6 @@ import Winnow.Wallet.Characters
   sentences and passphrases NFKD; Swift `String` equality and dictionary keys are canonical equivalence,
   i.e. NFD equality.
 * Splitting on a `Character` (`split(separator:)`), over Swift's own `Character`s (`Winnow.Characters`).
-* `String(decoding:as: UTF8.self)`: invalid UTF-8 becomes U+FFFD per maximal subpart.
 * `CharacterSet.whitespacesAndNewlines`. -/
 
 namespace Winnow.Keys.Unicode
@@ -107,48 +106,6 @@ def splitCharacters (s : String) (sep : Char) : List String := Id.run do
       cur := ""
     else cur := cur ++ c
   return (pieces.push cur).toList
-
-/-- `String(decoding: bytes, as: UTF8.self)`: each maximal ill-formed subpart becomes U+FFFD. -/
-def decodeUTF8Lossy (b : ByteArray) : String := Id.run do
-  let mut out : Array Char := #[]
-  let mut i := 0
-  let n := b.size
-  let cont (x : UInt8) : Bool := 0x80 ≤ x && x ≤ 0xBF
-  while i < n do
-    let x := b[i]!
-    if x < 0x80 then
-      out := out.push (Char.ofNat x.toNat); i := i + 1
-    else
-      -- expected length and the allowed range of the second byte
-      let (len, lo, hi) : Nat × UInt8 × UInt8 :=
-        if 0xC2 ≤ x && x ≤ 0xDF then (2, 0x80, 0xBF)
-        else if x == 0xE0 then (3, 0xA0, 0xBF)
-        else if (0xE1 ≤ x && x ≤ 0xEC) || x == 0xEE || x == 0xEF then (3, 0x80, 0xBF)
-        else if x == 0xED then (3, 0x80, 0x9F)
-        else if x == 0xF0 then (4, 0x90, 0xBF)
-        else if 0xF1 ≤ x && x ≤ 0xF3 then (4, 0x80, 0xBF)
-        else if x == 0xF4 then (4, 0x80, 0x8F)
-        else (0, 0, 0)
-      if len == 0 then
-        out := out.push '�'; i := i + 1
-      else
-        -- count how many bytes of the sequence are well-formed
-        let mut k := 1
-        let mut ok := true
-        while ok && k < len do
-          if i + k < n then
-            let y := b[i + k]!
-            let good := if k == 1 then lo ≤ y && y ≤ hi else cont y
-            if good then k := k + 1 else ok := false
-          else ok := false
-        if k == len then
-          let mut v : Nat := x.toNat &&& (if len == 2 then 0x1F else if len == 3 then 0x0F else 0x07)
-          for j in [1:len] do v := v * 64 + (b[i + j]!.toNat &&& 0x3F)
-          out := out.push (Char.ofNat v)
-          i := i + len
-        else
-          out := out.push '�'; i := i + k
-  return String.ofList out.toList
 
 /-- `CharacterSet.whitespacesAndNewlines` (as measured: it includes U+200B). -/
 def isWhitespaceOrNewline (c : Char) : Bool :=

@@ -305,7 +305,7 @@ def «open» (data : ByteArray) (store : String) (network : Tx.BitcoinNetwork) (
     Except SealFailure ByteArray := do
   unless isSealed data do throw .unsealed
   let some nl := firstNewline data | throw .malformed
-  let text := Keys.Unicode.decodeUTF8Lossy (data.extract «prefix».size nl)
+  let text := Text.decodeUTF8Lossy (data.extract «prefix».size nl)
   let some c := Wire.dataOfHex? text | throw .malformed
   unless c.size == 32 do throw .malformed
   let payload := data.extract (nl + 1) data.size
