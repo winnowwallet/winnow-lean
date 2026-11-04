@@ -55,6 +55,7 @@ def Model.setPersonPasted (m : Model) (s : String) : Model × List Cmd :=
   ({ m with person := { m.person with pasted := s, parsed := none, error := none } },
    if s.trimAscii.isEmpty then [] else [.parsePaste m.generation s])
 
+/-- Saved recipients and AddPersonView (records-test's `peopleScreens` and `homeScreens`). -/
 def stepPeople (msg : PeopleMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   let f := m.person

@@ -3,6 +3,7 @@ import WinnowApp.Real
 import WinnowApp.View
 import WinnowApp.E2E
 import WinnowApp.Project
+import WinnowApp.Main
 import LeanNative.Erase
 import LeanNative.Json
 import TestKit.Check
@@ -14,8 +15,11 @@ in-memory key store and two wallets made by `Wallet.create` (two phones: A and B
 
 Covers people (add, rename, label, attach, remove), every kind of paste, receive and sender labels, store
 tamper detection (on the sealed people file), a wrong-network store, a first write that fails, and
-reopening everything from disk. Exits 1 on any failure. (The shared-savings and MuSig2 scenarios went with
-vaults, upstream 1cf93fb; cards and records written with a `signerKey` still read.) -/
+reopening everything from disk; the People store's payment index and pay-to checks; and the screens the
+journeys open but never use (Home's payment screen, People, Settings, Receive, and `Model.fail` for every
+failure a screen can get), driven as a person uses them through the app's own `perform`. Exits 1 on any
+failure. (The shared-savings and MuSig2 scenarios went with vaults, upstream 1cf93fb; cards and records
+written with a `signerKey` still read.) -/
 
 open Winnow WinnowApp WinnowApp.RecordsReal TestKit
 open TestKit.Regtest (waitUntil)
@@ -585,6 +589,681 @@ def backgroundRuns : IO Unit := do
   check "system events: a launched task" ((system (Lean.Json.mkObj [("bgtask", Lean.Json.mkObj [("id", "x"), ("kind", "processing")])])) matches some (.bgtask "x" "processing"))
   check "system events: an expired task" ((system (Lean.Json.mkObj [("bgtaskExpired", Lean.Json.mkObj [("id", "x"), ("kind", "refresh")])])) matches some (.bgtaskExpired "x" "refresh"))
 
+/-! ## The screens, as a person uses them (#35, #44, #45, #48)
+
+Each flow sends the Model what a tap sends (`step`), runs the commands through the app's own `perform`
+against a backend (the real one over a wallet opened from disk with no network, or a stub that records what
+reaches it), hands every answer back through `onHost`, and reads the screen as the shell receives it. The
+journeys open these screens; these flows use their controls. -/
+
+/-- The shell's side of `perform`: the answers it posts, collected; `auth` and the other capabilities say yes,
+`clipboard.get` answers `clipboard`. -/
+structure Shell where
+  posted : IO.Ref (Array Host)
+  clipboard : IO.Ref String
+
+def Shell.new : IO Shell := do return { posted := ← IO.mkRef #[], clipboard := ← IO.mkRef "" }
+
+def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
+  post h := s.posted.modify (·.push h)
+  cap _ _ _ := pure ()
+  ask name _ := do
+    if name == "clipboard.get" then return Task.pure (Lean.Json.mkObj [("text", Lean.Json.str (← s.clipboard.get))])
+    return Task.pure (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
+
+/-- How many answers `perform` posts for the commands these flows run; none for the ones they leave out
+(networking, the mempool window, timers, the clipboard's copy, the journal). -/
+def answersTo : Cmd → Option Nat
+  | .refresh .. => some 3
+  | .saveSettings .. | .removeExport .. => some 0
+  | .receiveAddress .. | .setReceiveLabel .. | .ownCard .. | .parsePaste .. | .addPerson .. | .editPerson ..
+  | .updateRecipient .. | .labelSender .. | .removeSenderLabel .. | .catalogStatus .. | .connectedPeers ..
+  | .resetPeers .. | .reconnect .. | .loadPaymentDetails .. | .exportBundle .. | .revealPhrase ..
+  | .deleteWallet .. | .paste .. => some 1
+  | _ => none
+
+/-- Runs `cs` through `perform`, each answer back through `onHost` and whatever that asks for in turn; the
+model after, and the commands left out, in order. -/
+partial def Shell.run (s : Shell) (m : Model) (cs : List Cmd) : IO (Model × List Cmd) := do
+  let mut m := m
+  let mut left : List Cmd := []
+  for c in cs do
+    match answersTo c with
+    | none => left := left ++ [c]
+    | some n =>
+      let before := (← s.posted.get).size
+      WinnowApp.perform c s.fx
+      unless ← waitUntil 10_000 (every := 2) (do return (← s.posted.get).size ≥ before + n) do
+        throw (IO.userError "a command posted no answer within 10 s")
+      for h in (← s.posted.get).extract before (before + n) do
+        let (m', cs') := onHost h m
+        let (m', rest) ← s.run m' cs'
+        m := m'
+        left := left ++ rest
+  return (m, left)
+
+/-- A tap: `step`, then its commands as `run` runs them. -/
+def Shell.tap (s : Shell) (msg : Msg) (m : Model) : IO (Model × List Cmd) := do
+  let (m, cs) := step msg m
+  s.run m cs
+
+/-- The whole tree as the shell receives it. -/
+def rendered (m : Model) : String := (LeanNative.Html.toWire (view m)).toJson.compress
+def renderedH (h : H) : String := (LeanNative.Html.toWire h).toJson.compress
+
+/-- A ready regtest phone on the real backend: `Wallet.create` in its own directory, opened by
+`Backend.realWithMultisig` with no network (no peer, no HTTPS). -/
+def screenPhone (root : System.FilePath) (name : String) (entropy : UInt8) : IO (Backend × String) := do
+  let dir := root / name / "regtest"
+  IO.FS.createDirAll dir
+  let ks := inMemoryKeyStore (← IO.mkRef {})
+  match ← (Wallet.create network ks (some (dir / "wallet.json")) (entropy := some (ByteArray.mk (Array.replicate 16 entropy)))).run with
+  | .ok _ => pure ()
+  | .error e => throw (IO.userError s!"Wallet.create: {e.name}")
+  let (backend, _, _) ← Backend.realWithMultisig { keyStore := ks, fetch := fun _ => throw (.other "offline") }
+  match ← backend.openWallet .regtest dir.toString with
+  | .opened id => return (backend, id)
+  | _ => throw (IO.userError s!"{name}: the wallet did not open")
+
+/-- The model of a ready phone on regtest, in the foreground. -/
+def readyModel (walletID : String) (advanced := false) : Model :=
+  { stage := .ready, active := true, walletID := some walletID,
+    settings := { network := .regtest, advancedMode := advanced } }
+
+/-! ### Model.fail (#48) -/
+
+/-- Every busy flag a failure can clear, by name, as one model has them all set. -/
+def busyFlags : List (String × (Model → Bool)) :=
+  [ ("onboarding.busy", (·.onboarding.busy)), ("onboarding.restoring", (·.onboarding.restoring))
+  , ("receive.changing", (·.receive.changing)), ("labelEditor.saving", (·.labelEditor.saving))
+  , ("send.reviewing", (·.send.reviewing)), ("send.sending", (·.send.sending))
+  , ("spendingInFlight", (·.spendingInFlight)), ("settingsDraft.resettingPeers", (·.settingsDraft.resettingPeers))
+  , ("payment.loading", (·.payment.loading)), ("feeBump.bumping", (·.feeBump.bumping))
+  , ("exportState.busy", (·.exportState.busy)), ("reveal.revealing", (·.reveal.revealing))
+  , ("person.saving", (·.person.saving)), ("person.inferring", (·.person.inferring))
+  , ("multisigAdd.saving", (·.multisigAdd.saving)), ("multisigBuild.creating", (·.multisigBuild.creating))
+  , ("ledgerPair.pairing", (·.ledgerPair.pairing)), ("signerKeys.saving", (·.signerKeys.saving))
+  , ("collect.busy", (·.collect.busy)) ]
+
+/-- A phone with every screen in the middle of something: each busy flag set, the export holding a file, a
+card shown, the collection step at epoch 4. -/
+def busyModel : Model :=
+  { readyModel "w" with
+    onboarding := { busy := true, restoring := true }
+    receive := { address := "bcrt1q", changing := true }
+    labelEditor := { address := "bcrt1q", draft := "Rent", saving := true }
+    send := { reviewing := true, sending := true, resolvedRateMilli := some 2_000 }
+    spendingInFlight := true
+    settingsDraft := { resettingPeers := true }
+    payment := { loading := true }
+    feeBump := { txid := "tt", bumping := true }
+    exportState := { busy := true, file := some "/tmp/winnow-export-x/w.json" }
+    reveal := { revealing := true }
+    person := { saving := true, inferring := true }
+    shareCard := { card := some "card" }
+    multisigAdd := { saving := true }
+    multisigBuild := { creating := true }
+    ledgerPair := { pairing := true }
+    signerKeys := { saving := true }
+    collect := { busy := true, epoch := 4 } }
+
+/-- `Model.fail` for each context it handles: where the message lands, and the busy flags it clears; every
+other flag stays set (a failure touches only the screen that asked). -/
+def failTable : List (String × (Model → Bool) × List String) :=
+  let boom := some "boom"
+  [ ("create", (·.onboarding.error == boom), ["onboarding.busy"])
+  , ("import", (·.onboarding.error == boom), ["onboarding.busy"])
+  , ("onboarding", (·.onboarding.error == boom), ["onboarding.busy"])
+  , ("create.cancelled", (·.onboarding.error.isNone), ["onboarding.busy"])
+  , ("import.cancelled", (·.onboarding.error.isNone), ["onboarding.busy"])
+  , ("cloudRestore", (·.onboarding.restoreError == boom), ["onboarding.restoring"])
+  , ("cloudRestore.cancelled", (·.onboarding.restoreError.isNone), ["onboarding.restoring"])
+  , ("reveal.cancelled", (·.reveal.error.isNone), ["reveal.revealing"])
+  , ("receive", (·.receive.error == boom), ["receive.changing"])
+  , ("label", (·.labelEditor.error == boom), ["labelEditor.saving"])
+  , ("send", (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
+  -- a declined Face ID before a payment: the prompt's text shows, and Send is free again
+  , ("send.cancelled", (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
+  , ("rate", (·.send.resolvedRateMilli.isNone), [])
+  , ("settings", (·.settingsDraft.error == boom), ["settingsDraft.resettingPeers"])
+  , ("peers", (·.settingsDraft.error == boom), ["settingsDraft.resettingPeers"])
+  , ("delete", (·.confirm == some (.deleteFailed "boom")), [])
+  , ("catalog", (·.settingsDraft.catalog.isNone), [])
+  , ("payment", (·.payment.error == boom), ["payment.loading"])
+  , ("feeBump", (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
+  , ("feeBump.cancelled", (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
+  , ("export", fun m => m.exportState.error == boom && m.exportState.file.isNone, ["exportState.busy"])
+  , ("reveal", (·.reveal.error == boom), ["reveal.revealing"])
+  , ("card", fun m => m.shareCard.error == boom && m.shareCard.card.isNone, [])
+  , ("person", (·.person.error == boom), ["person.saving", "person.inferring"])
+  , ("recipients", (·.recipientsError == boom), [])
+  , ("multisigAdd", (·.multisigAdd.error == boom), ["multisigAdd.saving"])
+  , ("multisigBuild", (·.multisigBuild.error == boom), ["multisigBuild.creating"])
+  , ("multisigAccount", (·.multisigAccountError == boom), [])
+  , ("accountSpend", (·.payment.error == boom), [])
+  , ("ledgerPair", (·.ledgerPair.error == boom), ["ledgerPair.pairing"])
+  , ("signerKeys", (·.signerKeys.error == boom), ["signerKeys.saving"])
+  , ("signer", (·.signerDetail.error == boom), [])
+  , ("multisigOverview", (·.status.lastSyncError.isNone), [])
+  , ("collect.4", (·.collect.error == boom), ["collect.busy", "spendingInFlight"])
+  , ("collect.4.cancelled", (·.collect.error.isNone), ["collect.busy", "spendingInFlight"])
+  -- an earlier collection run's failure: dropped, though the spend it held is free again
+  , ("collect.3", (·.collect.error.isNone), ["spendingInFlight"])
+  -- what no screen asked for falls through to the sync error line
+  , ("refresh", (·.status.lastSyncError == boom), [])
+  , ("sync", (·.status.lastSyncError == boom), [])
+  , ("open", (·.status.lastSyncError == boom), [])
+  , ("somethingNew", (·.status.lastSyncError == boom), []) ]
+
+/-- #48: each failure reaches the screen that asked and clears that screen's busy flags, through `onHost`
+as `perform` posts it; the screens then show it. -/
+def failuresReachTheirScreens : IO Unit := do
+  for (name, flag) in busyFlags do
+    check s!"fail: the busy model has {name} set" (flag busyModel)
+  for (ctx, landed, clears) in failTable do
+    let (m, cs) := onHost (.failed busyModel.generation ctx "boom") busyModel
+    check s!"fail {ctx}: the message lands on its screen" (landed m && cs.isEmpty)
+    for (name, flag) in busyFlags do
+      if clears.contains name then check s!"fail {ctx}: clears {name}" (!flag m)
+      else check s!"fail {ctx}: leaves {name}" (flag m)
+  -- a cancelled restore leaves an earlier message alone; a cancelled iCloud prompt says nothing
+  let restoring := { busyModel with onboarding := { busyModel.onboarding with restoreError := some "earlier" } }
+  check "fail cloudRestore.cancelled: keeps what the restore said" ((restoring.fail "cloudRestore.cancelled" "x").onboarding.restoreError == some "earlier")
+  check "fail cloudRestore: a CancellationError says nothing" ((busyModel.fail "cloudRestore" "Winnow.CancellationError").onboarding.restoreError.isNone)
+  -- the collection step only while the scene is active
+  let away := (busyModel.fail "collect.4" "boom")
+  check "fail collect: the active scene's run shows" (away.collect.error == some "boom")
+  let background := { busyModel with active := false }.fail "collect.4" "boom"
+  check "fail collect: not while in the background" (background.collect.busy && background.collect.error.isNone && !background.spendingInFlight)
+  check "fail collect: a context that is not a number is an earlier run's" ((busyModel.fail "collect.x" "boom").collect.busy)
+  -- another wallet's failure is dropped (a network switch since)
+  let (switched, _) := busyModel.switchNetwork .mainnet
+  let (other, _) := onHost (.failed busyModel.generation "send" "boom") { switched with send := { sending := true } }
+  check "fail: another wallet's failure is dropped" (other.send.sending && other.send.error.isNone)
+  -- the screens show it: Send's review, the fee bump, Pair a Ledger, the label editor
+  let sending := { readyModel "w" with send := { sending := true, preview := none }, spendingInFlight := true }.present .send
+  let (m, _) := onHost (.failed 0 "send" "The node rejected the transaction: insufficient fee") sending
+  check "fail send: Send shows the node's reason" (contains (rendered m) "The node rejected the transaction: insufficient fee" && !m.send.sending)
+  let review : WinnowApp.FeeBumpPreview := { feeRateMilli := 5_000, fee := 700, change := some 9_300 }
+  let bump : FeeBump := { txid := "tt", bumping := true, targetText := "5", reviewed := some ("5", review) }
+  let bumping := { readyModel "w" (advanced := true) with feeBump := bump }.present .feeBump
+  check "fail feeBump: the sheet says Signing while it runs" (contains (rendered bumping) "Signing & broadcasting")
+  let (m, _) := onHost (.failed 0 "feeBump" "The replacement was refused") bumping
+  check "fail feeBump: the sheet shows it and offers Sign & replace again"
+    (contains (rendered m) "The replacement was refused" && contains (rendered m) "Sign & replace" && !m.spendingInFlight)
+  let pairing := { readyModel "w" (advanced := true) with routes := [.ledgerPair], ledgerPair := { name := "Nano X", pairing := true } }
+  let (m, _) := onHost (.failed 0 "ledgerPair" "No Ledger answered") pairing
+  check "fail ledgerPair: Pair a Ledger shows it, Pair again" (contains (rendered m) "No Ledger answered" && contains (rendered m) "\"Pair\"")
+  let unknown := (onHost (.failed 0 "somethingNew" "the sync line") (readyModel "w" (advanced := true))).1
+  check "fail: an unknown context shows on the Sync line" (contains (rendered unknown) "the sync line")
+
+/-! ### Settings (#44) -/
+
+/-- A backend that answers the Settings screen and records what reached it. -/
+def recordingBackend (calls : IO.Ref (Array String)) (failReset : IO.Ref Bool) : Backend :=
+  let note (s : String) : IO Unit := calls.modify (·.push s)
+  { Backend.pending with
+    reconnect := fun s => note s!"reconnect {s.scoped.manualPeers} genesis={s.verifyFromGenesis}"
+    snapshot := do note "snapshot"; return ({}, .synced)
+    records := do note "records"; return {}
+    multisigOverview := do note "multisigOverview"; return {}
+    catalogStatus := do note "catalogStatus"; return "Observed 2026-09-28: 412 candidates."
+    connectedPeers := do
+      note "connectedPeers"
+      return [{ endpoint := "203.0.113.7:8333", userAgent := "/Satoshi:30.0/", startHeight := 900_000, feeFilter := some 1_000 }]
+    resetPeers := do
+      note "resetPeers"
+      if ← failReset.get then throw (IO.userError "The peer store could not be cleared.")
+    updateSettings := fun s => note s!"updateSettings {s.scoped.manualPeers} {reprStr s.scoped.explorer} {s.scoped.esploraURL} genesis={s.verifyFromGenesis}"
+    exportBundle := fun withPhrase => do note s!"exportBundle {withPhrase}"; return "{\"version\":1}"
+    revealMnemonic := do note "revealMnemonic"; return ["abandon", "ability", "able"]
+    deleteWallet := note "deleteWallet" }
+
+/-- #44: Settings' controls, each through `perform` to the backend, each change saved (the command, the
+settings file and the backend's copy) and shown. -/
+def settingsScreen (root : System.FilePath) : IO Unit := do
+  let calls ← IO.mkRef (#[] : Array String)
+  let failReset ← IO.mkRef false
+  backendRef.set (recordingBackend calls failReset)
+  rootDir.set (root / "settings").toString
+  IO.FS.createDirAll (root / "settings")
+  tmpDir.set (root / "tmp").toString
+  IO.FS.createDirAll (root / "tmp")
+  let sh ← Shell.new
+  let called (s : String) : IO Bool := do return (← calls.get).contains s
+  let savedFile : IO Settings := do
+    match Lean.Json.parse (← IO.FS.readFile (root / "settings" / "settings.json")) >>= Lean.fromJson? with
+    | .ok s => return s
+    | .error _ => return {}
+  let saved (f : Settings → Bool) : IO Bool := waitUntil 5_000 (every := 5) do
+    try return f (← savedFile) catch _ => return false
+  let tap (msg : SettingsMsg) (m : Model) := sh.tap (.settings msg) m
+  -- the Settings tab: the census line and the connected peers load as it appears
+  let m := readyModel "w" (advanced := true)
+  let (m, _) ← sh.tap (.selectTab 2) m
+  check "settings: the tab asks for the peers and the census line" ((← called "connectedPeers") && (← called "catalogStatus"))
+  check "settings: both shown" (contains (rendered m) "Observed 2026-09-28: 412 candidates." && contains (rendered m) "203.0.113.7:8333" &&
+    contains (rendered m) "floor 1000 sat/kvB")
+  -- a manual peer: added, saved and shown; the same one again changes nothing; nonsense is refused
+  let (m, _) ← tap (.setManualPeer " 127.0.0.1:18444 ") m
+  let (m, left) ← tap .addManualPeer m
+  check "manual peer: added to this network's settings" (m.settings.manualPeers == ["127.0.0.1:18444"] && m.settingsDraft.manualPeer.isEmpty && left.isEmpty)
+  check "manual peer: saved to settings.json" (← saved (·.regtest.manualPeers == ["127.0.0.1:18444"]))
+  check "manual peer: the backend has it" (← waitUntil 2_000 (every := 5) (called "updateSettings [127.0.0.1:18444] WinnowApp.Explorer.blockstream  genesis=false"))
+  check "manual peer: shown with Remove" (contains (rendered m) "127.0.0.1:18444" && contains (rendered m) "Remove")
+  check "manual peer: only this network's" (m.settings.mainnet.manualPeers.isEmpty && m.settings.signet.manualPeers.isEmpty)
+  let (again, cs) := stepSettings .addManualPeer (stepSettings (.setManualPeer "127.0.0.1:18444") m).1
+  check "manual peer: the same one again is not saved twice" (cs.isEmpty && again.settings.manualPeers.length == 1)
+  let (bad, cs) := stepSettings .addManualPeer (stepSettings (.setManualPeer "no port here") m).1
+  check "manual peer: nonsense is refused on the screen" (cs.isEmpty && contains (rendered bad) "use host:port.")
+  let (m, _) ← tap (.setManualPeer "peer.example:8333") m
+  let (m, _) ← tap .addManualPeer m
+  check "manual peer: a second one" (m.settings.manualPeers == ["127.0.0.1:18444", "peer.example:8333"])
+  let (m, _) ← tap (.removeManualPeer 0) m
+  check "manual peer: removed" (m.settings.manualPeers == ["peer.example:8333"] && !contains (rendered m) "127.0.0.1:18444")
+  check "manual peer: the removal is saved" (← saved (·.regtest.manualPeers == ["peer.example:8333"])) (← IO.FS.readFile (root / "settings" / "settings.json"))
+  -- Reconnect: the backend rebuilds networking with the settings as saved
+  let (m, _) ← tap .reconnect m
+  check "Reconnect peers: reaches the backend with the saved peers" (← called "reconnect [peer.example:8333] genesis=false")
+  -- Verify from genesis: saved, journaled, and networking rebuilt with it
+  let (m', cs) := stepSettings (.setVerifyFromGenesis true) m
+  check "Verify from genesis: saves, journals and reconnects"
+    (cs.any (· matches .saveSettings _) && cs.any (· matches .journal "setting.verifyFromGenesis" _) && cs.any (· matches .reconnect ..))
+  let (m, _) ← sh.run m' cs
+  check "Verify from genesis: the backend reconnects from block 0" (← called "reconnect [peer.example:8333] genesis=true")
+  check "Verify from genesis: saved" (← saved (·.verifyFromGenesis))
+  check "Verify from genesis: the toggle is on, with its note" (contains (rendered m) "Turning this off later keeps the chain you already verified.")
+  check "Verify from genesis: the same value again does nothing" (stepSettings (.setVerifyFromGenesis true) m).2.isEmpty
+  -- the explorer: a preset, then a custom Esplora URL
+  let (m, _) ← tap (.setExplorer 1) m
+  check "explorer: mempool.space saved" (m.settings.scoped.explorer == .mempool)
+  check "explorer: no URL field for a preset" (!contains (rendered m) "Esplora-compatible website URL")
+  let (m, _) ← tap (.setExplorer 2) m
+  check "explorer: Custom shows the URL field" (contains (rendered m) "Esplora-compatible website URL")
+  let (m, _) ← tap (.setEsploraURL "  https://esplora.example/api  ") m
+  check "explorer: the custom URL is saved trimmed" (m.settings.scoped.esploraURL == "https://esplora.example/api" && m.settings.scoped.explorer == .custom)
+  check "explorer: saved to settings.json" (← saved fun s => s.regtest.explorer == .custom && s.regtest.esploraURL == "https://esplora.example/api")
+  check "explorer: the backend has it"
+    (← waitUntil 2_000 (every := 5) (called "updateSettings [peer.example:8333] WinnowApp.Explorer.custom https://esplora.example/api genesis=true"))
+  check "explorer: Selected shows it" (contains (rendered m) "Selected: https://esplora.example/api")
+  check "explorer: a relaunch keeps it" ((relaunch m.settings).esploraBaseURL == "https://esplora.example/api")
+  check "explorer: an index past the list does nothing" (stepSettings (.setExplorer 7) m).2.isEmpty
+  -- what the explorer trades away, and the design papers
+  let (side, _) := stepSettings .openReadSide m
+  check "read side: the sheet" (side.topSheet == some .readSide && contains (renderedH (readSideSheet [])) "read-side.html" &&
+    contains (rendered side) "The Read Side")
+  let (closed, _) := step .closeSheet side
+  check "read side: closes" closed.sheets.isEmpty
+  let (papers, _) := stepSettings .openPapers m
+  let list := renderedH (papersSheet papers [])
+  check "papers: the four" (contains list "A phone wallet" && contains list "The read side" && contains list "The write side" && contains list "Import")
+  let (paper, _) := stepSettings (.openPaper 2) papers
+  check "papers: one opens as its page" (contains (renderedH (papersSheet paper [])) "write-side.html" && contains (rendered paper) "write-side.html")
+  let (back, _) := stepSettings .closePaper paper
+  check "papers: back to the list" (back.paper.isNone && contains (renderedH (papersSheet back [])) "A phone wallet")
+  let (done, _) := step .closeSheet paper
+  check "papers: closing forgets the page" (done.sheets.isEmpty && done.paper.isNone)
+  -- Refresh and Reset peers
+  calls.set #[]
+  let (m, _) ← tap .refreshPeers m
+  check "Refresh: asks the backend for the peers" (← called "connectedPeers")
+  let (asking, _) ← tap .askResetPeers m
+  check "Reset peers: asks first" (asking.confirm == some .resetPeers && contains (rendered asking) "Reset and shuffle peers?")
+  let (resetting, cs) := stepSettings .resetPeers asking
+  check "Reset peers: Resetting… while it runs" (resetting.settingsDraft.resettingPeers && contains (rendered resetting) "Resetting" &&
+    resetting.confirm.isNone && cs.any (· matches .resetPeers _))
+  let (m, _) ← sh.run resetting cs
+  check "Reset peers: the backend resets, then the peers and the wallet are read again"
+    ((← called "resetPeers") && (← called "connectedPeers") && (← called "snapshot") && !m.settingsDraft.resettingPeers)
+  check "Reset peers: the button is back" (contains (rendered m) "Reset and shuffle peers" && !contains (rendered m) "Resetting")
+  failReset.set true
+  let (failed, _) ← sh.run (stepSettings .resetPeers m).1 (stepSettings .resetPeers m).2
+  check "Reset peers: a failure shows and frees the button"
+    (!failed.settingsDraft.resettingPeers && contains (rendered failed) "The peer store could not be cleared.")
+  -- Check gateways and reconnect: not while a discovery runs
+  check "Check gateways: reconnects" ((stepSettings .checkGateways m).2.any (· matches .reconnect ..))
+  check "Check gateways: not while discovering" (stepSettings .checkGateways { m with status := { discoveringGateways := true } }).2.isEmpty
+  -- the backup file and the recovery phrase reach the backend too (performSettings' other commands)
+  let (exp, _) := stepBackup .openExport m
+  let (exp, cs) := stepBackup .createExport exp
+  let (exp, _) ← sh.run exp cs
+  check "export: the backend's bundle, staged as a file" ((← called "exportBundle false") && exp.exportState.file.isSome && !exp.exportState.busy)
+  let file := exp.exportState.file.getD ""
+  check "export: the file holds the bundle" ((← IO.FS.readFile file) == "{\"version\":1}")
+  let (gone, cs) := step .closeSheet exp
+  let (_, _) ← sh.run gone cs
+  check "export: closing the sheet removes the staged file" (← waitUntil 2_000 (every := 5) do return !(← System.FilePath.pathExists file))
+  let (rev, _) ← sh.tap (.backup .reveal) m
+  check "reveal: the words, after device authentication" ((← called "revealMnemonic") && rev.reveal.words == ["abandon", "ability", "able"] &&
+    rev.topSheet == some .revealPhrase)
+  -- Delete wallet: asks, then the backend deletes and onboarding comes back
+  let (asking, _) ← tap .askDelete m
+  check "delete: asks first" (asking.confirm == some .deleteWallet && contains (rendered asking) "Delete this wallet?")
+  let (deleted, _) ← tap .deleteWallet asking
+  check "delete: the backend deletes, onboarding" ((← called "deleteWallet") && deleted.stage == .onboarding && deleted.walletID.isNone)
+  backendRef.set Backend.pending
+
+/-! ### Receive (#45) -/
+
+/-- #45: Receive's controls on the real backend: New address, a label saved, renamed and removed, and the
+share card with a display name. -/
+def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit := do
+  let m := readyModel walletID
+  let (m, left) ← sh.tap .openReceive m
+  let first := m.receive.address
+  check "receive: the first address" (first.startsWith "bcrt1p" && m.topSheet == some .receive) first
+  check "receive: the mempool window opens on it" (left.any fun | .watchAddress _ a => a == first | _ => false)
+  check "receive: an unlabelled address asks who it is for first"
+    (m.receive.editingLabel && contains (rendered m) "Who is this address for?" && contains (rendered m) "Skip for now")
+  let (m, _) ← sh.tap (.receive .finishLabel) m
+  check "receive: Skip shows the address" (!m.receive.editingLabel && contains (rendered m) first && contains (rendered m) "Label this address")
+  -- New address
+  let (m, left) ← sh.tap (.receive .freshAddress) m
+  let second := m.receive.address
+  check "New address: differs from the first" (second.startsWith "bcrt1p" && second != first) second
+  check "New address: the mempool window moves to it"
+    (left.any (· matches .stopWatchingAddress) && left.any fun | .watchAddress _ a => a == second | _ => false)
+  check "New address: the label editor comes first" (m.receive.editingLabel && !m.receive.changing && m.labelEditor.address == second)
+  -- label it
+  let (m, _) ← sh.tap (.receive (.setLabelDraft "  Alice, invoice 12 ")) m
+  let (m, _) ← sh.tap (.receive .saveLabel) m
+  check "label: saved for the new address only, trimmed"
+    (lookup m.records.receiveLabels second == some "Alice, invoice 12" && (lookup m.records.receiveLabels first).isNone)
+  check "label: back to the address, the label above it"
+    (!m.receive.editingLabel && contains (rendered m) "Alice, invoice 12" && contains (rendered m) "Edit label")
+  -- rename it
+  let (m, _) ← sh.tap (.receive .editLabel) m
+  check "rename: the editor holds the label" (m.labelEditor.draft == "Alice, invoice 12" && contains (rendered m) "Save label" &&
+    contains (rendered m) "Remove label")
+  let (twoLines, _) := stepReceive (.setLabelDraft "Alice\ninvoice") m
+  check "rename: two lines are refused on the screen"
+    ((stepReceive .saveLabel twoLines).2.isEmpty && contains (rendered twoLines) "Use a single-line label of at most 120 characters.")
+  let (m, _) ← sh.tap (.receive (.setLabelDraft "Alice, invoice 13")) m
+  let (m, _) ← sh.tap (.receive .saveLabel) m
+  check "rename: the new label" (lookup m.records.receiveLabels second == some "Alice, invoice 13" &&
+    contains (rendered m) "Alice, invoice 13" && !contains (rendered m) "invoice 12")
+  -- remove it
+  let (m, _) ← sh.tap (.receive .editLabel) m
+  let (m, _) ← sh.tap (.receive .removeLabel) m
+  check "remove: the label is gone" ((lookup m.records.receiveLabels second).isNone && !m.receive.editingLabel &&
+    contains (rendered m) "Label this address")
+  check "remove: and the backend agrees" ((lookup (← backend.records).receiveLabels second).isNone)
+  -- the share card: no name yet, then one
+  let (card, cs) := stepReceive .openCard m
+  check "card: the sheet opens, and asks for a name" (card.topSheet == some .shareCard && !cs.any (· matches .ownCard ..) &&
+    contains (renderedH (shareCardSheet card [])) "Add a name to make your card.")
+  let (card, left) ← sh.tap (.receive (.setOwnName "Alice")) card
+  check "card: the name is saved" (card.settings.ownDisplayName == "Alice" && left.isEmpty)
+  let shown := renderedH (shareCardSheet card [])
+  let some text := card.shareCard.card | check "card: made for the name" false; return
+  check "card: shown with its QR code" (contains shown "Your card" && contains shown "\"qr\"")
+  let read ← backend.parsePaste text
+  check "card: another phone reads Alice and a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
+  let (named, cs) := stepReceive .openCard { m with settings := { m.settings with ownDisplayName := "Alice" } }
+  check "card: opening it with a name set asks for the card" (cs.any fun | .ownCard _ n => n == "Alice" | _ => false)
+  let (named, _) ← sh.run named cs
+  check "card: the card arrives" (named.shareCard.card == some text)
+  let stale := onHost (.card named.generation "Bob" "other") named
+  check "card: one made for another name is dropped" (stale.1.shareCard.card == some text)
+  let (cleared, _) ← sh.tap (.receive (.setOwnName "  ")) card
+  check "card: an empty name takes the card away" (cleared.shareCard.card.isNone &&
+    contains (renderedH (shareCardSheet cleared [])) "Add a name to make your card.")
+  let (closed, cs) := step .closeSheet m
+  check "receive: Done closes the sheet and the mempool window" (closed.sheets.isEmpty && cs.any (· matches .stopWatchingAddress))
+
+/-! ### People (#35) -/
+
+/-- #35: Saved recipients from Send: a person added from a card, renamed, a refused paste and a refused
+duplicate, a person added from an address and removed, and one chosen to pay. Returns the model, Robert's id. -/
+def peopleScreens (sh : Shell) (backend : Backend) (walletID cardB addressB : String) : IO (Model × String) := do
+  let m := readyModel walletID
+  let (m, _) ← sh.tap .openSend m
+  let (m, _) ← sh.tap (.send .openRecipients) m
+  check "people: Saved recipients, empty" (m.topSheet == some .savedRecipients &&
+    contains (rendered m) "Save a recipient from a payment in Wallet, or add an address or card here.")
+  -- add Bob from his card
+  let (m, _) ← sh.tap (.people (.openAdd {} "")) m
+  check "add: the sheet" (m.topSheet == some .addPerson && contains (renderedH (addPersonSheet m [])) "Save recipient")
+  let (m, _) ← sh.tap (.people (.setName "Bob")) m
+  let (m, _) ← sh.tap (.people (.setPasted cardB)) m
+  check "add: the card reads as fresh addresses" (m.person.parsed == some { name := some "Bob", payTo := some true } &&
+    contains (renderedH (addPersonSheet m [])) "Fresh address each payment")
+  check "add: Save is enabled" (m.person.canSave m)
+  let (m, _) ← sh.tap (.people .save) m
+  let some bob := m.records.people.find? (·.name == "Bob") | check "add: Bob saved" false; return (m, "")
+  check "add: the sheet closes on the list" (m.topSheet == some .savedRecipients && bob.payTo == some true)
+  check "add: the list shows Bob with Rename and Remove" (contains (rendered m) "\"Bob\"" && contains (rendered m) "Rename")
+  -- rename him
+  let (m, _) ← sh.tap (.people (.rename bob.id)) m
+  let sheet := renderedH (addPersonSheet m [])
+  check "rename: the sheet, his name in it, no paste field" (contains sheet "Rename recipient" && m.person.name == "Bob" &&
+    !contains sheet "Paste an address or card")
+  let (m, _) ← sh.tap (.people (.setName "Robert")) m
+  let (m, _) ← sh.tap (.people .save) m
+  check "rename: saved" ((m.person? bob.id).map (·.name) == some "Robert" && m.topSheet == some .savedRecipients &&
+    contains (rendered m) "Robert")
+  -- what is refused: a paste that is no address or card, the same card under another name
+  let (m, _) ← sh.tap (.people (.openAdd {} "")) m
+  let (m, _) ← sh.tap (.people (.setName "Bobby")) m
+  let (garbage, _) ← sh.tap (.people (.setPasted "hello world")) m
+  check "refused: a paste that is not an address or card says so, and Save is off"
+    (garbage.person.error.isSome && !garbage.person.canSave garbage && (stepPeople .save garbage).2.isEmpty &&
+     contains (renderedH (addPersonSheet garbage [])) (garbage.person.error.getD "?"))
+  let (dup, _) ← sh.tap (.people (.setPasted cardB)) garbage
+  let (dup, _) ← sh.tap (.people .save) dup
+  check "refused: the same card twice, on the sheet" (dup.topSheet == some .addPerson && !dup.person.saving &&
+    dup.person.error.isSome && contains (renderedH (addPersonSheet dup [])) "Robert")
+  let (m, _) ← sh.tap .closeSheet dup
+  -- Carol, by one address, then removed
+  let (m, _) ← sh.tap (.people (.openAdd {} addressB)) m
+  check "add: an address pasted in the sheet" (m.person.parsed.bind (·.payTo) == some false &&
+    contains (renderedH (addPersonSheet m [])) "Uses this same address each time")
+  let (m, _) ← sh.tap (.people (.setName "Carol")) m
+  let (m, _) ← sh.tap (.people .save) m
+  let some carol := m.records.people.find? (·.name == "Carol") | check "add: Carol saved" false; return (m, bob.id)
+  check "add: Carol listed" (contains (rendered m) "Carol")
+  let (m, _) ← sh.tap (.people (.remove carol.id)) m
+  check "remove: Carol is no longer a saved recipient" (!contains (rendered m) "Carol" &&
+    ((m.person? carol.id).map (·.isSavedRecipient)) == some false && m.recipientsError.isNone)
+  check "remove: the backend agrees" (((← backend.records).people.find? (·.id == carol.id)).map (·.isSavedRecipient) == some false)
+  -- choose Robert to pay
+  let (m, _) ← sh.tap (.people (.choose bob.id)) m
+  check "choose: back on Send, paying Robert" (m.topSheet == some .send && m.send.inputs.personID == some bob.id &&
+    contains (rendered m) "Robert" && contains (rendered m) "Change")
+  let (m, _) := step .closeSheet m
+  return (m, bob.id)
+
+/-! ### Home: a payment's screen (#35) -/
+
+def scriptHex (address : String) : IO String := do
+  match AddressDecoder.scriptPubKey address network with
+  | .ok s => return hex s
+  | .error _ => throw (IO.userError s!"no script for {address}")
+
+/-- #35: Home's payment screen over three payments, the people the flow above saved and a receive label:
+each section, and what its buttons do, through the real backend. -/
+def homeScreens (sh : Shell) (backend : Backend) (walletID robertID bobAddress ownAddress funder : String) : IO Unit := do
+  discard <| backend.setReceiveLabel ownAddress "Invoice 12"
+  let records ← backend.records
+  let bobScript ← scriptHex bobAddress
+  check "home fixture: Robert's first address is one of his" (records.recipientByScript.contains (bobScript, robertID))
+  let t1 := hex (ByteArray.mk (Array.replicate 32 0x11))
+  let t2 := hex (ByteArray.mk (Array.replicate 32 0x22))
+  let t3 := hex (ByteArray.mk (Array.replicate 32 0x33))
+  let ownScript ← scriptHex ownAddress
+  let toBob : TxOut := { index := 0, address := some bobAddress, script := bobScript, amount := 50_000, ownedByWallet := false }
+  let change : TxOut := { index := 1, address := some "bcrt1qchange", script := "0014", amount := 9_500, ownedByWallet := true }
+  let toUs : TxOut := { index := 0, address := some ownAddress, script := ownScript, amount := 20_000, ownedByWallet := true }
+  let sent : HistoryItem :=
+    { txid := t1, height := 0, received := 9_500, spent := 60_000, fee := some 500, outputs := some [toBob, change] }
+  let received : HistoryItem :=
+    { txid := t2, height := 101, received := 20_000, spent := 0, fee := none, outputs := some [toUs], fundingAddresses := [funder] }
+  let unstored : HistoryItem := { txid := t3, height := 99, received := 0, spent := 7_300, fee := some 300 }
+  let history := [sent, received, unstored]
+  let status : Status := { balance := 29_500, history, payments := history.map ({ item := ·, source := .wallet }),
+                           feeBumpable := [t1], tipHeight := 101 }
+  let m := { readyModel walletID with status, records }
+  let home := rendered m
+  check "home: the list" (contains home "Sent to Robert" && contains home "Received" && contains home (Ids.historyPayment t2) &&
+    contains home "Pending" && contains home "Confirmed")
+  -- the payment to Robert
+  let (m, left) ← sh.tap (.home (.openPayment t1)) m
+  check "payment: opens, nothing to load" (m.routes == [.payment t1] && left.isEmpty && !m.payment.loading)
+  let sections := (paymentSections m t1).map renderedH
+  check "payment: its row, its recipient, its transaction" (sections.length == 3) s!"{sections.length}"
+  check "payment: the row" (contains sections[0]! "Sent to Robert" && contains sections[0]! "Pending")
+  check "payment: Robert, the amount, Rename and Remove" (contains sections[1]! "Robert" && contains sections[1]! (satsText 50_000) &&
+    contains sections[1]! "Rename recipient" && contains sections[1]! "Remove from saved recipients")
+  check "payment: Simple mode folds the address and the transaction ID under their titles"
+    (contains sections[1]! "\"Address\"" && contains sections[2]! "\"Transaction ID\"" && !contains (rendered m) "View transaction")
+  let (m, _) ← sh.tap (.setExpanded s!"pay.addr.0" true) m
+  let (m, _) ← sh.tap (.setExpanded "pay.txid" true) m
+  check "payment: unfolded" (m.isExpanded "pay.addr.0" && m.isExpanded "pay.txid" && contains (rendered m) bobAddress && contains (rendered m) t1)
+  let (opened, _) ← sh.tap (.home (.editRecipient bobAddress (some robertID))) m
+  check "payment: Rename recipient opens the sheet with his name"
+    (opened.topSheet == some .addPerson && opened.person.name == "Robert" && contains (rendered opened) "Rename recipient")
+  let (m, _) ← sh.tap (.home (.removeRecipient robertID)) m
+  check "payment: Remove from saved recipients" (((m.person? robertID).map (·.isSavedRecipient)) == some false &&
+    contains (rendered m) "Save recipient" && !contains (rendered m) "Remove from saved recipients")
+  let (m, _) ← sh.tap (.home (.editRecipient bobAddress (some robertID))) m
+  check "payment: Save recipient, with his name" (m.person.name == "Robert" && contains (renderedH (addPersonSheet m [])) "Save recipient")
+  let (m, _) ← sh.tap (.people .save) m
+  check "payment: saved again" (((m.person? robertID).map (·.isSavedRecipient)) == some true && contains (rendered m) "Rename recipient" &&
+    m.sheets.isEmpty)
+  let (m, _) ← sh.tap (.home .pop) m
+  check "payment: Back" (m.routes.isEmpty && contains (rendered m) "Activity")
+  -- the payment received: its address label, its sender
+  let (m, _) ← sh.tap (.home (.openPayment t2)) m
+  let sections := (paymentSections m t2).map renderedH
+  check "received: its row, its label, its sender, its transaction" (sections.length == 4) s!"{sections.length}"
+  check "received: the label of the address paid" (contains sections[1]! "Receive address labels" && contains sections[1]! "Invoice 12" &&
+    contains sections[1]! "Edit address label")
+  check "received: no sender yet" (contains sections[2]! "Save sender as person")
+  let (m, _) ← sh.tap (.home .labelSender) m
+  let sheet := renderedH (addPersonSheet m [])
+  check "sender: the sheet offers the saved people and the funding address"
+    (contains sheet "Save sender" && contains sheet "Or choose someone saved" && contains sheet "Robert" && contains sheet funder)
+  let (m, _) ← sh.tap (.people (.chooseFunding funder .localFunding)) m
+  let (m, _) ← sh.tap (.people (.setName "Dave")) m
+  let (m, _) ← sh.tap (.people .save) m
+  let some dave := m.records.people.find? (·.name == "Dave") | check "sender: Dave saved" false; return
+  check "sender: Dave labels the payment, paid at his funding address"
+    (lookup m.records.senderByTxid t2 == some dave.id && dave.payTo == some false && dave.provenance == some .localFunding && m.sheets.isEmpty)
+  let shown := rendered m
+  check "sender: the screen says so" (contains shown "Received from Dave" && contains shown "Send to Dave" && contains shown "Remove sender label")
+  let (paying, left) ← sh.tap (.home (.sendToPerson dave.id)) m
+  check "sender: Send to Dave opens Send, paying him" (paying.topSheet == some .send && paying.send.inputs.personID == some dave.id &&
+    paying.send.inputs.paymentIndex == some 0 && left.any (· matches .resolveRate ..))
+  let (m, _) ← sh.tap (.home .removeSenderLabel) m
+  check "sender: the label removed" ((lookup m.records.senderByTxid t2).isNone && contains (rendered m) "Save sender as person")
+  let (m, _) ← sh.tap (.home .labelSender) m
+  let (m, _) ← sh.tap (.people (.chooseSaved dave.id)) m
+  check "sender: someone saved, chosen" (lookup m.records.senderByTxid t2 == some dave.id && m.sheets.isEmpty)
+  -- the address label, edited from the payment
+  let (m, _) ← sh.tap (.home (.editPaymentLabel ownAddress)) m
+  let sheet := renderedH (labelSheet m [])
+  check "label: the sheet, the label in it" (m.topSheet == some .labelEditor && m.labelEditor.draft == "Invoice 12" &&
+    contains sheet "Address label" && contains sheet "Save label" && contains sheet "Remove label")
+  let (m, _) ← sh.tap (.receive (.setLabelDraft "Invoice 12, paid")) m
+  let (m, _) ← sh.tap (.receive .saveLabel) m
+  check "label: saved, the sheet closes, the payment shows it" (m.sheets.isEmpty && contains (rendered m) "Invoice 12, paid")
+  let (m, _) ← sh.tap (.home .pop) m
+  -- a send whose transaction is not on this phone: its details load
+  let (m, cs) := stepHome (.openPayment t3) m
+  check "unstored: opening it loads its details" (m.payment.loading && cs.any fun | .loadPaymentDetails _ t => t == t3 | _ => false)
+  check "unstored: Loading… meanwhile" (contains (rendered m) "Loading payment details")
+  let (m, cs) := onHost (.paymentLoaded m.generation t3) m
+  check "unstored: loaded, the wallet read again" (!m.payment.loading && cs.any (· matches .refresh _))
+  let (failed, _) := onHost (.failed m.generation "payment" "The peer did not send it.") { m with payment := { loading := true } }
+  check "unstored: a failure shows, with Load payment details again"
+    (contains (rendered failed) "The peer did not send it." && contains (rendered failed) "Load payment details")
+  check "unstored: not while syncing" (stepHome .loadPayment { failed with status := { failed.status with syncing := true } }).2.isEmpty
+  let (m, _) := stepHome .pop m
+  -- Advanced: the full transaction, and Bump fee for a payment that can be bumped
+  let adv := { m with settings := { m.settings with advancedMode := true } }
+  let (adv, _) := stepHome (.openPayment t1) adv
+  let s := rendered adv
+  check "Advanced: the txid in full, View transaction, Bump fee" (contains s t1 && contains s "View transaction" && contains s "Bump fee")
+  let (adv2, _) := stepHome (.openPayment t2) (stepHome .pop adv).1
+  check "Advanced: no Bump fee for a payment received" (!contains (rendered adv2) "Bump fee")
+  -- a payment gone from the history, and the Back up page
+  let (gone, _) := stepHome (.openPayment (hex (ByteArray.mk (Array.replicate 32 0x44)))) m
+  check "gone: says so" (contains (rendered gone) "This payment is no longer in the wallet")
+  let (backup, _) := stepHome .openBackup m
+  check "Back up: the page" (backup.routes == [.backup])
+
+/-! ### The People store: payment indexes and pay-to checks (#35) -/
+
+/-- `advancePaymentIndex`, as two payments to Bob move it, and `validatePayTo`'s refusals, one of them
+through the file. -/
+def paymentIndexAndPayTo (a b : Phone) : IO Unit := do
+  let r ← a.records
+  let some bob := r.people.find? (·.name == "Bob") | check "Bob is saved" false; return
+  let index (r : Records) : Nat := ((r.people.find? (·.id == bob.id)).map (·.nextPaymentIndex)).getD 999
+  check "index: Bob is paid at index 0 first" (index r == 0)
+  let (addr0, i0) ← obtain "index: Bob's next address" (nextPaymentAddress a.store bob.id)
+  let advance (i : UInt32) : RM Records := withPeople a.store (some a.wallet) fun ps =>
+    ps.advancePaymentIndex a.store.keys a.store.writeData bob.id i
+  let r ← obtain "index: a payment at 0" (advance i0)
+  check "index: the next payment uses 1" (index r == 1)
+  let (addr1, i1) ← obtain "index: Bob's next address again" (nextPaymentAddress a.store bob.id)
+  check "index: a fresh address" (i1 == 1 && addr1 != addr0)
+  let r ← obtain "index: a payment reported at 0 again" (advance 0)
+  check "index: never goes back" (index r == 1)
+  let r ← obtain "index: a payment at 4" (advance 4)
+  check "index: past it" (index r == 5)
+  let r ← obtain "index: then one at 2" (advance 2)
+  check "index: still past the highest" (index r == 5)
+  check "index: on disk" (index (← (← a.reopen).records) == 5)
+  refused "index: the last index there is" (kind := "invalidState") (advance PeopleStore.maximumNextIndex)
+  refused "index: an unknown person" (kind := "unknownPerson") (withPeople a.store (some a.wallet) fun ps =>
+    ps.advancePaymentIndex a.store.keys a.store.writeData "nobody" 1)
+  -- validatePayTo
+  let some bobRecord := (← a.store.read).people.record? bob.id | check "Bob's record" false; return
+  let some bobPayTo := bobRecord.payTo | check "Bob's pay-to" false; return
+  let person (id : String) (payTo : Winnow.PersonPayTo) : PersonRecord := { id, name := id, payTo := some payTo }
+  let addr ← obtain "B address 11" (wm (b.wallet.address .receive 11))
+  let seen ← obtain "payTo: Bob's descriptor" (PeopleStore.validatePayTo bobRecord network {})
+  let seen ← obtain "payTo: an address" (PeopleStore.validatePayTo (person "carol" (.address addr)) network seen)
+  check "payTo: both counted" (seen.size == 2)
+  let seen' ← obtain "payTo: a name-only person" (PeopleStore.validatePayTo { id := "dave", name := "Dave" } network seen)
+  check "payTo: a name-only person adds nothing" (seen'.size == 2)
+  refused "payTo: two people with Bob's key" (kind := "invalidState") (PeopleStore.validatePayTo (person "bob2" bobPayTo) network seen)
+  refused "payTo: two people with one address" (kind := "invalidState") (PeopleStore.validatePayTo (person "carol2" (.address addr)) network seen)
+  refused "payTo: an address not in canonical form" (kind := "invalidState")
+    (PeopleStore.validatePayTo (person "spaced" (.address s!" {addr}")) network {})
+  refused "payTo: a descriptor not in canonical form" (kind := "invalidState")
+    (PeopleStore.validatePayTo (person "spaced" (.descriptor s!"{bobPayTo.text}\n")) network {})
+  refused "payTo: another network's address" (PeopleStore.validatePayTo (person "main" (.address "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")) network {})
+  refused "payTo: a descriptor that is none" (PeopleStore.validatePayTo (person "junk" (.descriptor "tr(nonsense)")) network {})
+  refused "payTo: a silent payment code that is none" (PeopleStore.validatePayTo (person "sp" (.silentPayment "sp1qqnotacode")) network {})
+  -- a sealed file holding two people with one key reads as damage
+  let path := a.dir / "people.json"
+  let good ← IO.FS.readBinFile path
+  let key := ((← (a.keys.key "people.regtest").run).toOption.join).getD .empty
+  IO.FS.writeBinFile path (SealedStoreFile.sealed (PeopleStore.encode #[bobRecord, { bobRecord with id := "copy", name := "Copy" }] #[]) "people" network key)
+  check "payTo: a file with two people sharing a key is damaged" ((← (← a.reopen).records).peopleStorageNotice == some PeopleStore.damagedStorageMessage)
+  IO.FS.writeBinFile path good
+  check "payTo: the good file reads again" ((← (← a.reopen).records).peopleStorageNotice.isNone)
+
+/-- The screen flows, in one directory. -/
+def screens (root : System.FilePath) : IO Unit := do
+  failuresReachTheirScreens
+  settingsScreen root
+  let (alice, aliceID) ← screenPhone root "screens-alice" 0xA1
+  let (bob, _) ← screenPhone root "screens-bob" 0xB2
+  let cardB ← bob.ownCard "Bob"
+  let bobAddress ← bob.receiveAddress false
+  let otherAddress ← bob.receiveAddress true
+  let funder ← bob.receiveAddress true
+  backendRef.set alice
+  rootDir.set (root / "screens-alice").toString
+  let sh ← Shell.new
+  receiveScreen sh alice aliceID
+  let (_, robertID) ← peopleScreens sh alice aliceID cardB otherAddress
+  homeScreens sh alice aliceID robertID bobAddress (← alice.receiveAddress false) funder
+  backendRef.set Backend.pending
+
 /-- The explorer and manual-peer rules against what Foundation and the Swift app answered
 (`FoundationVectors`, from `scripts/foundation-vectors`): a custom explorer's host, which strings
 `explorerBaseURL` keeps (HTTPS anywhere, plain HTTP only on loopback) and how it spells them, the
@@ -624,5 +1303,7 @@ def main : IO UInt32 := runMain "records-test" do
     let before ← a.records
     tamper root a
     reopenFromDisk a before
+    paymentIndexAndPayTo a b
+    screens root
   catch e =>
     check "the script ran to the end" false (toString e)
