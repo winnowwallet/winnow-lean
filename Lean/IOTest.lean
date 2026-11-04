@@ -11,9 +11,11 @@ several getheaders batches, and the headers.bin round trip; a reorg (invalidateb
 stale equal-work sibling; compact-filter download with a match for a script the test funded, the pinned
 filter headers equal to the node's `getblockfilter`, filters.json round trip and a rollback on the
 reorg; the mempool window seeing a new transaction; broadcast of a raw transaction the node then holds
-in its mempool; peers.json and broadcast.json round trips. Offline policy checks: HTTP permits and
-redirects against a local Python server through the curl fetch, seed filtering and dns-json, the
-census catalog (the list each build ships). The node is killed by PID at the end, also on failure.
+in its mempool, a reorg under it making it pending again (rolled back, saved, announced, confirmed again);
+peers.json and broadcast.json round trips. Fake peers that never ask for an announced transaction: the
+announcement timeout naming each peer, and a relay-only session ending with `seatsGone`. Offline policy
+checks: HTTP permits and redirects against a local Python server through the curl fetch, seed filtering
+and dns-json, the census catalog (the list each build ships). The node is killed by PID at the end, also on failure.
 
 Usage: `io-test [--swift <oracle-io binary>]` (the binary compares Winnow's Swift side on the same node). -/
 
@@ -283,10 +285,11 @@ def closedPeerChecks : IO Unit := do
       (match ← outcome.get with | some (.error e) => e.description | some (.ok ()) => "accepted" | none => "still waiting")
 
 /-- A fake node that accepts any number of connections and handshakes each (version with
-NODE_COMPACT_FILTERS, verack), or with `silent` accepts and never speaks; `params` picks the magic. -/
-def fakeNode (params : NetworkParams) (silent : Bool := false) : IO PeerEndpoint := do
+NODE_COMPACT_FILTERS, verack), or with `silent` accepts and never speaks; `params` picks the magic, `v6`
+listens on `::1`. It answers nothing else, so an announced transaction is never asked for. -/
+def fakeNode (params : NetworkParams) (silent : Bool := false) (v6 : Bool := false) : IO PeerEndpoint := do
   let server ← Std.Async.TCP.Socket.Server.mk
-  server.bind (.v4 ⟨Std.Net.IPv4Addr.ofParts 127 0 0 1, 0⟩)
+  server.bind (if v6 then .v6 ⟨Std.Net.IPv6Addr.ofParts 0 0 0 0 0 0 0 1, 0⟩ else .v4 ⟨Std.Net.IPv4Addr.ofParts 127 0 0 1, 0⟩)
   server.listen 16
   let port := (← server.getSockName).port
   spawn do
@@ -319,7 +322,44 @@ def fakeNode (params : NetworkParams) (silent : Bool := false) : IO PeerEndpoint
             | .error _ => alive := false; break
           if !alive then break
         discard <| sock.shutdown.toIO
-  return { host := "127.0.0.1", port }
+  return { host := if v6 then "::1" else "127.0.0.1", port }
+
+/-- A canonical one-input, one-output transaction without a witness, spending a made-up coin: fake peers
+never look inside. -/
+def fakeRawTx (tag : UInt8) : ByteArray :=
+  ofHex! "0200000001" ++ ByteArray.mk (Array.replicate 32 tag) ++ ofHex! "00000000" ++ ofHex! "00ffffffff" ++
+    ofHex! "01e803000000000000" ++ ofHex! "0151" ++ ofHex! "00000000"
+
+/-- The broadcaster giving up on peers that take the inv and never ask for the transaction (#39), over an
+IPv4 and an IPv6 fake node (ephemeral, so high, ports): an announcement unanswered past
+`announcementTimeoutMs` fails naming its peer's endpoint (`expireStaleAnnouncements`, `endpointOfKey`),
+and a relay-only session whose seat has had its announcements ends with `seatsGone` (`canAnnounce`,
+`endRelayOnlySessionIfSeatsGone`), leaving the payment pending. -/
+def broadcastGiveUpChecks : IO Unit := do
+  let v4 ← fakeNode regtest
+  let v6 ← fakeNode regtest (v6 := true)
+  let pool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[v4, v6]) (seedResolver := some noSeeds)
+  pool.start
+  discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 2)
+  let b ← runNet "give-up broadcaster" (TxBroadcaster.new pool (rebroadcastBaseMs := 200) (announcementTimeoutMs := 100))
+  let events ← collect (← b.events)
+  let txid ← runNet "give-up broadcast" (b.broadcast (fakeRawTx 1))
+  let timedOut (ep : PeerEndpoint) : IO Bool := do
+    return (← events.get).any fun | .failed t p r => t == txid && p == ep && r == "announcement timeout" | _ => false
+  let both ← waitUntil 5_000 (do return (← timedOut v4) && (← timedOut v6))
+  let failedAt := (← events.get).filterMap fun | .failed _ p r => some s!"{p.description} {r}" | _ => none
+  check s!"announce timeout: each unanswered peer is named ({v4.description}, {v6.description})" both s!"{failedAt}"
+  b.shutdown
+  let b2 ← runNet "seat broadcaster" (TxBroadcaster.new pool (rebroadcastBaseMs := 200) (maxAnnouncementsPerPeer := 1))
+  let events2 ← collect (← b2.events)
+  let txid2 ← runNet "seat broadcast" (b2.broadcast (fakeRawTx 2))
+  check "relay-only: a session opens over the fake seat" (← runNet "enterRelayOnly" (b2.enterRelayOnly 1))
+  let ended ← waitUntil 5_000 (do return (← events2.get).any fun | .relaySessionEnded .seatsGone => true | _ => false)
+  check "relay-only: a seat out of announcements that never asked ends the session (seatsGone)"
+    (ended && !(← b2.isRelayOnly) && !(← pool.isRunning) && (← b2.pendingTxids) == #[txid2])
+    (toString ((← events2.get).filterMap fun | .relaySessionEnded r => some r.rawValue | _ => none))
+  b2.shutdown
+  pool.stop
 
 /-- Upstream `PeerPoolTests` for #175: discovery as one completion stream of dials and seed answers. -/
 def discoveryChecks (dir : String) : IO Unit := do
@@ -415,6 +455,7 @@ def fakeChecks (dir : String) : IO Unit := do
      (← pool2.isCoolingDown (ep mute)) && (← pool2.knownGood).isEmpty == false)
     (match r2 with | .error e => e.description | .ok _ => "ok")
   pool2.stop
+  broadcastGiveUpChecks
   let _ := dir
 
 /-- 3b. Restore-only range scans (#226): a back-scan for the funded script below the forward frontier. -/
@@ -685,6 +726,47 @@ def gatewayChecks (n : Node) : IO Unit := do
     (seated == #[onion] && (← seedAsks.get) == 0 && (← asked.get) == #[onion.host]) s!"{seated.map (·.host)}"
   pool.stop
 
+/-- A reorg under a confirmed send (#38), on the node: filter sync reports the fork, and
+`TxBroadcaster.rollBack` (as the app's `rollBackStores` calls it from `onReorg`) makes the tombstone
+pending again, saved and announced; a reload keeps it pending, and it confirms again on the new branch.
+`b` holds `txid` as a tombstone at `confirmedAt` and is shut down here; the scan is one of its own over
+`store`, from just below that block. -/
+def reorgUnderSendChecks (n : Node) (pool : PeerPool) (store : HeaderStore) (b : TxBroadcaster)
+    (txid raw : ByteArray) (confirmedAt : Nat) (dest : String) (broadcastPath : System.FilePath)
+    (mineAddr otherAddr : String) : IO Unit := do
+  let events ← collect (← b.events)
+  let destSpk ← scriptOf n dest
+  let fs ← runNet "send filters" (FilterSyncIO.new pool store (confirmedAt - 2).toUInt32)
+  n.waitFilterIndex
+  runNet "filter sync to the tip" (fs.sync #[destSpk] (onMatch := fun _ => pure ()))
+  discard <| n.cli #["invalidateblock", ← n.cli #["getblockhash", toString confirmedAt]]
+  -- the heavier branch leaves the send out, so it waits in the node's mempool
+  for _ in [0:2] do discard <| n.cli #["generateblock", otherAddr, "[]"]
+  n.waitFilterIndex
+  let sendForks ← IO.mkRef (#[] : Array UInt32)
+  runNet "filter sync over the reorg" (fs.sync #[destSpk]
+    (onReorg := some fun fork => do sendForks.modify (·.push fork); b.rollBack fork) (onMatch := fun _ => pure ()))
+  check "reorg under a send: reported at the block below its confirmation"
+    ((← sendForks.get) == #[(confirmedAt - 1).toUInt32]) s!"{← sendForks.get}"
+  check "reorg under a send: pending again" ((← b.pendingTxids) == #[txid] && (← b.rawTransaction txid) == some raw)
+  check "reorg under a send: announced again" (← waitUntil 5_000 (do
+    return (← events.get).any fun | .announced t k => t == txid && k ≥ 1 | _ => false))
+  b.shutdown
+  let reloaded ← runNet "broadcaster reload after the reorg" (TxBroadcaster.new pool (some broadcastPath))
+  check "reorg under a send: still pending after a reload" (reloaded.persistenceState == .loaded 1 && (← reloaded.pendingTxids) == #[txid])
+  let reloadedEvents ← collect (← reloaded.events)
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let matched ← IO.mkRef (#[] : Array UInt32)
+  runNet "filter sync, the send mined again" (fs.sync #[destSpk] (onMatch := fun m => do
+    if m.block.transactions.any (·.txid == txid) then
+      matched.modify (·.push m.height)
+      reloaded.markConfirmed txid m.height))
+  let reconfirmed ← waitUntil 5_000 (do return (← reloadedEvents.get).any fun | .confirmed t => t == txid | _ => false)
+  check "reorg under a send: confirmed again on the new branch"
+    (reconfirmed && (← reloaded.pendingTxids).isEmpty && (← matched.get) == #[(← n.height).toUInt32]) s!"matched at {← matched.get}"
+  reloaded.shutdown
+
 def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
   say s!"node: bitcoind regtest pid {n.pid}, p2p {n.p2p}"
   discard <| n.cli #["createwallet", "w"]
@@ -864,7 +946,8 @@ def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
   pool.start
   check "relay-only: start() resumes full service" ((← pool.mode) == .full && (← pool.isRunning))
   n.mine 1 mineAddr
-  runNet "markConfirmed" (b2.markConfirmed txid (← n.height).toUInt32)
+  let confirmedAt ← n.height
+  runNet "markConfirmed" (b2.markConfirmed txid confirmedAt.toUInt32)
   let drained ← waitUntil 5_000 (do
     return (← b2events.get).any fun | .relaySessionEnded .drained => true | _ => false)
   check "relay-only: the drain ends the session" (drained && !(← b2.isRelayOnly))
@@ -877,7 +960,7 @@ def nodeChecks (dir : String) (n : Node) (swift : Option String) : IO Unit := do
   let b3 ← runNet "broadcaster reload 2" (TxBroadcaster.new pool (some broadcastPath))
   check "confirmed tombstone persists and is silent" ((← b3.pendingTxids).isEmpty && (← b3.rawTransaction txid).isNone &&
     b3.persistenceState == .loaded 1)
-  b3.shutdown
+  reorgUnderSendChecks n pool store b3 txid raw confirmedAt dest broadcastPath mineAddr otherAddr
   -- 7c. A payment broadcast while no peer is seated reaches the node once one is, not on the 60 s retry.
   pool.stop
   let b4 ← runNet "broadcaster, no peers" (TxBroadcaster.new pool (some broadcastPath))

@@ -385,6 +385,8 @@ private def announce (b : TxBroadcaster) (txid : ByteArray) : IO Unit := do
     b.recordAnnouncement txid peer.endpoint.description
   b.emit (.announced txid announced)
 
+/-- Fails the peers whose announcement went unanswered past `announcementTimeoutMs`, naming each (io-test's
+`broadcastGiveUpChecks`, over IPv4 and IPv6). -/
 private def expireStaleAnnouncements (b : TxBroadcaster) (txid : ByteArray) : IO Unit := do
   let deadline := (← b.now) - seconds b.announcementTimeoutMs
   let expired ← b.state.modifyGet fun st =>
@@ -499,7 +501,8 @@ private def endRelayOnlySession (b : TxBroadcaster) (reason : RelaySessionEnd) :
   b.emit (.relaySessionEnded reason)
 
 /-- Whether any of `peers` can still hear about something pending: a seat that has not given up on a
-transaction (requested or served it, or has announcements left and was not deprioritized). -/
+transaction (requested or served it, or has announcements left and was not deprioritized). io-test's
+`broadcastGiveUpChecks` runs a session down to `seatsGone` over a seat that never asks. -/
 private def canAnnounce (b : TxBroadcaster) (st : BroadcastState) (peers : Array PeerConnection) : Bool :=
   let unconfirmed := st.pending.toArray.filter (·.2.confirmedAtHeight.isNone)
   peers.any fun peer =>
@@ -675,7 +678,8 @@ def markConfirmed (b : TxBroadcaster) (txid : ByteArray) (height : UInt32) : Net
   b.emit (.confirmed txid)
   b.scheduleRebroadcast
 
-/-- Reactivates entries whose confirming block was disconnected. -/
+/-- Reactivates entries whose confirming block was disconnected (io-test's `reorgUnderSendChecks`, from filter
+sync's `onReorg` over a real reorg; backend-test's step 9b, from `resumeInterruptedRollback`). -/
 def rollBack (b : TxBroadcaster) (forkHeight : UInt32) : NetM Unit := do
   let st ← b.state.get
   if st.stopped then throw (.broadcast .stopped)
