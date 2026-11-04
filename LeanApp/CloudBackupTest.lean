@@ -468,7 +468,8 @@ def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO
   let cloud ← match cloud with | some c => pure c | none => MemoryCloud.new
   let cloudKeys ← match cloudKeys with | some k => pure k | none => memoryCloudKeys
   let attempts ← IO.mkRef 0
-  let deps : Deps := { keyStore := keys, fetch := fun _ => throw (.other "offline"), networkParams := mode.networkParams, peerCount := 1 }
+  let deps : Deps := { keyStore := keys, networkParams := mode.networkParams, peerCount := 1, importPeerWaitMs := 1_000,
+                       fetch := fun _ => throw (.other "offline") }
   let (backend, env, app) ← Backend.realWithCloud deps (store := cloud.store) (keys := cloudKeys)
     (authenticate := fun _ => do
       attempts.modify (· + 1)
