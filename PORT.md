@@ -46,8 +46,11 @@ This file is the plan and the status board; it is updated as each module lands.
   recorded against it. The harness (Swift drivers, `gen/*.py`, `lockstep.py`, the Swift `Package.swift`
   with the oracle products) was moved out of the tree to `~/src/winnow-lean-swift-archive/LeanOracle`
   ("`LeanOracle/…`" in Lean comments means that harness); to rerun it, restore `Sources/` from `9cca3fc`
-  next to it. The Lean-side oracle executables (`Lean/Oracle*.lean`, `LeanApp/Oracle*.lean`) are kept.
-  `io-test --swift` likewise needs the archived `oracle-io`; without it `io-test` runs its 73 Lean checks.
+  next to it. The Lean side of that harness (the `Oracle` library, the `oracle-*` executables and
+  `io-test --swift`) was removed on 2026-11-04 (#43): CI never built it, the archive is no longer at
+  that path, and what only it checked moved into Lean tests: the explorer and peer rules into
+  records-test, against vectors from Foundation (`scripts/foundation-vectors`); FilterSync's
+  checks into the code io-test runs; the I/O error texts into io-test. It is in history at `bc4e81e`.
 * Platform APIs replaced: CryptoKit / CommonCrypto / P256K → Lean crypto; Network → Lean TCP;
   CoreImage QR → a QR encoder in Lean and a `qr` node; WKWebView (bundled design papers) → a generic
   bundled-page node; Security (Keychain), LocalAuthentication, UIKit pasteboard/share → capabilities.
@@ -364,7 +367,7 @@ Each module is done when its lockstep run against the Swift original passes and 
 
 ## How to port a module (the pattern every area follows)
 
-Layout during the port (the Swift parts are now in the archive, see Scope):
+Layout during the port (the Swift parts went to the archive and the Lean oracles were removed, see Scope):
 
 | What | Where |
 |---|---|

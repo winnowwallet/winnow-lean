@@ -8,6 +8,7 @@ import LeanNative.Erase
 import LeanNative.Json
 import TestKit.Check
 import TestKit.Regtest
+import FoundationVectors
 
 /-! `records-test`: a scripted run of every records operation against a temporary directory, with the
 in-memory key store and two wallets made by `Wallet.create` (two phones: A and B).
@@ -1263,10 +1264,33 @@ def screens (root : System.FilePath) : IO Unit := do
   homeScreens sh alice aliceID robertID bobAddress (← alice.receiveAddress false) funder
   backendRef.set Backend.pending
 
+/-- The explorer and manual-peer rules against what Foundation and the Swift app answered
+(`FoundationVectors`, from `scripts/foundation-vectors`): a custom explorer's host, which strings
+`explorerBaseURL` keeps (HTTPS anywhere, plain HTTP only on loopback) and how it spells them, the
+transaction link under it, and `parsePeer`. -/
+def foundationURLRules : IO Unit := do
+  let txid := String.join (List.replicate 32 "ab")
+  for (s, host, base, tx) in FoundationVectors.urls do
+    check s!"url host: {repr s}" (urlHost s == host) s!"{urlHost s}"
+    let got := explorerBaseURL .custom s .signet
+    check s!"explorer base: {repr s}" (got == base) got
+    let link := appendPath got ["tx", txid]
+    check s!"transaction link: {repr s}" (link == tx) link
+  -- where the app refuses what Foundation accepts: a non-ASCII host (Foundation applies IDNA)
+  check "url host: non-ASCII host refused" (urlHost "https://münchen.de" == none)
+  check "explorer base: non-ASCII host falls back to the preset"
+    (explorerBaseURL .custom "https://münchen.de" .signet == "https://mempool.space/signet")
+  for (text, want) in FoundationVectors.peers do
+    let got := (parsePeer text).toOption
+    check s!"peer: {repr text}" (got == want) s!"{got}"
+    check s!"saved peer dials as validated: {repr text}"
+      ((Real.parsePeerEndpoint text).map (·.description) == want)
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
   syncErrorBookkeeping
+  foundationURLRules
   peerGatewayModel
   syncBookkeepingScreens
   backgroundRuns

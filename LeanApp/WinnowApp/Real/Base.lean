@@ -386,15 +386,9 @@ def dirFile (dir name : String) : System.FilePath := System.FilePath.mk dir / na
 def removeQuietly (p : System.FilePath) : IO Unit := do
   try IO.FS.removeFile p catch _ => pure ()
 
-/-- `AppModel.parsePeer`: `host:port`, a non-empty host and a positive port. -/
+/-- A saved manual peer, read by the rule Settings validated it with (`peerHostPort`). -/
 def parsePeerEndpoint (text : String) : Option PeerEndpoint :=
-  let parts := ((text.trimAscii.copy.splitOn ":").filter (!·.isEmpty))
-  match parts with
-  | [host, port] =>
-    match port.toNat? with
-    | some p => if p > 0 && p ≤ 65535 then some { host, port := p.toUInt16 } else none
-    | none => none
-  | _ => none
+  (peerHostPort text).map fun (host, p) => { host, port := p.toUInt16 }
 
 /-- The peers and settings scoped to `n` (`networkScopedSettings`). -/
 def scopedFor (s : Settings) (n : WinnowApp.Network) : NetworkSettings :=
