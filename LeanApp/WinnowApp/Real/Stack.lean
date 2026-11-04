@@ -80,7 +80,8 @@ def rollBackStores (env : Env) (dir : Option String) (w : Wallet) (b : TxBroadca
   -- reactivates any own send whose confirming block fell (#157)
   runNet (b.rollBack fork)
 
-/-- `resumeInterruptedRollback()`: redo a rollback a crash interrupted, before anything scans. -/
+/-- `resumeInterruptedRollback()`: redo a rollback a crash interrupted, before anything scans (backend-test's
+step 9b). -/
 def resumeInterruptedRollback (env : Env) (dir : String) (w : Option Wallet) (s : Stack) : IO Unit := do
   let marker := dirFile dir rollbackMarkerName
   let some text ← (try some <$> IO.FS.readFile marker catch _ => pure none) | return

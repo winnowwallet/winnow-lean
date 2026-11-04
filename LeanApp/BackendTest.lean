@@ -16,7 +16,8 @@ history → fee rate + preview → send → the node's mempool → mine → conf
 a second send, fee bump (RBF accepted by the node) → mine → a 2-of-2 multisig account with a test key
 (funded, credited by the sync, a spend created, signed by the phone and by the other key in Lean,
 combined, finalized, broadcast, confirmed) → export (carrying the account) → import into a fresh
-directory (same balance, the account restored) → stop networking (no loop, no peer, no file change while blocks arrive) → reopen from
+directory (same balance, the account restored) → stop networking (no loop, no peer, no file change while blocks arrive) → an
+interrupted rollback replayed from its marker on the next start → reopen from
 disk → delete. One `ok`/`FAIL` line per check; the exit code is the verdict. -/
 
 /-- Every `Deps.journal` line of the run: which backend (A, B, C), the event, its fields. -/
@@ -681,6 +682,35 @@ def flow (dir : String) (n : Node) : IO Unit := do
   let late ← attempt a.syncNow
   let d2 ← envA.diagnostics
   check "after stop: syncNow without a stack does nothing" (late matches .ok _ && d2.syncPasses == d1.syncPasses)
+  -- 9b. A rollback a crash interrupted (`resumeInterruptedRollback`, #38): with the node's networking off, so
+  -- no scan can redo it, a marker below a confirmed send's block is replayed when networking starts, before
+  -- anything scans; then the node comes back and the send confirms again in its block.
+  let relayFile := System.FilePath.mk dirA / "broadcast.json"
+  let marker := System.FilePath.mk dirA / Real.rollbackMarkerName
+  let tombstones : IO (Array (ByteArray × Option UInt32)) := do
+    match TxBroadcaster.decodeStore (← IO.FS.readBinFile relayFile) (← wallTime) with
+    | .ok p => return p.toArray.map fun (t, e) => (t, e.confirmedAtHeight)
+    | .error _ => return #[]
+  let held := (← tombstones).filterMap (fun (t, h) => h.map (t, ·)) |>.qsort (·.2 > ·.2)
+  let some (heldTxid, heldAt) := held[0]? | throw (IO.userError "no confirmed send held in broadcast.json")
+  discard <| n.cli #["setnetworkactive", "false"]
+  IO.FS.writeFile marker (toString (heldAt - 1))
+  a.startNetworking settings
+  let replayed ← waitUntil 10_000 (do return !(← marker.pathExists))
+  let afterReplay ← tombstones
+  a.stopNetworking
+  discard <| n.cli #["setnetworkactive", "true"]
+  check "an interrupted rollback is replayed on start: the marker cleared, the send in the fallen block pending again"
+    (replayed && afterReplay.contains (heldTxid, none)) s!"{Winnow.displayHex heldTxid} at {heldAt}: {afterReplay.map (·.2)}"
+  discard <| waitUntil 5_000 (do return (← envA.diagnostics).liveLoops == 0)
+  a.startNetworking settings
+  let tipBack ← n.height
+  let reconfirmed ← waitUntil 60_000 (do a.syncNow; return (← tombstones).contains (heldTxid, some heldAt))
+  let (sBack, _) ← syncUntil a 30_000 fun s _ => s.nextScanHeight == tipBack + 1
+  check "after the replay: the send confirms again in its block, the scan back at the tip"
+    (reconfirmed && sBack.nextScanHeight == tipBack + 1) s!"relay {(← tombstones).map (·.2)}, next scan {sBack.nextScanHeight}, tip {tipBack}"
+  a.stopNetworking
+  discard <| waitUntil 5_000 (do return (← envA.diagnostics).liveLoops == 0)
   -- 10. Open the wallet again from disk (a new backend, the same key store).
   let (c, envC) ← Backend.realWithEnv (deps keysA "C")
   let reopened ← c.openWallet .regtest dirA

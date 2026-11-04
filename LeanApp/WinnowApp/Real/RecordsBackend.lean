@@ -61,20 +61,9 @@ def labelSender (c : RecordsCtx) (txid personID : String) : IO Records :=
 def removeSenderLabel (c : RecordsCtx) (txid : String) : IO Records :=
   c.run fun s w => RecordsReal.removeSenderLabel s w txid
 
-/-- `URL.host` of an explorer base URL: no scheme, user, port or path ("" when there is none). -/
-def urlHost (url : String) : String :=
-  match url.splitOn "://" with
-  | _ :: rest@(_ :: _) =>
-    let afterScheme := "://".intercalate rest
-    let authority := (afterScheme.takeWhile fun ch => ch != '/' && ch != '?' && ch != '#').toString
-    let hostPort := (authority.splitOn "@").getLast!
-    if hostPort.startsWith "[" then ((hostPort.drop 1).takeWhile (· != ']')).toString
-    else (hostPort.takeWhile (· != ':')).toString
-  | _ => ""
-
 def lookupSender (c : RecordsCtx) (txid baseURL : String) : IO (List String) := do
   let addresses ← c.run fun s _ => RecordsReal.lookupSender c.http s.network txid baseURL
-  c.journal "sender.lookupOnline" [("txid", txid), ("explorer", urlHost baseURL)]
+  c.journal "sender.lookupOnline" [("txid", txid), ("explorer", (WinnowApp.urlHost baseURL).getD "")]
   return addresses
 
 /-- The records fields of `base` replaced by these. -/

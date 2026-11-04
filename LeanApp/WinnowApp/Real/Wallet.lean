@@ -306,7 +306,7 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
     relayRestoredPayments env w stack.broadcaster
     let some filters := stack.filters | waiting "sync stack unavailable"
     stack.pool.start
-    if !(← waitForPeer env stack.pool 60_000 c.generation) then return ← waiting "public peers unavailable"
+    if !(← waitForPeer env stack.pool env.deps.importPeerWaitMs c.generation) then return ← waiting "public peers unavailable"
     let additional ← env.hooks.multisigWatchScripts (Network.tx n)
     let report ← runWM (w.verifyImport bundle (scanSource filters) additional fun m => do
       discard <| WM.io (env.hooks.multisigApply m (Network.tx n)))

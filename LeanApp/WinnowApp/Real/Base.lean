@@ -91,6 +91,9 @@ structure Deps where
   syncIntervalMs : Nat := 45_000
   /-- The phase ticker's interval (1 s). -/
   phaseIntervalMs : Nat := 1_000
+  /-- How long an import or restore waits for a peer before it reports "public peers unavailable" (60 s in
+  the app; cloud-backup-test's offline phones wait 1 s). -/
+  importPeerWaitMs : Nat := 60_000
   /-- `CensusCatalog.bundled`: the census list this build ships (mainnet only). -/
   census : IO (Option CensusCatalog) := CensusCatalog.bundled
   /-- The sync stack's parameters in place of the network's (test mode's custom signet). -/
@@ -383,15 +386,9 @@ def dirFile (dir name : String) : System.FilePath := System.FilePath.mk dir / na
 def removeQuietly (p : System.FilePath) : IO Unit := do
   try IO.FS.removeFile p catch _ => pure ()
 
-/-- `AppModel.parsePeer`: `host:port`, a non-empty host and a positive port. -/
+/-- A saved manual peer, read by the rule Settings validated it with (`peerHostPort`). -/
 def parsePeerEndpoint (text : String) : Option PeerEndpoint :=
-  let parts := ((text.trimAscii.copy.splitOn ":").filter (!·.isEmpty))
-  match parts with
-  | [host, port] =>
-    match port.toNat? with
-    | some p => if p > 0 && p ≤ 65535 then some { host, port := p.toUInt16 } else none
-    | none => none
-  | _ => none
+  (peerHostPort text).map fun (host, p) => { host, port := p.toUInt16 }
 
 /-- The peers and settings scoped to `n` (`networkScopedSettings`). -/
 def scopedFor (s : Settings) (n : WinnowApp.Network) : NetworkSettings :=

@@ -36,8 +36,6 @@ def requireEnd : Wire Unit := ByteReader.requireEnd
 
 end Wire
 
-def utf8Lossy (b : ByteArray) : String := ByteReader.decodeUTF8Lossy b
-
 /-! ## Writing (the `Data.append…` helpers) -/
 
 def varString (s : String) : ByteArray := varBytes s.toUTF8
