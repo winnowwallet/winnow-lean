@@ -2,6 +2,8 @@ import WinnowApp.Real
 import WinnowApp.Signers
 import WinnowApp.Payments
 import WinnowApp.View
+import WinnowApp.Main
+import TestKit.Regtest
 import LeanNative.Erase
 import LeanNative.Json
 import TestKit.Check
@@ -14,7 +16,9 @@ import TestKit.Fixtures
 * `AppTests/MultisigAccountFlowTests.swift` without the Ledger: the builder (with another Winnow's key and a
   recovery path), a co-signer's spend signed on two phones with BIP326 sequences, the recovery path's age
   check and the Advanced-mode gate, through `Backend.real` (`Real/Multisig.lean`) on wallets opened from
-  disk with no network.
+  disk with no network;
+* Settings → Signers as a person uses it: a signer saved from pasted keys, opened, renamed and removed (one an
+  account still uses among them), through the app's own `perform` on that backend.
 
 Fixtures as `Tests/Support/TestKeys.swift` (masters from BIP39 over 16 repeated bytes: 0xA1, 0xB2, 0xC3;
 0xD4 a recovery key; keys at m/86'/1'/0'). Exits 1 on any failure. -/
@@ -1643,6 +1647,165 @@ def testAnswersFinishAcrossTheBackground : IO Unit := do
   let (other, _) := onHost (.multisigCreated g "id1" "tr(…)" none) { other with multisigBuild := building.multisigBuild }
   check "another network's wallet drops it" other.multisigBuild.created.isNone
 
+/-! ## Settings → Signers, as a person uses it (#46)
+
+The Model gets what a tap sends (`step`), the commands run through the app's own `perform` against a phone's
+real backend, and every answer comes back through `onHost` (the signer answers through `onSignerHost`); the
+screens are read as the shell receives them. -/
+
+/-- The shell's side of `perform`: the answers it posts, collected; `clipboard.get` answers `clipboard`, every
+other capability says yes. -/
+structure Shell where
+  posted : IO.Ref (Array Host)
+  clipboard : IO.Ref String
+
+def Shell.new : IO Shell := do return { posted := ← IO.mkRef #[], clipboard := ← IO.mkRef "" }
+
+def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
+  post h := s.posted.modify (·.push h)
+  cap _ _ _ := pure ()
+  ask name _ := do
+    if name == "clipboard.get" then return Task.pure (Lean.Json.mkObj [("text", Lean.Json.str (← s.clipboard.get))])
+    return Task.pure (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
+
+/-- How many answers `perform` posts for the commands this flow runs; none for the ones it leaves out. -/
+def answersTo : Cmd → Option Nat
+  | .multisigOverview .. | .addSignerKeys .. | .renameSigner .. | .removeSigner .. | .paste .. => some 1
+  | _ => none
+
+/-- Runs `cs` through `perform`, each answer back through `onHost` and what that asks for in turn; the model
+after, and the commands left out. -/
+partial def Shell.run (s : Shell) (m : Model) (cs : List Cmd) : IO (Model × List Cmd) := do
+  let mut m := m
+  let mut left : List Cmd := []
+  for c in cs do
+    match answersTo c with
+    | none => left := left ++ [c]
+    | some n =>
+      let before := (← s.posted.get).size
+      WinnowApp.perform c s.fx
+      unless ← TestKit.Regtest.waitUntil 10_000 (every := 2) (do return (← s.posted.get).size ≥ before + n) do
+        throw (IO.userError "a command posted no answer within 10 s")
+      for h in (← s.posted.get).extract before (before + n) do
+        let (m', cs') := onHost h m
+        let (m', rest) ← s.run m' cs'
+        m := m'
+        left := left ++ rest
+  return (m, left)
+
+def Shell.tap (s : Shell) (msg : Msg) (m : Model) : IO (Model × List Cmd) := do
+  let (m, cs) := step msg m
+  s.run m cs
+
+/-- #46: a signer saved from pasted keys, opened, renamed on submit and on leaving, a duplicate and a bad paste
+refused, and one an account still uses removed (the app allows it: "Accounts already built with it are not
+changed"), the Signers list checked after each step. -/
+def testSignersAddOpenRenameRemove : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let ms ← masters
+  backendRef.set phone.backend
+  let sh ← Shell.new
+  let bobPhone ← keyExpression ms[2]!
+  let bobLedger ← keyExpression (← master 0xD4)
+  let carolKey ← keyExpression (← master 0xE5)
+  let fp (k : String) := keyFingerprint k .signet
+  let m : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .signet, advancedMode := true } }
+  let (m, _) ← sh.tap (.selectTab 2) m
+  check "Settings: the Signers row" (contains (rendered m) "signersButton" && contains (rendered m) "This phone")
+  let (m, _) ← sh.tap (.signer .openSigners) m
+  check "Signers: opens with the overview" (m.routes == [.signers] && m.multisig.keyExpression.isSome && m.multisig.signers.isEmpty)
+  let list := rendered m
+  check "Signers: this phone's key, Pair a Ledger, Save keys someone sent"
+    (contains list "signersOwnFingerprint" && contains list (m.multisig.ownFingerprint.getD "?") &&
+     contains list "signersPairLedgerButton" && contains list "signersAddKeysButton" && !contains list "signerRow-")
+  -- Save keys someone sent: Bob's phone and Ledger, pasted together
+  let (m, _) ← sh.tap (.signer .openKeysAdd) m
+  check "Save keys: the screen, Save off" (m.routes == [.signers, .signerKeysAdd] && !m.signerKeys.canSave .signet &&
+    contains (rendered m) "Save keys")
+  let (m, _) ← sh.tap (.signer (.setKeysName "Bob")) m
+  sh.clipboard.set "tpubnonsense"
+  let (bad, _) ← sh.tap (.signer .pasteKeys) m
+  check "Save keys: a paste that is no key says why, and Save stays off"
+    (bad.signerKeys.text == "tpubnonsense" && contains (rendered bad) "signerKeysError" && (stepSigner .saveKeys bad).2.isEmpty)
+  sh.clipboard.set s!" {bobPhone}\n{bobLedger} "
+  let (m, _) ← sh.tap (.signer .pasteKeys) bad
+  let shown := rendered m
+  check "Save keys: both keys, one signer" (contains shown (fp bobPhone) && contains shown (fp bobLedger) &&
+    contains shown "2 keys that always sign together: one signer.")
+  let (m, _) ← sh.tap (.signer .saveKeys) m
+  let some bob := m.multisig.signers.find? (·.name == "Bob") | check "Save keys: Bob saved" false; return
+  check "Save keys: back on the list, Bob in it" (m.routes == [.signers] && bob.keys == [bobPhone, bobLedger] && !bob.isLedger &&
+    contains (rendered m) s!"signerRow-{bob.id}" && contains (rendered m) "one signer")
+  -- the same key again is refused on the screen
+  let (m, _) ← sh.tap (.signer .openKeysAdd) m
+  let (m, _) ← sh.tap (.signer (.setKeysName "Bob again")) m
+  sh.clipboard.set bobLedger
+  let (m, _) ← sh.tap (.signer .pasteKeys) m
+  let (m, _) ← sh.tap (.signer .saveKeys) m
+  check "Save keys: a key already saved is refused, on the screen" (m.routes.getLast? == some .signerKeysAdd && !m.signerKeys.saving &&
+    m.signerKeys.error == some "That key is already saved as Bob." && contains (rendered m) "That key is already saved as Bob.")
+  let (m, _) ← sh.tap (.signer .pop) m
+  check "Save keys: Back" (m.routes == [.signers] && m.multisig.signers.length == 1)
+  -- Carol, one key
+  let (m, _) ← sh.tap (.signer .openKeysAdd) m
+  let (m, _) ← sh.tap (.signer (.setKeysName "Carol")) m
+  sh.clipboard.set carolKey
+  let (m, _) ← sh.tap (.signer .pasteKeys) m
+  let (m, _) ← sh.tap (.signer .saveKeys) m
+  let some carol := m.multisig.signers.find? (·.name == "Carol") | check "Save keys: Carol saved" false; return
+  check "Signers: Bob and Carol" (m.multisig.signers.map (·.name) == ["Bob", "Carol"] && contains (rendered m) s!"signerRow-{carol.id}")
+  -- open Bob: his name, his keys, Remove
+  let (m, _) ← sh.tap (.signer (.openSigner bob.id)) m
+  let detail := rendered m
+  check "Bob: the detail screen" (m.routes == [.signers, .signer bob.id] && m.signerDetail.name == "Bob" &&
+    contains detail "signerNameField" && contains detail bobPhone && contains detail bobLedger &&
+    contains detail "2 keys that sign together, someone sent you." && contains detail "signerRemoveButton")
+  -- rename on submit, then on leaving
+  let (m, _) ← sh.tap (.signer (.setSignerName "Bob and his Ledger")) m
+  let (m, _) ← sh.tap (.signer .renameSigner) m
+  check "rename: on submit" (((m.signer? bob.id).map (·.name)) == some "Bob and his Ledger")
+  check "rename: the same name again asks nothing" (stepSigner .renameSigner m).2.isEmpty
+  for name in ["", "  ", "two\nlines"] do
+    check s!"rename: an unusable name ({name.length} characters) asks nothing" (stepSigner .renameSigner (stepSigner (.setSignerName name) m).1).2.isEmpty
+  let (m, _) ← sh.tap (.signer (.setSignerName "Robert")) m
+  let (m, _) ← sh.tap (.signer .pop) m
+  check "rename: on leaving, back on the list" (m.routes == [.signers] && ((m.signer? bob.id).map (·.name)) == some "Robert" &&
+    contains (rendered m) "Robert" && m.signerDetail.id.isEmpty)
+  check "rename: written" (((← phone.signers).find? (·.id == bob.id)).map (·.name) == some "Robert")
+  -- an account that uses Carol's key, then Carol removed
+  let (accountID, descriptor) ← phone.buildWith "With Carol" 2 [carolKey]
+  let (m, _) ← sh.run m [.multisigOverview m.generation]
+  check "account: built with Carol" ((m.multisigInfo? accountID).any (·.signerExpressions.contains carolKey))
+  let (m, _) ← sh.tap (.signer (.openSigner carol.id)) m
+  check "Carol: the screen says accounts keep her key" (contains (rendered m) "Accounts already built with it are not changed.")
+  let (m, _) ← sh.tap (.signer .removeSigner) m
+  check "remove: back on the list, without Carol" (m.routes == [.signers] && (m.signer? carol.id).isNone &&
+    !contains (rendered m) s!"signerRow-{carol.id}" && m.multisig.signers.map (·.name) == ["Robert"])
+  let some account := m.multisigInfo? accountID | check "remove: the account stays" false; return
+  check "remove: the account is unchanged" (account.descriptor == descriptor && account.policy == some "2 of 2" &&
+    account.signerExpressions.contains carolKey)
+  check "remove: and on disk" ((← phone.record accountID).descriptor == descriptor && (← phone.signers).map (·.name) == ["Robert"])
+  -- a signer that is gone: the screen says so, and removing it again shows the backend's refusal
+  let (gone, _) ← sh.tap (.signer (.openSigner carol.id)) m
+  check "gone: the screen says so" (contains (rendered gone) "This signer is no longer on this phone.")
+  let (gone, _) ← sh.tap (.signer .removeSigner) gone
+  check "gone: removing it again is refused, on the screen" (gone.signerDetail.error.isSome &&
+    contains (rendered gone) (gone.signerDetail.error.getD "?") && gone.routes.getLast? == some (.signer carol.id))
+  -- the backend's answers for another wallet are dropped; a save that lands elsewhere keeps the screen
+  let (other, _) := m.switchNetwork .mainnet
+  let other := { other with routes := [.signers, .signer bob.id] }
+  let (other, cs) := onHost (.signerRemoved m.generation bob.id) other
+  check "another wallet: a removal is dropped" (other.routes == [.signers, .signer bob.id] && cs.isEmpty)
+  let (other, cs) := onHost (.signerRenamed m.generation bob.id) other
+  check "another wallet: a rename is dropped" cs.isEmpty
+  let (saved, cs) := onHost (.signerSaved m.generation "x") m
+  check "a save that lands on the list: the list stays, read again" (saved.routes == [.signers] && cs.any (· matches .multisigOverview _))
+  let _ := other
+  backendRef.set Backend.pending
+
+def screenTests : List (String × IO Unit) :=
+  [ ("testSignersAddOpenRenameRemove", testSignersAddOpenRenameRemove) ]
+
 def pureTests : List (String × IO Unit) :=
   [ ("testPaymentsMergeWalletAndAccountRowsAndFoldTransfers", testPaymentsMergeWalletAndAccountRowsAndFoldTransfers)
   , ("testAReviewForTheWalletNeverSignsForAnAccount", testAReviewForTheWalletNeverSignsForAnAccount)
@@ -1795,4 +1958,6 @@ def main : IO UInt32 := runMain "multisig-app-test" do
   for (name, t) in oneWalletTests do runTest name t
   IO.println "HistoryDisplayTests, SendReviewBindingTests, draft rows"
   for (name, t) in pureTests do runTest name t
+  IO.println "SignersView, SignerDetailView, SignerKeysAddView"
+  for (name, t) in screenTests do runTest name t
   try IO.FS.removeDirAll root catch _ => pure ()

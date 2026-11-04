@@ -26,6 +26,10 @@ initialize backgroundRuns : IO.Ref (List (String × Real.BackgroundSyncRun)) ←
 initialize e2eRef : IO.Ref (Option E2E.Mode) ← IO.mkRef none
 /-- `<Application Support>` itself: test mode's journal lives in its run directory there. -/
 initialize supportDir : IO.Ref String ← IO.mkRef ""
+/-- The settings saves asked for so far, and the lock their writes take: each save writes only while it is
+still the last one asked for (`performWallet`'s `saveSettings`). -/
+initialize settingsAsked : IO.Ref Nat ← IO.mkRef 0
+initialize settingsWrite : Std.Mutex Unit ← Std.Mutex.new ()
 /-- A Debug build, as the shell's `build` capability answers at boot. Test mode, sample data and tracing
 are Debug-only: a Release build ignores their environment variables. -/
 initialize debugBuild : IO.Ref Bool ← IO.mkRef false
@@ -215,9 +219,16 @@ def bootApp (fx : Effects Host) : IO Unit := discard <| IO.asTask do
 /-- The wallet itself: settings, opening, creating, importing and deleting it. -/
 def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
-  | .saveSettings s => discard <| IO.asTask do
-      IO.FS.writeFile (← settingsPath) (toJson s).pretty
-      b.updateSettings s
+  | .saveSettings s => do
+      -- each save runs in a task of its own, and two quick changes (a manual peer added, then removed) can
+      -- finish out of order: a save that a later one has superseded writes nothing, so the file and the
+      -- backend end with the last settings (records-test's `settingsScreen`)
+      let n ← settingsAsked.modifyGet fun k => (k + 1, k + 1)
+      discard <| IO.asTask do
+        settingsWrite.atomically do
+          if (← settingsAsked.get) != n then return
+          IO.FS.writeFile (← settingsPath) (toJson s).pretty
+          b.updateSettings s
   | .openWallet g n isBoot => background fx g "open" do
       let dir ← walletDir n
       IO.FS.createDirAll dir
@@ -331,7 +342,8 @@ def performPayments (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         return .bumped g txid (← b.bumpFee txid p)
   | _ => pure ()
 
-/-- Settings: the peer catalog and peers, the backup file, the recovery phrase and the person card. -/
+/-- Settings: the peer catalog and peers, the backup file, the recovery phrase and the person card
+(records-test's `settingsScreen` and `receiveScreen`). -/
 def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
   | .catalogStatus g => background fx g "catalog" do return .catalogStored g (← b.catalogStatus)
