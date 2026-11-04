@@ -1,6 +1,6 @@
 # Winnow in Lean: the port of Sources/WalletCore and Sources/WinnowApp (see ../PORT.md).
 name = "winnow"
-defaultTargets = ["Secp", "Winnow", "oracle-crypto", "oracle-keys", "oracle-tx", "oracle-net", "oracle-wallet", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
+defaultTargets = ["Secp", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
 
 [[lean_lib]]
 name = "Secp"
@@ -12,31 +12,6 @@ name = "Winnow"
 # LeanApp's tests and journeys reach it through `require winnow`.
 [[lean_lib]]
 name = "TestKit"
-
-# The lockstep oracles (LeanOracle): one executable per area, so that areas build independently.
-[[lean_lib]]
-name = "Oracle"
-globs = ["Oracle.+"]
-
-[[lean_exe]]
-name = "oracle-crypto"
-root = "OracleCrypto"
-
-[[lean_exe]]
-name = "oracle-keys"
-root = "OracleKeys"
-
-[[lean_exe]]
-name = "oracle-tx"
-root = "OracleTx"
-
-[[lean_exe]]
-name = "oracle-net"
-root = "OracleNet"
-
-[[lean_exe]]
-name = "oracle-wallet"
-root = "OracleWallet"
 
 # Integration tests of the I/O area against a local bitcoind (Winnow/IO).
 [[lean_exe]]

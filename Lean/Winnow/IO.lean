@@ -34,12 +34,8 @@ Actors are structures over `IO.Ref` state changed by atomic `modifyGet`s (the ch
 the pool monitor, stream listeners) are dedicated threads; timeouts and backoff are libuv timers.
 Errors are one `NetError` with a case per Swift error type (`NetM := EIO NetError`).
 
-Tests: `Lean/IOTest.lean` (`lake build io-test && .lake/build/bin/io-test [--swift <oracle-io>]`), against
-a disposable regtest bitcoind and scripted fake peers; `LeanOracle/IO/main.swift` runs the Swift
-side on the same node (built outside SwiftPM:
-`swiftc -O -I .build/release -Xcc -fmodule-map-file=.build/out/Intermediates.noindex/GeneratedModuleMaps/libsecp256k1.modulemap
-LeanOracle/IO/main.swift .build/release/{WalletCore,P256K,libsecp256k1}.o -o oracle-io`
-after `swift build -c release -Xswiftc -enable-testing --product oracle-net`).
+Tests: `Lean/IOTest.lean` (`lake build io-test && .lake/build/bin/io-test`), against a disposable regtest
+bitcoind and scripted fake peers.
 
 ## Not covered (by the port or by the tests)
 

@@ -31,24 +31,13 @@ name = "backend-test"
 root = "BackendTest"
 
 # The records side of the backend, headless (WinnowApp/Real/Records*.lean).
+# What Foundation and the Swift app answered for the explorer and peer rules (scripts/foundation-vectors).
+[[lean_lib]]
+name = "FoundationVectors"
+
 [[lean_exe]]
 name = "records-test"
 root = "RecordsTest"
-
-# The Lean side of the records lockstep (LeanOracle/gen/f_records.py; Swift: oracle-records).
-[[lean_exe]]
-name = "oracle-records"
-root = "OracleRecords"
-
-# The Lean side of the pure-helpers lockstep (LeanOracle/gen/f_pure.py; Swift: oracle-pure).
-[[lean_exe]]
-name = "oracle-pure"
-root = "OraclePure"
-
-# The Lean side of the test-mode lockstep (LeanOracle/gen/f_e2e.py; Swift: oracle-e2e).
-[[lean_exe]]
-name = "oracle-e2e"
-root = "OracleE2E"
 
 # The app's Ledger transport over the shell's ble.* capabilities, against a fake peripheral backed by
 # the Lean Ledger simulator.

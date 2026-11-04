@@ -324,12 +324,18 @@ def scanCeiling (frontier : UInt32) (maxBlocks : Option UInt32) (tip : UInt32) :
     | some 0 => none
     | some m => some (min (frontier.toNat + m.toNat - 1) representableTip.toNat).toUInt32
 
-/-- The batches of one run: ≤ `maxRangePerRequest` blocks from the frontier to the ceiling. -/
+/-- The last height of the batch that starts at `start`: ≤ `maxRangePerRequest` blocks, not past
+`ceiling`. The forward and range scans step by it (`FilterSyncIO.sync`, `runRange`). -/
+def batchStop (start ceiling : UInt32) : UInt32 :=
+  (min (start.toNat + maxRangePerRequest.toNat - 1) ceiling.toNat).toUInt32
+
+/-- The batches from the frontier to the ceiling, each ending at its `batchStop`; the cfheaders requests of
+one batch (`FilterSyncIO.pinFilterHeaders`). io-test's `filterSyncPure` checks it. -/
 def batches (frontier ceiling : UInt32) : Array (UInt32 × UInt32) := Id.run do
   let mut out := #[]
   let mut start := frontier.toNat
   while start ≤ ceiling.toNat do
-    let stop := min (start + maxRangePerRequest.toNat - 1) ceiling.toNat
+    let stop := (batchStop start.toUInt32 ceiling).toNat
     out := out.push (start.toUInt32, stop.toUInt32)
     start := stop + 1
   return out
@@ -495,7 +501,8 @@ def filterMatches (m : CFilterMessage) (watchScripts : Array ByteArray) : Except
   let f ← (GCSFilter.decode GCSFilter.defaultP GCSFilter.defaultM (m.blockHash.extract 0 16) n encoded).mapError (·.name)
   return f.containsAny watchScripts
 
-/-- A fetched block, checked against the matched filter's block hash and its merkle root. -/
+/-- A fetched block, checked against the matched filter's block hash and its merkle root
+(`FilterSyncIO`'s block fetch; io-test's `filterSyncPure` checks it on a real block). -/
 def verifiedBlock (b : Block) (blockHash : ByteArray) (height : UInt32) : Except FilterSyncError Block :=
   if !(b.hash == blockHash) then .error (.badPeerResponse s!"block hash mismatch at {height}")
   else if !b.hasValidMerkleRoot then .error (.badPeerResponse s!"merkle root mismatch at {height}")
