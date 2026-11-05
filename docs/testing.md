@@ -64,7 +64,8 @@ against the node.
   already seen spent at a higher fee: the node requests the transaction and
   refuses it. Peers never say so, so the phone reports it as sent, and it
   finds out from the block: Send and the Transactions row say replaced, the
-  balance drops and the fee bump goes.
+  balance drops and the fee bump goes. A payment of two coins, one of them
+  spent the same way, gives the other coin back, and the phone spends it.
 
 What the journeys do not cover: a physical Ledger (CI's is simulated; the
 owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift

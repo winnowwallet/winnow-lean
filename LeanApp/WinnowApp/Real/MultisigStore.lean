@@ -291,7 +291,7 @@ where
 
 def isPending (u : WalletUTXO) : Bool := u.spent.any (·.height.isNone)
 
-/-- Undoes in-flight spends a confirmed conflict beat (as `Wallet.reconcilePendingConflict`): their pending
+/-- Undoes in-flight spends a confirmed conflict beat (as `Wallet.reconcilePendingConflicts`): their pending
 outputs go, the inputs the winner did not take are released, and an in-flight spend of one of those
 outputs loses with them. Every spend undone. -/
 def dropLosingSpends (losers : Array ByteArray) (r : MultisigAccountRecord) : MultisigAccountRecord × Array ByteArray := Id.run do

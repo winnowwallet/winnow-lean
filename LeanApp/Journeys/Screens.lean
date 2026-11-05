@@ -39,6 +39,7 @@ def amount (f : Find) : UI (Option Nat) := do return digits (← text f)
 
 def funding : Nat := 5000000
 def payment : Nat := 1000000
+def smallCoin : Nat := 3000000
 def recoveryPayment : Nat := 500000
 def silentPayment : Nat := 150000
 /-- The builder's shortest recovery delay: one day. -/

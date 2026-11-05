@@ -459,7 +459,8 @@ def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
 /-- The same recovery phrase on another device spends the phone's coins, twice. A review whose coin has gone
 fails when the owner signs, on the Send screen, which can then be used again. A payment whose coin the node has
 already seen spent goes out and the node refuses it, which it never tells a peer: the phone finds out from the
-block that confirms the other spend. -/
+block that confirms the other spend. When that spend took only one of the payment's two coins, the other comes
+back and can be spent. -/
 def spentElsewhere : Journey := ⟨"spentElsewhere", do
   let r ← Run.new "elsewhere"
   let h := r.host
@@ -535,6 +536,54 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     tap (historyPayment txid)
     pause 1
     expect (!(← exists? bumpFeeButton)) "the payment still offers a fee bump"
+
+  let (twoCoins, other3) ← step "a payment of two coins, one of them spent elsewhere: the node refuses it" do
+    backToWalletList
+    discard <| h.fund address smallCoin
+    discard <| h.fund address smallCoin
+    waitForBalance (2 * smallCoin)
+    tap (.tab "Send")
+    scrolled newPaymentButton
+    tap newPaymentButton
+    r.paste destination pasteDestinationButton
+    type amountField (toString (smallCoin + payment))
+    scrolled reviewButton
+    tap reviewButton
+    waitFor sendButton 30
+    discard <| Send.expectReview destination (smallCoin + payment)
+    let winner ← h.sweepOneCoin other destination 1000
+    scrolled sendButton
+    tap sendButton
+    waitFor broadcastPending 30
+    waitFor (.text "^Relayed to 1 peer") 30
+    let txid ← text (.text "^[0-9a-f]{64}$")
+    expect (!(← h.mempool).contains txid) "the node took the payment"
+    pure (txid, winner)
+
+  step "the other spend confirms: the coin it left comes back, and the phone can spend it" do
+    h.mine 1
+    expect ((← h.tipTransactions).contains other3) "the block does not have the other spend"
+    waitFor broadcastReplaced 60
+    tap (.tab "Wallet")
+    waitForBalance smallCoin
+    scrolled (historyPayment twoCoins)
+    waitUntil 60 "the payment's row is not marked replaced" do
+      return (← text (historyStatus twoCoins)) == s!"replaced by {String.ofList (other3.toList.take 8)}…"
+    tap (.tab "Send")
+    scrolled newPaymentButton
+    tap newPaymentButton
+    r.paste destination pasteDestinationButton
+    type amountField (toString payment)
+    scrolled reviewButton
+    tap reviewButton
+    waitFor sendButton 30
+    let fee ← Send.expectReview destination payment
+    scrolled sendButton
+    let txid ← Send.send h
+    h.expectPays txid destination payment
+    h.mine 1
+    tap (.tab "Wallet")
+    waitForBalance (smallCoin - payment - fee)
     discard <| h.cli #["unloadwallet", other]⟩
 
 def all : List Journey :=

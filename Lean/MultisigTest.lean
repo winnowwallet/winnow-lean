@@ -856,6 +856,46 @@ def backupCompatibility : TM Unit := do
     check "backup: legacy raw transaction" (old.rawTransaction == entry.rawTransaction)
   | .error e => check "backup: legacy decodes" false e
 
+/-- A block spends one of a pending send's coins (SEC-039; the journey `spentElsewhere` has Core do this to the
+app): the send can never confirm, so it goes, with the change it promised and a send of that change, and its
+other coin comes back. -/
+def aLosingPendingSend : TM Unit := do
+  let w ← need "create" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
+  let script ← need "spk" (w.scriptPubKey .receive 0)
+  let funding : Transaction := { version := 2, inputs := #[coinbaseInput], locktime := 0
+                                 outputs := #[{ value := 100_000, scriptPubKey := script }, { value := 60_000, scriptPubKey := script }] }
+  discard (need "fund" (w.apply (fakeMatch 100 #[funding])))
+  need "mature" (w.recordScanHeight (100 + Wallet.coinbaseMaturity))
+  let first ← need "send" (w.buildSend #[{ amount := 130_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit first)
+  let firstTx := first.built.transaction
+  check "the payment needs both coins" (firstTx.inputs.size == 2)
+  let chained ← need "send its change" (w.buildSend #[{ amount := 10_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit chained)
+  let chainedTx := chained.built.transaction
+  check "the second payment spends the first's change" (chainedTx.inputs.any (·.previousOutput.txid == firstTx.txid))
+  let winner : Transaction := { version := 2, locktime := 0
+                                inputs := #[{ previousOutput := ⟨funding.txid, 1⟩, scriptSig := .empty, sequence := 0xFFFF_FFFD }]
+                                outputs := #[{ value := 59_000, scriptPubKey := p2trDestination }] }
+  let effect ← need "confirm" (w.apply (fakeMatch 150 #[winner]))
+  check "conflict: the coin it left is spendable" ((← w.balance) == 100_000) s!"{← w.balance}"
+  check "conflict: nothing is pending" (← w.state).pendingSends.isEmpty
+  check "conflict: the relay is told to stop, for both"
+    (effect.discardedReplacements.contains firstTx.txid && effect.discardedReplacements.contains chainedTx.txid)
+  check "conflict: the losers' outputs never existed"
+    (!(← w.allUtxos).any fun u => u.txid == firstTx.txid || u.txid == chainedTx.txid)
+  let row (txid : ByteArray) : TM (Option HistoryEntry) := do return (← w.history).find? (·.txid == txid)
+  check "conflict: the first stays listed, replaced" (((← row firstTx.txid).bind (·.replacedBy)) == some winner.txid)
+  check "conflict: the second stays listed, replaced" (((← row chainedTx.txid).bind (·.replacedBy)) == some winner.txid)
+  check "conflict: the winner's row has what it took and its exact fee"
+    (((← row winner.txid).map fun e => (e.spent, e.fee)) == some (60_000, some 1_000))
+  -- the winner is back in every mempool (`HistoryLedger.rewind`): its coin stays reserved, the losers stay gone
+  need "reorg" (w.rollBack 149)
+  check "reorg: the winner waits, its coin reserved" ((← w.balance) == 100_000 && ((← row winner.txid).map (·.height)) == some 0)
+  check "reorg: the losers do not come back" (((← row firstTx.txid).bind (·.replacedBy)) == some winner.txid && (← w.state).pendingSends.isEmpty)
+  discard (need "confirm again" (w.apply (fakeMatch 150 #[winner])))
+  check "reorg: the winner confirms on the new branch" ((← w.balance) == 100_000 && ((← row winner.txid).map (·.height)) == some 150)
+
 def invalidMetadata : TM Unit := do
   let recipient : HistoryEntry.ExternalOutput := { vout := 0, amount := 50_000, scriptPubKey := p2trDestination }
   let invalid : List HistoryEntry.Outputs := [
@@ -1677,6 +1717,7 @@ def main : IO UInt32 := runMain "multisig-test" do
   runTest "feeBumpRecordsItsOutputs" feeBumpRecordsItsOutputs
   runTest "recordedOutputsRoundTrip" recordedOutputsRoundTrip
   runTest "backupCompatibility" backupCompatibility
+  runTest "aLosingPendingSend" aLosingPendingSend
   runTest "invalidMetadata" invalidMetadata
   runTest "contradictedImportedMetadataIsDropped" contradictedImportedMetadataIsDropped
   runTest "accountSecrets" accountSecrets

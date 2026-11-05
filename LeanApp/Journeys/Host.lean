@@ -263,6 +263,13 @@ def Host.samePhrase (h : Host) (name : String) (entropy : ByteArray) : IO Unit :
 def Host.sweep (h : Host) (wallet destination : String) (rate : Nat) : IO String := do
   field (← h.walletJson #["-named", "sendall", s!"recipients=[\"{destination}\"]", s!"fee_rate={rate}"] wallet) "txid"
 
+/-- One of the wallet's coins alone, sent to `destination` at `rate` sat/vB: the transaction, in the node's mempool. -/
+def Host.sweepOneCoin (h : Host) (wallet destination : String) (rate : Nat) : IO String := do
+  let some coin := ((← h.walletJson #["listunspent"] wallet).getArr?.toOption.bind (·[0]?)) | failure s!"{wallet} has no coin"
+  let input := Json.arr #[Json.mkObj [("txid", coin.getObjValD "txid"), ("vout", coin.getObjValD "vout")]]
+  field (← h.walletJson #["-named", "sendall", s!"recipients=[\"{destination}\"]", s!"fee_rate={rate}",
+    s!"inputs={input.compress}"] wallet) "txid"
+
 /-- The Core signers are done: their wallets unloaded. -/
 def Host.unload (h : Host) (signers : List CoreSigner) : IO Unit := do
   for s in signers do discard <| h.cli #["unloadwallet", s.wallet]
