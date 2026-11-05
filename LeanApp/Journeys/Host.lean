@@ -105,7 +105,12 @@ end Host
 
 /-! ## Transactions as the node decodes them -/
 
-/-- An output of a decoded transaction: its script, address and value in sats (exact, from the JSON number). -/
+/-- A bitcoin amount as the node writes it (a JSON number of BTC), in sats: exact. -/
+def satsOf : Json → Nat
+  | .num n => (n.mantissa * 100000000 / (10 : Int) ^ n.exponent).toNat
+  | _ => 0
+
+/-- An output of a decoded transaction: its script, address and value in sats. -/
 structure Output where
   script : String
   address : String
@@ -116,10 +121,21 @@ def outputs (tx : Json) : List Output :=
   | .error _ => []
   | .ok vs => vs.toList.map fun o =>
     let spk := o.getObjValD "scriptPubKey"
-    let sats := match o.getObjValD "value" with
-      | .num n => (n.mantissa * 100000000 / (10 : Int) ^ n.exponent).toNat
-      | _ => 0
-    { script := (spk.getObjValAs? String "hex").toOption.getD "", address := (spk.getObjValAs? String "address").toOption.getD "", sats }
+    { script := (spk.getObjValAs? String "hex").toOption.getD "", address := (spk.getObjValAs? String "address").toOption.getD "",
+      sats := satsOf (o.getObjValD "value") }
+
+/-- The coins a decoded transaction spends, as `txid:vout`, in its order. -/
+def spends (tx : Json) : List String :=
+  match (tx.getObjValD "vin").getArr? with
+  | .error _ => []
+  | .ok vs => vs.toList.map fun v =>
+    s!"{(v.getObjValAs? String "txid").toOption.getD ""}:{(v.getObjValAs? Nat "vout").toOption.getD 0}"
+
+/-- The fee of a transaction in the node's mempool, in sats, as the node computed it. -/
+def Host.mempoolFee (h : Host) (txid : String) : IO Nat := do
+  let fee := satsOf (((← h.json #["getmempoolentry", txid]).getObjValD "fees").getObjValD "base")
+  if fee == 0 then failure s!"the node's mempool entry for {txid} has no fee"
+  return fee
 
 /-- Whether the transaction pays `sats` to `script`. -/
 def pays (tx : Json) (script : String) (sats : Nat) : Bool := (outputs tx).any fun o => o.script == script && o.sats == sats

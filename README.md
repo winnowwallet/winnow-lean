@@ -110,7 +110,7 @@ PATH; CI sets the first two to the pinned release `scripts/install-bitcoin` down
 
 ### UI tests
 
-The UI journeys are Lean, run on the Mac: `LeanApp/Journeys.lean` holds the five as named steps of what a
+The UI journeys are Lean, run on the Mac: `LeanApp/Journeys.lean` holds the six as named steps of what a
 person does on each screen, `LeanApp/Journeys/Screens.lean` those screens (create the wallet, fill the Send
 form, build an account, set the recovery delay: the controls and the driver mechanics), and
 `LeanApp/Journeys/Host.lean` the other side (the fixture's node through `bitcoin-cli`, Bitcoin Core wallets as
@@ -129,13 +129,15 @@ what was on screen, and the log shows each step's time:
   and spend with the phone's and the Ledger's signatures;
 - `shippedCensus`: the census peer list the build ships shows in Settings on mainnet;
 - `silentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
-  receiver (written from the BIP's receiving side) finds, and the receipt shows its address.
+  receiver (written from the BIP's receiving side) finds, and the receipt shows its address;
+- `feeBumpReplaceConfirm`: send at a low rate, then bump the fee from the unconfirmed payment's screen;
+  Core checks that the replacement spends the same coins, pays more fee, and is the one that confirms.
 
 They run two ways, both LeanNative's runners with `scripts/ui-fixture` as their hooks. `scripts/journeys --wire`
 (LeanNative's `wire-journeys`) runs them against the app itself, headless: the journeys executable
 runs the app as a child of itself with a fake shell (LeanNative's `LEANNATIVE_DRIVER=wire`: a Keychain in a file,
 paths under the evidence directory, no network, no Bluetooth) and finds each element in the app's view tree, so
-the five take under a minute against the fixture's node, with no simulator; CI runs this in the `lean` job. What
+the six take about a minute against the fixture's node, with no simulator; CI runs this in the `lean` job. What
 it does not test is the renderer and real touches, which the simulator run does.
 `scripts/journeys` runs them as CI does in the `app` job: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
 with the journeys as `UI_JOURNEY`, and `scripts/ui-fixture` starting the node before and collecting the app's
@@ -152,8 +154,8 @@ goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases); and the five journeys headless (LeanNative's `wire-journey`) |
-| `app` (two at once) | the same build and census import; Debug for the simulator, checked for Swift; the five UI journeys split across the two (`ui-journey-shards`; `scripts/ui-fixture` as the hooks) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (6 random cases); and the six journeys headless (LeanNative's `wire-journey`) |
+| `app` (two at once) | the same build and census import; Debug for the simulator, checked for Swift; the six UI journeys split across the two (`ui-journey-shards`; `scripts/ui-fixture` as the hooks) |
 | `media` | once both parts pass, the website's media from their evidence (LeanNative's `journey-media`: one video, the journeys in order) |
 | `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |
 

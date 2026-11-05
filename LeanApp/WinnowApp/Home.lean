@@ -106,12 +106,13 @@ def historyRow (m : Model) (h : HistoryItem) (tappable := true) : H × List H :=
   let title := historyTitle m.records h
   let status : List H :=
     if m.settings.advancedMode then
-      [ caption (match h.replacedBy with
+      [ .identified (Ids.historyStatus h.txid) (caption (match h.replacedBy with
           | some r => s!"replaced by {String.ofList (r.toList.take 8)}…"
-          | none => if h.height > 0 then s!"block {h.height}" else "awaiting confirmation") ] ++
-      (match h.fee with | some f => [caption s!"fee {groupDigits f.natAbs} sats"] | none => [])
+          | none => if h.height > 0 then s!"block {h.height}" else "awaiting confirmation")) ] ++
+      (match h.fee with | some f => [.identified (Ids.historyFee h.txid) (caption s!"fee {groupDigits f.natAbs} sats")] | none => [])
     else
-      [caption (if h.replacedBy.isSome then "Replaced" else if h.height > 0 then "Confirmed" else "Pending")]
+      [.identified (Ids.historyStatus h.txid)
+        (caption (if h.replacedBy.isSome then "Replaced" else if h.height > 0 then "Confirmed" else "Pending"))]
   (.row [ .col ([.identified (Ids.historyPayment (h.txid))
                   (if tappable then navLink title (some (.home (.openPayment h.txid))) else body title)] ++
                (if labels.isEmpty then [] else [caption labels]))
@@ -321,7 +322,7 @@ def paymentSections (m : Model) (txid : String) : List H :=
         [.section "Transaction" ""
           ([ copyableIdentifier m "pay.txid" txid
            , explorerButton "View transaction" (m.settings.transactionURL txid) "transaction ID" ] ++
-           (if m.status.feeBumpable.contains txid then [.button "Bump fee" .plain (some (.home .openFeeBump))] else []))]
+           (if m.status.feeBumpable.contains txid then [.identified Ids.bumpFeeButton (.button "Bump fee" .plain (some (.home .openFeeBump)))] else []))]
       else [.section "" "" (technical m "pay.txid" "Transaction ID" [copyableIdentifier m "pay.txid" txid])]
     [.section "" "" [paymentRow m row false]] ++ accountSection m row ++ recipients ++ labelSection ++ notice ++
     -- a payment out also receives its change: only money coming in has a sender
@@ -330,24 +331,27 @@ def paymentSections (m : Model) (txid : String) : List H :=
 
 /-! ### FeeBumpView -/
 
+/-- The fee bump sheet: the current rate, a higher one reviewed, Sign & replace (the `feeBumpReplaceConfirm`
+journey, which has Core check the replacement). -/
 def feeBumpSheet (m : Model) (inner : List H) : H :=
   let f := m.feeBump
   formSheet "Bump fee" (if f.bumping then none else some .closeSheet) [closeBar "Close"]
     ([ .section "Transaction" "" [ copyableIdentifier m "bump.txid" f.txid,
-                                   .labeled "Current rate" ((f.currentRateMilli.map feeRateText).getD "—") ] ] ++
+                                   .identified Ids.bumpCurrentRate (.labeled "Current rate" ((f.currentRateMilli.map feeRateText).getD "—")) ] ] ++
      (if f.replacement.isNone then
        [.section "Replacement fee" "The recipient and inputs stay the same. The extra fee comes from change; Winnow enforces a higher absolute fee, a higher feerate, and the incremental relay fee."
-         [ .input .decimal "" "Higher rate (sat/vB)" f.targetText (fun s => .home (.setBumpRate s)) none
-         , .button "Review replacement" .plain (if (parseRateMilli f.targetText (trimNewlines := true)).isSome then some (.home .reviewBump) else none) ]]
+         [ .identified Ids.bumpRateField (.input .decimal "" "Higher rate (sat/vB)" f.targetText (fun s => .home (.setBumpRate s)) none)
+         , .identified Ids.bumpReviewButton (.button "Review replacement" .plain
+             (if (parseRateMilli f.targetText (trimNewlines := true)).isSome then some (.home .reviewBump) else none)) ]]
       else []) ++
      (match f.reviewed, f.replacement with
       | some (_, p), none =>
         [.section "Review" ""
           [ .labeled "Actual rate" (feeRateText p.feeRateMilli)
-          , .labeled "Replacement fee" (satsText p.fee)
+          , .identified Ids.bumpReplacementFee (.labeled "Replacement fee" (satsText p.fee))
           , .labeled "Change back" (match p.change with | some c => satsText c | none => "none (remainder becomes fee)")
-          , .button (if f.bumping then "Signing & broadcasting…" else "Sign & replace") .primary
-              (if f.bumping then none else some (.home .bump)) ]]
+          , .identified Ids.bumpSignButton (.button (if f.bumping then "Signing & broadcasting…" else "Sign & replace") .primary
+              (if f.bumping then none else some (.home .bump))) ]]
       | _, _ => []) ++
      (match f.replacement with
       | some r => [.section "Replacement broadcast" ""

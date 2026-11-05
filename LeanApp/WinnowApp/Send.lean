@@ -137,10 +137,10 @@ def sendForm (m : Model) : List H :=
   (if m.settings.advancedMode then
     [ .section "Fee" "The rate uses your override, recent confirmed fees, or a preset, never below the peers' relay floor. It is not a live fee-market estimate."
         [ .picker "Priority" ["Low", "Medium", "High"] i.priority (fun n => .send (.setPriority n))
-        , .labeled "Resolved rate" ((m.send.resolvedRateMilli.map feeRateText).getD "Set at review")
-        , .labeled "Network floor" ((m.status.feeFloorMilli.map feeRateText).getD "unknown")
+        , .identified Ids.resolvedRateText (.labeled "Resolved rate" ((m.send.resolvedRateMilli.map feeRateText).getD "Set at review"))
+        , .identified Ids.feeFloorText (.labeled "Network floor" ((m.status.feeFloorMilli.map feeRateText).getD "unknown"))
         -- a decimal rate: the number pad has no decimal point
-        , .input .decimal "" "Override (sat/vB, optional)" i.override (send .setOverride) none ] ]
+        , .identified Ids.feeOverrideField (.input .decimal "" "Override (sat/vB, optional)" i.override (send .setOverride) none) ] ]
    else []) ++
   [ .section "" ""
       [ .identified Ids.reviewButton (.button (if m.send.reviewing then "Preparing review…" else "Review payment") .primary

@@ -5,7 +5,7 @@ import Journeys.Screens
 
 /-! # The UI journeys
 
-Five journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Six journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -375,8 +375,90 @@ def silentPaymentSend : Journey := ⟨"silentPaymentSend", do
     waitFor broadcastConfirmed 90
     shot "41-silent-confirmed"⟩
 
+/-- A payment sent at a low rate, then replaced with a higher fee from its payment screen (Advanced mode's Bump
+fee). Before it, Send's fee controls against the node: the Network floor is the node's BIP133 feefilter, and an
+override under it resolves to the floor. Core checks the replacement: it spends exactly the original's coins,
+pays the same amount to the same address with a higher fee, takes the original's place in the mempool, and is
+the one that confirms. The Transactions list then shows the replacement confirmed with its fee, and the
+original's row marked replaced by it. -/
+def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
+  let r ← Run.new "feebump"
+  let h := r.host
+  r.launch "feebump"
+  createWallet
+
+  step "the node funds the wallet" do
+    let address ← Receive.address
+    Receive.close
+    discard <| h.fund address funding
+    waitForBalance funding
+  turnOnAdvanced
+
+  let destination ← h.bankAddress
+  let low ← step "Send's fee: the node's relay floor, and an override under it resolved to the floor" do
+    tap (.tab "Send")
+    r.paste destination pasteDestinationButton
+    type amountField (toString payment)
+    let floor ← Send.floorMilli
+    let shown ← text feeFloorText
+    expectEq "an override under the floor, resolved" (← Send.override (Send.rateText (floor / 2))) shown
+    -- a whole rate at or above the floor: the lowest Winnow would send at that the node relays
+    let low := max 1 ((floor + 999) / 1000)
+    expectEq "the low override, resolved" (← Send.override (toString low)) s!"{low} sat/vB"
+    pure low
+
+  let (txid, fee, coins) ← step "send at the low rate; the node has it at that fee" do
+    scrolled reviewButton
+    tap reviewButton
+    waitFor sendButton 30
+    let fee ← Send.expectReview destination payment
+    let txid ← Send.send h
+    h.expectPays txid destination payment
+    expectEq "the fee the node computes" (← h.mempoolFee txid) fee
+    let coins := spends (← h.transaction txid)
+    expect (!coins.isEmpty) "the payment spends nothing"
+    waitFor broadcastPending 30
+    pure (txid, fee, coins)
+
+  let (replacement, newFee) ← step "open the unconfirmed payment and replace it at a higher rate" do
+    tap (.tab "Wallet")
+    waitFor (historyPayment txid) 30
+    scrolled (historyPayment txid)
+    expectEq "the payment's row" (← text (historyStatus txid)) "awaiting confirmation"
+    tap (historyPayment txid)
+    Bump.start
+    let newFee ← Bump.review (toString (low + 4))
+    expect (newFee > fee) s!"the replacement's fee {newFee} is not above the original's {fee}"
+    shot "50-fee-bump-review"
+    let replacement ← Bump.replace h
+    pure (replacement, newFee)
+
+  step "Core: the same coins, the same payment, a higher fee, and the original gone from the mempool" do
+    expectEq "the coins the replacement spends" (spends (← h.transaction replacement)) coins
+    h.expectPays replacement destination payment
+    expectEq "the replacement's fee, as the node computes it" (← h.mempoolFee replacement) newFee
+    expect (!(← h.mempool).contains txid) "the original is still in the node's mempool"
+
+  step "the replacement confirms, not the original; the Transactions rows say so, with the new fee" do
+    tap (.button "Done")
+    h.mine 1
+    let tip ← h.tipTransactions
+    expect (tip.contains replacement) "the block does not have the replacement"
+    expect (!tip.contains txid) "the block has the original"
+    let height ← h.height
+    backToWalletList
+    waitForBalance (funding - payment - newFee)
+    scrolled (historyPayment replacement)
+    waitUntil 60 "the replacement's row is not confirmed" do
+      return (← text (historyStatus replacement)) == s!"block {height}"
+    expectEq "the replacement's fee on its row" (← amount (historyFee replacement)) (some newFee)
+    expectEq "the original's row" (← text (historyStatus txid)) s!"replaced by {String.ofList (replacement.toList.take 8)}…"
+    expectEq "the original's fee on its row" (← amount (historyFee txid)) (some fee)
+    shot "51-fee-bump-confirmed"⟩
+
 def all : List Journey :=
-  [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, shippedCensus, silentPaymentSend]
+  [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, shippedCensus, silentPaymentSend,
+   feeBumpReplaceConfirm]
 
 end WinnowJourneys
 
