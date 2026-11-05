@@ -210,6 +210,13 @@ def override (rate : String) : UI String := do
     return (← resolved.get).endsWith " sat/vB"
   resolved.get
 
+/-- With the sent payment's details open: waits for the node to request the payment, and reads its txid. A list
+holds only the rows on screen, so both are scrolled to. -/
+def relayedTxid : UI String := do
+  waitUntil 30 "the node did not request the payment" do scrollTo (.text "^Relayed to 1 peer")
+  scrolled (.text "^[0-9a-f]{64}$")
+  text (.text "^[0-9a-f]{64}$")
+
 end Send
 
 /-! ## A fee bump -/

@@ -513,8 +513,7 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     waitFor broadcastPending 30
     scrolled (.text "^Transaction details")
     tap (.text "^Transaction details")
-    waitFor (.text "^Relayed to 1 peer") 30
-    let txid ← text (.text "^[0-9a-f]{64}$")
+    let txid ← Send.relayedTxid
     let mempool ← h.mempool
     expect (!mempool.contains txid) "the node took the payment"
     expect (mempool.contains winner) "the node dropped the other spend"
@@ -555,8 +554,7 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     scrolled sendButton
     tap sendButton
     waitFor broadcastPending 30
-    waitFor (.text "^Relayed to 1 peer") 30
-    let txid ← text (.text "^[0-9a-f]{64}$")
+    let txid ← Send.relayedTxid
     expect (!(← h.mempool).contains txid) "the node took the payment"
     pure (txid, winner)
 
