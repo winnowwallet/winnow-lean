@@ -67,7 +67,7 @@ def stepSend (msg : SendMsg) (m : Model) : Model × List Cmd :=
         ({ m with send := { m.send with sending := true, error := none }, spendingInFlight := true }, [cmd])
   | .editPayment => if m.send.sending then (m, []) else ({ m with send := { m.send with preview := none, error := none } }, [])
   | .newPayment =>
-    ({ m with send := { inputs := { network := m.settings.network } } }, [.resolveRate g { network := m.settings.network } m.status.feeFloorMilli])
+    ({ m with send := { inputs := { network := m.settings.network } }, expanded := m.expanded.erase "send.details" }, [.resolveRate g { network := m.settings.network } m.status.feeFloorMilli])
 
 /-- A relay event about the sent transaction (SendView's `apply`). -/
 def Model.onRelay (m : Model) (txid : String) (e : RelayEvent) : Model :=

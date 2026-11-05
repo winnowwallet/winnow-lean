@@ -416,29 +416,36 @@ def reconcileReplacementDescendants (s : WalletState) (txid : ByteArray) : Walle
     pendingSends := s.pendingSends.filter fun p => !((pendingTxid p).map descendants.contains).getD false }
   return (s, descendants)
 
-/-- A pending send with exactly the confirmed transaction's inputs (as a multiset) lost the race:
-its outputs are removed and its history row marked replaced. -/
-def reconcilePendingConflict (s : WalletState) (tx : Transaction) : WalletState × Option PendingSend := Id.run do
-  let confirmedInputs := tx.inputs.map (·.previousOutput)
+/-- The pending sends a confirmed transaction beat, as `MultisigStore.dropLosingSpends`: one sharing any input
+with it can never confirm. Their pending outputs go, all their reservations are released (`applySpends` then
+takes what the winner spent, as it would any live coin), their history rows are marked replaced, and a pending
+send of one of those outputs loses with them. Every send undone. -/
+def reconcilePendingConflicts (s : WalletState) (tx : Transaction) : WalletState × Array ByteArray := Id.run do
   let txid := tx.txid
-  let isConflict (p : PendingSend) : Bool := Id.run do
-    let some candidate := pendingTx p | return false
-    if candidate.txid == txid then return false
-    let mut unmatched := confirmedInputs
-    for i in candidate.inputs do
-      match unmatched.findIdx? (· == i.previousOutput) with
-      | some k => unmatched := unmatched.eraseIdx! k
-      | none => return false
-    return unmatched.isEmpty
-  let some k := s.pendingSends.findIdx? isConflict | return (s, none)
-  let pending := s.pendingSends[k]!
-  let s := { s with pendingSends := s.pendingSends.eraseIdx! k }
-  let some pendingTxid' := pendingTxid pending | return (s, some pending)
-  let s := { s with allUtxos := s.allUtxos.filter (·.txid != pendingTxid') }
-  let s := match historyIndex s pendingTxid' with
-    | some h => { s with history := s.history.modify h fun e => { e with replacedBy := some txid } }
-    | none => s
-  return (s, some pending)
+  let spends := tx.inputs.map (·.previousOutput)
+  let losers := s.pendingSends.filterMap fun p => do
+    let candidate ← pendingTx p
+    if candidate.txid != txid && candidate.inputs.any (spends.contains ·.previousOutput) then some candidate.txid else none
+  let mut queue := losers.toList
+  let mut dropped : Array ByteArray := #[]
+  let mut coins := s.allUtxos
+  repeat
+    match queue with
+    | [] => break
+    | loser :: rest =>
+      queue := rest
+      if dropped.contains loser then continue
+      dropped := dropped.push loser
+      let neverExisted := fun (u : WalletUTXO) => u.txid == loser && u.height == 0
+      queue := queue ++ (coins.filter neverExisted).toList.filterMap fun u =>
+        u.spent.bind fun m => if m.height.isNone then some m.spentBy else none
+      coins := (coins.filter (!neverExisted ·)).map fun u =>
+        if u.spent.any (fun m => m.spentBy == loser && m.height.isNone) then { u with spent := none } else u
+  if dropped.isEmpty then return (s, #[])
+  return ({ s with
+    allUtxos := coins
+    pendingSends := s.pendingSends.filter fun p => !((pendingTxid p).map dropped.contains).getD false
+    history := s.history.map fun e => if dropped.contains e.txid then { e with replacedBy := some txid } else e }, dropped)
 
 /-- Bitcoin's output-value rules for every transaction of the block. -/
 def checkBlockAmounts (b : Net.Block) : Except WalletError Unit := do
@@ -542,26 +549,20 @@ def apply (w : Wallet) (m : Net.BlockMatch) : WM MatchEffect := do
     let (s1, discarded) := reconcileReplacementDescendants s txid
     s := s1
     effect := { effect with discardedReplacements := effect.discardedReplacements ++ discarded }
-    let (s2, conflicting) := reconcilePendingConflict s tx
+    let (s2, lost) := reconcilePendingConflicts s tx
     s := s2
-    if let some c := conflicting then
-      if let some t := pendingTxid c then
-        effect := { effect with discardedReplacements := effect.discardedReplacements.push t }
+    effect := { effect with discardedReplacements := effect.discardedReplacements ++ lost }
     let coinbase := isCoinbaseTx tx
     let mut spentAmount : Int64 := 0
     let mut allOurs := !coinbase && !tx.inputs.isEmpty
     if !coinbase then
       let (s3, e3, sp, ao) := applySpends s tx txid m.height effect
       s := s3; effect := e3; spentAmount := sp; allOurs := ao
-    if conflicting.isSome then allOurs := true
     let (s4, e4, received) := applyOutputs s tx txid map m.height coinbase effect
     s := s4; effect := e4
-    let accounted := match conflicting with
-      | some c => c.selected.foldl (fun a u => a + u.amount) 0
-      | none => spentAmount
-    let touches := spentAmount > 0 || received > 0 || conflicting.isSome || s.history.any (·.txid == txid)
+    let touches := spentAmount > 0 || received > 0 || !lost.isEmpty || s.history.any (·.txid == txid)
     if !touches then continue
-    s := recordConfirmedHistory s tx txid m.height m.blockHash received accounted allOurs
+    s := recordConfirmedHistory s tx txid m.height m.blockHash received spentAmount allOurs
   WM.wallet (checkWalletTotalInvariant s)
   w.persist s
   w.stateRef.set s
