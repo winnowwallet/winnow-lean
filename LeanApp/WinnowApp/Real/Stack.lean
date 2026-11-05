@@ -71,7 +71,8 @@ def observeBroadcasterFailures (env : Env) (b : TxBroadcaster) (gen : Nat) : IO 
 
 def finishRollback (dir : String) : IO Unit := removeQuietly (dirFile dir rollbackMarkerName)
 
-/-- `rollBackStores(to:)`: the target is recorded first; nothing changes if it cannot be. -/
+/-- `rollBackStores(to:)`: the target is recorded first; nothing changes if it cannot be (backend-test's
+step 7e). -/
 def rollBackStores (env : Env) (dir : Option String) (w : Wallet) (b : TxBroadcaster) (fork : UInt32) : IO Unit := do
   let some dir := dir | failWith .noStorage
   writeAtomic (dirFile dir rollbackMarkerName) (toString fork).toUTF8

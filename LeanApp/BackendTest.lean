@@ -15,7 +15,8 @@ create → start networking → sync to tip → receive address → fund + mine 
 history → fee rate + preview → send → the node's mempool → mine → confirmed, balance arithmetic →
 a second send, fee bump (RBF accepted by the node) → mine → a 2-of-2 multisig account with a test key
 (funded, credited by the sync, a spend created, signed by the phone and by the other key in Lean,
-combined, finalized, broadcast, confirmed) → export (carrying the account) → import into a fresh
+combined, finalized, broadcast, confirmed) → a reorg under a send and the account's coin, the send and the coin
+back after it → export (carrying the account) → import into a fresh
 directory (same balance, the account restored) → stop networking (no loop, no peer, no file change while blocks arrive) → an
 interrupted rollback replayed from its marker on the next start → reopen from
 disk → delete. One `ok`/`FAIL` line per check; the exit code is the verdict. -/
@@ -366,6 +367,53 @@ def testReceiverCode : IO String := IO.ofExcept ((do
 def testReceiverScript (n : Node) (tx : Json) : IO ByteArray := do
   receiverScript n tx testScanSecret (← IO.ofExcept ((Keys.publicKeyOf testSpendSecret).mapError (·.name)))
 
+/-- A reorg under a confirmed send and an account's coin (#38, the app's side of what `io-test` checks on the
+broadcaster alone): the sync loop's `onReorg` takes `rollBackStores` through the wallet, the account and the
+relay, each seen from where a person sees it; the heavier branch leaves both out, and the next block confirms
+them again. The account's balance after. -/
+def reorgFlow (n : Node) (a : Backend) (dir accountID accountAddress mineAddr : String) : IO Int := do
+  let marker := System.FilePath.mk dir / Real.rollbackMarkerName
+  let accountBalance : IO (Option Int) := do return (← multisigAccount? a accountID).map (·.balance)
+  let unmoved ← accountBalance
+  let inputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "2000000", network := .regtest }
+  let txid := (← a.sendPayment inputs (← a.previewSend inputs)).txid
+  check "reorg: the send reaches the node" (← waitUntil 20_000 (do return (← n.mempool).contains txid))
+  let accountCoin : Int := 1_000_000
+  let coinTxid ← n.wallet #["sendtoaddress", accountAddress, btc 1_000_000]
+  n.mine 1 mineAddr
+  let fallen ← n.height
+  n.waitFilterIndex
+  let credited := unmoved.map (· + accountCoin)
+  let (s1, _) ← syncUntil a 60_000 fun s _ => (history? s txid).any (·.height == fallen)
+  let seen ← waitUntil 30_000 (do a.syncNow; return (← accountBalance) == credited)
+  check "reorg: before it, the send confirmed and the account credited, in one block"
+    ((history? s1 txid).any (·.height == fallen) && seen && (← a.rawTransactionHex txid).isNone)
+    s!"{(history? s1 txid).map (·.height)}, account {← accountBalance} vs {credited}"
+  discard <| n.cli #["invalidateblock", ← n.cli #["getblockhash", toString fallen]]
+  -- the heavier branch leaves both out, so they wait in the node's mempool
+  let elsewhere ← n.wallet #["getnewaddress"]
+  for _ in [0:2] do discard <| n.cli #["generateblock", elsewhere, "[]"]
+  n.waitFilterIndex
+  let tip ← n.height
+  let (s2, _) ← syncUntil a 60_000 fun s _ => s.nextScanHeight == tip + 1 && (history? s txid).any (·.height == 0)
+  check "reorg: the send is unconfirmed again" ((history? s2 txid).any (·.height == 0))
+    s!"{(history? s2 txid).map (·.height)}, next scan {s2.nextScanHeight}, tip {tip}, error {s2.lastSyncError}"
+  check "reorg: the relay holds the send again" (← a.rawTransactionHex txid).isSome
+  let dropped ← waitUntil 10_000 (do a.syncNow; return (← accountBalance) == unmoved)
+  check "reorg: the account's coin fell with its block" dropped s!"{← accountBalance} vs {unmoved}"
+  check "reorg: the rollback finished, no marker left" (!(← marker.pathExists))
+  let waiting ← n.mempool
+  check "reorg: both wait in the node's mempool" (waiting.contains txid && waiting.contains coinTxid) s!"{waiting}"
+  n.mine 1 mineAddr
+  let height ← n.height
+  n.waitFilterIndex
+  let (s3, _) ← syncUntil a 60_000 fun s _ => (history? s txid).any (·.height == height)
+  let back ← waitUntil 30_000 (do a.syncNow; return (← accountBalance) == credited)
+  check "reorg: the next block confirms the send and credits the account again"
+    ((history? s3 txid).any (·.height == height) && back && (← a.rawTransactionHex txid).isNone)
+    s!"{(history? s3 txid).map (·.height)} vs {height}, account {← accountBalance} vs {credited}"
+  return (credited.getD 0)
+
 /-- 2b and 2c of the flow (its own definition: the flow's `do` block is at Lean's recursion limit). -/
 def routingAndBackground (a : Backend) (envA : Real.Env) (n : Node) (settings : Settings) (mineAddr : String) : IO Unit := do
   -- 2b. Peer routing (upstream #181, #190): Manual with only a Tor gateway never dials the clearnet node;
@@ -590,6 +638,8 @@ def flow (dir : String) (n : Node) : IO Unit := do
   -- 7d. A Ledger: paired 2-of-2 and a 2-of-3 with recovery, registered, addresses verified, both funded,
   -- each spend signed by the phone and the Ledger, broadcast and confirmed.
   let ledgerIDs ← ledgerFlow n a msA device mineAddr
+  -- 7e. A reorg under a send and the account's coin.
+  let ms : MultisigResult := { ms with balance := ← reorgFlow n a dirA ms.id ms.firstAddress mineAddr }
   -- 8. Export, and import into a fresh directory (the wallet as exported: it paid the account in 7c, and a
   -- payment it just sent is still unconfirmed).
   let pendingInputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "1000000", network := .regtest }
