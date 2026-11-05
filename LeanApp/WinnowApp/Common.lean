@@ -81,7 +81,7 @@ def Model.fail (m : Model) (context message : String) : Model :=
 /-- Forget what a sheet held when it goes away (the SwiftUI view's @State dies with it). -/
 def Model.forgetSheet (m : Model) : Sheet → Model × List Cmd
   | .receive => ({ m with receive := {}, labelEditor := {} }, [.stopWatchingAddress])
-  | .send => ({ m with send := {} }, [])
+  | .send => ({ m with send := {}, expanded := m.expanded.erase "send.details" }, [])
   | .feeBump => ({ m with feeBump := {} }, [])
   | .addPerson => ({ m with person := {} }, [])
   | .labelEditor => ({ m with labelEditor := {} }, [])

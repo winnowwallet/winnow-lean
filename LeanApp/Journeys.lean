@@ -554,6 +554,8 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     scrolled sendButton
     tap sendButton
     waitFor broadcastPending 30
+    scrolled (.text "^Transaction details")
+    tap (.text "^Transaction details")
     let txid ← Send.relayedTxid
     expect (!(← h.mempool).contains txid) "the node took the payment"
     pure (txid, winner)

@@ -789,6 +789,9 @@ def failuresReachTheirScreens : IO Unit := do
   check "a sent payment waits for its confirmation" (contains (rendered sent) "Waiting for confirmation")
   let gone := { sent with status := { sent.status with history := [replacedRow] } }
   check "Send stops waiting once the payment is replaced" (contains (rendered gone) "Replaced" && !contains (rendered gone) "Waiting for confirmation")
+  let opened := { sent with expanded := ["send.details"] }
+  check "a new payment starts with its details closed" (!(stepSend .newPayment opened).1.isExpanded "send.details")
+  check "so does Send opened again" (!(opened.closeSheet .send).1.isExpanded "send.details")
   let review : WinnowApp.FeeBumpPreview := { feeRateMilli := 5_000, fee := 700, change := some 9_300 }
   let bump : FeeBump := { txid := "tt", bumping := true, targetText := "5", reviewed := some ("5", review) }
   let bumping := { readyModel "w" (advanced := true) with feeBump := bump }.present .feeBump
