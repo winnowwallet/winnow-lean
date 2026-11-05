@@ -5,7 +5,7 @@ import Journeys.Screens
 
 /-! # The UI journeys
 
-Six journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Seven journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -456,9 +456,90 @@ def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
     expectEq "the original's fee on its row" (← amount (historyFee txid)) (some fee)
     shot "51-fee-bump-confirmed"⟩
 
+/-- The same recovery phrase on another device spends the phone's coins, twice. A review whose coin has gone
+fails when the owner signs, on the Send screen, which can then be used again. A payment whose coin the node has
+already seen spent goes out and the node refuses it, which it never tells a peer: the phone finds out from the
+block that confirms the other spend. -/
+def spentElsewhere : Journey := ⟨"spentElsewhere", do
+  let r ← Run.new "elsewhere"
+  let h := r.host
+  let entropy ← randomHex 16
+  let other := s!"elsewhere-{← randomHex 4}"
+  let some seed := Winnow.Wire.dataOfHex? entropy | failure "the entropy is not hex"
+  h.samePhrase other seed
+  r.launch "elsewhere" [("WINNOW_E2E_ENTROPY", entropy)]
+  createWallet
+
+  let address ← step "the node funds the wallet" do
+    let address ← Receive.address
+    Receive.close
+    discard <| h.fund address funding
+    waitForBalance funding
+    pure address
+  turnOnAdvanced
+
+  let destination ← h.bankAddress
+  step "the reviewed coin is spent elsewhere and confirmed: signing fails on the Send screen" do
+    tap (.tab "Send")
+    r.paste destination pasteDestinationButton
+    type amountField (toString payment)
+    scrolled reviewButton
+    tap reviewButton
+    waitFor sendButton 30
+    discard <| Send.expectReview destination payment
+    -- a low rate: the phone's next fee comes from this block
+    discard <| h.sweep other destination 2
+    h.mine 1
+    discard <| h.fund address (2 * funding)
+    tap (.tab "Wallet")
+    waitForBalance (2 * funding)
+    tap (.tab "Send")
+    scrolled sendButton
+    tap sendButton
+    waitFor (.text "^The available coins, fee, or change changed") 30
+
+  let refused ← step "the coin is spent elsewhere again, unconfirmed: the node takes the payment and refuses it" do
+    scrolled (.button "Edit payment")
+    tap (.button "Edit payment")
+    scrolled reviewButton
+    tap reviewButton
+    waitFor sendButton 30
+    discard <| Send.expectReview destination payment
+    -- well over the rate the phone reviewed: a lower one its payment would replace
+    let winner ← h.sweep other destination 100
+    scrolled sendButton
+    tap sendButton
+    waitFor broadcastPending 30
+    scrolled (.text "^Transaction details")
+    tap (.text "^Transaction details")
+    waitFor (.text "^Relayed to 1 peer") 30
+    let txid ← text (.text "^[0-9a-f]{64}$")
+    let mempool ← h.mempool
+    expect (!mempool.contains txid) "the node took the payment"
+    expect (mempool.contains winner) "the node dropped the other spend"
+    pure (txid, winner)
+
+  step "the other spend confirms: the refused payment is marked replaced and the coins are gone" do
+    let (txid, winner) := refused
+    h.mine 1
+    let tip ← h.tipTransactions
+    expect (tip.contains winner) "the block does not have the other spend"
+    expect (!tip.contains txid) "the block has the refused payment"
+    waitFor broadcastReplaced 60
+    expect (!(← exists? broadcastPending)) "Send still waits for a confirmation that cannot come"
+    tap (.tab "Wallet")
+    waitForBalance 0
+    scrolled (historyPayment txid)
+    waitUntil 60 "the payment's row is not marked replaced" do
+      return (← text (historyStatus txid)) == s!"replaced by {String.ofList (winner.toList.take 8)}…"
+    tap (historyPayment txid)
+    pause 1
+    expect (!(← exists? bumpFeeButton)) "the payment still offers a fee bump"
+    discard <| h.cli #["unloadwallet", other]⟩
+
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, shippedCensus, silentPaymentSend,
-   feeBumpReplaceConfirm]
+   feeBumpReplaceConfirm, spentElsewhere]
 
 end WinnowJourneys
 

@@ -58,6 +58,13 @@ against the node.
   the same payment, a higher fee, the original gone from the mempool, and
   the replacement is the one that confirms. The Transactions list shows it
   confirmed with its fee and the original's row marked replaced.
+- `spentElsewhere`: the same recovery phrase, in a Core wallet, spends the
+  phone's coins. A review whose coin has gone fails when signed, on the Send
+  screen, which works again. Then the phone pays with a coin the node has
+  already seen spent at a higher fee: the node requests the transaction and
+  refuses it. Peers never say so, so the phone reports it as sent, and it
+  finds out from the block: Send and the Transactions row say replaced, the
+  balance drops and the fee bump goes.
 
 What the journeys do not cover: a physical Ledger (CI's is simulated; the
 owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift

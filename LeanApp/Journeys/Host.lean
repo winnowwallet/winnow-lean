@@ -1,5 +1,7 @@
 import LeanNative.Journey
 import TestKit.Regtest
+import Winnow.Keys.BIP32
+import Winnow.Keys.BIP39
 
 /-! # The journeys' host side: the fixture's regtest node, Bitcoin Core as a co-signer, backend-test's receiver
 
@@ -243,6 +245,23 @@ def Host.importAccount (h : Host) (c : CoreSigner) (descriptor : String) : IO Un
 /-- The PSBT with this wallet's signatures added. -/
 def Host.sign (h : Host) (c : CoreSigner) (psbt : String) : IO String := do
   field (← h.walletJson #["walletprocesspsbt", psbt, "true", "DEFAULT", "true", "false"] c.wallet) "psbt"
+
+/-- The phone's recovery phrase restored on another device: a blank Core wallet on the seed of `entropy`, with
+the app's receive and change branches and their private keys, that signs with its own libsecp256k1. -/
+def Host.samePhrase (h : Host) (name : String) (entropy : ByteArray) : IO Unit := do
+  let (.ok words) := Winnow.Keys.BIP39.mnemonic entropy | failure "no recovery phrase from this entropy"
+  let (.ok master) := Winnow.Keys.HDKey.ofSeed (Winnow.Keys.BIP39.seed words) | failure "no master key from this seed"
+  discard <| h.cli #["-named", "createwallet", s!"wallet_name={name}", "blank=true"]
+  let branch (n : Nat) : IO Json := do
+    let desc ← h.withChecksum s!"tr({master.serialized .testnet}/86h/1h/0h/{n}/*)"
+    return Json.mkObj [("desc", Json.str desc), ("timestamp", "now"), ("range", Json.arr #[0, 50])]
+  let result ← h.walletJson #["importdescriptors", (Json.arr #[← branch 0, ← branch 1]).compress] name
+  for r in (result.getArr?.toOption.getD #[]) do
+    unless (r.getObjValAs? Bool "success").toOption.getD false do failure s!"importdescriptors: {r.compress}"
+
+/-- Everything the wallet holds, sent to `destination` at `rate` sat/vB: the transaction, in the node's mempool. -/
+def Host.sweep (h : Host) (wallet destination : String) (rate : Nat) : IO String := do
+  field (← h.walletJson #["-named", "sendall", s!"recipients=[\"{destination}\"]", s!"fee_rate={rate}"] wallet) "txid"
 
 /-- The Core signers are done: their wallets unloaded. -/
 def Host.unload (h : Host) (signers : List CoreSigner) : IO Unit := do
