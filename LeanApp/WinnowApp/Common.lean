@@ -29,7 +29,8 @@ def literal (s : String) : H := Html.mono (caption s)
 /-! ## Failures -/
 
 /-- Route a backend failure to the state of the screen that asked (`context`), clearing that screen's busy
-flags (records-test's `failuresReachTheirScreens`, one case per context). -/
+flags (records-test's `failuresReachTheirScreens`, one case per context; the journey `spentElsewhere` signs a
+review whose coin has gone). -/
 def Model.fail (m : Model) (context message : String) : Model :=
   -- a cancelled authentication prompt: revealing the phrase treats it as a decision (no error)
   if context == "create.cancelled" || context == "import.cancelled" then { m with onboarding := { m.onboarding with busy := false, error := none } } else

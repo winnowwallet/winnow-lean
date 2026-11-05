@@ -782,8 +782,13 @@ def failuresReachTheirScreens : IO Unit := do
   check "fail: another wallet's failure is dropped" (other.send.sending && other.send.error.isNone)
   -- the screens show it: Send's review, the fee bump, Pair a Ledger, the label editor
   let sending := { readyModel "w" with send := { sending := true, preview := none }, spendingInFlight := true }.present .send
-  let (m, _) := onHost (.failed 0 "send" "The node rejected the transaction: insufficient fee") sending
-  check "fail send: Send shows the node's reason" (contains (rendered m) "The node rejected the transaction: insufficient fee" && !m.send.sending)
+  let (m, _) := onHost (.failed 0 "send" Real.AppError.sendReviewChanged.text) sending
+  check "fail send: Send shows why, and can be used again" (contains (rendered m) Real.AppError.sendReviewChanged.text && !m.send.sending)
+  let replacedRow : HistoryItem := { txid := "tt", height := 0, received := 0, spent := 1000, fee := some 100, replacedBy := some "rr" }
+  let sent := { (readyModel "w") with send := { sentTxid := some "tt" } }.present .send
+  check "a sent payment waits for its confirmation" (contains (rendered sent) "Waiting for confirmation")
+  let gone := { sent with status := { sent.status with history := [replacedRow] } }
+  check "Send stops waiting once the payment is replaced" (contains (rendered gone) "Replaced" && !contains (rendered gone) "Waiting for confirmation")
   let review : WinnowApp.FeeBumpPreview := { feeRateMilli := 5_000, fee := 700, change := some 9_300 }
   let bump : FeeBump := { txid := "tt", bumping := true, targetText := "5", reviewed := some ("5", review) }
   let bumping := { readyModel "w" (advanced := true) with feeBump := bump }.present .feeBump

@@ -195,6 +195,9 @@ def sendStatus (m : Model) (txid : String) : List H :=
   let s := m.send
   [ .section ""  ""
       ((if s.confirmedHeight.isSome then [.row [Html.tone .positive (.icon "checkmark.circle.fill"), .identified Ids.broadcastConfirmed (body "Payment confirmed")]]
+        else if ((m.historyItem? txid).bind (·.replacedBy)).isSome then
+          [.row [Html.tone .warning (.icon "exclamationmark.triangle"), .identified Ids.broadcastReplaced (body "Replaced")],
+           caption "This transaction will not confirm: another one spent its coins."]
         else [.row [Html.tone .warning (.icon "clock"), .identified Ids.broadcastPending (body "Waiting for confirmation")],
               caption (if m.settings.advancedMode then "You can leave this screen. Follow this payment in Wallet."
                        else "You can close this screen. The payment stays in Activity until it confirms.")]) ++
