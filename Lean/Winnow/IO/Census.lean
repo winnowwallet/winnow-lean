@@ -205,7 +205,7 @@ def ofJson (j : Json) : Except String CensusCatalog := do
 def decode (data : ByteArray) (minimumEntries : Nat := 0) : Except CensusError CensusCatalog := do
   if data.size > maximumBytes then throw (.invalid .size)
   let some text := String.fromUTF8? data | throw (.decoding "not UTF-8")
-  let j ← (Json.parse text).mapError CensusError.decoding
+  let j ← (Winnow.Text.parseJson text).mapError CensusError.decoding
   let c ← (ofJson j).mapError CensusError.decoding
   (c.validated minimumEntries).mapError CensusError.invalid
 

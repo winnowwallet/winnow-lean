@@ -1,4 +1,5 @@
 import Lean.Data.Json
+import Winnow.Text.Json
 import Std.Data.HashMap
 import Winnow.Net.GCS
 import Winnow.Net.Messages
@@ -186,7 +187,7 @@ other fields are ignored. Any failure is `damaged`. (Foundation also takes a tra
 first of duplicated keys; this parser takes neither.) -/
 def ofJsonText (text : String) : Except FilterSyncStorageError Progress := do
   let bad : FilterSyncStorageError := .damaged "the JSON or a progress field is invalid"
-  let j ← (Json.parse text).mapError fun _ => bad
+  let j ← (Winnow.Text.parseJson text).mapError fun _ => bad
   let .num n ← (j.getObjVal? "nextScanHeight").mapError (fun _ => bad) | throw bad
   -- n = mantissa / 10^exponent
   let scale := 10 ^ n.exponent

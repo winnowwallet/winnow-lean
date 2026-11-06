@@ -227,7 +227,7 @@ private def objectEntries (j : Json) : Option (Array (String × Json)) :=
 /-- Decodes the store's bytes (after the size checks). -/
 def decodeStore (data : ByteArray) (now : Float) : Except BroadcastStorageError (Std.HashMap ByteArray PendingTx) := do
   let some text := String.fromUTF8? data | damaged "the JSON is invalid"
-  let .ok j := Json.parse text | damaged "the JSON is invalid"
+  let .ok j := Winnow.Text.parseJson text | damaged "the JSON is invalid"
   let .obj _ := j | damaged "the top level is not an object"
   match j.getObjVal? "version" with
   | .ok v =>

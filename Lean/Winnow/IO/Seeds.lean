@@ -20,7 +20,7 @@ namespace DNSJSON
 `JSONDecoder` does) on a body that is not the dns-json shape. -/
 def hosts (data : ByteArray) : Except String (Array String) := do
   let some text := String.fromUTF8? data | throw "not UTF-8"
-  let j ← Json.parse text
+  let j ← Winnow.Text.parseJson text
   let some status := PersistedPeers.jsonInt? (← j.getObjVal? "Status") (-(2 ^ 63)) (2 ^ 63 - 1) | throw "Status"
   let answers ← match j.getObjVal? "Answer" with
     | .ok .null => pure #[]

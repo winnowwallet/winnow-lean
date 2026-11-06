@@ -45,6 +45,12 @@ root = "SilentPaymentTest"
 name = "crypto-test"
 root = "CryptoTest"
 
+# Deterministic fuzzing of every parser that reads bytes the wallet did not write (TestKit/Fuzz.lean, the harness,
+# and Fuzz.lean, the targets). Run from Lean/; CI runs it with a seed from the commit.
+[[lean_exe]]
+name = "fuzz"
+root = "Fuzz"
+
 # The census list a build ships, held to CensusCatalog's rules (scripts/import-census and CI run it).
 [[lean_exe]]
 name = "census-check"
