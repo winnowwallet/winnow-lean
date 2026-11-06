@@ -93,8 +93,16 @@ private def jsonTokens : Array ByteArray :=
   #["{", "}", "[", "]", ",", ":", "\"", "null", "true", "false", "0", "-1", "1.5", "1e3", "1e-9", "1e400", "1e-400",
     "18446744073709551616", "1e99999999", "1e-99999999", "\"\"", "\"\\u0000\"", "\"\\ud800\""].map String.toUTF8
 
+/-- CompactSizes written wider than their value, which every reader must refuse. The harness's own length bombs
+promise more than follows, so without these a mutation never reaches the minimality rule. -/
+private def wideLengths : Array ByteArray :=
+  #[⟨#[0xFD, 0, 0]⟩, ⟨#[0xFD, 1, 0]⟩, ⟨#[0xFD, 0xFC, 0]⟩, ⟨#[0xFE, 0, 0, 0, 0]⟩, ⟨#[0xFE, 1, 0, 0, 0]⟩,
+    ⟨#[0xFE, 0xFF, 0xFF, 0, 0]⟩, ⟨#[0xFF, 0, 0, 0, 0, 0, 0, 0, 0]⟩, ⟨#[0xFF, 1, 0, 0, 0, 0, 0, 0, 0]⟩,
+    ⟨#[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]⟩]
+
 private def psbt : Target := {
   name := "psbt"
+  tokens := wideLengths
   seeds := #[.empty, ofHex! "70736274ff", ofHex! "70736274ff01fb040200000001020402000000010401000105010000", psbtV0, psbtV2]
   check := fun _ data => do
     let .ok parsed := PSBT.parse data | return false
@@ -139,10 +147,12 @@ private def descriptor : Target := {
 
 private def transaction : Target := {
   name := "transaction"
+  tokens := wideLengths
   seeds := #[.empty, minimalTransaction] ++ spends
   check := fun _ data => do
     let .ok parsed := Transaction.decode data | return false
     let bytes := parsed.serialized true
+    require (bytes == data) "a transaction's canonical form is different bytes"
     let .ok again := Transaction.decode bytes
       | throw (IO.userError "a transaction's canonical form does not parse")
     require (again == parsed) "transaction canonical round trip changed it"
@@ -152,10 +162,12 @@ private def genesisBlock : ByteArray := ofHex! "01000000000000000000000000000000
 
 private def block : Target := {
   name := "block"
+  tokens := wideLengths
   seeds := #[.empty, zeros 80 ++ ⟨#[0]⟩, zeros 80 ++ ⟨#[1]⟩ ++ minimalTransaction, genesisBlock,
     zeros 80 ++ ⟨#[2]⟩ ++ spends[0]! ++ spends[1]!]
   check := fun _ data => do
     let .ok parsed := Block.decode data | return false
+    require (parsed.serialized == data) "a block's canonical form is different bytes"
     let .ok again := Block.decode parsed.serialized
       | throw (IO.userError "a block's canonical form does not parse")
     require (again == parsed) "block canonical round trip changed it"
@@ -187,6 +199,7 @@ private def payloads : Array ByteArray := #[
 
 private def messages : Target := {
   name := "messages"
+  tokens := wideLengths
   seeds := payloads
   check := fun _ data => do
     let mut took := false
@@ -194,6 +207,8 @@ private def messages : Target := {
       let .ok parsed := PeerMessage.decode command data | continue
       took := true
       require (parsed.command == command) s!"{command} decoded as {parsed.command}"
+      -- `version` keeps the fields it reads, so its trailing bytes go
+      if command != "version" then require (parsed.payload == data) s!"{command}'s canonical form is different bytes"
       let .ok again := PeerMessage.decode parsed.command parsed.payload
         | throw (IO.userError s!"{command}'s canonical form does not parse")
       require (again.command == parsed.command && again.payload == parsed.payload)
@@ -227,6 +242,7 @@ private def framing : Target := {
 
 private def filter : Target := {
   name := "filter"
+  tokens := wideLengths
   seeds := #[.empty, ⟨#[0]⟩, ofHex! "019dfca8", ofHex! "0db414c859a07e8205876354a210a75042d0463404913d61a8e068e58a3ae2aa080026"]
   check := fun _ data => do
     let .ok (count, reader) := ByteReader.readVarInt.run (ByteReader.init data) | return false
@@ -328,6 +344,7 @@ private def dnsJSON : Target := {
 
 private def fundingSources : Target := {
   name := "funding-sources"
+  tokens := wideLengths
   seeds := #[.empty, minimalTransaction] ++ spends
   check := fun _ data => do
     let .ok parsed := Transaction.decode data | return false

@@ -39,13 +39,14 @@ This file is the plan and the status board; it is updated as each module lands.
   against it — `Sources/`, the Swift tests (`Tests/`, `AppTests/`, `UITests/`), `Package.swift` and its
   lockfile, the Swift app's `project.yml`, the Swift tools (`Tools/Debug|Fixture|Fuzz|Generate`), the
   Swift-app CI/release/site scripts and `.github/workflows`. The tree holds no `.swift` file; the only
-  Swift in the app is the generic LeanNative shell, generated at build time (above). The original remains in
-  history at `9cca3fc`.
+  Swift in the app is the generic LeanNative shell, generated at build time (above). The original remains
+  upstream in `winnowwallet/winnow`, where `9cca3fc` is this port's first base (the tree of `f4bab06`,
+  0.7.3). This repository's history was folded, so that commit is not in it.
 * **During the port** the Swift WalletCore was the **oracle**: for each module, a Swift driver exercised
   the original and a Lean CLI answered the same requests, compared step by step. The results below were
   recorded against it. The harness (Swift drivers, `gen/*.py`, `lockstep.py`, the Swift `Package.swift`
   with the oracle products) was moved out of the tree to `~/src/winnow-lean-swift-archive/LeanOracle`
-  ("`LeanOracle/…`" in Lean comments means that harness); to rerun it, restore `Sources/` from `9cca3fc`
+  ("`LeanOracle/…`" in Lean comments means that harness); to rerun it, restore `Sources/` from upstream's `9cca3fc`
   next to it. The Lean side of that harness (the `Oracle` library, the `oracle-*` executables and
   `io-test --swift`) was removed on 2026-11-04 (#43): CI never built it, the archive is no longer at
   that path, and what only it checked moved into Lean tests: the explorer and peer rules into
