@@ -30,6 +30,10 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 - [foundation-vectors](foundation-vectors) regenerates `LeanApp/FoundationVectors.lean`: what Foundation's `URL`
   and the Swift app's rules answer for custom explorer URLs and manual peers, which records-test checks the
   Lean rules against (macOS, `xcrun swift`).
+- [mainnet-retarget-vectors](mainnet-retarget-vectors) writes `Lean/Vectors/mainnet-retargets.json`, the
+  headers either side of every mainnet retarget, from a public Esplora server. Each header must hash to its
+  block and meet its own target, so the server is trusted for nothing. crypto-test checks `expectedBits`
+  against them.
 - [swift-utf8-vectors](swift-utf8-vectors) writes `Lean/Vectors/swift-utf8-decoding.json`, Swift's own
   `String(decoding:as: UTF8.self)` over well-formed and ill-formed UTF-8, which `crypto-test` holds
   `Winnow.Text.decodeUTF8Lossy` to. It needs Xcode's Swift and feeds the program to `xcrun swift` on stdin, so

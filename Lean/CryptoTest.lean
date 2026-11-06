@@ -25,6 +25,11 @@ BIP340 signing against BIP340's own vectors.
   runs of high bytes, written by `scripts/swift-utf8-vectors`. `Text.decodeUTF8Lossy` must give Swift's
   scalars for every vector (one U+FFFD per maximal subpart), and so must `ByteReader.readVarString`, the
   version message's user agent, which reads through it.
+* `Vectors/mainnet-retargets.json`: the headers either side of every mainnet retarget, written by
+  `scripts/mainnet-retarget-vectors`. `HeaderChain.expectedBits` must give each one's real bits, and
+  `requireDifficulty` must take them and refuse others. Core's `pow_tests.cpp` and `arith_uint256_tests.cpp` cover
+  what mainnet never did: the 4× easier clamp and a negative timespan. `requireBoundedAdjustment` is held to 4×
+  easier and to powLimit, either side of each.
 * The fast curve (`Secp.Fast`), which compiled code runs in place of the proved scalar multiplication,
   lift_x and point addition (`@[implemented_by]`): each `…Fast` function against the proved code it stands in
   for (`Secp.smul?`, `smulJ`, `Fq.sqrt?`), over edge scalars, seeded random ones and the points they give.
@@ -271,6 +276,147 @@ def jsonExponents : IO Unit := do
   check "json: after an escaped quote it is still text" (took "[\"\\\"1e99999999\"]")
   check "json: the next value after a string is a number again" (!took "[\"a\",1e99999999]")
 
+/-! ## Difficulty retargeting: mainnet's own retargets and Core's cases -/
+
+section Retargets
+open Winnow.Net Winnow.Net.NetworkParams
+
+/-- A header of which the retarget rules read only the time and bits. -/
+def timedHeader (time bits : UInt32) : BlockHeader :=
+  .mk' 1 (ByteArray.mk (Array.replicate 32 0)) (ByteArray.mk (Array.replicate 32 0)) time bits 0
+
+def expectedIs (r : Except HeaderChainError (Option UInt32)) (want : UInt32) : Bool :=
+  match r with | .ok (some bits) => bits == want | _ => false
+
+def showExpected (r : Except HeaderChainError (Option UInt32)) : String :=
+  match r with | .ok b => s!"{b.map (·.toNat)}" | .error e => e.name
+
+def refusedAs (kind : String) (r : Except HeaderChainError Unit) : Bool :=
+  match r with | .ok () => false | .error e => e.name == kind
+
+/-- `requireDifficulty` for `h` at `height` on a chain held from `baseHeight`, with `first` at the period's
+first height and `last` below `h`. Any other height is a header no retarget could come from, so reading the
+wrong one shows. -/
+def difficultyOn (h first last : BlockHeader) (height baseHeight : UInt32) : Except HeaderChainError Unit :=
+  HeaderChain.requireDifficulty h height baseHeight mainnet fun i =>
+    let at_ := baseHeight + i.toUInt32
+    if at_ == height - 1 then last
+    else if at_ + 2_016 == height then first
+    else timedHeader 0 0x1d00ffff
+
+/-- Core's `pow_tests.cpp`: (case, height, period's first time, last time, last bits, the next bits). -/
+def corePowTests : List (String × UInt32 × UInt32 × UInt32 × UInt32 × UInt32) := [
+  ("no constraint applies", 32_256, 1_261_130_161, 1_262_152_739, 0x1d00ffff, 0x1d00d86a),
+  ("capped at powLimit", 2_016, 1_231_006_505, 1_233_061_996, 0x1d00ffff, 0x1d00ffff),
+  ("the 4× harder clamp", 68_544, 1_279_008_237, 1_279_297_671, 0x1c05a3f4, 0x1c0168fd),
+  ("the 4× harder clamp rounds down", 68_544, 1_279_297_671 - 302_400, 1_279_297_671, 0x1c05a3f5, 0x1c0168fd),
+  ("a negative timespan takes the 4× harder clamp", 68_544, 1_279_297_671, 1_279_008_237, 0x1c05a3f4, 0x1c0168fd),
+  ("the 4× easier clamp, on a built time", 46_368, 1_263_163_443, 1_269_211_443, 0x1c387f6f, 0x1d00e1fd),
+  ("the window starts at its first block's time", 4_032, 1_269_211_443 + 2_016 * 600, 1_269_211_443 + 4_031 * 600,
+    0x1c05a3f4, 0x1c05a33c)]
+
+/-- Core's `arith_uint256_tests.cpp`: (bits, the target it reads as, that target's own bits). -/
+def coreCompact : List (UInt32 × Nat × UInt32) := [
+  (0x01123456, 0x12, 0x01120000), (0x02123456, 0x1234, 0x02123400), (0x03123456, 0x123456, 0x03123456),
+  (0x04123456, 0x12345600, 0x04123456), (0x05009234, 0x92340000, 0x05009234),
+  (0x20123456, 0x123456 * 2 ^ 232, 0x20123456), (0x1d00ffff, 0xffff * 2 ^ 208, 0x1d00ffff)]
+
+def retargetRules : IO Unit := do
+  for (name, height, firstTime, lastTime, lastBits, want) in corePowTests do
+    let r := HeaderChain.expectedBits height (timedHeader lastTime lastBits) (some (timedHeader firstTime 0)) mainnet
+    check s!"retarget: {name}" (expectedIs r want) (showExpected r)
+  for (bits, value, canonical) in coreCompact do
+    check s!"compact: {bits.toNat} reads as {value}" (UInt256.target bits == some ⟨value⟩)
+    check s!"compact: {value} writes as {canonical.toNat}" ((UInt256.mk value).compact == canonical)
+  -- the mantissa's top bit means negative, so a target whose top byte has it takes one more byte
+  check "compact: 0x80 takes the extra byte" ((UInt256.mk 0x80).compact == 0x02008000)
+  check "compact: 0xFFFF takes the extra byte" ((UInt256.mk 0xffff).compact == 0x0300ffff)
+  check "compact: the top of 256 bits takes the extra byte" (UInt256.max.compact == 0x2100ffff)
+  check "compact: zero" (UInt256.zero.compact == 0)
+  check "bitWidth: at the byte edges" ([0, 1, 0xff, 0x100, 2 ^ 255].map (fun v => (UInt256.mk v).bitWidth) == [0, 1, 8, 9, 256])
+  check "multiplied wraps at 256 bits" ((UInt256.mk (2 ^ 255)).multiplied 3 == UInt256.mk (2 ^ 255))
+  -- negative, zero and overflowing bits, which `targetAndWork` refuses as Core's CheckProofOfWork does
+  for bits in [0, 0x00123456, 0x01003456, 0x02000056, 0x03000000, 0x04000000, 0x00923456, 0x01803456, 0x02800056,
+               0x03800000, 0x04800000, 0x01fedcba, 0x04923456, 0xff123456] do
+    check s!"target: {bits} is no target"
+      (refusedAs "invalidTarget" ((HeaderChain.targetAndWork (UInt32.ofNat bits) mainnet 1).map fun _ => ()))
+  -- between retargets the bits may not change
+  let last := timedHeader 1_300_000_000 0x1c05a3f4
+  check "difficulty: unchanged between retargets" (difficultyOn last last last 2_017 0 |>.isOk)
+  check "difficulty: refused between retargets, one easier"
+    (refusedAs "unexpectedDifficulty" (difficultyOn (timedHeader 0 0x1c05a3f5) last last 2_017 0))
+  check "difficulty: refused between retargets, one harder"
+    (refusedAs "unexpectedDifficulty" (difficultyOn (timedHeader 0 0x1c05a3f3) last last 2_017 0))
+  -- the first retarget after a mid-period checkpoint: at most 4× easier, never past powLimit
+  let bounded (bits previous : UInt32) :=
+    HeaderChain.requireBoundedAdjustment (timedHeader 0 bits) (timedHeader 0 previous) mainnet 2_016
+  check "bounded: exactly 4× easier" (bounded 0x1b10132c 0x1b0404cb |>.isOk)
+  check "bounded: refused just past 4×" (refusedAs "unexpectedDifficulty" (bounded 0x1b10132d 0x1b0404cb))
+  check "bounded: harder is not its business" (bounded 0x1b000001 0x1b0404cb |>.isOk)
+  check "bounded: powLimit, where 4× reaches past it" (bounded 0x1d00ffff 0x1d00d86a |>.isOk)
+  check "bounded: refused just past powLimit" (refusedAs "unexpectedDifficulty" (bounded 0x1d010000 0x1d00d86a))
+  check "bounded: refused unreadable bits" (refusedAs "invalidTarget" (bounded 0x1d80ffff 0x1d00ffff))
+  check "bounded: refused unreadable previous bits" (refusedAs "invalidTarget" (bounded 0x1d00ffff 0x1d80ffff))
+  let unreadable := HeaderChain.expectedBits 2_016 (timedHeader 0 0x1d80ffff) (some (timedHeader 0 0)) mainnet
+  check "retarget: refused when the last bits are unreadable"
+    (refusedAs "invalidTarget" (unreadable.map fun _ => ()))
+
+/-- Every retarget mainnet has had. The headers carry their proof of work, so the table can't be wrong without
+that showing: each row's two headers must link and meet their own bits, and the period's first header is the
+row before's `next`, which pins the windows together. -/
+def mainnetRetargets : IO Unit := do
+  let j ← IO.ofExcept (Json.parse (← IO.FS.readFile "Vectors/mainnet-retargets.json"))
+  let rows ← IO.ofExcept (j.getObjValAs? (Array Json) "boundaries")
+  let header (row : Json) (key : String) : IO BlockHeader :=
+    match BlockHeader.decode (bytesOf row key) with
+    | .ok h => pure h
+    | .error _ => throw (IO.userError s!"retarget: {key} of {row.compress} is no header")
+  let powLimit := UInt256.ofLittleEndian mainnet.powLimit
+  let timespan : Int := mainnet.powTargetTimespan.toNat
+  let mut first := HeaderChain.genesisHeader mainnet
+  let mut changed := 0
+  let mut capped : Array Nat := #[]
+  let mut harder : Array Nat := #[]
+  let mut easier : Array Nat := #[]
+  for row in rows do
+    let height ← IO.ofExcept (row.getObjValAs? Nat "height")
+    let last ← header row "last"
+    let next ← header row "next"
+    let h := height.toUInt32
+    check s!"mainnet {height}: the headers are real"
+      (next.previousHash == last.hash && (HeaderChain.checkedWork last mainnet (h - 1)).isOk &&
+       (HeaderChain.checkedWork next mainnet h).isOk)
+    let r := HeaderChain.expectedBits h last (some first) mainnet
+    check s!"mainnet {height}: the bits" (expectedIs r next.bits) (showExpected r)
+    check s!"mainnet {height}: the bits round trip"
+      ((UInt256.target next.bits).map (·.compact) == some next.bits)
+    check s!"mainnet {height}: accepted from the period's first header" (difficultyOn next first last h (h - 2_016) |>.isOk)
+    check s!"mainnet {height}: refused with other bits"
+      (refusedAs "unexpectedDifficulty" (difficultyOn { next with bits := next.bits + 1 } first last h (h - 2_016)))
+    check s!"mainnet {height}: accepted from a checkpoint inside the period"
+      (difficultyOn next first last h (h - 2_015) |>.isOk)
+    let raw : Int := (last.time.toNat : Int) - (first.time.toNat : Int)
+    if next.bits != last.bits then changed := changed + 1
+    if raw < timespan / 4 then harder := harder.push height
+    if raw > timespan * 4 then easier := easier.push height
+    if last.bits == powLimit.compact && raw > timespan then capped := capped.push height
+    first := next
+  let heights := rows.filterMap fun r => (r.getObjValAs? Nat "height").toOption
+  check "mainnet: every period, in order"
+    (heights == (Array.range heights.size).map fun i => (i + 1) * 2_016)
+  check "mainnet: reaches the shipped checkpoint" (heights.contains 959_616)
+  let checkpoint := rows.find? fun r => (r.getObjValAs? Nat "height").toOption == some 959_616
+  check "mainnet: the shipped checkpoint is that header"
+    ((checkpoint.map (bytesOf · "next")) == mainnet.checkpoint.map (·.header))
+  check "mainnet: block 2016 is capped at powLimit" (capped[0]? == some 2_016)
+  check "mainnet: block 32256 is the first change"
+    ((rows.find? fun r => ((bytesOf r "last").extract 72 76) != ((bytesOf r "next").extract 72 76)).bind
+      (fun r => (r.getObjValAs? Nat "height").toOption) == some 32_256)
+  check "mainnet: block 68544 hits the 4× harder clamp" (harder.contains 68_544)
+  IO.println s!"  retarget: {rows.size} mainnet periods, {changed} changed the bits, {capped.size} capped at powLimit, {harder.size} at the harder clamp {harder}, {easier.size} at the easier"
+
+end Retargets
+
 def main : IO UInt32 := runMain "crypto-test" do
   fips197
   wycheproof
@@ -280,3 +426,5 @@ def main : IO UInt32 := runMain "crypto-test" do
   roundTrips
   utf8
   jsonExponents
+  retargetRules
+  mainnetRetargets

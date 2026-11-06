@@ -169,7 +169,8 @@ def checkedWork (h : BlockHeader) (p : NetworkParams) (height : UInt32) : Except
   if !(UInt256.ofLittleEndian h.hash ≤ target) then throw (.insufficientProofOfWork height)
   return work
 
-/-- Core's CalculateNextWorkRequired (regtest: fixed). `none`: the period's first header is unavailable. -/
+/-- Core's CalculateNextWorkRequired (regtest: fixed). `none`: the period's first header is unavailable.
+Every test node is regtest, so crypto-test's `mainnetRetargets` is what runs the arithmetic. -/
 def expectedBits (height : UInt32) (previous : BlockHeader) (periodFirst : Option BlockHeader) (p : NetworkParams) :
     Except HeaderChainError (Option UInt32) := do
   if p.noRetargeting || height % p.difficultyAdjustmentInterval != 0 then return some previous.bits
@@ -181,7 +182,8 @@ def expectedBits (height : UInt32) (previous : BlockHeader) (periodFirst : Optio
   let adjusted := (target.multiplied elapsed.toNat.toUInt32).quotientAndRemainder ⟨timespan.toNat⟩ |>.1
   return some (min adjusted (UInt256.ofLittleEndian p.powLimit)).compact
 
-/-- The one adjustment a mid-period checkpoint cannot verify exactly: at most 4× easier, never past powLimit. -/
+/-- The one adjustment a mid-period checkpoint cannot verify exactly: at most 4× easier, never past powLimit
+(crypto-test's `retargetRules`). -/
 def requireBoundedAdjustment (h previous : BlockHeader) (p : NetworkParams) (height : UInt32) : Except HeaderChainError Unit := do
   let (some target, some previousTarget) := (UInt256.target h.bits, UInt256.target previous.bits)
     | throw (.invalidTarget height)
