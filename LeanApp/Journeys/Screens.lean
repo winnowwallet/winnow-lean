@@ -296,6 +296,9 @@ def addPastedMember (r : Run) (keyExpression : String) : UI Unit := do
   r.clipboard keyExpression
   tap multisigBuildAddMemberButton
   tap signerPickerPasteButton
+  -- the app reads the clipboard on a task of its own, and the sheet closes when it has: the next member's key
+  -- must not reach the clipboard before then, or this paste reads it and the next one adds nothing
+  expectGone signerPickerPasteButton 10
 
 /-- A paired Ledger, chosen in the member picker. -/
 def addLedgerMember (ledgerName : String) : UI Unit := do
