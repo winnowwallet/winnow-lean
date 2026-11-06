@@ -125,9 +125,9 @@ def decodeFrom : ByteReader.M Transaction := do
   let mut inputCount ← readVarInt
   let mut segwit := false
   if inputCount == 0 then
-    -- marker 0x00 must be followed by a nonzero flag (BIP144)
+    -- marker 0x00 must be followed by the one flag BIP144 defines; Core refuses every other
     let flag ← readUInt8
-    if flag == 0 then throw (.malformed "tx flag 0")
+    if flag != 1 then throw (.malformed s!"tx flag {flag}")
     segwit := true
     inputCount ← readVarInt
   if inputCount == 0 then throw (.malformed "tx has no inputs")
@@ -135,7 +135,10 @@ def decodeFrom : ByteReader.M Transaction := do
   if inputCount.toNat > (← remainingM) / 41 then throw (.malformed s!"tx input count {inputCount}")
   let mut inputs ← decodeInputs inputCount.toNat
   let outputs ← decodeOutputs
-  if segwit then inputs ← decodeWitnesses inputs
+  if segwit then
+    inputs ← decodeWitnesses inputs
+    -- Core's "Superfluous witness record": the marker says there is a witness, so there must be one
+    if inputs.all (·.witness.isEmpty) then throw (.malformed "tx marks a witness and has none")
   let locktime ← readUInt32
   return { version, inputs, outputs, locktime }
 

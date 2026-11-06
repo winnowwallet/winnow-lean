@@ -119,6 +119,12 @@ the same value. A refusal is not a finding. These are:
   parent prints the case the child was on;
 - **a hang:** the parent kills a child that stays on one case for 30 seconds.
 
+A round trip can't see a reader that takes too much, because the value survives
+it. So the transaction, block, filter and control block targets, and every message
+but `version`, also require the canonical form to be the input's own bytes, and the
+binary targets splice in CompactSizes written wider than their value. A PSBT can't
+be held to that: its canonical form is version 2, whatever arrived.
+
 An out-of-bounds `ByteArray` `[i]!` is not caught as a crash. It reads 0 without
 panicking, so only a target's invariant can notice it.
 
