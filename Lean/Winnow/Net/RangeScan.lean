@@ -167,7 +167,7 @@ def toJson (p : RangeScanProgress) : Json :=
 
 /-- `recordKind(in:)`: what a file says it is. -/
 def recordKindOf (text : String) : Option String :=
-  match Json.parse text with
+  match Winnow.Text.parseJson text with
   | .ok j => (j.getObjValAs? String "record").toOption
   | .error _ => none
 
@@ -183,7 +183,7 @@ def notRangeRecord (text : String) : Option RangeScanError :=
 
 def decode (text : String) : Except RangeScanError RangeScanProgress := do
   let bad : RangeScanError := (notRangeRecord text).getD (.recordDamaged "the JSON or a progress field is invalid")
-  let j ← (Json.parse text).mapError fun _ => bad
+  let j ← (Winnow.Text.parseJson text).mapError fun _ => bad
   let some fromHeight := u32? j "from" | throw bad
   let some toHeight := u32? j "to" | throw bad
   let some nextScanHeight := u32? j "nextScanHeight" | throw bad

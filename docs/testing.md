@@ -19,7 +19,7 @@ Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6); and the six journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 6); and the six journeys headless against the app itself (LeanNative's `wire-journey`). |
 | `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send and the 2-of-3 on one runner; Ledger, census and silent payments on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
@@ -98,6 +98,50 @@ them headless against the app itself, in under a minute, into
 Tests find Bitcoin Core through `WINNOW_BITCOIND` and `WINNOW_BITCOIN_CLI`,
 Homebrew or the PATH; `scripts/ci-regtest` uses the pinned release that
 `scripts/install-bitcoin` downloads.
+
+## Fuzzing
+
+`fuzz` ([`Lean/Fuzz.lean`](../Lean/Fuzz.lean), harness in
+[`Lean/TestKit/Fuzz.lean`](../Lean/TestKit/Fuzz.lean)) is the port of the Swift
+app's `Tools/Fuzz`. It runs in the `lean` job on every run, with a seed taken from
+the commit, so each commit tries new inputs and a failure replays from the line it
+prints. There is no separate job and no schedule.
+
+It mutates known-good inputs for 23 targets: the fifteen upstream had, the same
+address and silent payment rules past their checksums, and the files and Ledger
+replies upstream's harness could not reach. A check parses the input and holds what
+parsed to what the wallet relies on, mostly that the canonical form parses back to
+the same value. A refusal is not a finding. These are:
+
+- **a broken invariant:** the run stops and prints the input and the replay line;
+- **a crash:** the run happens in a child under `LEAN_ABORT_ON_PANIC=1`, because
+  compiled Lean otherwise prints a panic and carries on with a default value. The
+  parent prints the case the child was on;
+- **a hang:** the parent kills a child that stays on one case for 30 seconds.
+
+An out-of-bounds `ByteArray` `[i]!` is not caught as a crash. It reads 0 without
+panicking, so only a target's invariant can notice it.
+
+```sh
+cd Lean
+.lake/build/bin/fuzz --iterations 2000 --seed 0x57494e4e4f575055
+.lake/build/bin/fuzz --target psbt --seed 0xa1 --iterations 500 --save /tmp/fuzz
+```
+
+Keep the `--target` a failure printed when you replay it: every target draws from
+one generator, so narrowing it changes the inputs. To keep an input as a regression,
+copy it from `--save` to `Lean/Vectors/fuzz/<target>/` as a `.bin`. Those are replayed
+at the start of every run.
+
+Each target's line in the output says how many mutated inputs it took. A target
+that takes none is only testing refusals, and the run refuses to start if none of a
+target's seeds parses. `address` and `silent-payment-address` always take none,
+because a mutation breaks the checksum: `address-program` and `silent-payment-keys`
+cover the same rules past it.
+
+`fuzz` reaches what `Lean/` holds. The stores in `LeanApp/` (people, labels, sealed
+files) are not targets yet. It also can't see a wrong answer that is
+self-consistent: for that the tests compare with Bitcoin Core or published vectors.
 
 ## The journey media
 

@@ -18,7 +18,7 @@ lockfile.
 | WalletCore | Keys, descriptors, scripts, PSBTs, transactions, silent payments, wallet state, people and contact cards, and Bitcoin P2P networking | swift-secp256k1 (P256K) |
 | [TestSupport](../Tests/Support/README.md) | In-memory keys, controlled peers and disposable Bitcoin Core fixtures | WalletCore; development only |
 | [winnow-debug](../Tools/Debug/README.md) | Offline inspection, diagnostics, generators and network soaks | WalletCore |
-| [WinnowFuzz](../Tools/Fuzz/README.md) | Bounded hostile-input parsing and invariants | WalletCore through WinnowFuzzCore |
+| [`fuzz`](testing.md#fuzzing) | Bounded hostile-input parsing and invariants | Winnow, through TestKit |
 | [winnow-fixture](../Tools/Fixture/README.md) | Test-bank preparation | TestSupport |
 
 There is no VaultKit and no shared-account record. An import bundle that

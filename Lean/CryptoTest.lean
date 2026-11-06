@@ -260,6 +260,17 @@ def fastCurve : IO Unit := do
 
 end FastCurve
 
+/-- `Text.parseJson`'s bound: what the wallet reads still parses, the exponents that stop it do not (SEC-040), and
+a string that looks like one is only a string. -/
+def jsonExponents : IO Unit := do
+  let took (t : String) := (Winnow.Text.parseJson t).toBool
+  check "json: a Double's exponents parse" (took "[1e308,1e-320,2.5E+3,0]")
+  check "json: the bound itself parses" (took "1e400" && took "1e-400")
+  check "json: past the bound, refused" (!took "1e401" && !took "1E-401" && !took "1e+99999999" && !took "{\"a\":1e-99999999}")
+  check "json: inside a string it is text" (took "{\"a\":\"1e99999999\"}")
+  check "json: after an escaped quote it is still text" (took "[\"\\\"1e99999999\"]")
+  check "json: the next value after a string is a number again" (!took "[\"a\",1e99999999]")
+
 def main : IO UInt32 := runMain "crypto-test" do
   fips197
   wycheproof
@@ -268,3 +279,4 @@ def main : IO UInt32 := runMain "crypto-test" do
   fastCurve
   roundTrips
   utf8
+  jsonExponents

@@ -1,4 +1,5 @@
 import Winnow.IO.Base
+import Winnow.Text.Json
 import Winnow.Keys.Unicode
 
 /-! # Peer provenance and diversity (`Network/Peers/PeerDiversity.swift`, `SeedAddressFilter` of
@@ -245,7 +246,7 @@ private def endpointOf (j : Json) : Option PeerEndpoint := do
 /-- Reads either format; `none` when it is neither. -/
 def decode (data : ByteArray) : Option (Array PeerCandidate) := do
   let text ← String.fromUTF8? data
-  let j ← (Json.parse text).toOption
+  let j ← (Winnow.Text.parseJson text).toOption
   let versioned : Option (Array PeerCandidate) := do
     let v ← jsonNat? (← (j.getObjVal? "version").toOption) (2 ^ 63)
     let .arr peers ← (j.getObjVal? "peers").toOption | none

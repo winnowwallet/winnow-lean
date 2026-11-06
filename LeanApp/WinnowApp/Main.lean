@@ -68,7 +68,7 @@ def walletDir (n : Network) : IO String := return ((System.FilePath.mk (← root
 def loadSettings : IO Settings := do
   let p ← settingsPath
   if !(← p.pathExists) then return {}
-  match Json.parse (← IO.FS.readFile p) >>= fromJson? with
+  match Winnow.Text.parseJson (← IO.FS.readFile p) >>= fromJson? with
   | .ok s => pure s
   | .error _ => pure {}
 
@@ -76,7 +76,7 @@ def loadSettings : IO Settings := do
 def loadSettingsNoting : IO (Settings × Bool) := do
   let p ← settingsPath
   if !(← p.pathExists) then return ({}, false)
-  match Json.parse (← IO.FS.readFile p) with
+  match Winnow.Text.parseJson (← IO.FS.readFile p) with
   | .ok j => return ((fromJson? j).toOption.getD {}, (j.getObjVal? "network").isOk)
   | .error _ => return ({}, false)
 
@@ -247,7 +247,7 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       let (id, report) ← b.importBundle n (← walletDir n) json
       return .imported g id report
     -- a bundle carrying recovery words is imported only after device authentication, as AppModel
-    let seeded := match Json.parse json with
+    let seeded := match Winnow.Text.parseJson json with
       | .ok j => match j.getObjVal? "mnemonic" with | .ok .null | .error _ => false | .ok _ => true
       | .error _ => false
     if seeded then authenticated fx g "import" "Import this wallet's recovery phrase" act
