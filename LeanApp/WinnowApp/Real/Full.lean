@@ -53,7 +53,7 @@ def withStore {α} (h : RecordsHost) (none' : α) (f : RecordsStore → IO α) :
   | some s => f s
   | none => return none'
 
-/-- `nextPaymentAddress(for:)` of a saved person, with the review's recipient. -/
+/-- `nextPaymentAddress(for:)` of a saved person, with the review's recipient (backend-test's `peopleFlow`). -/
 def personPayment (h : RecordsHost) (personID : String) : IO (String × UInt32 × PreviewRecipient) := do
   let s ← h.store
   let some p := (← s.read).people.record? personID | RM.toIO (throw (.people .unknownPerson))
