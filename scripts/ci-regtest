@@ -6,7 +6,7 @@
 #
 #   scripts/ci-regtest [io] [backend] [differential]
 #
-#   MULTISIG_CASES  the differential's random cases (default 6)
+#   MULTISIG_CASES  the differential's cases (default 9, six of them nested)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$("$ROOT/scripts/install-bitcoin")"
@@ -21,7 +21,7 @@ for suite in "$@"; do
     backend) echo "▶ backend-test"; (cd "$ROOT/LeanApp" && .lake/build/bin/backend-test) ;;
     differential)
       echo "▶ multisig-differential"
-      (cd "$ROOT/Lean" && .lake/build/bin/multisig-differential --cases "${MULTISIG_CASES:-6}") ;;
+      (cd "$ROOT/Lean" && .lake/build/bin/multisig-differential --cases "${MULTISIG_CASES:-9}") ;;
     *) echo "ci-regtest: no suite $suite (io, backend, differential)" >&2; exit 2 ;;
   esac
 done
