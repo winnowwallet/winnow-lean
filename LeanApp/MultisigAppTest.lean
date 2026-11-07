@@ -18,7 +18,9 @@ import TestKit.Fixtures
   check and the Advanced-mode gate, through `Backend.realWithMultisig` (`Real/Multisig.lean`) on wallets opened from
   disk with no network;
 * Settings → Signers as a person uses it: a signer saved from pasted keys, opened, renamed and removed (one an
-  account still uses among them), through the app's own `perform` on that backend.
+  account still uses among them), through the app's own `perform` on that backend;
+* an account's own screens the same way: removal refused until every spend is in a block, joining from a pasted
+  descriptor, a new address, the collection page and Discard, and removing members and keys in the builder.
 
 Fixtures as `Tests/Support/TestKeys.swift` (masters from BIP39 over 16 repeated bytes: 0xA1, 0xB2, 0xC3;
 0xD4 a recovery key; keys at m/86'/1'/0'). Exits 1 on any failure. -/
@@ -1733,7 +1735,9 @@ def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
 
 /-- How many answers `perform` posts for the commands this flow runs; none for the ones it leaves out. -/
 def answersTo : Cmd → Option Nat
-  | .multisigOverview .. | .addSignerKeys .. | .renameSigner .. | .removeSigner .. | .paste .. => some 1
+  | .multisigOverview .. | .addSignerKeys .. | .renameSigner .. | .removeSigner .. | .paste ..
+  | .checkMultisigDescriptor .. | .addMultisigAccount .. | .removeMultisigAccount .. | .newMultisigAddress ..
+  | .discardDraft .. => some 1
   | _ => none
 
 /-- Runs `cs` through `perform`, each answer back through `onHost` and what that asks for in turn; the model
@@ -1865,6 +1869,251 @@ def testSignersAddOpenRenameRemove : IO Unit := do
   check "a save that lands on the list: the list stays, read again" (saved.routes == [.signers] && cs.any (· matches .multisigOverview _))
   let _ := other
   backendRef.set Backend.pending
+
+/-! ## An account's own screens, as a person uses them (#65) -/
+
+/-- The Wallet tab of a phone with the overview loaded, `phone` the backend the app's `perform` runs on. -/
+def Phone.openApp (p : Phone) (sh : Shell) : IO Model := do
+  backendRef.set p.backend
+  let m : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .signet, advancedMode := true } }
+  return (← sh.run m [.multisigOverview m.generation]).1
+
+/-- A spend or a payment in a block, as the filter scan hands it to the account store. -/
+def Phone.seeBlock (p : Phone) (height : UInt32) (txs : Array Transaction) : IO Unit :=
+  discard <| p.multisig.applyMatch (fakeMatch height (#[coinbaseAt height] ++ txs)) signet
+
+/-- This phone broadcast `tx`: its coins are reserved, nothing is in a block. -/
+def Phone.recordBroadcast (p : Phone) (id : String) (tx : Transaction) (change : Option UInt32) : IO Unit := do
+  let done ← p.multisig.withStore fun s => s.recordSpend p.multisig.host.keys p.multisig.host.writeData id tx change
+  check "the spend touched a live coin" done
+
+/-- Remove account, then Remove on the confirmation. -/
+def Shell.remove (s : Shell) (m : Model) : IO Model := do
+  let (m, _) ← s.tap (.multisig .askRemove) m
+  return (← s.tap (.multisig .remove) m).1
+
+/-- A funds guard: a removed account is not scanned, and adding it again does not find coins it already had. So
+Remove is refused, on the screen, while anything may still arrive or be taken back: a coin, a spend only in
+the mempool, the change a confirmed spend left, and a confirmed spend a reorg undid. -/
+def testAnAccountGoesOnlyWhenEverySpendIsInABlock : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let other ← phoneWith 0xC3
+  let sh ← Shell.new
+  let (id, descriptor) ← phone.buildWith "Joint" 2 [← other.keyExpression]
+  let account ← need "account" (MultisigAccount.parse descriptor signet)
+  let m ← phone.openApp sh
+  let (m, _) ← sh.tap (.multisig (.openAccount id)) m
+  let refused (name : String) (m : Model) : IO Unit := do
+    check s!"{name}: refused, on the screen" (m.multisigAccountError == some Real.accountHoldsCoinsText &&
+      contains (rendered m) "still holds coins" && m.routes.getLast? == some (.multisigAccount id) && m.confirm.isNone)
+    check s!"{name}: the account stays" (((← phone.accounts).any (·.id == id)) && (← phone.record id).descriptor == descriptor)
+  -- a coin
+  let height := (← phone.record id).createdAtHeight + 1
+  let funding := fundingTx 0x41 (← spk account 0)
+  phone.seeBlock height #[funding]
+  let m ← sh.remove m
+  refused "a coin" m
+  -- spending it, with change: reserved, in no block, and the change on its way
+  let first := spend #[⟨funding.txid, 0⟩]
+    #[{ value := 40_000, scriptPubKey := elsewhere }, { value := 19_000, scriptPubKey := ← spk account 0 1 }]
+  phone.recordBroadcast id first (some 0)
+  check "the coin is reserved, in no block" ((spentOf (← phone.record id) ⟨funding.txid, 0⟩) == marker first.txid none)
+  let m ← sh.remove m
+  refused "a spend with change, in no block" m
+  -- in a block, but its change is a coin of its own
+  phone.seeBlock (height + 1) #[first]
+  check "the spend is in a block" ((spentOf (← phone.record id) ⟨funding.txid, 0⟩) == marker first.txid (some (height + 1)))
+  let m ← sh.remove m
+  refused "the change of a confirmed spend" m
+  -- the change spent with none left: the only coin is spent, in no block
+  let second := spend #[⟨first.txid, 1⟩] #[{ value := 18_000, scriptPubKey := elsewhere }]
+  phone.recordBroadcast id second none
+  check "every coin is spent, the last in no block" ((← phone.record id).utxos.isEmpty && (← phone.record id).allUtxos.all (·.isSpent))
+  let m ← sh.remove m
+  refused "the last coin spent only in the mempool" m
+  -- in a block, and a reorg takes that block back
+  phone.seeBlock (height + 2) #[second]
+  phone.multisig.rollBack (height + 1)
+  let m ← sh.remove m
+  refused "a spend a reorg took back" m
+  -- the same spend in the new chain: nothing left
+  phone.seeBlock (height + 2) #[second]
+  let (m, cs) := step (.multisig .askRemove) m
+  check "Remove asks first" (m.confirm == some (.removeMultisig id) && cs.isEmpty && (← phone.accounts).any (·.id == id))
+  let (m, _) ← sh.tap (.multisig .remove) m
+  check "every spend in a block: the account goes" (m.multisigAccountError.isNone && m.routes.getLast? != some (.multisigAccount id) &&
+    (m.multisigInfo? id).isNone && !(← phone.accounts).any (·.id == id))
+  failsStarting "and it is gone from the store" (phone.record id) ""
+  phone.backend.removeMultisigAccount id
+  -- an account that never held a coin goes at once
+  let (empty, _) ← phone.buildWith "Empty" 2 [← keyExpression (← master 0xD4)]
+  let (m, _) ← sh.run m [.multisigOverview m.generation]
+  let (m, _) ← sh.tap (.multisig (.openAccount empty)) m
+  let m ← sh.remove m
+  check "an account with no coins goes" (m.multisigAccountError.isNone && (m.multisigInfo? empty).isNone)
+
+/-- Join an account: the screen checks what is pasted, says why not, and saves only what it checked. -/
+def testJoiningAnAccountFromAPastedDescriptor : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let other ← phoneWith 0xC3
+  let sh ← Shell.new
+  let (id, descriptor) ← other.buildWith "Theirs" 2 [← phone.keyExpression]
+  let (_, withoutUs) ← other.buildWith "Not ours" 2 [← keyExpression (← master 0xD4)]
+  let m ← phone.openApp sh
+  let (m, _) ← sh.tap (.multisig .openAdd) m
+  let (m, _) ← sh.tap (.multisig (.setName "Household")) m
+  let savesNothing (name : String) (m : Model) : IO Unit := do
+    check s!"{name}: Save stays off" (!m.multisigAdd.canSave && (stepMultisig .save m).2.isEmpty)
+    check s!"{name}: nothing added" (← phone.accounts).isEmpty
+  check "nothing pasted: nothing to check" (m.multisigAdd.check.isNone)
+  savesNothing "nothing pasted" m
+  sh.clipboard.set "tr(nonsense)"
+  let (bad, _) ← sh.tap (.multisig .pasteDescriptor) m
+  check "not a descriptor: the screen says so" (bad.multisigAdd.descriptor == "tr(nonsense)" &&
+    (bad.multisigAdd.validation.any (· matches .error _)))
+  savesNothing "not a descriptor" bad
+  sh.clipboard.set withoutUs
+  let (stranger, _) ← sh.tap (.multisig .pasteDescriptor) m
+  check "no key of this phone: refused with the reason" ((stranger.multisigAdd.validation.any fun
+    | .error e => e == Real.notASignerText | .ok _ => false) && contains (rendered stranger) "No key of this descriptor")
+  savesNothing "no key of this phone" stranger
+  sh.clipboard.set s!"  {descriptor}\n"
+  let (good, _) ← sh.tap (.multisig .pasteDescriptor) m
+  check "the shared text, spaces and all: checked" ((good.multisigAdd.validation.any fun
+    | .ok c => c.policy == "2 of 2" | .error _ => false) && good.multisigAdd.canSave)
+  let (unnamed, _) ← sh.tap (.multisig (.setName "")) good
+  savesNothing "no name" unnamed
+  let (edited, _) := stepMultisig (.setDescriptor (descriptor ++ "x")) good
+  check "edited: the check no longer counts" (edited.multisigAdd.validation.isNone && !edited.multisigAdd.canSave)
+  -- Save
+  let (m, _) ← sh.tap (.multisig .save) good
+  let some joined := m.multisigInfo? id | check "joined: the account is listed" false; return
+  check "joined: the same account, the name given here" (joined.name == "Household" && joined.descriptor == descriptor)
+  check "joined: back from the form" (m.routes.getLast? != some .multisigAdd && !m.multisigAdd.saving)
+  check "joined: on disk" ((← phone.record id).name == "Household")
+  -- again: the form keeps the text and says why
+  let (m, _) ← sh.tap (.multisig .openAdd) m
+  let (m, _) ← sh.tap (.multisig (.setName "Again")) m
+  sh.clipboard.set descriptor
+  let (m, _) ← sh.tap (.multisig .pasteDescriptor) m
+  let (m, _) ← sh.tap (.multisig .save) m
+  check "joined twice: refused on the form" (m.routes.getLast? == some .multisigAdd && !m.multisigAdd.saving && m.multisigAdd.error.isSome &&
+    contains (rendered m) (m.multisigAdd.error.getD "?"))
+  check "joined twice: one account, its name kept" ((← phone.accounts).map (·.name) == ["Household"])
+
+/-- New address: the account's next address, the one every co-signer derives, kept across a restart. -/
+def testNewAddressMovesTheAccountOn : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let sh ← Shell.new
+  let (id, descriptor) ← phone.buildWith "Joint" 2 [← keyExpression (← master 0xD4)]
+  let account ← need "account" (MultisigAccount.parse descriptor signet)
+  let m ← phone.openApp sh
+  check "New address asks nothing away from the account" (stepMultisig .newAddress m).2.isEmpty
+  let (m, _) ← sh.tap (.multisig (.openAccount id)) m
+  let shown (m : Model) : Option MultisigInfo := m.multisigInfo? id
+  let first := (account.address 0).toOption
+  let second := (account.address 1).toOption
+  check "the first address" (((shown m).bind (·.receiveAddress)) == first && first.isSome && first != second)
+  check "the account page shows it" (contains (rendered m) (first.getD "?") && contains (rendered m) "multisigNewAddressButton")
+  let (m, _) ← sh.tap (.multisig .newAddress) m
+  check "the next address" (((shown m).bind (·.receiveAddress)) == second && ((shown m).map (·.nextReceiveIndex)) == some 1)
+  check "the page moves on" (contains (rendered m) (second.getD "?") && !contains (rendered m) (first.getD "?"))
+  check "kept on disk" ((← phone.record id).nextReceiveIndex == 1)
+  let (m, _) ← sh.tap (.multisig .newAddress) m
+  check "and again" (((shown m).bind (·.receiveAddress)) == (account.address 2).toOption)
+
+/-- The collection page, from the account page's "Payment awaiting signatures" to Discard, which frees the
+account for another payment; the receipt the same page shows once a payment went. -/
+def testACollectionPageShowsItsDraftAndDiscardsIt : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let sh ← Shell.new
+  let (id, descriptor) ← phone.buildWith "Joint" 2 [← keyExpression (← master 0xD4)]
+  let account ← need "account" (MultisigAccount.parse descriptor signet)
+  phone.seeBlock ((← phone.record id).createdAtHeight + 1) #[fundingTx 0x42 (← spk account 0)]
+  let destination ← destinationOf (← master 0xE5) 0
+  Real.createDraft phone.env phone.multisig id destination 20_000 2.0 false
+  let some filed := (← phone.record id).draft | check "the draft is filed" false; return
+  let m ← phone.openApp sh
+  let (m, _) ← sh.tap (.multisig (.openAccount id)) m
+  check "the account page leads to the draft, not to Send" (contains (rendered m) "multisigDraftButton" && !contains (rendered m) "multisigSendButton")
+  let (m, cs) := step (.multisig (.openPSBT id)) m
+  let page := rendered m
+  check "the collection page" (m.routes.getLast? == some (.multisigPSBT id) && cs.isEmpty && multisigPSBTTitle m id == "Awaiting signatures" &&
+    contains page "Awaiting signatures" && contains page "PSBT to share" && contains page filed.psbtBase64 && contains page "multisigDiscardDraftButton")
+  check "it reviews the spend" (((m.multisigInfo? id).bind (·.draft)).map (·.signatures) == some "0 of 2")
+  -- Discard asks first
+  let (m, cs) := step (.multisig (.askDiscard id)) m
+  check "Discard asks first" (m.confirm == some (.discardDraft id) && cs.isEmpty && (← phone.record id).draft.isSome)
+  let (m, left) ← sh.tap (.multisig .discard) m
+  check "discarded: on disk and on the screen" ((← phone.record id).draft.isNone && m.confirm.isNone && ((m.multisigInfo? id).bind (·.draft)).isNone)
+  check "discarded: the wallet refreshes" (left.any fun | .refresh _ => true | _ => false)
+  check "the page has nothing left to collect" (multisigPSBTTitle m id == "Payment" && !contains (rendered m) "multisigDiscardDraftButton")
+  check "the coin is free" ((← phone.record id).balance == 60_000 && !(← phone.record id).utxos.any (·.isSpent))
+  let (back, _) := stepMultisig .pop m
+  check "the account can pay again" (contains (rendered back) "multisigSendButton")
+  Real.createDraft phone.env phone.multisig id destination 25_000 2.0 false
+  check "another payment can start" (← phone.record id).draft.isSome
+  failsWith "a second payment while one waits" (Real.createDraft phone.env phone.multisig id destination 25_000 2.0 false) Real.draftInProgressText
+  Real.discardDraft phone.env phone.multisig id
+  failsWith "signing when nothing waits" (phone.backend.signDraft id) Real.noDraftText
+  -- a file holding a draft that is no PSBT never gets in, so the steps that read one never meet it
+  let junk : MultisigSpendDraft := { psbtBase64 := "not a psbt", createdAtHeight := 0 }
+  match ← (Real.fileDraft phone.multisig id (some junk)).toBaseIO with
+  | .ok _ => check "a draft that is no PSBT is refused" false
+  | .error _ => check "a draft that is no PSBT is refused" (← phone.record id).draft.isNone
+  -- the receipt
+  let sent := { m with collect := { m.collect with broadcastTxid := some "aa11" } }
+  check "the receipt" (multisigPSBTTitle sent id == "Payment" && contains (rendered sent) "Payment sent" && contains (rendered sent) "aa11")
+
+/-- The builder: a member and a key removed, this phone coming back as a member when the account it came in
+with goes, and the threshold following the members. -/
+def testTheBuilderRemovesMembersAndKeys : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let sh ← Shell.new
+  let bobPhone ← keyExpression (← masters)[2]!
+  let bobLedger ← keyExpression (← master 0xD4)
+  let carolKey ← keyExpression (← master 0xE5)
+  let danKey ← keyExpression (← master 0xD5)
+  let bob ← phone.backend.addSignerKeys true "Bob" s!"{bobPhone}\n{bobLedger}"
+  let carol ← phone.backend.addSignerKeys true "Carol" carolKey
+  let (pair, _) ← phone.buildWith "Pair" 2 [danKey]
+  let m ← phone.openApp sh
+  let phoneKey ← phone.keyExpression
+  let (m, _) := stepMultisig .openBuild m
+  let keysOf (m : Model) := m.multisigBuild.members.map (·.keys.map (·.key))
+  check "the builder starts with this phone" (keysOf m == [[phoneKey]])
+  let pick (m : Model) (msg : MultisigMsg) : Model :=
+    let (m, _) := stepMultisig (.openPicker none) m
+    (stepMultisig msg m).1
+  let m := pick m (.pickSigner bob)
+  let m := pick m (.pickSigner carol)
+  check "Bob and Carol join" (keysOf m == [[phoneKey], [bobPhone, bobLedger], [carolKey]])
+  let (m, _) := stepMultisig (.setThreshold 3) m
+  check "3 of 3" (m.multisigBuild.shownThreshold == 3)
+  -- a key out of a member; the last key takes the member with it
+  let (one, _) := stepMultisig (.removeMemberKey 1 1) m
+  check "Bob loses his Ledger" (keysOf one == [[phoneKey], [bobPhone], [carolKey]] && one.multisigBuild.shownThreshold == 3)
+  let (gone, _) := stepMultisig (.removeMemberKey 1 0) one
+  check "his last key: the member goes, the threshold follows" (keysOf gone == [[phoneKey], [carolKey]] && gone.multisigBuild.shownThreshold == 2)
+  -- a member goes; this phone is not added twice
+  let (noBob, _) := stepMultisig (.removeMember 1) m
+  check "Bob goes as one" (keysOf noBob == [[phoneKey], [carolKey]] && noBob.multisigBuild.shownThreshold == 2)
+  -- an account as a member brings this phone's key with it; removing it brings the phone back
+  let withPair := pick noBob (.pickAccount pair)
+  check "the account takes this phone's key" (keysOf withPair == [[carolKey], [phoneKey, danKey]] ||
+    keysOf withPair == [[carolKey], [danKey, phoneKey]]) s!"{keysOf withPair}"
+  let (back, _) := stepMultisig (.removeMember 1) withPair
+  check "removing it: this phone is a member again" (keysOf back == [[phoneKey], [carolKey]])
+  -- this phone cannot be taken out: the screen needs its key among the members
+  let (kept, _) := stepMultisig (.removeMember 0) back
+  check "this phone's own member, removed: it comes back" (keysOf kept == [[phoneKey], [carolKey]])
+
+def accountTests : List (String × IO Unit) :=
+  [ ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
+  , ("testJoiningAnAccountFromAPastedDescriptor", testJoiningAnAccountFromAPastedDescriptor)
+  , ("testNewAddressMovesTheAccountOn", testNewAddressMovesTheAccountOn)
+  , ("testACollectionPageShowsItsDraftAndDiscardsIt", testACollectionPageShowsItsDraftAndDiscardsIt)
+  , ("testTheBuilderRemovesMembersAndKeys", testTheBuilderRemovesMembersAndKeys) ]
 
 def screenTests : List (String × IO Unit) :=
   [ ("testSignersAddOpenRenameRemove", testSignersAddOpenRenameRemove) ]
@@ -2023,4 +2272,6 @@ def main : IO UInt32 := runMain "multisig-app-test" do
   for (name, t) in pureTests do runTest name t
   IO.println "SignersView, SignerDetailView, SignerKeysAddView"
   for (name, t) in screenTests do runTest name t
+  IO.println "MultisigAccountView, MultisigAddView, MultisigPSBTView, MultisigBuildView"
+  for (name, t) in accountTests do runTest name t
   try IO.FS.removeDirAll root catch _ => pure ()
