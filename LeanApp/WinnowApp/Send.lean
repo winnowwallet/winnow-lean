@@ -151,6 +151,7 @@ def paymentAmounts (p : Preview) : H :=
                    .identified Ids.reviewFee (.labeled "Network fee" (satsText p.fee)),
                    .identified Ids.reviewTotal (.labeled "Total" (satsText (p.amount + p.fee))) ]
 
+/-- A warning on the review; backend-test's `peopleFlow` reaches all four of `sendReview`'s. -/
 def warning (iconName text : String) : H := .section "" "" [.row [Html.tone .warning (.icon iconName), caption text]]
 
 def sendReview (m : Model) (p : Preview) : List H :=
