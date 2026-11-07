@@ -13,6 +13,7 @@ BIP340 signing against BIP340's own vectors.
 * `Vectors/cryptokit-aes-gcm.json`: CryptoKit's own output (`AES.GCM.seal` with a given nonce, the
   `combined` layout, long nonces, and the error each refusal raises), written by a scratch Swift program
   over CryptoKit; see that file's `source`.
+* `Vectors/bip32-test-vectors.json`: BIP32's test vectors, written by `scripts/bip32-vectors`.
 * `Vectors/bip340-test-vectors.csv`: BIP340's test vectors, byte for byte as published (bitcoin/bips at
   200f9b26fe0a2f235a2af8b30c4be9f12f6bc9cb, `bip-0340/test-vectors.csv`, SHA-256
   34c9d1d9c3a88d524bc80778540dc43f8306ec249a7485293063c376db851c2d). Where a vector has a secret key, the
@@ -420,6 +421,41 @@ def mainnetRetargets : IO Unit := do
 
 end Retargets
 
+/-- BIP32's own test vectors (`scripts/bip32-vectors`): `ofSeed` and `derived` reach every extended key, private
+(through `privateAdd`) and neutered; a neutered parent reaches each unhardened child (through `publicAdd`) and is
+refused a hardened one; every key reads back; and vector 5's invalid keys are refused. -/
+def bip32 : IO Unit := do
+  let j ← IO.ofExcept (Json.parse (← IO.FS.readFile "Vectors/bip32-test-vectors.json"))
+  let vectors ← IO.ofExcept (j.getObjValAs? (Array Json) "vectors")
+  let invalid ← IO.ofExcept (j.getObjValAs? (Array Json) "invalid")
+  let mut publicSteps := 0
+  let mut hardenedSteps := 0
+  for v in vectors do
+    let .ok root := HDKey.ofSeed (bytesOf v "seed") | throw (IO.userError s!"bip32: seed of {v.compress}")
+    let mut parent : Option HDKey := none
+    for c in ← IO.ofExcept (v.getObjValAs? (Array Json) "chains") do
+      let path := field c "path"
+      let .ok k := root.derived path | throw (IO.userError s!"bip32: {path} did not derive")
+      check s!"bip32 {path}: the private key" (k.serialized == field c "prv") k.serialized
+      check s!"bip32 {path}: the public key" (k.neutered.serialized == field c "pub") k.neutered.serialized
+      for key in [field c "prv", field c "pub"] do
+        check s!"bip32 {path}: {key} reads back"
+          (match HDKey.deserialize key with | .ok read => read.serialized == key | .error _ => false)
+      if let some p := parent then
+        match p.neutered.child k.childIndex with
+        | .ok child =>
+          publicSteps := publicSteps + 1
+          check s!"bip32 {path}: reached from the public parent" (child.serialized == field c "pub") child.serialized
+        | .error e =>
+          hardenedSteps := hardenedSteps + 1
+          check s!"bip32 {path}: hardened, so the public parent is refused"
+            (k.childIndex ≥ HDKey.hardenedOffset && e matches .hardenedDerivationFromPublicKey) e.name
+      parent := some k
+  check "bip32: both kinds of step ran" (publicSteps ≥ 5 && hardenedSteps ≥ 5) s!"{publicSteps}, {hardenedSteps}"
+  check "bip32: vector 5 has its keys" (invalid.size ≥ 10) s!"{invalid.size}"
+  for row in invalid do
+    check s!"bip32 refuses: {field row "why"}" (HDKey.deserialize (field row "key") matches .error _)
+
 def main : IO UInt32 := runMain "crypto-test" do
   fips197
   wycheproof
@@ -427,6 +463,7 @@ def main : IO UInt32 := runMain "crypto-test" do
   bip340
   fastCurve
   roundTrips
+  bip32
   utf8
   jsonExponents
   retargetRules
