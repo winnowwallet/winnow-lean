@@ -118,7 +118,8 @@ def handleInv (w : MempoolWindow) (p : InventoryPayload) (peer : PeerEndpoint) (
     let w := request.foldl (fun w v => { w with inFlight := w.inFlight.insert v.hash now }) w
     (w, effects.push (.sendGetData peer { vectors := request }))
 
-/-- The getdata could not be sent: roll the txids back so another peer's announcement re-requests them. -/
+/-- The getdata could not be sent: roll the txids back so another peer's announcement re-requests them
+(io-test's `mempoolRefetchChecks`, as for `handleNotfound`). -/
 def sendFailed (w : MempoolWindow) (request : Array InventoryVector) : MempoolWindow :=
   request.foldl (fun w v => (w.forget v.hash) |> fun w => { w with inFlight := w.inFlight.erase v.hash }) w
 

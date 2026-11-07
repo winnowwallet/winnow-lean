@@ -119,6 +119,7 @@ private def classes (f : FilterSyncIO) (peers : Array PeerConnection) : IO (Arra
 private def sourceSpanOf (f : FilterSyncIO) (agreeing dissenting : Array PeerConnection) : IO (Bool × Bool) := do
   return sourceSpan (← f.classes agreeing) (← f.classes dissenting)
 
+/-- A vote one source class carried alone: everyone is cooled off, nobody condemned (io-test's `voteChecks`). -/
 private def refuseDisputedVote {α} (f : FilterSyncIO) (peers : Array PeerConnection) (reason : String) : NetM α := do
   for c in peers do f.pool.transportFailure c reason
   throw (.filters (.checkpointMismatch reason))

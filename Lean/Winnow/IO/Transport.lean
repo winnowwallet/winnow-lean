@@ -233,6 +233,7 @@ def request (c : PeerConnection) (m : PeerMessage) (commands : Array String) (ti
       throw e
     awaitPromise p
 
+/-- The limit on what a peer can make us hold (io-test's `burstChecks`). -/
 private def burstTooLarge (command : String) (bytes limit : Nat) : NetError :=
   .peer (.protocolViolation s!"{command} burst of {bytes} bytes exceeds the {limit}-byte bound")
 
@@ -388,6 +389,7 @@ private partial def receiveLoop (c : PeerConnection) (sock : TCP.Socket.Client) 
 
 /-! ## Keepalive -/
 
+/-- One keepalive beat: tear down after `readIdleTimeoutMs` of silence, else ping (io-test's `keepaliveChecks`). -/
 private partial def keepaliveTick (c : PeerConnection) : IO Unit := do
   let st ← c.state.get
   if st.didTeardown then return
