@@ -12,7 +12,8 @@ The node is TestKit.Regtest's without P2P (temp datadir, random ports, `bitcoind
 the end, also on failure. Seeded cases vary the threshold, the number of signers (two to six), which
 signers are Bitcoin Core wallets (keys Core generated, signing through `walletprocesspsbt` with its own
 libsecp256k1), the order the signers are listed in, and the recovery leaf (none, fewer of the same signers,
-or separate keys, after a delay). A third of the cases with three or more signers are nested (#256): some
+or separate keys, after a delay). Every third case is left to chance, where a third of those with three or
+more signers are nested; the cases between are always nested (`Shape`). In a nested account (#256) some
 signers are grouped into one member of two or three keys, signing with all of them (a phone and its Ledger)
 or with a threshold of them (a 2-of-3 account that is one member), the threshold counts members, and the
 account has a leaf per group of members and per way the group meets its thresholds; a recovery path of
@@ -32,10 +33,10 @@ fewer members is a timelocked leaf per group. For every case Core must agree wit
   people also complete a signers' leaf; a signers' leaf finishing a spend that carries the recovery
   sequence (BIP326); one recovery spend is mined.
 
-The case generator draws from the same SplitMix64 sequence in the same order as the Swift one, so a seed
-names the same case shapes (Core's keys differ per node). Differences: the signers' spend uses the
-locktime-at-tip draw and the change goes last (Swift draws both at random); a disagreement is recorded with
-seed and case and the run continues. Usage: `multisig-differential [--seed HEX] [--cases N]`. Exit 1 on any
+The cases left to chance draw from the same SplitMix64 sequence in the same order as the Swift generator,
+so a seed names the same case shapes there (Core's keys differ per node). Differences: the signers' spend
+uses the locktime-at-tip draw and the change goes last (Swift draws both at random); a disagreement is
+recorded with seed and case and the run continues. Usage: `multisig-differential [--seed HEX] [--cases N]`. Exit 1 on any
 disagreement. -/
 
 open Winnow Keys Lean
@@ -242,6 +243,27 @@ def Case.isNested (c : Case) : Bool :=
 def Case.thresholdGroups (c : Case) : Array Nat :=
   (Array.range c.groups.size).filter fun g => c.thresholds[g]! < c.groups[g]!.size
 
+/-- What a case must be. Each case's generator is seeded by its number, so a short run is the same cases
+every time, and left to chance those can miss a kind of account altogether. -/
+inductive Shape
+  | drawn
+  /-- Nested, with every member signing with all its keys: a phone and its Ledger. -/
+  | everyKey
+  /-- Nested, with a member that is a threshold of its keys: a 2-of-3 account that is one member. -/
+  | thresholdMember
+  deriving BEq
+
+def Shape.ofCase (number : Nat) : Shape :=
+  match number % 3 with
+  | 1 => .everyKey
+  | 2 => .thresholdMember
+  | _ => .drawn
+
+def Case.fits (c : Case) : Shape → Bool
+  | .drawn => true
+  | .everyKey => c.isNested && c.thresholdGroups.isEmpty
+  | .thresholdMember => !c.thresholdGroups.isEmpty
+
 def Case.members (c : Case) : IO (Array MultisigAccount.Member) :=
   (Array.range c.groups.size).mapM fun g => do
     let keys ← c.groups[g]!.mapM (c.signers[·]!.expression)
@@ -279,14 +301,11 @@ def nestedGroups (n : Nat) : IO (Array (Array Nat)) := do
     cursor := cursor + size
   return groups
 
-def generate (number : Nat) : IO Case := do
-  let n := 2 + (← count 5)
-  let coreCount := min (← count 3) n
-  let mut signers : Array Signer := #[]
-  for i in [0:coreCount] do signers := signers.push (.core (← CoreSigner.make s!"case{number}-core{i}"))
-  for _ in [coreCount:n] do signers := signers.push (.winnow (← randomMaster))
-  signers ← shuffle signers
-  let nested ← if n ≥ 3 then pure ((← count 3) == 0) else pure false
+/-- `c` with its signers made into members and a threshold of them. -/
+def drawMembers (c : Case) (shape : Shape) : IO Case := do
+  let n := c.signers.size
+  let drawn ← if n ≥ 3 then pure ((← count 3) == 0) else pure false
+  let nested := drawn || shape != .drawn
   let groups ← if nested then nestedGroups n else pure ((Array.range n).map (#[·]))
   -- A group of two or three signs with all of them, or half the time with fewer: one of a pair, one or
   -- two of three.
@@ -295,19 +314,36 @@ def generate (number : Nat) : IO Case := do
   let mut threshold := 1 + (← count groups.size)
   -- One member alone may spend only when every member needs two keys.
   if nested && threshold == 1 && thresholds.any (· < 2) then threshold := 2
+  return { c with groups, thresholds, threshold }
+
+def generate (number : Nat) : IO Case := do
+  let shape := Shape.ofCase number
+  -- Three signers cannot be nested with every key: `[2, 1]` needs one of two, which leaves one signer
+  -- alone, or two of two, the ordinary account.
+  let drawnSigners := 2 + (← count 5)
+  let n := if shape == .drawn then drawnSigners else max drawnSigners 4
+  let coreCount := min (← count 3) n
+  let mut signers : Array Signer := #[]
+  for i in [0:coreCount] do signers := signers.push (.core (← CoreSigner.make s!"case{number}-core{i}"))
+  for _ in [coreCount:n] do signers := signers.push (.winnow (← randomMaster))
+  signers ← shuffle signers
+  let unmade : Case := { number, threshold := 0, signers, groups := #[], thresholds := #[], recovery := none,
+                         recoveryMasters := #[] }
+  let mut c ← drawMembers unmade shape
+  while !c.fits shape do c ← drawMembers unmade shape
   let blocks : UInt32 ← do
     if (← count 10) < 7 then pure (1 + (← count spendableDelay.toNat)).toUInt32
     else pure (#[16, 144, 4_032, 65_535] : Array UInt32)[← count 4]!
   let mut recoveryMasters : Array HDKey := #[]
   let recovery ← match ← count 3 with
     | 0 => pure none
-    | 1 => pure (some (RecoveryPlan.fewerSigners (1 + (← count groups.size)) blocks))
+    | 1 => pure (some (RecoveryPlan.fewerSigners (1 + (← count c.groups.size)) blocks))
     | _ =>
       let k := 1 + (← count 3)
       for _ in [0:k] do recoveryMasters := recoveryMasters.push (← randomMaster)
       let keys ← recoveryMasters.mapM keyExpression
       pure (some (RecoveryPlan.separateKeys (1 + (← count recoveryMasters.size)) keys blocks))
-  return { number, threshold, signers, groups, thresholds, recovery, recoveryMasters }
+  return { c with recovery, recoveryMasters }
 
 /-! ## Signing and finalizing -/
 
@@ -424,10 +460,15 @@ def checkMembersReadBack (a : MultisigAccount) (c : Case) (tag : String) : IO Un
   let read := policies members.thresholds (members.groups.map (·.size)) members.thresholdGroups
   let built := policies c.thresholds (c.groups.map (·.size)) c.thresholdGroups
   tally (read == built) "members read back" s!"{tag}: Winnow reads threshold members {read}, built {built}"
-  unless c.threshold < c.groups.size do return
-  tally (members.threshold == c.threshold && members.groups.size == c.groups.size) "members read back"
-    s!"{tag}: Winnow reads {members.threshold} of {members.groups.size}"
-  if let (some recoveryMembers, some (.fewerSigners m _)) := (a.recoveryMembers, c.recovery) then
+  if c.threshold < c.groups.size then
+    tally (members.threshold == c.threshold && members.groups.size == c.groups.size) "members read back"
+      s!"{tag}: Winnow reads {members.threshold} of {members.groups.size}"
+  let some (.fewerSigners m _) := c.recovery | return
+  let some recoveryMembers := a.recoveryMembers | return
+  -- Leaves that hold every member cannot be told into members, and when any one member may spend, a member
+  -- of which one key signs is the same leaves as that many members of one key: `membersOf`.
+  let splits := m == 1 && c.thresholdGroups.any (c.thresholds[·]! == 1)
+  if m.toNat < c.groups.size && !splits then
     tally (recoveryMembers.threshold == m.toNat && recoveryMembers.groups.size == c.groups.size) "recovery members read back"
       s!"{tag}: Winnow reads {recoveryMembers.threshold} of {recoveryMembers.groups.size} for recovery"
 
@@ -645,6 +686,9 @@ def main (args : List String) : IO UInt32 := do
           checkCase c tag
         catch e => tally false "case completed" s!"{tag}: {e}"
         say s!"  ({(← IO.monoMsNow) - start} ms)"
+      if cases ≥ 3 then
+        check "nested cases ran" ((← agreed.get).any (·.1 == "members read back"))
+          "no nested account reached Core"
     finally
       n.stop
       discard <| IO.Process.output { cmd := "rm", args := #["-rf", dir] }
