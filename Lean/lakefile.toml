@@ -8,7 +8,8 @@ name = "Secp"
 [[lean_lib]]
 name = "Winnow"
 
-# What the test executables share (TestKit/): the tally and how it prints, the test keys, a regtest bitcoind.
+# What the test executables share (TestKit/): the tally and how it prints, the test keys, a regtest bitcoind, a
+# fake peer.
 # LeanApp's tests and journeys reach it through `require winnow`.
 [[lean_lib]]
 name = "TestKit"

@@ -1,5 +1,7 @@
 import WinnowApp.Real
+import WinnowApp.Send
 import TestKit.Check
+import TestKit.FakeNode
 import TestKit.Fixtures
 import TestKit.Regtest
 open Lean Winnow Winnow.IO Winnow.Net WinnowApp TestKit TestKit.Regtest
@@ -19,7 +21,9 @@ combined, finalized, broadcast, confirmed) → a reorg under a send and the acco
 back after it → export (carrying the account) → import into a fresh
 directory (same balance, the account restored) → stop networking (no loop, no peer, no file change while blocks arrive) → an
 interrupted rollback replayed from its marker on the next start → reopen from
-disk → delete. One `ok`/`FAIL` line per check; the exit code is the verdict. -/
+disk → delete. Then `peopleFlow`, on two phones of its own: a person saved from a contact card and paid twice,
+the review's four warnings, a fake explorer, a fake peer ahead of the wallet. One `ok`/`FAIL` line per check; the
+exit code is the verdict. -/
 
 /-- Every `Deps.journal` line of the run: which backend (A, B, C), the event, its fields. -/
 initialize journalEvents : IO.Ref (Array (String × String × List (String × String))) ← IO.mkRef #[]
@@ -449,6 +453,159 @@ def routingAndBackground (a : Backend) (envA : Real.Env) (n : Node) (settings : 
      (← waitUntil 5_000 do return (← envA.diagnostics).liveLoops == 0))
   a.startNetworking settings
   check "background check: refused while the scene is active" (!(← a.runBackgroundSync settings))
+
+/-! ## Paying saved people -/
+
+/-- The warnings on the review of `p`, as the Send screen renders them. -/
+def reviewWarnings (p : Preview) : List String :=
+  let screen := String.intercalate "\n" ((sendReview ({} : Model) p).map fun h => (LeanNative.Html.toWire h).toJson.compress)
+  let has (t : String) := (screen.splitOn t).length > 1
+  [("inferred", "This destination was inferred from transaction funding"), ("reused", "This address has been saved for reuse"),
+   ("fee", "of the amount: sending"), ("syncing", "Your wallet is still syncing")].filterMap fun (name, text) =>
+    if has text then some name else none
+
+/-- The addresses a transaction in the node's best block pays. -/
+def paidAddresses (n : Node) (txid : String) : IO (List String) := do
+  let tx ← n.json #["getrawtransaction", txid, "true", (← n.cli #["getbestblockhash"]).trimAscii.toString]
+  let vout := (tx.getObjValAs? (Array Json) "vout").toOption.getD #[]
+  return (vout.toList.filterMap fun o => ((o.getObjValD "scriptPubKey").getObjValAs? String "address").toOption)
+
+def personNamed (b : Backend) (name : String) : IO Person := do
+  match (← b.records).people.find? (·.name == name) with
+  | some p => return p
+  | none => throw (IO.userError s!"no person {name}")
+
+/-- Alice saves Bob from the card his phone made, pays him twice and he finds both payments, at two addresses;
+someone inferred from a payment's funding is paid with the warning that it is unverified, from the wallet's own
+record and from a fake explorer's answer; a saved address warns of reuse and is reused; a large fee warns; a
+peer ahead of the wallet makes a payment warn that the wallet is still syncing. -/
+def peopleFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let keysBob ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (bob, _) ← Backend.realWithEnv (deps keysBob "Bob")
+  let dirBob := s!"{dir}/Bob/BTCSwift/regtest"
+  IO.FS.createDirAll dirBob
+  discard <| bob.openWallet .regtest dirBob
+  bob.startNetworking settings
+  discard <| bob.createWallet .regtest dirBob
+  let card ← bob.ownCard "Bob"
+  -- the explorer Alice's phone reaches: answers one transaction's funding, and nothing else goes to it
+  let explorerAnswer ← IO.mkRef ""
+  let explorerAsked ← IO.mkRef (#[] : Array String)
+  let keysAlice ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let aliceDeps := deps keysAlice "Alice"
+  let fetch : HttpFetch := fun req => do
+    if req.url.startsWith "https://explorer.test/" then
+      explorerAsked.modify (·.push req.url)
+      return .response 200 none (← explorerAnswer.get).toUTF8
+    aliceDeps.fetch req
+  let (alice, _) ← Backend.realWithEnv { aliceDeps with fetch }
+  let dirAlice := s!"{dir}/Alice/BTCSwift/regtest"
+  IO.FS.createDirAll dirAlice
+  discard <| alice.openWallet .regtest dirAlice
+  alice.startNetworking settings
+  discard <| alice.createWallet .regtest dirAlice
+  -- Frank's wallet holds one coin at a key hash, which spending reveals (a taproot key spend would not)
+  discard <| n.cli #["createwallet", "frank"]
+  let frankAddress := (← n.cli #["-rpcwallet=frank", "getnewaddress", "", "bech32"]).trimAscii.toString
+  discard <| n.wallet #["sendtoaddress", frankAddress, "2.0"]
+  n.mine 1 mineAddr
+  let fundTxid := (← n.cli #["-rpcwallet=frank", "sendtoaddress", ← alice.receiveAddress false, "1.0"]).trimAscii.toString
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (funded, _) ← syncUntil alice 60_000 fun s p => s.balance == 100_000_000 && p == .synced
+  check "people: Alice is funded" (funded.balance == 100_000_000) s!"{funded.balance}"
+  -- Bob, from his card: every payment derives a fresh address, so nothing on the review warns
+  check "people: Bob's card can be paid at fresh addresses" ((← alice.parsePaste card).payTo == some true)
+  discard <| alice.addPerson "Bob" (some card) none none none
+  let bobID := (← personNamed alice "Bob").id
+  let payBob : SendInputs := { personID := some bobID, amount := "300000", network := .regtest }
+  let first ← alice.previewSend payBob
+  check "people: the review names Bob, and has no warning" ((first.recipient.map (·.name)) == some "Bob" && reviewWarnings first == [])
+    s!"{reviewWarnings first}"
+  check "people: a second look shows the same address" ((← alice.previewSend payBob).destination == first.destination)
+  let forged ← attempt (alice.sendPayment payBob { first with fee := first.fee + 1 })
+  check "people: a refused payment" (forged matches .error _)
+  check "people: a refused payment leaves his address unused" ((← alice.previewSend payBob).destination == first.destination)
+  let paidOnce := (← alice.sendPayment payBob first).txid
+  check "people: paying Bob moves him to his next address" ((← personNamed alice "Bob").nextPaymentIndex == 1)
+  let second ← alice.previewSend payBob
+  check "people: the next payment goes to a different address" (second.destination != first.destination) second.destination
+  let paidTwice := (← alice.sendPayment payBob second).txid
+  check "people: and that moves him on again" ((← personNamed alice "Bob").nextPaymentIndex == 2)
+  checkJournal "person.paid" ["name", "paymentIndex", "txid"]
+    (fun f => field f "name" == "Bob" && field f "paymentIndex" == "1" && field f "txid" == paidTwice) "the second payment"
+  let mined ← waitUntil 20_000 (do let mp ← n.mempool; return mp.contains paidOnce && mp.contains paidTwice)
+  check "people: both payments reach the node" mined
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  check "people: the chain shows the first address" ((← paidAddresses n paidOnce).contains first.destination)
+  check "people: the chain shows the second address" ((← paidAddresses n paidTwice).contains second.destination)
+  let (atBob, _) ← syncUntil bob 60_000 fun s _ => s.balance == 600_000
+  check "people: Bob's own wallet finds both payments, as two coins" (atBob.balance == 600_000 && atBob.utxoCount == 2)
+    s!"{atBob.balance} sat, {atBob.utxoCount} coin(s)"
+  -- Frank funded Alice's wallet: the record of that payment is all that says this address is his
+  let (s, _) ← syncUntil alice 60_000 fun s p => (history? s paidTwice).any (·.height > 0) && p == .synced
+  let funding := ((history? s fundTxid).map (·.fundingAddresses)).getD []
+  check "people: the funding payment shows where it came from" (funding == [frankAddress]) s!"{funding}"
+  discard <| alice.addPerson "Frank" (some frankAddress) (some .localFunding) none (some fundTxid)
+  check "people: Frank is labelled as that payment's sender"
+    ((← alice.records).senderByTxid.any fun (t, id) => t == fundTxid && !id.isEmpty)
+  let payFrank : SendInputs := { personID := some (← personNamed alice "Frank").id, amount := "200000", network := .regtest }
+  let frank ← alice.previewSend payFrank
+  check "people: Frank's address warns that it is inferred, and that it is reused"
+    (frank.destination == frankAddress && reviewWarnings frank == ["inferred", "reused"]) s!"{reviewWarnings frank}"
+  discard <| alice.sendPayment payFrank frank
+  check "people: an address saved for reuse is not moved past" ((← alice.previewSend payFrank).destination == frankAddress)
+  -- Erin paid Alice too: saved as that payment's sender, her address from the explorer's answer
+  let erinTxid ← n.wallet #["sendtoaddress", ← alice.receiveAddress true, "0.1"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  discard <| syncUntil alice 60_000 fun s _ => (history? s erinTxid).any (·.height > 0)
+  let erinAddress ← n.wallet #["getnewaddress"]
+  explorerAnswer.set s!"\{\"txid\":\"{erinTxid}\",\"vin\":[\{\"prevout\":\{\"scriptpubkey_address\":\"{erinAddress}\"}}]}"
+  let found ← alice.lookupSender erinTxid "https://explorer.test/api"
+  check "people: the explorer's answer" (found == [erinAddress]) s!"{found}"
+  check "people: asked the explorer for that transaction" ((← explorerAsked.get) == #[s!"https://explorer.test/api/tx/{erinTxid}"])
+    s!"{← explorerAsked.get}"
+  checkJournal "sender.lookupOnline" ["txid", "explorer"] (fun f => field f "txid" == erinTxid && field f "explorer" == "explorer.test")
+  discard <| alice.addPerson "Erin" none none none (some erinTxid)
+  let erinID := (← personNamed alice "Erin").id
+  discard <| alice.attachDestination erinID erinAddress .explorerFunding (some "explorer.test")
+  check "people: Erin's destination is from the explorer" ((← personNamed alice "Erin").provenance == some .explorerFunding)
+  let erin ← alice.previewSend { personID := some erinID, amount := "200000", network := .regtest }
+  check "people: Erin's address warns that it is inferred, and that it is reused"
+    (erin.destination == erinAddress && reviewWarnings erin == ["inferred", "reused"]) s!"{reviewWarnings erin}"
+  -- Carol gave Alice an address herself: linkable, not unverified
+  let carolAddress ← n.wallet #["getnewaddress"]
+  discard <| alice.addPerson "Carol" (some carolAddress) none none none
+  let carol ← alice.previewSend { personID := some (← personNamed alice "Carol").id, amount := "200000", network := .regtest }
+  check "people: an address someone gave warns only of reuse" (reviewWarnings carol == ["reused"]) s!"{reviewWarnings carol}"
+  -- a fee large for the amount, on a payment to a typed address
+  let small ← alice.previewSend { destination := carolAddress, amount := "1000", network := .regtest }
+  check "people: a fee over half the amount warns" (small.fee * 2 ≥ 1000 && reviewWarnings small == ["fee"])
+    s!"fee {small.fee}, {reviewWarnings small}"
+  let large ← alice.previewSend { destination := carolAddress, amount := "1000000", network := .regtest }
+  check "people: a fee small for the amount does not" (reviewWarnings large == []) s!"{reviewWarnings large}"
+  -- a peer advertises blocks the wallet has no headers for, and never sends them; the real node, which the
+  -- pool remembers, goes off the network so that this peer holds the one seat
+  let ahead ← fakeNode Winnow.Net.NetworkParams.regtest (startHeight := ((← n.height) + 100).toInt32)
+  alice.stopNetworking
+  discard <| n.cli #["setnetworkactive", "false"]
+  alice.startNetworking { settings with regtest := { manualPeers := [s!"{ahead.host}:{ahead.port}"] } }
+  let behind ← waitUntil 20_000 (do return (← alice.snapshot).2 matches .headers ..)
+  check "people: a peer ahead of the wallet puts it behind on headers" behind (showPhase (← alice.snapshot).2)
+  let lagging ← alice.previewSend { destination := carolAddress, amount := "1000000", network := .regtest }
+  check "people: a payment while headers are behind warns" (lagging.locktimeLagsTip && reviewWarnings lagging == ["syncing"])
+    s!"{reviewWarnings lagging}"
+  alice.stopNetworking
+  discard <| n.cli #["setnetworkactive", "true"]
+  alice.startNetworking settings
+  let (_, caughtUp) ← syncUntil alice 60_000 fun _ p => p == .synced
+  check "people: caught up, the warning is gone" (caughtUp == .synced) (showPhase caughtUp)
+  let synced ← alice.previewSend { destination := carolAddress, amount := "1000000", network := .regtest }
+  check "people: no warning once synced" (reviewWarnings synced == []) s!"{reviewWarnings synced}"
 
 set_option maxRecDepth 4096 in
 def flow (dir : String) (n : Node) : IO Unit := do
@@ -887,5 +1044,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir (flow dir)
+    try withNode dir fun n => do flow dir n; peopleFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

@@ -243,7 +243,7 @@ def removePerson (s : RecordsStore) (w : Option Wallet) (personID : String) : RM
 def removeSenderLabel (s : RecordsStore) (w : Option Wallet) (txid : String) : RM Records :=
   withPeople s w fun ps => RM.io (ps.removeSenderLabel s.keys s.writeData txid)
 
-/-- `advancePersonPaymentIndex(id:past:)`: best effort, as AppModel calls it. -/
+/-- `advancePersonPaymentIndex(id:past:)`: best effort, as AppModel calls it (backend-test's `peopleFlow`). -/
 def advancePersonPaymentIndex (s : RecordsStore) (w : Option Wallet) (personID : String) (index : UInt32) : IO Records := do
   discard <| (withPeople s w fun ps => ps.advancePaymentIndex s.keys s.writeData personID index).run
   records s w
