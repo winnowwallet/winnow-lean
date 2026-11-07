@@ -386,6 +386,7 @@ partial def replenish (p : PeerPool) : IO Unit := do
     (st, st)
   if !evicted.isEmpty && st.started then spawn p.pruneAndReplenish
 
+/-- Drops connections that have died and fills their seats (io-test's `replenishChecks`). -/
 partial def pruneAndReplenish (p : PeerPool) : IO Unit := do
   let peers := (← p.state.get).peers
   let mut alive := #[]

@@ -13,7 +13,9 @@ filter headers equal to the node's `getblockfilter`, filters.json round trip and
 reorg; the mempool window seeing a new transaction; broadcast of a raw transaction the node then holds
 in its mempool, a reorg under it making it pending again (rolled back, saved, announced, confirmed again);
 peers.json and broadcast.json round trips. Fake peers that never ask for an announced transaction: the
-announcement timeout naming each peer, and a relay-only session ending with `seatsGone`. Offline policy
+announcement timeout naming each peer, and a relay-only session ending with `seatsGone`. Fake peers that
+misbehave or go quiet: a burst past its byte bound, the keepalive and a silent peer, a pool replacing a peer it
+lost, and filter votes that split or that one source class carries. Offline policy
 checks: HTTP permits and redirects against a local Python server through the curl fetch, seed filtering
 and dns-json, the census catalog (the list each build ships). The node is killed by PID at the end, also on failure. -/
 
@@ -462,8 +464,13 @@ def closedPeerChecks : IO Unit := do
 
 /-- A fake node that accepts any number of connections and handshakes each (version with
 NODE_COMPACT_FILTERS, verack), or with `silent` accepts and never speaks; `params` picks the magic, `v6`
-listens on `::1`. It answers nothing else, so an announced transaction is never asked for. -/
-def fakeNode (params : NetworkParams) (silent : Bool := false) (v6 : Bool := false) : IO PeerEndpoint := do
+listens on `::1`. It answers pings unless `pongs` is off, and hands every other message and each ping to
+`answer`, which by default says nothing, so an announced transaction is never asked for. Resolving `hangUp`
+closes its connections, and any made later, from the node's side. -/
+def fakeNode (params : NetworkParams) (silent : Bool := false) (v6 : Bool := false) (pongs : Bool := true)
+    (startHeight : Int32 := 0)
+    (answer : (PeerMessage → IO Unit) → PeerMessage → IO Unit := fun _ _ => pure ())
+    (hangUp : Option (IO.Promise Unit) := none) : IO PeerEndpoint := do
   let server ← Std.Async.TCP.Socket.Server.mk
   server.bind (if v6 then .v6 ⟨Std.Net.IPv6Addr.ofParts 0 0 0 0 0 0 0 1, 0⟩ else .v4 ⟨Std.Net.IPv4Addr.ofParts 127 0 0 1, 0⟩)
   server.listen 16
@@ -474,6 +481,8 @@ def fakeNode (params : NetworkParams) (silent : Bool := false) (v6 : Bool := fal
       let sock ← keep.accept.block
       spawn do
         let send (m : PeerMessage) : IO Unit := (sock.send (MessageFramer.frame m.command m.payload params.magic)).block
+        if let some p := hangUp then
+          discard <| IO.mapTask (fun _ => discard <| sock.shutdown.toIO) p.result?
         let mut framer : MessageFramer := { magic := params.magic }
         repeat
           let some chunk ← (sock.recv? 65536).block | break
@@ -488,12 +497,13 @@ def fakeNode (params : NetworkParams) (silent : Bool := false) (v6 : Bool := fal
                 match cmd with
                 | "version" =>
                   send (.version { version := 70016, services := 64 ||| 1, timestamp := 0, receiver := .unspecified,
-                                   sender := .unspecified, nonce := 9, userAgent := "/fake-node:0/", startHeight := 0,
+                                   sender := .unspecified, nonce := 9, userAgent := "/fake-node:0/", startHeight,
                                    relay := false })
                   send .verack
-                | "ping" =>
-                  if let .ok (.ping n) := PeerMessage.decode cmd payload then send (.pong n)
-                | _ => pure ()
+                | _ =>
+                  if let .ok m := PeerMessage.decode cmd payload then
+                    if let (.ping n, true) := (m, pongs) then send (.pong n)
+                    answer send m
             | .ok (none, _) => break
             | .error _ => alive := false; break
           if !alive then break
@@ -505,6 +515,214 @@ never look inside. -/
 def fakeRawTx (tag : UInt8) : ByteArray :=
   ofHex! "0200000001" ++ ByteArray.mk (Array.replicate 32 tag) ++ ofHex! "00000000" ++ ofHex! "00ffffffff" ++
     ofHex! "01e803000000000000" ++ ofHex! "0151" ++ ofHex! "00000000"
+
+/-! ## Peers that misbehave or go quiet -/
+
+def filled (size : Nat) (tag : UInt8) : ByteArray := ByteArray.mk (Array.replicate size tag)
+
+def connectedTo (e : PeerEndpoint) (pingIntervalMs : Nat := 60_000) (readIdleTimeoutMs : Nat := 150_000) :
+    IO PeerConnection := do
+  let c ← PeerConnection.new e regtest (pingIntervalMs := pingIntervalMs) (readIdleTimeoutMs := readIdleTimeoutMs)
+  runNet "connect" (c.connect 5_000)
+  return c
+
+/-- A peer past `requestMany`'s byte bound (`burstTooLarge`), which is what limits what a peer can make us
+hold: exactly at the bound the burst arrives, and one byte under it the connection goes. -/
+def burstChecks : IO Unit := do
+  let filter : PeerMessage := .cfilter { blockHash := filled 32 7, filter := filled 1_000 8 }
+  let burst := 3 * filter.payload.size
+  let node ← fakeNode regtest (answer := fun send m => do
+    if m matches .getcfilters _ then for _ in [0:3] do send filter)
+  let ask (c : PeerConnection) (limit : Nat) :=
+    c.requestMany (.getcfilters { startHeight := 0, stopHash := filled 32 0 }) "cfilter" 3 (timeoutMs := 5_000)
+      (maxTotalBytes := some limit)
+  let fits ← connectedTo node
+  let got ← (ask fits burst).attempt
+  check "a burst exactly at its byte bound arrives" (match got with | .ok ms => ms.size == 3 | _ => false)
+    (match got with | .error e => e.description | .ok ms => s!"{ms.size} messages")
+  check "that peer stays connected" (← fits.isConnected)
+  fits.disconnect
+  let over ← connectedTo node
+  let refused ← (ask over (burst - 1)).attempt
+  check "a burst one byte past its bound is a protocol violation"
+    (match refused with
+     | .error (.peer (.protocolViolation why)) => why == s!"cfilter burst of {burst} bytes exceeds the {burst - 1}-byte bound"
+     | _ => false)
+    (match refused with | .error e => e.description | .ok _ => "accepted")
+  check "and it tears the connection down" (!(← over.isConnected))
+
+/-- The keepalive (`keepaliveTick`): pings on its interval hold a quiet connection open while the peer
+answers, and a peer that stops is torn down once `readIdleTimeoutMs` passes, failing what waits on it. -/
+def keepaliveChecks : IO Unit := do
+  let pings ← IO.mkRef 0
+  let answering ← fakeNode regtest (answer := fun _ m => do if m matches .ping _ then pings.modify (· + 1))
+  let alive ← connectedTo answering (pingIntervalMs := 100) (readIdleTimeoutMs := 1_500)
+  IO.sleep 2_000
+  check "a peer answering the keepalive outlives the idle timeout" (← alive.isConnected)
+  check "the keepalive pings on its interval" ((← pings.get) ≥ 3) s!"{← pings.get} pings in two seconds"
+  alive.disconnect
+  let silent ← fakeNode regtest (pongs := false)
+  let quiet ← connectedTo silent (pingIntervalMs := 100) (readIdleTimeoutMs := 1_500)
+  let start ← IO.monoMsNow
+  let waiting ← IO.mkRef (none : Option (Except NetError PeerMessage))
+  spawn do waiting.set (some (← (quiet.request (.ping 1) #["pong"] (timeoutMs := 30_000)).attempt))
+  let gone ← waitUntil 8_000 (do return !(← quiet.isConnected)) (every := 20)
+  let took := (← IO.monoMsNow) - start
+  check "a silent peer is torn down after the idle timeout" (gone && took ≥ 1_450) s!"{took} ms"
+  discard <| waitUntil 2_000 (do return (← waiting.get).isSome) (every := 20)
+  check "what waited on it fails, naming the silence"
+    (match ← waiting.get with
+     | some (.error (.peer (.disconnected why))) => why.startsWith "no bytes received for"
+     | _ => false)
+    (match ← waiting.get with | some (.error e) => e.description | some (.ok _) => "answered" | none => "still waiting")
+
+/-- A pool that loses its peer dials another (`pruneAndReplenish`, on the monitor's interval). -/
+def replenishChecks : IO Unit := do
+  let hangUpA ← IO.Promise.new (α := Unit)
+  let hangUpB ← IO.Promise.new (α := Unit)
+  let a ← fakeNode regtest (hangUp := some hangUpA)
+  let b ← fakeNode regtest (hangUp := some hangUpB)
+  let pool ← PeerPool.new regtest (peerCount := 1) (manualPeers := #[a, b]) (seedResolver := some noSeeds)
+    (monitorIntervalMs := 100)
+  pool.start
+  discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 1)
+  let first := (← pool.connectedPeers).map (·.endpoint)
+  (if first == #[a] then hangUpA else hangUpB).resolve ()
+  let other := if first == #[a] then b else a
+  let moved ← waitUntil 10_000 do
+    let peers ← pool.connectedPeers
+    return peers.map (·.endpoint) == #[other] && (← peers.allM (·.isConnected))
+  check "a pool that loses its peer dials another" moved
+    s!"on {(← pool.connectedPeers).map (·.endpoint.description)}"
+  pool.stop
+
+/-- Regtest headers on genesis, for a chain tall enough to have filter checkpoints. -/
+def minedHeaders (count : Nat) : Array BlockHeader := Id.run do
+  let mut previous := HeaderChain.genesisHeader regtest
+  let mut out := #[]
+  for i in [0:count] do
+    let time := regtest.genesisTime + (i.toUInt32 + 1) * 600
+    let mut nonce : UInt32 := 0
+    let mut h := BlockHeader.mk' 1 previous.hash (filled 32 0) time regtest.genesisBits nonce
+    while !(HeaderChain.checkedWork h regtest 1).isOk do
+      nonce := nonce + 1
+      h := BlockHeader.mk' 1 previous.hash (filled 32 0) time regtest.genesisBits nonce
+    out := out.push h
+    previous := h
+  return out
+
+/-- A peer with no headers to give, answering the filter questions with these tags as its filter data. -/
+def filterAnswers (checkpoint cfheader : UInt8) (send : PeerMessage → IO Unit) : PeerMessage → IO Unit
+  | .getheaders _ => send (.headers #[])
+  | .getcfcheckpt r => send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := #[filled 32 checkpoint] })
+  | .getcfheaders r =>
+    send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := filled 32 0, filterHashes := #[filled 32 cfheader] })
+  | _ => pure ()
+
+/-- Peers that disagree about filters, through a real `sync`. Two manual peers and a remembered one on `::1`
+make two source classes, and a vote carried by one class alone is `refuseDisputedVote`: everyone is cooled off
+and nobody is condemned, since one channel's word can't say who lied. -/
+def voteChecks (dir : String) : IO Unit := do
+  let store ← runNet "vote headers" (HeaderStore.open regtest none)
+  discard <| runNet "vote chain" (store.connect (minedHeaders 1_000))
+  let syncOn (pool : PeerPool) (seats : Nat) : IO (Except NetError Unit) := do
+    let seated ← waitUntil 10_000 (do return (← pool.connectedPeers).size == seats)
+    check s!"vote: {seats} peers seated" seated s!"{(← pool.connectedPeers).size}"
+    let filters ← runNet "vote filters" (FilterSyncIO.new pool store 0)
+    (filters.sync #[] (onMatch := fun _ => pure ())).attempt
+  let mismatch (r : Except NetError Unit) (reason : String) : Bool :=
+    match r with | .error (.filters (.checkpointMismatch why)) => why == reason | _ => false
+  let show' (r : Except NetError Unit) := match r with | .error e => e.description | .ok () => "synced"
+  -- no majority: two peers, two answers
+  let a ← fakeNode regtest (startHeight := 1_000) (answer := filterAnswers 1 1)
+  let b ← fakeNode regtest (startHeight := 1_000) (answer := filterAnswers 2 1)
+  let split ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[a, b]) (seedResolver := some noSeeds)
+  split.start
+  let r ← syncOn split 2
+  check "vote: two peers disagree on a checkpoint, and the sync is refused"
+    (mismatch r "no cfcheckpt majority across 2 peers") (show' r)
+  check "vote: both are dropped and refused"
+    ((← split.connectedPeers).isEmpty && (← split.rejectionReason a) == some "cfcheckpt no majority" &&
+     (← split.rejectionReason b) == some "cfcheckpt no majority" && !(← split.knownGood).contains a)
+  split.stop
+  let threePeers (name : String) (x y z : UInt8 × UInt8) : IO (PeerPool × PeerEndpoint × PeerEndpoint × PeerEndpoint) := do
+    -- at our height: a peer far below it is evicted as stale before any vote
+    let manualA ← fakeNode regtest (startHeight := 1_000) (answer := filterAnswers x.1 x.2)
+    let manualB ← fakeNode regtest (startHeight := 1_000) (answer := filterAnswers y.1 y.2)
+    let remembered ← fakeNode regtest (v6 := true) (startHeight := 1_000) (answer := filterAnswers z.1 z.2)
+    let file : System.FilePath := s!"{dir}/{name}-peers.json"
+    IO.FS.writeBinFile file (PersistedPeers.encode #[{ endpoint := remembered, source := .persisted }])
+    let pool ← PeerPool.new regtest (peerCount := 3) (manualPeers := #[manualA, manualB]) (peersFile := some file)
+      (seedResolver := some noSeeds)
+    pool.start
+    return (pool, manualA, manualB, remembered)
+  let allCooled (pool : PeerPool) (peers : List PeerEndpoint) (reason : String) : IO Bool := do
+    let judged ← peers.allM fun e => do
+      return (← pool.isCoolingDown e) && (← pool.rejectionReason e) == some reason
+    return judged && (← pool.connectedPeers).isEmpty
+  -- a class outvotes another on the checkpoint
+  let (pool, x, y, z) ← threePeers "checkpoint-vote" (1, 1) (1, 1) (2, 1)
+  let r ← syncOn pool 3
+  let reason := "cfcheckpt: one source class outvotes another"
+  check "vote: one class outvoting another on a checkpoint is refused" (mismatch r reason) (show' r)
+  check "vote: all three are cooled off" (← allCooled pool [x, y, z] reason)
+  check "vote: and the remembered peer stays remembered" ((← pool.knownGood).contains z)
+  pool.stop
+  -- the same on the filter headers, the checkpoint agreed
+  let (pool, x, y, z) ← threePeers "cfheaders-vote" (1, 1) (1, 1) (1, 2)
+  let r ← syncOn pool 3
+  let reason := "cfheaders at 0: one source class outvotes another"
+  check "vote: one class outvoting another on filter headers is refused" (mismatch r reason) (show' r)
+  check "vote: all three are cooled off again" (← allCooled pool [x, y, z] reason)
+  pool.stop
+  -- a majority spanning both classes is evidence, so its dissenter alone goes
+  let (pool, x, y, z) ← threePeers "spanning-vote" (1, 1) (2, 1) (1, 1)
+  let _ ← syncOn pool 3
+  check "vote: a majority across classes condemns its dissenter"
+    ((← pool.rejectionReason y) == some "cfcheckpt mismatch" && !(← pool.knownGood).contains y)
+    s!"{← pool.rejectionReason y}"
+  check "vote: and leaves the majority alone" (!(← pool.isCoolingDown x) && !(← pool.isCoolingDown z))
+  pool.stop
+
+/-- The window frees a txid when its fetch fails, so another peer's announcement fetches it: without this a
+payment isn't seen until the next block (`handleNotfound`, `sendFailed`). -/
+def mempoolRefetchChecks : IO Unit := do
+  let tx ← match Transaction.decode (fakeRawTx 1) with
+    | .ok t => pure t
+    | .error _ => throw (IO.userError "fakeRawTx does not decode")
+  let script := (tx.outputs[0]!).scriptPubKey
+  let a : PeerEndpoint := { host := "127.0.0.1", port := 1 }
+  let b : PeerEndpoint := { host := "127.0.0.1", port := 2 }
+  let vectors : Array InventoryVector := #[{ type := InventoryType.tx, hash := tx.txid }]
+  let announced : PeerMessage := .inv { vectors }
+  let opened : MempoolWindow := (({ watchScripts := Std.HashSet.ofList [script] } : MempoolWindow).start).1
+  let askedOf (es : Array MempoolEffect) : Array PeerEndpoint :=
+    es.filterMap fun | .sendGetData p _ => some p | _ => none
+  let paid (es : Array MempoolEffect) : Bool :=
+    es.any fun | .emit (.paymentSeen _ amount _) => amount == 1_000 | _ => false
+  let (w, first) := opened.handle announced a 100
+  check "mempool: the first announcement is fetched" (askedOf first == #[a])
+  let (w, second) := w.handle announced b 101
+  check "mempool: a second one waits on the fetch" (askedOf second).isEmpty
+  -- notfound for something else frees nothing
+  let block : InventoryPayload := { vectors := #[{ type := InventoryType.block, hash := tx.txid }] }
+  let (w, _) := w.handle (.notfound block) a 102
+  check "mempool: a block's notfound frees no txid" (askedOf (w.handle announced b 103).2).isEmpty
+  let (w, _) := w.handle (.notfound { vectors }) a 104
+  let (_, late) := w.handle (.tx tx) a 105
+  check "mempool: after notfound the transaction is no longer expected" !(paid late)
+  let (w, third) := w.handle announced b 106
+  check "mempool: after notfound, another peer's announcement fetches it" (askedOf third == #[b])
+  let (_, seen) := w.handle (.tx tx) b 107
+  check "mempool: and the payment is seen" (paid seen)
+  -- the getdata could not be sent
+  let (w, _) := opened.handle announced a 100
+  let w := w.sendFailed vectors
+  check "mempool: a failed send frees the request" w.inFlight.isEmpty
+  let (w, retry) := w.handle announced b 101
+  check "mempool: after a failed send, another peer's announcement fetches it" (askedOf retry == #[b])
+  let (_, seen) := w.handle (.tx tx) b 102
+  check "mempool: and that payment is seen" (paid seen)
 
 /-- The broadcaster giving up on peers that take the inv and never ask for the transaction (#39), over an
 IPv4 and an IPv6 fake node (ephemeral, so high, ports): an announcement unanswered past
@@ -632,7 +850,11 @@ def fakeChecks (dir : String) : IO Unit := do
     (match r2 with | .error e => e.description | .ok _ => "ok")
   pool2.stop
   broadcastGiveUpChecks
-  let _ := dir
+  burstChecks
+  keepaliveChecks
+  replenishChecks
+  voteChecks dir
+  mempoolRefetchChecks
 
 /-- 3b. Restore-only range scans (#226): a back-scan for the funded script below the forward frontier. -/
 def rangeChecks (dir : String) (pool : PeerPool) (store : HeaderStore) (fs : FilterSyncIO) (spk : ByteArray)
