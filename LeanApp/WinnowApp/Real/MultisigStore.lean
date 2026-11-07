@@ -631,8 +631,6 @@ def configure (h : MultisigHost) (network : BitcoinNetwork) (dir : Option System
   h.state.atomically (set store)
   h.notice.set (match result with | .damaged m => some m | _ => none)
 
-def all (h : MultisigHost) : IO (Array MultisigAccountRecord) := return (← h.read).records
-
 end MultisigHost
 
 end WinnowApp.RecordsReal

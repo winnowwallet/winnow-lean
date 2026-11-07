@@ -11,7 +11,7 @@ import WinnowApp.Real.MultisigStore
 import WinnowApp.Real.CloudBackup
 import WinnowApp.Real.CloudApp
 
-/-! # `Backend.real` (aggregator): AppModel's wallet and network logic over the Lean WalletCore
+/-! # The real backend (aggregator): AppModel's wallet and network logic over the Lean WalletCore
 
 | Module | AppModel.swift |
 |---|---|
@@ -22,9 +22,9 @@ import WinnowApp.Real.CloudApp
 | `Real/Peers.lean` | scene phase start/stop, reconnect, retry, the census line, peers, reset (:553, :2586–2665) |
 | `Real/BackgroundSync.lean` | background chain checks: `BackgroundSyncRun`, `runBackgroundSync` (BackgroundSyncScheduler.swift) |
 | `Real/Shell.lean` | the shell's `keychain.*` and `http.get` capabilities as `KeyStore IO` and `HttpFetch` |
-| `Real/Assemble.lean` | the core fields of the `Backend` record (`Backend.coreWithEnv`) |
+| `Real/Assemble.lean` | the core fields of the `Backend` record |
 | `Real/Records*.lean` | people and labels (PeopleStore, ReceiveAddressLabelStore, AppModel) |
-| `Real/Full.lean` | `Backend.real`: both halves joined through `Hooks` |
+| `Real/Full.lean` | `Backend.realWithMultisig`: both halves joined through `Hooks` |
 | `Real/CloudBackup.lean` | the iCloud backup's controller, CloudKit store and iCloud Keychain keys (CloudBackupController.swift, ICloudBackupStore.swift) |
 | `Real/CloudApp.lean` | AppModel's iCloud flows: preparation, updates, restore; `Backend.realWithCloud` |
 

@@ -147,28 +147,16 @@ def tweak32 (t : ByteArray) : PK Nat :=
 
 /-- `Signing.PrivateKey.add`: `secp256k1_ec_seckey_tweak_add`; a tweak ≥ n or a zero sum fails. -/
 def privateAdd (d : Nat) (tw : ByteArray) : PK Nat := do
-  let t ← tweak32 tw
-  if t ≥ groupN then throw .underlyingCryptoError
-  let s := (d + t) % groupN
-  if s == 0 then throw .underlyingCryptoError
-  return s
-
-/-- `Signing.PrivateKey.multiply`: `secp256k1_ec_seckey_tweak_mul`; a zero tweak or one ≥ n fails. -/
-def privateMultiply (d : Nat) (tw : ByteArray) : PK Nat := do
-  let t ← tweak32 tw
-  if t == 0 || t ≥ groupN then throw .underlyingCryptoError
-  return (d * t) % groupN
+  let _ ← tweak32 tw
+  lift (Secp.secretAdd d tw)
 
 /-- `PrivateKey.negation`. -/
 def privateNegate (d : Nat) : Nat := (groupN - d) % groupN
 
 /-- `Signing.PublicKey.add`: `t·G + P` (`secp256k1_ec_pubkey_tweak_add`); infinity fails. -/
 def publicAdd (p : Point) (tw : ByteArray) : PK Point := do
-  let t ← tweak32 tw
-  if t ≥ groupN then throw .underlyingCryptoError
-  match ← addOpt (← mulGen t) (some p) with
-  | some q => pure q
-  | none => throw .underlyingCryptoError
+  let _ ← tweak32 tw
+  lift (Secp.pointAdd p.1 p.2 tw)
 
 /-- `Signing.PublicKey.multiply`: `t·P` (`secp256k1_ec_pubkey_tweak_mul`). -/
 def publicMultiply (p : Point) (tw : ByteArray) : PK Point := do
@@ -177,9 +165,6 @@ def publicMultiply (p : Point) (tw : ByteArray) : PK Point := do
   match ← mulOpt t p with
   | some q => pure q
   | none => throw .underlyingCryptoError
-
-/-- `PublicKey.negation`. -/
-def publicNegate (p : Point) : Point := (p.1, -p.2)
 
 /-- `PublicKey.combine`: the sum of all keys (`secp256k1_ec_pubkey_combine`); infinity fails. -/
 def combine (ps : List Point) : PK Point := do

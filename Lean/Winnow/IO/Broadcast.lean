@@ -34,10 +34,6 @@ inductive AnnouncementState where
   | announced | requested | served | failed | deprioritized
   deriving BEq, Inhabited, Repr
 
-def AnnouncementState.rawValue : AnnouncementState → String
-  | .announced => "announced" | .requested => "requested" | .served => "served" | .failed => "failed"
-  | .deprioritized => "deprioritized"
-
 /-- Why a relay-only session ended (`RelaySessionEnd`). -/
 inductive RelaySessionEnd where
   /-- nothing left to relay: confirmed, cancelled or replaced -/
@@ -314,16 +310,6 @@ def rawTransaction (b : TxBroadcaster) (txid : ByteArray) : BaseIO (Option ByteA
 
 def wasServed (b : TxBroadcaster) (txid : ByteArray) : BaseIO Bool := do
   return ((← b.state.get).pending[txid]?.map (·.served)).getD false
-
-def relayStatus (b : TxBroadcaster) (txid : ByteArray) : BaseIO (Array (String × AnnouncementState)) := do
-  match (← b.state.get).pending[txid]? with
-  | some e => return e.peers.toArray.map fun (k, r) => (k, r.state)
-  | none => return #[]
-
-def attemptCount (b : TxBroadcaster) (txid : ByteArray) : BaseIO (Option Nat) := do
-  return (← b.state.get).pending[txid]?.map (·.attempt)
-def nextAttemptDate (b : TxBroadcaster) (txid : ByteArray) : BaseIO (Option Float) := do
-  return (← b.state.get).pending[txid]?.map (·.nextAttemptAt)
 
 /-! ## Relay -/
 

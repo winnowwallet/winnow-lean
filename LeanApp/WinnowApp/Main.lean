@@ -119,7 +119,7 @@ def clipPolicyArgs (text : String) : ClipPolicy → Json
   | .recoveryPhrase => Json.mkObj [("text", Json.str text), ("localOnly", Json.bool true), ("expiresIn", toJson (120 : Nat))]
   | .interchange => Json.mkObj [("text", Json.str text), ("localOnly", Json.bool false), ("expiresIn", toJson (300 : Nat))]
 
-/-- The backend, chosen once at boot: `Backend.real` over the shell's Keychain and `http.get`
+/-- The backend, chosen once at boot: `Backend.realWithCloud` over the shell's Keychain and `http.get`
 capabilities. `WINNOW_LEAN_SAMPLE=1` (passed with `SIMCTL_CHILD_` by `simctl launch`) runs the screens
 on sample data instead — a UI harness like Winnow's E2EMode (Debug builds only). -/
 def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit := do

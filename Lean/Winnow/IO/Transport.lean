@@ -125,10 +125,6 @@ def peerStartHeight (c : PeerConnection) : BaseIO Int32 := do return (← c.stat
 /-- Latest BIP133 feefilter (sat/kvB) the peer sent. -/
 def feeFilter (c : PeerConnection) : BaseIO (Option Int64) := do return (← c.state.get).feeFilter
 def isConnected (c : PeerConnection) : BaseIO Bool := do return (← c.state.get).isConnected
-/-- What the gossip buffer holds: messages and payload bytes. -/
-def backlogSize (c : PeerConnection) : BaseIO (Nat × Nat) := do
-  let s ← c.state.get
-  return (s.backlog.size, s.backlogBytes)
 
 private def awaitPromise {α} (p : IO.Promise (Except NetError α)) : NetM α := do
   match ← IO.wait p.result? with
@@ -243,44 +239,20 @@ def requestMany (c : PeerConnection) (m : PeerMessage) (command : String) (count
     (maxTotalBytes : Option Nat := none) : NetM (Array PeerMessage) := do
   if count == 0 then throw (.other "requestMany: count must be positive")
   let p ← IO.Promise.new
-  let r ← c.state.modifyGet fun st =>
+  let id ← c.state.modifyGet fun st =>
     if !isOpen st then (none, st) else
     let st := purge st (·.command == command)
     let id := st.nextId
-    let st := { st with nextId := id + 1 }
-    let rec drain (st : ConnState) (got : Array PeerMessage) (bytes : Nat) (fuel : Nat) : ConnState × Array PeerMessage × Nat :=
-      match fuel with
-      | 0 => (st, got, bytes)
-      | fuel + 1 =>
-        if got.size ≥ count then (st, got, bytes)
-        else match st.backlog.findIdx? (·.1.command == command) with
-          | some i =>
-            let size := st.backlog[i]!.2
-            let (msg, st) := takeFromBacklog st i
-            drain st (got.push msg) (bytes + size) fuel
-          | none => (st, got, bytes)
-    let (st, got, bytes) := drain st #[] 0 (st.backlog.size + 1)
-    if maxTotalBytes.any (bytes > ·) then (some (Sum.inl (Sum.inl bytes)), st)
-    else if got.size ≥ count then (some (Sum.inl (Sum.inr got)), st)
-    else
-      let col : PendingCollector :=
-        { id, command, expected := count, received := got, promise := p, maxTotalBytes, receivedBytes := bytes }
-      (some (Sum.inr id), { st with collectors := st.collectors.push col })
-  let some r := r | throw (.peer .notConnected)
-  match r with
-  | .inl (.inl bytes) =>
-    let e := burstTooLarge command bytes (maxTotalBytes.getD 0)
-    c.teardown (some e)
+    let col : PendingCollector := { id, command, expected := count, received := #[], promise := p, maxTotalBytes, receivedBytes := 0 }
+    (some id, { st with nextId := id + 1, collectors := st.collectors.push col })
+  let some id := id | throw (.peer .notConnected)
+  c.scheduleTimeout id timeoutMs
+  try
+    c.send m
+    awaitPromise p
+  catch e =>
+    c.state.modify fun st => { st with collectors := st.collectors.filter (·.id != id) }
     throw e
-  | .inl (.inr got) => c.send m; return got
-  | .inr id =>
-    c.scheduleTimeout id timeoutMs
-    try
-      c.send m
-      awaitPromise p
-    catch e =>
-      c.state.modify fun st => { st with collectors := st.collectors.filter (·.id != id) }
-      throw e
 
 /-- Manual ping: sends a nonce and waits for any pong. -/
 def ping (c : PeerConnection) (timeoutMs : Nat := 10_000) : NetM Unit := do

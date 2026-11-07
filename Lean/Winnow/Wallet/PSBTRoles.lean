@@ -113,17 +113,6 @@ def signKeyPath (p : PSBT) (index : Int) (tweakedPrivateKey : ByteArray) (auxili
   let w ← (Signer.witness tx k spent tweakedPrivateKey hashType auxiliaryRand).mapError .sign
   return p.modifyInput k (·.setTapKeySignature (some w[0]!))
 
-/-- Script-path fields of a `multi_a` input: internal key, the one leaf script, leaf-hashed key origins. -/
-def attachScriptPath (p : PSBT) (index : Int) (controlBlock : Tx.Taproot.ControlBlock) (leafScript : Script)
-    (leafVersion : UInt8 := Tx.Taproot.leafVersion) (keyOrigins : Array (ByteArray × KeyOrigin) := #[]) : RM PSBT := do
-  let k ← p.checkIndex index
-  let leaf : TapLeafScript := { controlBlock, script := leafScript.bytes, leafVersion }
-  let mut i := (p.inputs[k]!.setTapInternalKey (some controlBlock.internalKey)).setTapLeafScripts #[leaf]
-  if !keyOrigins.isEmpty then
-    let origins := i.tapBIP32Derivation ++ keyOrigins.map fun (key, o) => (key, { o with leafHashes := #[leaf.leafHash] })
-    i := i.setTapBIP32Derivation origins
-  return p.modifyInput k fun _ => i
-
 /-- Script-path fields for a tree of leaves: the internal key (from the first leaf's control block), one
 PSBT_IN_TAP_LEAF_SCRIPT per leaf, and the given origins, whose leaf hashes the caller sets. -/
 def attachScriptPaths (p : PSBT) (index : Int) (leaves : Array (Tx.Taproot.ControlBlock × Script × UInt8))

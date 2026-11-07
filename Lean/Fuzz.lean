@@ -348,9 +348,7 @@ private def fundingSources : Target := {
   seeds := #[.empty, minimalTransaction] ++ spends
   check := fun _ data => do
     let .ok parsed := Transaction.decode data | return false
-    let sources := FundingSources.sources parsed
     let scripts := FundingSources.fundingScripts parsed
-    require (sources.size ≤ parsed.inputs.size) "more funding sources than inputs"
     require (scripts.size ≤ parsed.inputs.size) "more funding scripts than inputs"
     return true }
 

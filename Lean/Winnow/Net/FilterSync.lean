@@ -142,9 +142,6 @@ inductive PersistenceState where
   | disabled | missing | loaded
   deriving BEq, Inhabited, Repr
 
-def PersistenceState.name : PersistenceState → String
-  | .disabled => "disabled" | .missing => "missing" | .loaded => "loaded"
-
 /-- A block whose compact filter matched the watch list. -/
 structure BlockMatch where
   height : UInt32
@@ -408,11 +405,6 @@ def sourceSpan (agreeing dissenting : Array (Option PeerSource)) : Bool × Bool 
   let crossSource := a.size > 1
   (crossSource, !crossSource && !(d.all a.contains))
 
-/-- One cfcheckpt reply as `collectedCheckpoints` judges it: answered about our tip, with
-`tip / 1000` headers. `false`: the peer is evicted as misbehaving and the others are still asked. -/
-def acceptCheckpoint (m : CFCheckptMessage) (tipHash : ByteArray) (tip : UInt32) : Bool :=
-  m.stopHash == tipHash && m.filterHeaders.size == (tip / checkpointInterval).toNat
-
 /-- The lowest checkpoint height (1000, 2000, … ≤ tip) whose pinned header differs from the reference. -/
 def lowestDisputedBoundary (headers : Std.HashMap String String) (reference : CFCheckptMessage) (tip : UInt32) : Option UInt32 := Id.run do
   for i in [0:reference.filterHeaders.size] do
@@ -525,7 +517,7 @@ def finalCheckpointGuard (headers : Std.HashMap String String) (reference : CFCh
 
 1. no connected peers → `peersCoolingDown n` / `noPeers`; 2. `PeerPool.syncHeaders` (HeaderChain.syncStep);
 3. a fork → `onReorg minForkHeight`, then `rollBack`; 4. `validateAgainstTip`; tip < frontier → done;
-5. `scanCeiling` (none → done); 6. cfcheckpt from `checkpointPeerCount` peers, `acceptCheckpoint`,
+5. `scanCeiling` (none → done); 6. cfcheckpt from `checkpointPeerCount` peers, each answer about our tip with `tip / 1000` headers,
 `strictMajority`, `sourceSpan` (disputed → cool all, `checkpointMismatch`), ban the minority, `reconcilePins`
 (→ `onReorg`, `rollBack`); 7. per batch (`batches`): `requestStart`, cfheaders from `crossSourceSet`,
 strict majority again (none → cool all, `checkpointMismatch`), `checkCFHeadersCount`, `walkFilterHeaders`,

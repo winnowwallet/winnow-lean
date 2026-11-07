@@ -1023,7 +1023,6 @@ def feeResolution : TM Unit := do
 
 def hasText (s t : String) : Bool := (s.splitOn t).length > 1
 def sortedNats (xs : Array Nat) : List Nat := xs.toList.mergeSort
-def sortedInts (xs : Array Int) : List Int := xs.toList.mergeSort
 
 /-- Members of a nested test account: the masters, the members' key expressions, the account. -/
 structure Family where

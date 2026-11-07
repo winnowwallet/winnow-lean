@@ -18,7 +18,6 @@ def cmpctBlock : InventoryType := ⟨4⟩
 def witnessTx : InventoryType := ⟨0x40000001⟩
 def witnessBlock : InventoryType := ⟨0x40000002⟩
 def baseType (t : InventoryType) : InventoryType := ⟨t.rawValue &&& 0x3FFFFFFF⟩
-def isWitness (t : InventoryType) : Bool := t.rawValue &&& 0x40000000 != 0
 end InventoryType
 
 /-- One (type, 32-byte hash) pair; for witness types the hash is still the plain txid/block hash. -/
@@ -26,8 +25,6 @@ structure InventoryVector where
   type : InventoryType
   hash : ByteArray
   deriving Inhabited
-
-instance : BEq InventoryVector := ⟨fun a b => a.type == b.type && a.hash == b.hash⟩
 
 def InventoryVector.serialized (v : InventoryVector) : ByteArray := u32LE v.type.rawValue ++ v.hash
 def InventoryVector.read : Wire InventoryVector := do
@@ -37,7 +34,7 @@ def InventoryVector.read : Wire InventoryVector := do
 
 structure InventoryPayload where
   vectors : Array InventoryVector
-  deriving Inhabited, BEq
+  deriving Inhabited
 
 namespace InventoryPayload
 def maxCount : UInt64 := 50_000

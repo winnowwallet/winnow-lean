@@ -17,9 +17,6 @@ namespace PeerAddress
 
 instance : BEq PeerAddress := ⟨fun a b => a.time == b.time && a.services == b.services && a.ip == b.ip && a.port == b.port⟩
 
-def ofIPv4 (time : Option UInt32) (services : UInt64) (a b c d : UInt8) (port : UInt16) : PeerAddress :=
-  { time, services, ip := ByteArray.mk (Array.replicate 10 0 ++ #[0xFF, 0xFF, a, b, c, d]), port }
-
 def unspecified : PeerAddress := { services := 0, ip := ByteArray.mk (Array.replicate 16 0), port := 0 }
 
 /-- With or without the leading timestamp (`addr` vs `version`); the port is big-endian on the wire. -/
@@ -62,10 +59,6 @@ def host (a : PeerAddress) : String := Id.run do
   | none => return ":".intercalate (groups.map hexGroup)
   | some (lo, hi) =>
     return ":".intercalate ((groups.take lo).map hexGroup) ++ "::" ++ ":".intercalate ((groups.drop hi).map hexGroup)
-
-/-- "host:port", IPv6 bracketed. -/
-def endpointDescription (a : PeerAddress) : String :=
-  if a.isIPv4Mapped then s!"{a.host}:{a.port}" else s!"[{a.host}]:{a.port}"
 
 end PeerAddress
 end Winnow.Net

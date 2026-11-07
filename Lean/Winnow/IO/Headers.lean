@@ -64,9 +64,7 @@ def height (s : HeaderStore) : BaseIO UInt32 := return (← s.snapshot).height
 def tipHash (s : HeaderStore) : BaseIO ByteArray := return (← s.snapshot).tipHash
 def startHeight (s : HeaderStore) : BaseIO UInt32 := return (← s.snapshot).startHeight
 def blockHash (s : HeaderStore) (height : UInt32) : BaseIO (Option ByteArray) := return (← s.snapshot).blockHash? height
-def header (s : HeaderStore) (height : UInt32) : BaseIO (Option BlockHeader) := return (← s.snapshot).header? height
 def blockLocator (s : HeaderStore) : BaseIO (Array ByteArray) := return (← s.snapshot).blockLocator
-def tipWork (s : HeaderStore) : BaseIO ByteArray := return (← s.snapshot).tipWork
 
 /-- The prefix bytes of the file (`fileBytes` up to the first header). -/
 def prefixBytes (c : HeaderChain) : ByteArray :=

@@ -335,8 +335,6 @@ def pairSuffixText (appearance : Nat) : String := s!"/<{2 * appearance};{2 * app
 
 /-- The only signer suffix accepted on a key's first appearance (SEC-019). -/
 def signerSuffix : Array Descriptor.Element := pairSuffix 0
-/-- A signer's key on its second path, for the recovery leaf of an ordinary account. -/
-def recoverySuffix : Array Descriptor.Element := pairSuffix 1
 
 /-- Which appearance a suffix is, or `none` for any other derivation. -/
 def appearance? (elements : Array Descriptor.Element) : Option Nat :=
@@ -1011,11 +1009,6 @@ def Leaf.hash (l : Leaf) : ByteArray := Taproot.leafHash l.version l.script
 /-- Every leaf at (choice, index) in tree order, with its control block. -/
 def leaves (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM (Array Leaf) :=
   return (← a.resolved choice index).leaves
-
-/-- The first signers' leaf at (choice, index). -/
-def signersLeaf (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM Leaf := do
-  let some l := (← a.leaves choice index).find? (·.path == .signers) | invalid "the account's tree does not resolve to its leaves"
-  return l
 
 /-- Whether `coin` may already be spent on the recovery path in the next block. -/
 def isUnlockedForRecovery (a : MultisigAccount) (coin : WalletUTXO) (chainTip : UInt32) : Bool :=

@@ -81,8 +81,6 @@ structure KeyValue where
   value : ByteArray
   deriving Inhabited
 
-instance : BEq KeyValue := ⟨fun a b => a.key == b.key && a.value == b.value⟩
-
 namespace KeyValue
 def make (type : UInt8) (keyData : ByteArray := .empty) (value : ByteArray) : KeyValue :=
   ⟨ByteArray.mk #[type] ++ keyData, value⟩
@@ -188,14 +186,8 @@ def remove (i : Input) (type : UInt8) (keyData : ByteArray := .empty) : Input :=
 
 def previousTxid (i : Input) : Option ByteArray :=
   (i.pair InType.previousTxid).bind fun p => if p.value.size == 32 then some p.value else none
-def setPreviousTxid (i : Input) : Option ByteArray → Input
-  | none => i.remove InType.previousTxid
-  | some v => i.set (KeyValue.make InType.previousTxid .empty v)
 
 def outputIndex (i : Input) : Option UInt32 := (i.pair InType.outputIndex).bind (u32Value? ·.value)
-def setOutputIndex (i : Input) : Option UInt32 → Input
-  | none => i.remove InType.outputIndex
-  | some v => i.set (KeyValue.make InType.outputIndex .empty (u32LE v))
 
 def sequence (i : Input) : Option UInt32 := (i.pair InType.sequence).bind (u32Value? ·.value)
 def setSequence (i : Input) : Option UInt32 → Input
@@ -215,9 +207,6 @@ def witnessUTXO (i : Input) : Option SighashBIP341.SpentOutput := do
     ByteReader.requireEnd
     return { amount, scriptPubKey }
   m.runAll p.value |>.toOption
-def setWitnessUTXO (i : Input) : Option SighashBIP341.SpentOutput → Input
-  | none => i.remove InType.witnessUTXO
-  | some o => i.set (KeyValue.make InType.witnessUTXO .empty (Wire.appendVarData (i64LE o.amount) o.scriptPubKey))
 
 def tapInternalKey (i : Input) : Option ByteArray := (i.pair InType.tapInternalKey).map (·.value)
 def setTapInternalKey (i : Input) : Option ByteArray → Input
@@ -286,14 +275,8 @@ def remove (o : Output) (type : UInt8) (keyData : ByteArray := .empty) : Output 
 
 def amount (o : Output) : Option Int64 :=
   (o.pair OutType.amount).bind fun p => if p.value.size == 8 then some (readLE p.value 0 8).toInt64 else none
-def setAmount (o : Output) : Option Int64 → Output
-  | none => o.remove OutType.amount
-  | some v => o.set (KeyValue.make OutType.amount .empty (i64LE v))
 
 def script (o : Output) : Option ByteArray := (o.pair OutType.script).map (·.value)
-def setScript (o : Output) : Option ByteArray → Output
-  | none => o.remove OutType.script
-  | some v => o.set (KeyValue.make OutType.script .empty v)
 
 def tapInternalKey (o : Output) : Option ByteArray := (o.pair OutType.tapInternalKey).map (·.value)
 def setTapInternalKey (o : Output) : Option ByteArray → Output

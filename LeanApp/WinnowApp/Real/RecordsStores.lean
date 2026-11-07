@@ -229,9 +229,6 @@ def configure (keys : StoreKeyVault) (path : Option System.FilePath) (network : 
 
 def record? (s : PeopleStore) (id : String) : Option PersonRecord := s.records.find? (·.id == id)
 
-def sender? (s : PeopleStore) (txidHex : String) : Option PersonRecord :=
-  (lookupLabel s.senderByTxid txidHex).bind s.record?
-
 /-- `mutate`: validate, persist, adopt; labels naming a removed person are pruned. -/
 def mutate (s : PeopleStore) (keys : StoreKeyVault) (writeData : WriteData) (candidate : Array PersonRecord) : RM PeopleStore := do
   let surviving : Std.HashSet String := candidate.foldl (fun a p => a.insert p.id) {}
@@ -457,8 +454,6 @@ def «open» (path : Option System.FilePath) (walletID : String) (network : Bitc
   match ← (readLabels p walletID network).run with
   | .ok labels => return { s with labels }
   | .error _ => return { s with notice := some (RecordsError.labels .damaged).description }
-
-def label? (s : LabelStore) (script : ByteArray) : Option String := (s.labels.find? (·.1 == script)).map (·.2)
 
 def encode (s : LabelStore) (labels : Array (ByteArray × String)) : ByteArray :=
   (write (.obj #[("version", ofInt 1), ("walletID", .str s.walletID), ("network", .str (networkRaw s.network)),

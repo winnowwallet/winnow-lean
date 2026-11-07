@@ -258,9 +258,6 @@ structure Person where
   deriving Repr, Inhabited, BEq
 
 def Person.isSavedRecipient (p : Person) : Bool := p.payTo.isSome && p.savedRecipient != some false
-def Person.derivesFreshAddresses (p : Person) : Bool := p.payTo == some true
-def Person.hasUnverifiedFundingDestination (p : Person) : Bool :=
-  p.provenance == some .localFunding || p.provenance == some .explorerFunding
 
 /-- People and local labels, as one snapshot (each mutation answers with a fresh one). -/
 structure Records where

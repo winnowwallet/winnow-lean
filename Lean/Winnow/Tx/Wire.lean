@@ -111,15 +111,11 @@ end ByteReader
 
 namespace Wire
 
-def appendUInt8 (d : ByteArray) (v : UInt8) : ByteArray := d.push v
-def appendUInt16 (d : ByteArray) (v : UInt16) : ByteArray := d ++ u16LE v
 def appendUInt32 (d : ByteArray) (v : UInt32) : ByteArray := d ++ u32LE v
-def appendUInt64 (d : ByteArray) (v : UInt64) : ByteArray := d ++ u64LE v
 def appendInt32 (d : ByteArray) (v : Int32) : ByteArray := d ++ i32LE v
 def appendInt64 (d : ByteArray) (v : Int64) : ByteArray := d ++ i64LE v
 def appendCompactSize (d : ByteArray) (v : UInt64) : ByteArray := d ++ compactSize v
 def appendVarData (d : ByteArray) (b : ByteArray) : ByteArray := d ++ varBytes b
-def appendVarString (d : ByteArray) (s : String) : ByteArray := appendVarData d s.toUTF8
 
 /-- `CharacterSet.whitespacesAndNewlines`: general category Z*, U+0009–U+000D, U+0085 and U+200B (as Foundation has it). -/
 def isWhitespaceOrNewline (c : Char) : Bool :=
@@ -154,9 +150,6 @@ def bytesOfHexChars (cs : List Char) : Option ByteArray := Id.run do
 
 /-- `Data(hex:)`: raw byte order. -/
 def dataOfHex? (s : String) : Option ByteArray := bytesOfHexChars (trimWhitespace s).toList
-
-/-- `Data.hex`: lowercase, raw byte order. -/
-def dataHex (d : ByteArray) : String := hex d
 
 end Wire
 end Winnow

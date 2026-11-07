@@ -61,19 +61,12 @@ def start (w : MempoolWindow) (seconds : Nat := defaultDurationSeconds) : Mempoo
   if w.running then (w, #[.armStop seconds])
   else ({ w with running := true, generation := w.generation + 1 }, #[.armStop seconds, .startSweep])
 
-def extend (w : MempoolWindow) (seconds : Nat) : MempoolWindow × Array MempoolEffect :=
-  if w.running then (w, #[.armStop seconds]) else (w, #[])
-
 /-- Closes the window; echo watches survive (they belong to the caller). -/
 def stop (w : MempoolWindow) : MempoolWindow × Array MempoolEffect :=
   ({ w with running := false, generation := w.generation + 1, seenTxids := {}, seenOrder := #[], inFlight := {},
             echoed := {} }, #[.cancelAll])
 
 def watchEcho (w : MempoolWindow) (txid : ByteArray) : MempoolWindow := { w with echoTxids := w.echoTxids.insert txid }
-
-def unwatchEcho (w : MempoolWindow) (txid : ByteArray) : MempoolWindow :=
-  let pre := hex txid ++ "|"
-  { w with echoTxids := w.echoTxids.erase txid, echoed := w.echoed.filter fun k => !k.startsWith pre }
 
 /-- Drops a txid from the seen set (the ordered list is searched only for one actually seen). -/
 def forget (w : MempoolWindow) (txid : ByteArray) : MempoolWindow :=

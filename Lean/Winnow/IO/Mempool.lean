@@ -120,14 +120,7 @@ def start (m : MempoolWindowIO) (seconds : Nat := MempoolWindow.defaultDurationS
       m.sweepLoop (← m.state.get).generation
     | _ => pure ()
 
-/-- Pushes the automatic close `seconds` into the future. -/
-def extend (m : MempoolWindowIO) (seconds : Nat) : IO Unit := do
-  let (_, effects) := (← m.state.get).extend seconds
-  for e in effects do
-    if let .armStop s := e then m.armStop s
-
 def watchEcho (m : MempoolWindowIO) (txid : ByteArray) : BaseIO Unit := m.state.modify (·.watchEcho txid)
-def unwatchEcho (m : MempoolWindowIO) (txid : ByteArray) : BaseIO Unit := m.state.modify (·.unwatchEcho txid)
 
 end MempoolWindowIO
 end Winnow.IO

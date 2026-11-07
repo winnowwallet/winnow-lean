@@ -33,7 +33,6 @@ def headerSize : Nat := 24
 def maxPayloadSize : Nat := 4_000_000
 
 def append (f : MessageFramer) (data : ByteArray) : MessageFramer := { f with buffer := f.buffer ++ data }
-def bufferedCount (f : MessageFramer) : Nat := f.buffer.size
 
 /-- The command bytes up to the first zero, accepted when non-empty and made only of non-whitespace
 ASCII characters (Swift decodes them lossily, so any byte ≥ 0x80 fails; whitespace is U+0009–U+000D

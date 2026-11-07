@@ -98,13 +98,6 @@ def rollBack (f : FilterSyncIO) (forkHeight : UInt32) : NetM Unit := do
   f.persist candidate
   f.progress.set candidate
 
-/-- Test seam: sets progress directly. -/
-def recordProgress (f : FilterSyncIO) (nextScanHeight : UInt32) (filterHeaders : Std.HashMap String String := {}) :
-    NetM Unit := do
-  let c : Progress := { nextScanHeight, filterHeaders }
-  f.persist c
-  f.progress.set c
-
 private def beginRequest (f : FilterSyncIO) : NetM Unit := do
   let ok ← f.requesting.modifyGet fun r => (!r, true)
   if !ok then throw (.filters .busy)
@@ -132,7 +125,7 @@ private def approved (f : FilterSyncIO) (endpoints : Array String) : NetM (Array
 
 private def collectedCheckpoints (f : FilterSyncIO) (peers : Array PeerConnection) (tipHash : ByteArray) (tip : UInt32) :
     NetM (Array (PeerConnection × CFCheckptMessage)) := do
-  let checkpointPeers := peers.extract 0 (max 1 (min 3 f.requiredCheckpointPeers))
+  let checkpointPeers := peers.extract 0 (checkpointPeerCount f.requiredCheckpointPeers peers.size)
   let mut out := #[]
   for peer in checkpointPeers do
     let response ← match ← (peer.request (.getcfcheckpt { stopHash := tipHash }) #["cfcheckpt"]).attempt with

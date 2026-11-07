@@ -125,10 +125,6 @@ def recipientByScript (people : Array PersonRecord) (network : BitcoinNetwork) :
       out := out.push (s, p)
   return out
 
-/-- `personScripts()`: script → name. -/
-def personScripts (people : Array PersonRecord) (network : BitcoinNetwork) : Array (ByteArray × String) :=
-  (recipientByScript people network).map fun (s, p) => (s, p.name)
-
 /-! ## The `Records` summary -/
 
 def personSummary (p : PersonRecord) : Person :=
@@ -163,17 +159,6 @@ def records (s : RecordsStore) (w : Option Wallet) : IO Records := do
     let (r, st) ← summaryOf s (← get) w
     set st
     return r
-
-/-- `recipientByScript`, from the cache when people have not changed since. -/
-def recipients (s : RecordsStore) : IO (Array (ByteArray × PersonRecord)) :=
-  s.state.atomically do
-    let st ← get
-    match st.recipientsCache with
-    | some r => return r
-    | none =>
-      let r := recipientByScript st.people.records s.network
-      set { st with recipientsCache := some r }
-      return r
 
 /-- A mutation of the state, answered with the fresh `Records`. -/
 def mutate (s : RecordsStore) (w : Option Wallet) (f : RecordsState → RM RecordsState) : RM Records := do
@@ -307,9 +292,5 @@ def lookupSender (get : String → Nat → IO ByteArray) (network : BitcoinNetwo
   let url := appendPath baseURL ["tx", txid]
   let data ← RM.io (get url maximumLookupBytes)
   parseFundingAddresses data network (some txid)
-
-/-- The getter over the I/O area's `RoutedHTTPClient`. -/
-def routedGetter (c : Winnow.IO.RoutedHTTPClient) : String → Nat → IO ByteArray := fun url max =>
-  (c.get url max).toIO
 
 end WinnowApp.RecordsReal

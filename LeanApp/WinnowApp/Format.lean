@@ -23,8 +23,4 @@ def feeRateText (milli : Nat) : String :=
     s!".{if frac < 10 then "0" else ""}{frac}"
   s!"{groupDigits whole}{fracText} sat/vB"
 
-/-- The first `n` characters and an ellipsis. -/
-def shorten (s : String) (n : Nat := 16) : String :=
-  if s.length ≤ n then s else String.ofList (s.toList.take n) ++ "…"
-
 end WinnowApp

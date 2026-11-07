@@ -6,13 +6,9 @@ import Secp.Bytes
 
 namespace Winnow
 
-abbrev Bytes := ByteArray
-
 def hex (b : ByteArray) : String := Secp.toHex b
 def ofHex? (s : String) : Option ByteArray := Secp.ofHex? s
 def ofHex! (s : String) : ByteArray := (ofHex? s).getD .empty
-
-def ByteArray.ofList (xs : List UInt8) : ByteArray := ⟨xs.toArray⟩
 
 def u16LE (n : UInt16) : ByteArray := ⟨#[n.toUInt8, (n >>> 8).toUInt8]⟩
 def u32LE (n : UInt32) : ByteArray := ⟨#[n.toUInt8, (n >>> 8).toUInt8, (n >>> 16).toUInt8, (n >>> 24).toUInt8]⟩
@@ -45,9 +41,6 @@ def readBE (b : ByteArray) (off n : Nat) : UInt64 := Id.run do
   return v
 
 def ByteArray.reverse (b : ByteArray) : ByteArray := ⟨b.data.reverse⟩
-
-def ByteArray.take (b : ByteArray) (n : Nat) : ByteArray := b.extract 0 n
-def ByteArray.drop (b : ByteArray) (n : Nat) : ByteArray := b.extract n b.size
 
 /-- Constant-shape equality of two byte strings. -/
 def ByteArray.eq (a b : ByteArray) : Bool := a.data == b.data
@@ -86,12 +79,6 @@ def le (n : Nat) : Reader UInt64 := do
   let b ← bytes n
   return readLE b 0 n
 
-def u16 : Reader UInt16 := return (← le 2).toUInt16
-def u32 : Reader UInt32 := return (← le 4).toUInt32
-def u64 : Reader UInt64 := le 8
-def i32 : Reader Int32 := return (← u32).toInt32
-def i64 : Reader Int64 := return (← u64).toInt64
-
 /-- CompactSize, rejecting non-canonical encodings (as Bitcoin Core does). -/
 def compact : Reader UInt64 := do
   let tag ← u8
@@ -108,11 +95,6 @@ def compact : Reader UInt64 := do
     let v ← le 8
     if v ≤ 0xffffffff then throw "non-canonical CompactSize"
     return v
-
-def varBytes (max : Nat := 4_000_000) : Reader ByteArray := do
-  let n ← compact
-  if n.toNat > max then throw s!"length {n} above {max}"
-  bytes n.toNat
 
 end Reader
 end Winnow

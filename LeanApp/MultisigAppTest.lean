@@ -15,7 +15,7 @@ import TestKit.Fixtures
   the combined filter scan drives (payments, spends, conflicts, reorgs), against `MultisigStore`;
 * `AppTests/MultisigAccountFlowTests.swift` without the Ledger: the builder (with another Winnow's key and a
   recovery path), a co-signer's spend signed on two phones with BIP326 sequences, the recovery path's age
-  check and the Advanced-mode gate, through `Backend.real` (`Real/Multisig.lean`) on wallets opened from
+  check and the Advanced-mode gate, through `Backend.realWithMultisig` (`Real/Multisig.lean`) on wallets opened from
   disk with no network;
 * Settings → Signers as a person uses it: a signer saved from pasted keys, opened, renamed and removed (one an
   account still uses among them), through the app's own `perform` on that backend.
@@ -512,7 +512,7 @@ def testDuplicateWrongNetworkAndBadNamesAreRefused : IO Unit := do
 /-! ## MultisigAccountFlowTests (no Ledger) -/
 
 /-- A ready phone (`readyMultisigModel`): a signet wallet created from one repeated entropy byte in its own
-directory, opened by `Backend.real` with no network. -/
+directory, opened by `Backend.realWithMultisig` with no network. -/
 structure Phone where
   backend : Backend
   env : Real.Env

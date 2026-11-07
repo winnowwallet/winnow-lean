@@ -75,8 +75,6 @@ def serialized (tx : Transaction) (includeWitness : Bool) : ByteArray := Id.run 
 
 /-- txid in internal byte order (SHA256d of the no-witness serialization). -/
 def txid (tx : Transaction) : ByteArray := sha256d (tx.serialized false)
-/-- wtxid in internal byte order (SHA256d of the witness serialization). -/
-def wtxid (tx : Transaction) : ByteArray := sha256d (tx.serialized true)
 
 /-- The bound on a serialized script field (not `MAX_SCRIPT_SIZE`, see the Swift original). -/
 def maxSerializedScript : Nat := 4_000_000

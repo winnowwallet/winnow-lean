@@ -16,7 +16,7 @@ structure RecordsCtx where
   /-- The records of the current network (the core swaps it on a network switch). -/
   store : IO RecordsStore
   wallet : IO (Option Wallet)
-  /-- The explorer GET (`url`, `maximumBytes`), e.g. `routedGetter httpClient`. -/
+  /-- The explorer GET (`url`, `maximumBytes`). -/
   http : String → Nat → IO ByteArray
   /-- `e2e?.journal(_:fields:)` (test mode); a no-op otherwise. -/
   journal : String → List (String × String) → IO Unit := fun _ _ => pure ()

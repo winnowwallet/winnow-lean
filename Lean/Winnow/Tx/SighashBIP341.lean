@@ -29,8 +29,6 @@ structure SpentOutput where
   scriptPubKey : ByteArray
   deriving Inhabited
 
-instance : BEq SpentOutput := ⟨fun a b => a.amount == b.amount && a.scriptPubKey == b.scriptPubKey⟩
-
 /-- A BIP341 hash_type byte. -/
 structure HashType where
   rawValue : UInt8
@@ -45,7 +43,6 @@ def baseType (h : HashType) : UInt8 := h.rawValue &&& 0x03
 def isValid (h : HashType) : Bool := h.rawValue == 0 || (h.baseType != 0 && h.rawValue &&& 0x7C == 0)
 def isAnyoneCanPay (h : HashType) : Bool := h.rawValue &&& 0x80 != 0
 def commitsToAllOutputs (h : HashType) : Bool := h.rawValue == 0x00 || h.rawValue == 0x01
-def anyoneCanPay (h : HashType) : HashType := ⟨h.rawValue ||| 0x80⟩
 end HashType
 
 /-- The BIP342 common signature message extension (ext_flag = 1). -/

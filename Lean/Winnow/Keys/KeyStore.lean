@@ -5,8 +5,7 @@ import Winnow.Text.UTF8
 /-! # Wallet secret storage (port of `Keys/KeyStore.swift`)
 
 `KeyStore` is a structure of functions over a monad, the Lean form of the Swift protocol. The device
-implementation (`KeychainStore.swift`, Security framework) is not ported here: it becomes an iOS capability.
-`InMemoryKeyStore` is the store of `Tests/Support/InMemoryKeyStore.swift`. -/
+implementation (`KeychainStore.swift`, Security framework) is not ported here: it becomes an iOS capability. -/
 
 namespace Winnow.Keys
 
@@ -115,17 +114,5 @@ structure KeyStore (m : Type → Type) [Monad m] where
 /-- The contents of an in-memory store. Swift dictionary keys compare by canonical equivalence, so IDs
 are kept in NFD. -/
 abbrev InMemorySecrets := Std.HashMap String WalletSecret
-
-/-- An in-memory `KeyStore` over a state of secrets (not persisted). -/
-def InMemoryKeyStore {m : Type → Type} [Monad m] [MonadStateOf InMemorySecrets m] : KeyStore m where
-  store secret id := do
-    let k := Unicode.nfd id
-    if (← (get : m InMemorySecrets)).contains k then throw (.alreadyExists id)
-    modify (m := m) (σ := InMemorySecrets) (·.insert k secret)
-  load id := do
-    match (← (get : m InMemorySecrets))[Unicode.nfd id]? with
-    | some s => pure s
-    | none => throw (.notFound id)
-  delete id := modify (m := m) (σ := InMemorySecrets) (·.erase (Unicode.nfd id))
 
 end Winnow.Keys

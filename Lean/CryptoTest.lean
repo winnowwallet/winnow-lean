@@ -322,6 +322,9 @@ def coreCompact : List (UInt32 × Nat × UInt32) := [
   (0x20123456, 0x123456 * 2 ^ 232, 0x20123456), (0x1d00ffff, 0xffff * 2 ^ 208, 0x1d00ffff)]
 
 def retargetRules : IO Unit := do
+  for (name, p) in [("mainnet", mainnet), ("signet", signet), ("regtest", regtest)] do
+    check s!"params: {name} are well formed" p.valid
+  check "params: signet's magic comes from its challenge" (signet.magic == signetMagic signetChallenge)
   for (name, height, firstTime, lastTime, lastBits, want) in corePowTests do
     let r := HeaderChain.expectedBits height (timedHeader lastTime lastBits) (some (timedHeader firstTime 0)) mainnet
     check s!"retarget: {name}" (expectedIs r want) (showExpected r)

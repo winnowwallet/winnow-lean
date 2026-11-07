@@ -408,12 +408,6 @@ def parseURL (s : String) : Option URLParts := do
   let again ← parseURLOnce u.render
   return { again with rebuilt := true }
 
-/-- Scheme (lowercased) and host of a URL string (`URL(string:)?.scheme`, `.host`); none when it has neither. -/
-def urlParts (s : String) : Option (String × String) :=
-  (parseURL s).bind fun u => match u.scheme, u.host with
-    | some scheme, some host => some (scheme.toLower, host)
-    | _, _ => none
-
 /-- `URL(string:)?.host`. -/
 def urlHost (s : String) : Option String := (parseURL s).bind (·.host)
 

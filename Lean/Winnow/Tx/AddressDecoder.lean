@@ -74,9 +74,6 @@ def scriptPubKey (address : String) (network : BitcoinNetwork) : Except AddressE
     segwitScriptPubKey address network
   else base58ScriptPubKey address network
 
-/-- Whether a scriptPubKey is P2TR (OP_1 ‹32 bytes›). -/
-def isP2TR (spk : ByteArray) : Bool := spk.size == 34 && spk[0]! == 0x51 && spk[1]! == 0x20
-
 /-- The standard address for a payment output, if Winnow can pay it. -/
 def address (script : ByteArray) (network : BitcoinNetwork) : Option String :=
   let n := script.size

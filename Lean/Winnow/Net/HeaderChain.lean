@@ -6,8 +6,8 @@ import Std.Data.HashMap
 /-! # The header chain (`Network/Headers/HeaderChain.swift`)
 
 The Swift `HeaderChain` is an actor owning a file. Here it is a value: `connect` returns the next chain,
-what the batch did, and the storage writes the I/O layer must apply in order (`StorageWrite`), which
-`StorageWrite.apply` also simulates on the file's bytes. The device clock (`now`) is an argument.
+what the batch did, and the storage writes the I/O layer must apply in order (`StorageWrite`). The device
+clock (`now`) is an argument.
 
 Validated per header, as in Swift: linkage, compact bits → target ≤ powLimit, SHA256d(header) ≤ target,
 the timestamp at most two hours past `now`, and the required difficulty (every
@@ -91,21 +91,6 @@ inductive StorageWrite where
   | append (offset : Nat) (payload : ByteArray) (length : Nat) (countOffset : Nat) (count : ByteArray)
   deriving Inhabited
 
-/-- `bytes` written at `offset` (a write past the end zero-fills the gap, as a seek-and-write does). -/
-def writeAt (file : ByteArray) (offset : Nat) (bytes : ByteArray) : ByteArray := Id.run do
-  let mut f := file
-  while f.size < offset do f := f.push 0
-  let head := f.extract 0 offset
-  let tail := if offset + bytes.size < f.size then f.extract (offset + bytes.size) f.size else .empty
-  return head ++ bytes ++ tail
-
-def StorageWrite.apply (file : Option ByteArray) : StorageWrite → ByteArray
-  | .replace b => b
-  | .append off payload len cOff count =>
-    let f := writeAt (file.getD .empty) off payload
-    let f := if f.size ≥ len then f.extract 0 len else writeAt f len .empty
-    writeAt f cOff count
-
 structure HeaderChain where
   params : NetworkParams
   /-- Main chain; element 0 is at `baseHeight`. -/
@@ -135,8 +120,6 @@ def tip (c : HeaderChain) : BlockHeader := c.headers.back!
 def tipHash (c : HeaderChain) : ByteArray := c.tip.hash
 def height (c : HeaderChain) : UInt32 := c.baseHeight + (c.headers.size - 1).toUInt32
 def startHeight (c : HeaderChain) : UInt32 := c.baseHeight
-/-- Cumulative chainwork at the tip, big-endian. -/
-def tipWork (c : HeaderChain) : ByteArray := c.chainwork.back!.bigEndianData
 
 def header? (c : HeaderChain) (height : UInt32) : Option BlockHeader :=
   if height < c.baseHeight then none else c.headers[(height - c.baseHeight).toNat]?
