@@ -1173,6 +1173,68 @@ def testAThresholdAccountAsOneMember : IO Unit := do
   let screen ← screenOf (← Real.reviewMultisigPSBT phone.env phone.multisig estateID o.base64)
   check "Carol completes the family" (screen.progress.complete && (completePaths screen).length == 1)
 
+/-- What an account's page says of a recovery path of fewer members. The recovery leaves alone can read as
+more members than the account has, and it is the members of the policy line above that the page counts. -/
+def testRecoveryTextCountsTheAccountsMembers : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let ms ← masters
+  let phoneKey ← phone.keyExpression
+  let bob ← keyExpression ms[1]!
+  let carol ← keyExpression ms[2]!
+  let dave ← keyExpression (← master 0xE5)
+  let erin ← keyExpression (← master 0xE6)
+  let frank ← keyExpression (← master 0xE7)
+  let textOf (id : String) : IO (Option String × Option String) := do
+    let info := (← phone.accounts).find? (·.id == id)
+    return (info.bind (·.policy), info.bind (·.recovery))
+  -- Recovery by all three members: every leaf holds Carol, Dave, Erin and Frank, so they read as one key each.
+  let (everyID, everyD, _) ← phone.backend.createMultisigAccount true "Everyone" 2
+    [([phoneKey, bob], some 1), ([carol, dave, erin], none), ([frank], none)] (some (.fewerSigners 3 144))
+  let every ← need "everyone" (MultisigAccount.parse everyD signet)
+  check "every member: two recovery leaves" (every.recoveryLeaves.size == 2)
+  check "every member: the leaves alone read five members"
+    ((every.recoveryMembers.map fun m => (m.threshold, m.groups.size)) == some (5, 5))
+  let (policy, recovery) ← textOf everyID
+  check "every member: the policy" (policy == some "2 of 3 members, one of them 1 of 2") s!"{policy}"
+  check "every member: the recovery text" (recovery == some "after 144 blocks: any 3 of the members") s!"{recovery}"
+  -- Recovery by any one member: the 1-of-2 member's keys read as two members.
+  let (anyID, anyD, _) ← phone.backend.createMultisigAccount true "Anyone" 2
+    [([phoneKey, bob], some 1), ([carol], none), ([dave], none)] (some (.fewerSigners 1 144))
+  let any ← need "anyone" (MultisigAccount.parse anyD signet)
+  check "any member: four recovery leaves" (any.recoveryLeaves.size == 4)
+  check "any member: the leaves alone read four members"
+    ((any.recoveryMembers.map fun m => (m.threshold, m.groups.size)) == some (1, 4))
+  let (policy, recovery) ← textOf anyID
+  check "any member: the policy" (policy == some "2 of 3 members, one of them 1 of 2") s!"{policy}"
+  check "any member: the recovery text" (recovery == some "after 144 blocks: any 1 of the members") s!"{recovery}"
+  -- Every member signs, so the policy reads Erin and Frank as two members, where recovery can tell them one.
+  let (allID, allD, _) ← phone.backend.createMultisigAccount true "All of us" 3
+    [([phoneKey, bob, carol], some 2), ([dave, erin], none), ([frank], none)] (some (.fewerSigners 2 144))
+  check "all members: seven recovery leaves" ((← need "all of us" (MultisigAccount.parse allD signet)).recoveryLeaves.size == 7)
+  let (policy, recovery) ← textOf allID
+  check "all members: the policy" (policy == some "4 of 4 members, one of them 2 of 3") s!"{policy}"
+  check "all members: the recovery text" (recovery == some "after 144 blocks: any 2 of the members") s!"{recovery}"
+  -- Two members whose every leaf would hold both are an ordinary account, with members only in recovery.
+  let (flatID, flatD, _) ← phone.backend.createMultisigAccount true "Ordinary" 2
+    [([phoneKey, bob], none), ([carol], none)] (some (.fewerSigners 1 144))
+  check "ordinary: not nested, two recovery leaves" ((← need "ordinary" (MultisigAccount.parse flatD signet)).recoveryLeaves.size == 2)
+  let (policy, recovery) ← textOf flatID
+  check "ordinary: the policy" (policy == some "3 of 3") s!"{policy}"
+  check "ordinary: the recovery text" (recovery == some "after 144 blocks: any 1 of the members") s!"{recovery}"
+  -- Keys of no member, from someone else's descriptor: leaves that read as members of their own, but are not.
+  let bare (key : String) := (key.dropEnd "/<0;1>/*".length).copy
+  let nums := Winnow.hex Keys.Taproot.unspendableInternalKey
+  let (firstKey, secondKey) := (← keyExpression (← master 0xE8), ← keyExpression (← master 0xE9))
+  let separate := s!"tr({nums},\{\{sortedmulti_a(2,{phoneKey},{bob}),sortedmulti_a(2,{bare phoneKey}/<2;3>/*,{carol})},\{and_v(v:pk({firstKey}),older(144)),and_v(v:pk({secondKey}),older(144))}})"
+  let (policy, recovery) ← textOf (← phone.join "Two heirs" separate)
+  check "separate keys: the policy" (policy == some "2 of 2 members, one of them 1 of 2") s!"{policy}"
+  check "separate keys: the recovery text" (recovery == some "after 144 blocks: any of 2 recovery groups") s!"{recovery}"
+  -- Signers' keys, in leaves that read as more members than the account's two.
+  let cross := s!"tr({nums},\{\{sortedmulti_a(2,{phoneKey},{bob}),sortedmulti_a(2,{carol},{dave})},\{and_v(v:multi_a(3,{bare phoneKey}/<2;3>/*,{bare bob}/<2;3>/*,{bare carol}/<2;3>/*),older(144)),and_v(v:multi_a(3,{bare phoneKey}/<4;5>/*,{bare bob}/<4;5>/*,{bare dave}/<2;3>/*),older(144))}})"
+  let (policy, recovery) ← textOf (← phone.join "Crossed" cross)
+  check "crossed leaves: the policy" (policy == some "1 of 2 members") s!"{policy}"
+  check "crossed leaves: the recovery text" (recovery == some "after 144 blocks: any of 2 recovery groups") s!"{recovery}"
+
 def testPairingSavingAndRegisteringAreAdvancedModeOnly : IO Unit := do
   let phone ← phoneWith 0xA1
   phone.useLedger (← simulator 0xB2)
@@ -1185,6 +1247,7 @@ def testPairingSavingAndRegisteringAreAdvancedModeOnly : IO Unit := do
 def nestedTests : List (String × IO Unit) :=
   [ ("testTwoPhonesWithLedgersAndAThirdMember", testTwoPhonesWithLedgersAndAThirdMember)
   , ("testAThresholdAccountAsOneMember", testAThresholdAccountAsOneMember)
+  , ("testRecoveryTextCountsTheAccountsMembers", testRecoveryTextCountsTheAccountsMembers)
   , ("testPairingSavingAndRegisteringAreAdvancedModeOnly", testPairingSavingAndRegisteringAreAdvancedModeOnly) ]
 
 /-- The signer list is not a wallet's: deleting the wallet keeps `signers.json`, and the list reads back. -/

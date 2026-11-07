@@ -919,9 +919,12 @@ def MultisigApp.allHooks (a : MultisigApp) (base : Hooks) : Hooks :=
 
 /-! ## What the screens show -/
 
-/-- `MultisigAccountView.recoveryText`: "after 4320 blocks: any 1 of the signers", or "… the recovery key". -/
+/-- `MultisigAccountView.recoveryText`: "after 4320 blocks: any 1 of the signers", or "… the recovery key";
+"… any 2 of the members" in the count of the policy line above it, or, for several leaves that are not a
+group of those members, "… any of 2 recovery groups", the groups the signing screen shows. -/
 def recoveryText (r : MultisigAccount.Recovery) (account : MultisigAccount) : String :=
-  if let some members := account.recoveryMembers then s!"after {r.blocks} blocks: any {members.threshold} of the members" else
+  if let some count := account.recoveryMemberCount then s!"after {r.blocks} blocks: any {count} of the members" else
+  if account.recoveryLeaves.size > 1 then s!"after {r.blocks} blocks: any of {account.recoveryLeaves.size} recovery groups" else
   let signerKeys := account.signers.filterMap fun s => (MultisigAccount.extendedKey? s).map (·.1.publicKey)
   let reused := r.keys.all fun k => match MultisigAccount.extendedKey? k with
     | some (x, _) => signerKeys.contains x.publicKey

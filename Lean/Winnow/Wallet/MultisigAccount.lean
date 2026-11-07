@@ -901,6 +901,25 @@ group of them; `none` for one leaf. -/
 def recoveryMembers (a : MultisigAccount) : Option Members :=
   if a.recoveryLeaves.size > 1 then membersOf (a.recoveryLeaves.map fun l => (l.threshold, l.keys)) else none
 
+/-- How many members a recovery path of fewer members takes, for the page under `policySummary`, which it
+must not outnumber. `recoveryMembers` alone can: leaves that hold every member, or that are any one member,
+cannot be told into members (`membersOf`). So in a nested account the leaves are first read as every group
+of the account's `members`. They are not when those are read finer than the leaves can be (every member
+signing, so one that is always needed whole reads as its keys); the leaves' own count then stands, if
+within the members. `none` for a recovery key that is not a signer's, or leaves that are not of this shape:
+the page then claims no members. -/
+def recoveryMemberCount (a : MultisigAccount) : Option Nat := do
+  let read ← a.recoveryMembers
+  let family := LeafFamily.ofLeaves (a.recoveryLeaves.map (·.keys))
+  guard (family.order.all (a.signers.map identity).contains)
+  unless a.isNested do return read.threshold
+  let own ← a.members
+  let groups := own.groups.map (·.map identity)
+  if let some size := family.groupSize groups then
+    if family.matchesGroups groups own.thresholds size then return size
+  guard (read.threshold ≤ own.groups.size)
+  return read.threshold
+
 /-- ", one of them 2 of 3"; ", two of them 2 of 3, one 1 of 2"; "" when every member signs with all its
 keys. -/
 def thresholdMembersText (members : Members) : String := Id.run do
