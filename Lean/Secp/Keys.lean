@@ -27,12 +27,6 @@ inductive Err where
   | invalidAuxiliaryRand | signingFailed | internal
   deriving Repr, DecidableEq
 
-def Err.name : Err → String
-  | .invalidPrivateKey => "invalidPrivateKey" | .invalidPublicKey => "invalidPublicKey"
-  | .invalidTweak => "invalidTweak" | .invalidResult => "invalidResult"
-  | .invalidAuxiliaryRand => "invalidAuxiliaryRand" | .signingFailed => "signingFailed"
-  | .internal => "internal"
-
 abbrev R := Except Err
 
 def Gpt : APoint := .pt (Fq.ofNat Spec.Gx.val) (Fq.ofNat Spec.Gy.val)
@@ -78,11 +72,6 @@ def mulGAdd (k : Nat) (p : APoint) : R APoint :=
 /-- Exactly 32 bytes below `N`. -/
 def scalar? (b : ByteArray) : Option Nat :=
   if b.size = 32 ∧ fromBE b < N then some (fromBE b) else none
-
-def secret (b : ByteArray) : R Nat :=
-  match scalar? b with
-  | some d => if d = 0 then throw .invalidPrivateKey else pure d
-  | none => throw .invalidPrivateKey
 
 def tweak (b : ByteArray) : R Nat :=
   match scalar? b with | some t => pure t | none => throw .invalidTweak

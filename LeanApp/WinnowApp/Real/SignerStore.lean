@@ -168,8 +168,6 @@ def configure (keys : StoreKeyVault) (path : Option System.FilePath) (network : 
 def requireReadable (s : SignerStore) : RM Unit := do
   if s.isDamaged then fail .damaged
 
-def record? (s : SignerStore) (id : String) : Option SignerRecord := s.records.find? (·.id == id)
-
 /-- `append`: refuses past the ceiling and any key another record already holds. -/
 def append (s : SignerStore) (keys : StoreKeyVault) (writeData : WriteData) (r : SignerRecord) : RM SignerStore := do
   unless s.records.size < SignerRecord.maximumSigners do fail .tooMany

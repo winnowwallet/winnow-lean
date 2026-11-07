@@ -1,6 +1,6 @@
 import WinnowApp.Real.BackgroundSync
 
-/-! # `Backend.real`: the core half of AppModel behind the `Backend` record
+/-! # The real backend: the core half of AppModel behind the `Backend` record
 
 Every field is one AppModel method (file:line in each `Real/*` module's doc). The people and label
 fields stay `notPorted` here (the records half plugs them in over this backend, through `Deps.hooks`
@@ -79,11 +79,5 @@ def Env.backend (env : Env) : Backend :=
     cancelBackgroundSync := cancelBackgroundSync env }
 
 end Real
-
-/-- The core half alone over the injected capabilities, with its diagnostics handle (`Real/Full.lean`
-adds the records half: `Backend.realWithEnv`). -/
-def Backend.coreWithEnv (deps : Real.Deps) : IO (Backend × Real.Env) := do
-  let env ← Real.Env.new deps
-  return (env.backend, env)
 
 end WinnowApp

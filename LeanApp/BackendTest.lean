@@ -4,7 +4,7 @@ import TestKit.Fixtures
 import TestKit.Regtest
 open Lean Winnow Winnow.IO Winnow.Net WinnowApp TestKit TestKit.Regtest
 
-/-! `backend-test`: `Backend.real` end to end against a disposable regtest bitcoind, through the
+/-! `backend-test`: `Backend.realWithMultisig` end to end against a disposable regtest bitcoind, through the
 Backend fields only (plus the diagnostics handle for "no loop survives a stop").
 
 The node is TestKit.Regtest's, as io-test's (temp datadir, random free ports, compact-filter

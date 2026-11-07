@@ -81,7 +81,7 @@ def verifiedSignatures (tx : Transaction) (spent : SighashBIP341.SpentOutput) : 
   let w := input.witness
   unless w.size ≥ 2 do throw "short witness"
   let leafScript := w[w.size - 2]!
-  let cb ← needE "control block" (·.name) (Taproot.ControlBlock.parse w[w.size - 1]!)
+  let some cb := Tx.Taproot.ControlBlock.parse? w[w.size - 1]! | throw "control block"
   let root := cb.path.foldl Taproot.branchHash (Taproot.leafHash cb.leafVersion leafScript)
   let (outputKey, parity) ← needE "tweak" (·.name) (Taproot.tweakedOutputKey cb.internalKey (some root))
   check "replay: output key" (outputKey == suffixBytes spent.scriptPubKey 32)
@@ -1023,7 +1023,6 @@ def feeResolution : TM Unit := do
 
 def hasText (s t : String) : Bool := (s.splitOn t).length > 1
 def sortedNats (xs : Array Nat) : List Nat := xs.toList.mergeSort
-def sortedInts (xs : Array Int) : List Int := xs.toList.mergeSort
 
 /-- Members of a nested test account: the masters, the members' key expressions, the account. -/
 structure Family where

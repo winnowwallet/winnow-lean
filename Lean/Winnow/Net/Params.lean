@@ -11,12 +11,6 @@ inductive BitcoinNetwork where
   | mainnet | signet | regtest
   deriving BEq, Inhabited, Repr, DecidableEq
 
-def BitcoinNetwork.rawValue : BitcoinNetwork → String
-  | .mainnet => "mainnet" | .signet => "signet" | .regtest => "regtest"
-
-def BitcoinNetwork.ofRaw? : String → Option BitcoinNetwork
-  | "mainnet" => some .mainnet | "signet" => some .signet | "regtest" => some .regtest | _ => none
-
 /-- A peer's host/port. -/
 structure PeerEndpoint where
   host : String
@@ -31,8 +25,6 @@ structure Checkpoint where
   header : ByteArray
   chainwork : ByteArray
   deriving Inhabited
-
-instance : BEq Checkpoint := ⟨fun a b => a.height == b.height && a.header == b.header && a.chainwork == b.chainwork⟩
 
 structure NetworkParams where
   network : BitcoinNetwork

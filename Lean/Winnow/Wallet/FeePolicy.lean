@@ -19,12 +19,6 @@ def Priority.satPerVByte : Priority → Float
   | .medium => 5
   | .high => 12
 
-def Priority.ofString? : String → Option Priority
-  | "low" => some .low
-  | "medium" => some .medium
-  | "high" => some .high
-  | _ => none
-
 /-- Median of the samples (`none` when empty): the middle one, or the mean of the two middle ones. -/
 def median (samples : Array Float) : Option Float :=
   if samples.isEmpty then none

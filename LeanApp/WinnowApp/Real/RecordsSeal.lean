@@ -145,8 +145,6 @@ def description : RecordsError → String
 
 end RecordsError
 
-instance : ToString RecordsError := ⟨RecordsError.description⟩
-
 /-- A records operation. -/
 abbrev RM := ExceptT RecordsError IO
 
@@ -192,9 +190,6 @@ def liftWallet {α} (network : Tx.BitcoinNetwork) (x : WM α) : RM α := do
   | .error e => throw (namedError e.name network)
 
 /-! ## Networks -/
-
-def Network.toBitcoin : Network → Tx.BitcoinNetwork
-  | .mainnet => .mainnet | .signet => .signet | .regtest => .regtest
 
 def networkRaw (n : Tx.BitcoinNetwork) : String := Wallet.networkName n
 

@@ -25,7 +25,7 @@ name = "WinnowApp"
 name = "ios-project"
 root = "IosProject"
 
-# `Backend.real` end to end against a disposable regtest bitcoind (BackendTest.lean).
+# `Backend.realWithMultisig` end to end against a disposable regtest bitcoind (BackendTest.lean).
 [[lean_exe]]
 name = "backend-test"
 root = "BackendTest"

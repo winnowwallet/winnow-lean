@@ -7,7 +7,7 @@ import WinnowApp.Backend
 import WinnowApp.Pure
 import WinnowApp.Payments
 
-/-! # `Backend.real`: shared state, injected capabilities, error texts
+/-! # The real backend: shared state, injected capabilities, error texts
 
 The Swift `AppModel` is a `@MainActor` class whose async methods interleave at every `await`. Here the
 backend's own state (wallet, stack, generation, in-flight flags, the reviewed previews) is one `Core`
@@ -78,9 +78,7 @@ structure Hooks where
   multisigSnapshot : Std.HashSet ByteArray → Tx.BitcoinNetwork → List HistoryItem → IO (Int × List DisplayedPayment) :=
     fun _ _ wallet => pure (0, payments wallet [] [])
 
-instance : Inhabited Hooks := ⟨{}⟩
-
-/-- Platform capabilities and tunables, injected (`Backend.real` builds nothing platform-specific). -/
+/-- Platform capabilities and tunables, injected (the real backend builds nothing platform-specific). -/
 structure Deps where
   keyStore : Keys.KeyStore IO
   fetch : HttpFetch

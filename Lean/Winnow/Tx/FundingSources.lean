@@ -13,17 +13,6 @@ inductive Revelation where
   | coinbase | taprootKeyPath | unrecognized
   deriving Repr, BEq, Inhabited
 
-def Revelation.name : Revelation → String
-  | .publicKeyHash => "publicKeyHash" | .scriptHash => "scriptHash" | .witnessKeyHash => "witnessKeyHash"
-  | .witnessScriptHash => "witnessScriptHash" | .taprootScriptPath => "taprootScriptPath"
-  | .coinbase => "coinbase" | .taprootKeyPath => "taprootKeyPath" | .unrecognized => "unrecognized"
-
-structure Source where
-  inputIndex : Nat
-  revelation : Revelation
-  scriptPubKey : Option ByteArray
-  deriving Inhabited
-
 /-- DER-encoded ECDSA signature plus sighash byte (shape only). -/
 def looksLikeSignature (d : ByteArray) : Bool := d.size ≥ 9 && d.size ≤ 73 && d[0]! == 0x30
 
@@ -113,12 +102,6 @@ def revelation (input : Transaction.Input) : Revelation × Option ByteArray :=
   else if !input.scriptSig.isEmpty then legacyRevelation input.scriptSig
   else if input.witness.isEmpty then (.unrecognized, none)
   else segwitRevelation input.witness
-
-/-- Per-input reconstruction, in input order. -/
-def sources (tx : Transaction) : Array Source :=
-  tx.inputs.mapIdx fun i input =>
-    let (r, s) := revelation input
-    { inputIndex := i, revelation := r, scriptPubKey := s }
 
 /-- The distinct revealed funding scripts, in first-seen order. -/
 def fundingScripts (tx : Transaction) : Array ByteArray := Id.run do

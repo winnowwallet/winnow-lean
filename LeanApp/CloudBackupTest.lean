@@ -179,11 +179,6 @@ def fixture : TM Fixture := do
     receiveLabels := #[(hex script, "Private invoice")], ownDisplayName := "Me", advancedMode := true }
   return { bundle, state, dir }
 
-def peopleStore (dir : System.FilePath) : TM PeopleStore := do
-  let vault := StoreKeyVault.inMemory (← IO.mkRef {})
-  let (s, _) ← PeopleStore.configure vault (some (dir / "people.json")) .mainnet
-  return s
-
 def cloudContextRoundTrips : TM Unit := do
   let f ← fixture
   let restored ← match ← need "decode" (CloudAppState.decode (some f.state.encoded) f.bundle) with

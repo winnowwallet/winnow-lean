@@ -214,8 +214,6 @@ abbrev NetM := EIO NetError
 
 instance : MonadLift IO NetM := ⟨IO.toEIO fun e => NetError.other (toString e)⟩
 
-def NetM.toIO {α} (x : NetM α) : IO α := EIO.toIO (fun e => IO.userError (toString e)) x
-
 /-- Runs and returns the outcome (never throws). -/
 def NetM.attempt {α} (x : NetM α) : BaseIO (Except NetError α) := EIO.toBaseIO x
 

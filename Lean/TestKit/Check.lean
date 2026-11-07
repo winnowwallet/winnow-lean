@@ -57,8 +57,6 @@ class Describe (ε : Type) where
   name : ε → String
   describe : ε → String := name
 
-instance : Describe String := ⟨id, id⟩
-
 /-- What a test's step returns, as an `Except`: a pure `Except ε` or an `ExceptT ε IO` (MAM, WM, RM, …). -/
 class Outcome (m : Type → Type) (ε : outParam Type) where
   outcome {α : Type} : m α → IO (Except ε α)

@@ -21,7 +21,6 @@ def run {α} (r : Wire α) (b : ByteArray) : Except WireError (α × Nat) :=
   (fun (a, rd) => (a, rd.offset)) <$> ByteReader.M.run r (ByteReader.init b)
 
 def remaining : Wire Nat := ByteReader.remainingM
-def offset : Wire Nat := do return (← get).offset
 def bytes (n : Nat) : Wire ByteArray := ByteReader.readBytes n
 def u8 : Wire UInt8 := ByteReader.readUInt8
 def u16 : Wire UInt16 := ByteReader.readUInt16

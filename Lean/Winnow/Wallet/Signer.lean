@@ -55,19 +55,6 @@ def witness (tx : Transaction) (inputIndex : Int) (spentOutputs : Array SighashB
   let sighash ← (SighashBIP341.sighash tx inputIndex spentOutputs hashType).mapError .sighash
   return #[← signItem sighash tweakedPrivateKey auxiliaryRand hashType]
 
-/-- Signs every input; `privateKeyFor` maps a spent scriptPubKey to its tweaked secret. -/
-def sign (tx : Transaction) (spentOutputs : Array SighashBIP341.SpentOutput) (hashType : SighashBIP341.HashType := .default)
-    (auxiliaryRand : ByteArray) (privateKeyFor : ByteArray → Option ByteArray) : M Transaction := do
-  unless tx.inputs.size == spentOutputs.size do
-    throw (.signer (.spentOutputCountMismatch tx.inputs.size spentOutputs.size))
-  let mut tx := tx
-  for h : i in [0:tx.inputs.size] do
-    let script := spentOutputs[i]!.scriptPubKey
-    let some key := privateKeyFor script | throw (.signer (.missingKey (hex script)))
-    let w ← witness tx i spentOutputs key hashType auxiliaryRand
-    tx := { tx with inputs := tx.inputs.modify i fun inp => { inp with witness := w } }
-  return tx
-
 /-- A BIP342 script-path signature (untweaked key; the sighash commits to the leaf and the annex). -/
 def scriptPathSignature (tx : Transaction) (inputIndex : Int) (spentOutputs : Array SighashBIP341.SpentOutput)
     (leafScript : Script) (leafVersion : UInt8 := Tx.Taproot.leafVersion) (hashType : SighashBIP341.HashType := .default)

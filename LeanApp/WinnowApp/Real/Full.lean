@@ -2,7 +2,7 @@ import WinnowApp.Real.Assemble
 import WinnowApp.Real.RecordsBackend
 import WinnowApp.Real.Multisig
 
-/-! # `Backend.real`: the core half with the records half plugged in
+/-! # The real backend: the core half with the records half plugged in
 
 The records (`people.json`, `receive-labels.json` of the network directory) open where AppModel's
 `configurePeople` runs: on every `Hooks.configure` (boot, adopting a wallet, deleting one). The core
@@ -122,9 +122,5 @@ def Backend.realWithEnv (deps : Real.Deps) (ledger : IO Real.LedgerSession := Re
     IO (Backend × Real.Env) := do
   let (b, env, _) ← Backend.realWithMultisig deps ledger
   return (b, env)
-
-/-- The real backend: the Lean WalletCore, the network stack and the records behind every field. -/
-def Backend.real (deps : Real.Deps) (ledger : IO Real.LedgerSession := Real.noLedger) : IO Backend := do
-  return (← Backend.realWithEnv deps ledger).1
 
 end WinnowApp

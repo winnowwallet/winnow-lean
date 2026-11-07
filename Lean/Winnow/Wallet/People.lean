@@ -189,8 +189,6 @@ inductive PersonPasteError where
   | empty | unrecognised
   deriving Inhabited, BEq
 
-def PersonPasteError.name : PersonPasteError → String | .empty => "empty" | .unrecognised => "unrecognised"
-
 def PersonPasteError.description : PersonPasteError → String
   | .empty => "Paste the person's Winnow card, their public account key, or a Bitcoin address."
   | .unrecognised => "That doesn't look like a Winnow card, a public account key or a Bitcoin address."
@@ -256,9 +254,6 @@ end PersonCard
 inductive PersonImport.Source where
   | card | keyExpression | descriptor | address
   deriving Inhabited, BEq
-
-def PersonImport.Source.name : PersonImport.Source → String
-  | .card => "card" | .keyExpression => "keyExpression" | .descriptor => "descriptor" | .address => "address"
 
 structure PersonImport where
   name : Option String

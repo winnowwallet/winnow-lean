@@ -29,14 +29,6 @@ namespace Script
 
 def empty : Script := ⟨.empty⟩
 
-/-- `Script(hex:)`: whitespace-trimmed, an optional `0x` prefix, non-empty and even. -/
-def ofHex? (s : String) : Option Script :=
-  let t := Wire.trimWhitespace s
-  let t := if t.startsWith "0x" then String.ofList (t.toList.drop 2) else t
-  (Wire.bytesOfHexChars t.toList).map Script.mk
-
-def hex (s : Script) : String := Winnow.hex s.bytes
-
 namespace Op
 def zero : UInt8 := 0x00
 def pushData1 : UInt8 := 0x4c

@@ -33,9 +33,6 @@ structure CloudAppState where
 
 namespace CloudAppState
 
-/-- `SignerStore.maximumFileBytes`. -/
-def maximumSignerFileBytes : Nat := 1_024 * 1_024
-
 private def sortedLabels (labels : Array (String × String)) : Array (String × String) :=
   (labels.toList.mergeSort fun a b => !(b.1 < a.1)).toArray
 

@@ -27,9 +27,6 @@ inductive SignError where
   | signing (e : SignFailure)
   deriving Inhabited
 
-def SignError.name : SignError → String
-  | .ledger e => e.name | .psbt e => e.name | .signing e => e.name
-
 def SignError.ofRole : PSBTRoleError → SignError
   | .psbt e => .psbt e | .sign e => .signing e
 

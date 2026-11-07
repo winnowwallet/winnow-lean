@@ -42,7 +42,6 @@ instance : Add UInt256 := ⟨fun a b => ofNat (a.val + b.val)⟩
 instance : Sub UInt256 := ⟨fun a b => ofNat (a.val + modulus - b.val)⟩
 
 def shiftedLeft (x : UInt256) (bits : Nat) : UInt256 := ofNat (x.val <<< bits)
-def shiftedRight (x : UInt256) (bits : Nat) : UInt256 := ⟨x.val >>> bits⟩
 /-- Wrapping multiplication by a 32-bit factor, like Core's arith_uint256. -/
 def multiplied (x : UInt256) (factor : UInt32) : UInt256 := ofNat (x.val * factor.toNat)
 

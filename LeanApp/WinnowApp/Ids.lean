@@ -186,6 +186,5 @@ def sendFrom (accountID : String) : String := s!"sendFrom-{accountID}"
 def peerType (raw : String) : String := s!"peerType_{raw}"
 /-- A stepper's halves, as XCTest names them. -/
 def decrement (stepper : String) : String := stepper ++ "-Decrement"
-def increment (stepper : String) : String := stepper ++ "-Increment"
 
 end WinnowApp.Ids

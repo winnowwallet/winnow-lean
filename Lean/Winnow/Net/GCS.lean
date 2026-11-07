@@ -60,49 +60,6 @@ def maxEncodedSize : Nat := 4_000_000
 
 @[inline] def keyWords (key : ByteArray) : UInt64 × UInt64 := (readLE key 0 8, readLE key 8 8)
 
-/-- Bit `i` of the stream, most significant bit of each byte first. -/
-@[inline] def bitAt (b : ByteArray) (i : Nat) : Bool :=
-  ((b.get! (i >>> 3)) >>> (7 - (i &&& 7)).toUInt8) &&& 1 == 1
-
-/-- Builds a filter from byte-string items (callers pre-filter them, as BIP158 blocks do). -/
-def build (items : Array ByteArray) (p : UInt8 := defaultP) (m : UInt32 := defaultM) (key : ByteArray) :
-    Except GCSError GCSFilter := do
-  if key.size != 16 then throw .emptyKey
-  let unique : Std.HashSet ByteArray := items.foldl (·.insert ·) {}
-  let n := unique.size.toUInt32
-  if n == 0 then return { p, m, key, n, encoded := .empty }
-  let (k0, k1) := keyWords key
-  let f := n.toUInt64 * m.toUInt64
-  let hashed := (unique.toArray.map fun item => mulHi (sipHash k0 k1 item) f).qsort (· < ·)
-  let pp := p.toUInt64
-  let mask := (1 <<< pp) - 1
-  let mut out := ByteArray.emptyWithCapacity (hashed.size * (p.toNat + 2) / 8 + 1)
-  let mut cur : UInt8 := 0
-  let mut used : Nat := 0 -- bits used in `cur`
-  let mut last : UInt64 := 0
-  for value in hashed do
-    let delta := value - last
-    last := value
-    let quotient := delta >>> pp
-    -- unary quotient (ones), then a zero
-    let mut q := quotient
-    while q > 0 do
-      cur := cur ||| ((1 : UInt8) <<< (7 - used).toUInt8)
-      used := used + 1
-      if used == 8 then out := out.push cur; cur := 0; used := 0
-      q := q - 1
-    used := used + 1
-    if used == 8 then out := out.push cur; cur := 0; used := 0
-    let remainder := delta &&& mask
-    let mut i := p.toNat
-    while i > 0 do
-      i := i - 1
-      if (remainder >>> i.toUInt64) &&& 1 == 1 then cur := cur ||| ((1 : UInt8) <<< (7 - used).toUInt8)
-      used := used + 1
-      if used == 8 then out := out.push cur; cur := 0; used := 0
-  if used > 0 then out := out.push cur
-  return { p, m, key, n, encoded := out }
-
 /-- Leading one bits of each byte value (a table, so unary runs are counted a byte at a time). -/
 def leadingOnes : ByteArray := Id.run do
   let mut t := ByteArray.emptyWithCapacity 256
@@ -204,20 +161,6 @@ def serialized (f : GCSFilter) : ByteArray := compactSize f.n.toUInt64 ++ f.enco
   let pos := pos + ones + 1
   ((ones.toUInt64 <<< p.toUInt64) + readBits enc pos p.toNat, pos + p.toNat)
 
-def contains (f : GCSFilter) (item : ByteArray) : Bool := Id.run do
-  if f.n == 0 then return false
-  let target := f.hashedValue item
-  let mut pos := 0
-  let mut last : UInt64 := 0
-  for _ in [0:f.n.toNat] do
-    let (d, pos') := nextDelta f.encoded f.p pos
-    pos := pos'
-    let value := last + d
-    if value == target then return true
-    if value > target then return false
-    last := value
-  return false
-
 /-- BIP158 `MatchAny`: hash and sort the queries once, then one merge pass over the set. -/
 def matchAny (f : GCSFilter) (items : Array ByteArray) : Bool := Id.run do
   if f.n == 0 || items.isEmpty then return false
@@ -238,8 +181,6 @@ def containsAny (f : GCSFilter) (items : Array ByteArray) : Bool := f.matchAny i
 
 /-- BIP158 filter hash and header chain: SHA256d(SHA256d(filter) ‖ previousHeader). -/
 def filterHash (serializedFilter : ByteArray) : ByteArray := sha256d serializedFilter
-def filterHeader (serializedFilter previousHeader : ByteArray) : ByteArray :=
-  sha256d (filterHash serializedFilter ++ previousHeader)
 
 end GCSFilter
 end Winnow.Net

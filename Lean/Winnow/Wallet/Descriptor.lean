@@ -56,9 +56,6 @@ def DescriptorFailure.name : DescriptorFailure → String
   | .descriptor e => e.name | .taproot e => e.name | .multisig e => e.name
   | .bech32 e => e.name
 
-/-- Legacy address prefix of an extended-key network. -/
-def _root_.Winnow.Keys.HDKey.Network.hrp : HDKey.Network → String | .mainnet => "bc" | .testnet => "tb"
-
 namespace Descriptor
 
 structure KeyOrigin where
@@ -233,7 +230,6 @@ structure P where
 
 abbrev PM := StateT P (Except DescriptorError)
 
-def atEnd : PM Bool := do let s ← get; return s.i ≥ s.cs.size
 def peek : PM (Option Char) := do let s ← get; return s.cs[s.i]?
 
 def consume (c : Char) : PM Bool := do
@@ -536,8 +532,6 @@ def serialized (d : Descriptor) : String :=
   let body := serializeExpression d.expression
   body ++ "#" ++ Checksum.create body
 
-def isRanged (d : Descriptor) : Bool := d.allKeys.any (·.derivation.isRanged)
-
 /-! ## Derivation -/
 
 abbrev DM := Except DescriptorFailure
@@ -634,10 +628,6 @@ def derived (d : Descriptor) (index : UInt32) (network : Tx.BitcoinNetwork) : DM
 `derived` gives for that choice, without resolving the keys again. -/
 def taprootOutput (internal : ByteArray) (tree : Taproot.Tree) (network : Tx.BitcoinNetwork) : DM DerivedOutput := do
   outputOf (← (Taproot.scriptPubKey internal (some (Taproot.merkleRoot tree))).mapError .taproot) network
-
-/-- `derived(index:network:)` for extended-key networks (testnet keys ↦ signet addresses). -/
-def derivedForKeyNetwork (d : Descriptor) (index : UInt32) (network : HDKey.Network := .mainnet) : DM (Array DerivedOutput) :=
-  d.derived index (if network == .mainnet then .mainnet else .signet)
 
 /-- The `tr(KEY,TREE)` internal key and resolved script tree at (`index`, `choice`); `invalidContext` for a
 descriptor without a tree. -/

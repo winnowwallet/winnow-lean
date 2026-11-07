@@ -18,7 +18,6 @@ def Base58Error.name : Base58Error → String
 namespace Base58
 
 def alphabet : String := "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-def alphabetBytes : ByteArray := alphabet.toUTF8
 
 def encode (data : ByteArray) : String := Id.run do
   let zeros := (data.toList.takeWhile (· == 0)).length

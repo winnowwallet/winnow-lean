@@ -44,16 +44,6 @@ structure ControlBlock where
 
 namespace ControlBlock
 
-def serialized (c : ControlBlock) : ByteArray :=
-  c.path.foldl (· ++ ·) (ByteArray.mk #[c.leafVersion ||| (if c.outputKeyParity then 1 else 0)] ++ c.internalKey)
-
-/-- Parses a control block; length must be 33 + 32m with m in 0...128. -/
-def parse (b : ByteArray) : Except TaprootError ControlBlock := do
-  if b.size < 33 || (b.size - 33) % 32 != 0 || (b.size - 33) / 32 > 128 then throw .invalidControlBlock
-  let cb := b[0]!
-  return { leafVersion := cb &&& 0xFE, outputKeyParity := cb &&& 1 != 0, internalKey := b.extract 1 33,
-           path := (List.range ((b.size - 33) / 32)).map fun i => b.extract (33 + 32 * i) (65 + 32 * i) }
-
 end ControlBlock
 
 /-- TapLeaf hash: H_TapLeaf(leafVersion || CompactSize(script length) || script). -/
@@ -96,16 +86,6 @@ def controlBlocks (internalKey : ByteArray) (tree : Tree) : Except TaprootError 
   let root := merkleRoot tree
   let (_, parity) ← tweakedOutputKey internalKey (some root)
   return (hashes tree).2.map fun (v, _, p) => { leafVersion := v, outputKeyParity := parity, internalKey, path := p }
-
-/-- Control block for the leaf with the given in-order index. -/
-def controlBlock (internalKey : ByteArray) (tree : Tree) (leafIndex : Int) : Except TaprootError ControlBlock := do
-  let blocks ← controlBlocks internalKey tree
-  if leafIndex < 0 || leafIndex ≥ blocks.length then throw .leafNotFound
-  return blocks[leafIndex.toNat]!
-
-/-- Verifies a control block against a merkle root by walking the path bottom-up. -/
-def verify (cb : ControlBlock) (script : ByteArray) (merkleRoot : ByteArray) : Bool :=
-  cb.path.foldl branchHash (leafHash cb.leafVersion script) == merkleRoot
 
 /-- The BIP341 NUMS internal key H = lift_x(SHA256(uncompressed SEC encoding of G)). -/
 def unspendableInternalKey : ByteArray :=

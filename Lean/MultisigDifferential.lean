@@ -146,8 +146,6 @@ def combinations : List Nat → Nat → List (List Nat)
 
 /-! ## Signers -/
 
-def hex8 (n : UInt32) : String := Descriptor.hex8 n
-
 /-- A Bitcoin Core signer: a Core wallet's own tr() account key; Core signs with `walletprocesspsbt`. -/
 structure CoreSigner where
   wallet : String

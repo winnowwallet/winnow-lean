@@ -249,9 +249,6 @@ def mulGJ (k : Nat) : J := Id.run do
     if w != 0 then r := r.addA gTable[16 * i + w]!
   return r
 
-/-- `k·G`; `none` is infinity. -/
-def mulG (k : Nat) : Option A := (mulGJ k).toA?
-
 /-- Affine forms of Jacobian points through one inverse (Montgomery's trick); none of them infinity. -/
 def toAs? (js : Array J) : Option (Array A) := Id.run do
   let mut pre : Array F := Array.mkEmpty js.size
@@ -286,7 +283,5 @@ def mulPtJ (k : Nat) (p : A) : Option J := Id.run do
     let w := (k >>> (4 * i)) % 16
     if w != 0 then r := r.addA tab[w]!
   return some r
-
-def mulPt (k : Nat) (p : A) : Option A := (mulPtJ k p).bind J.toA?
 
 end Secp.Fast

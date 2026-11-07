@@ -15,9 +15,6 @@ in the descriptor's shape. The Bitcoin app takes a template of at most 512 chara
 namespace Winnow.Ledger
 open Keys
 
-/-- `MultisigAccount.signerSuffix` (`/<0;1>/*`). -/
-abbrev signerSuffix : Array Descriptor.Element := MultisigAccount.signerSuffix
-
 /-- A BIP388 wallet policy (`LedgerWalletPolicy`). -/
 structure WalletPolicy where
   name : String

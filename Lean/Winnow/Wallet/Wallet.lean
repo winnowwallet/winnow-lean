@@ -87,7 +87,7 @@ def Randomness.system : Randomness where
 
 /-! ## An in-memory key store over a reference -/
 
-/-- `InMemoryKeyStore` (Tests/Support) as an `IO` store: IDs compare by canonical equivalence (NFD). -/
+/-- `Tests/Support/InMemoryKeyStore.swift` as an `IO` store: IDs compare by canonical equivalence (NFD). -/
 def inMemoryKeyStore (ref : IO.Ref InMemorySecrets) : KeyStore IO where
   store secret id := do
     let k := Unicode.nfd id
@@ -278,7 +278,6 @@ def «open» (storagePath : System.FilePath) (keyStore : KeyStore IO) (random : 
 
 /-! ### Reading -/
 
-def creationHeight (w : Wallet) : IO UInt32 := return (← w.state).creationHeight
 def nextScanHeight (w : Wallet) : IO UInt32 := return (← w.state).nextScanHeight
 def nextReceiveIndex (w : Wallet) : IO UInt32 := return (← w.state).nextReceiveIndex
 def nextChangeIndex (w : Wallet) : IO UInt32 := return (← w.state).nextChangeIndex
@@ -375,8 +374,6 @@ def recordScanHeight (w : Wallet) (nextScanHeight : UInt32) (scannedThroughHash 
   let hash := scannedThroughHash.filter fun h => h.size == 32 && nextScanHeight > 0
   w.stateRef.modify fun s => pruneSpentCoins { s with nextScanHeight, scannedThroughHash := hash } nextScanHeight
   w.persist (← w.state)
-
-def scannedThroughHash (w : Wallet) : IO (Option ByteArray) := return (← w.state).scannedThroughHash
 
 /-- Reserves every address below the supplied cursors (neither moves backwards), persisting both before
 the live state changes. Cursors must leave room for the gap-limit lookahead (`invalidPath`). -/
@@ -1076,11 +1073,5 @@ def verifyImport (w : Wallet) (bundle : ImportBundle) (source : ScanSource) (add
   WM.wallet (ImportReport.make bundle (← WM.io effects.get) (← w.utxos) fromHeight toHeight)
 
 end Wallet
-
-/-- A `ScanSource` that replays given matches (tests, and the pure core of a real scan). -/
-def ScanSource.scripted (fromHeight : UInt32) (blocks : Array Net.BlockMatch) (lastScanned : Option UInt32) : ScanSource where
-  nextScanHeight := pure fromHeight
-  lastScannedHeight := pure lastScanned
-  sync _ f := blocks.forM f
 
 end Winnow

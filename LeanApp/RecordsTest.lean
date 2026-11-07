@@ -53,17 +53,6 @@ def fakeMatch (height : UInt32) (txs : Array Transaction) : Net.BlockMatch :=
     hash := .empty }
   { height := height, blockHash := .empty, block := { header := header, transactions := txs } }
 
-/-- A block at `height` whose second transaction pays `outputs` (the first is an unrelated coinbase). -/
-def fundingBlock (height : UInt32) (seed : UInt8) (outputs : Array (ByteArray × Int64)) : Net.BlockMatch :=
-  let coinbase : Transaction := {
-    version := 2, inputs := #[coinbaseInput],
-    outputs := #[{ value := 50, scriptPubKey := ByteArray.mk #[0x6a] }], locktime := height }
-  let funding : Transaction := {
-    version := 2,
-    inputs := #[{ previousOutput := ⟨ByteArray.mk (Array.replicate 32 seed), 0⟩, scriptSig := .empty, sequence := 0xFFFF_FFFD }],
-    outputs := outputs.map fun (s, v) => { value := v, scriptPubKey := s }, locktime := 0 }
-  fakeMatch height #[coinbase, funding]
-
 structure Phone where
   name : String
   dir : System.FilePath
