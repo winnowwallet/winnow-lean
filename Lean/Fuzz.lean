@@ -358,7 +358,7 @@ private def controlBlock : Target := {
   name := "control-block"
   seeds := #[.empty, ⟨#[0xC0]⟩ ++ gx, ⟨#[0xC1]⟩ ++ gx ++ zeros 32]
   check := fun _ data => do
-    let .ok parsed := Keys.Taproot.ControlBlock.parse data | return false
+    let some parsed := Tx.Taproot.ControlBlock.parse? data | return false
     require (parsed.serialized == data) "control block canonical round trip changed bytes"
     return true }
 

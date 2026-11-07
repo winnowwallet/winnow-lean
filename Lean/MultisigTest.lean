@@ -81,7 +81,7 @@ def verifiedSignatures (tx : Transaction) (spent : SighashBIP341.SpentOutput) : 
   let w := input.witness
   unless w.size ≥ 2 do throw "short witness"
   let leafScript := w[w.size - 2]!
-  let cb ← needE "control block" (·.name) (Taproot.ControlBlock.parse w[w.size - 1]!)
+  let some cb := Tx.Taproot.ControlBlock.parse? w[w.size - 1]! | throw "control block"
   let root := cb.path.foldl Taproot.branchHash (Taproot.leafHash cb.leafVersion leafScript)
   let (outputKey, parity) ← needE "tweak" (·.name) (Taproot.tweakedOutputKey cb.internalKey (some root))
   check "replay: output key" (outputKey == suffixBytes spent.scriptPubKey 32)
