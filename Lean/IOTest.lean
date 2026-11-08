@@ -342,6 +342,40 @@ def offlineChecks (dir : String) : IO Unit := do
   check "census thin" (nameOf (CensusCatalog.decode (doc (civil today) ["9.9.9.9"]).toUTF8 (minimumEntries := 50)) == "thin")
   check "census bad date" (CensusCatalog.day "2026-02-30" == none && CensusCatalog.day "2026-10-26" == some 20752)
   check "no bundled census outside an app bundle" (← CensusCatalog.bundled).isNone
+  -- After Settings → Reset peers the rebuilt pool is told which peers it had (`avoidOnReset`): they are the
+  -- census entries it dials last, after every other one; the manual peer, then the remembered one, still
+  -- come first (`PeerPool.localCandidates`). Census entries are mainnet's: port 8333, one per netblock.
+  let censusHosts := ["9.9.9.9", "8.8.8.8", "1.1.1.1", "4.2.2.2", "208.67.222.222", "64.6.64.6", "77.88.8.8", "94.140.14.14"]
+  match CensusCatalog.decode (doc (civil today) censusHosts).toUTF8 with
+  | .error e => check "reset order: the census list" false e.name
+  | .ok census =>
+    let at8333 (h : String) : PeerEndpoint := { host := h, port := 8333 }
+    let manual := at8333 "185.70.40.1"
+    let remembered := at8333 "51.15.0.1"
+    let had := [at8333 "1.1.1.1", at8333 "77.88.8.8"]
+    let peersFile := System.FilePath.mk dir / "reset-order-peers.json"
+    IO.FS.writeBinFile peersFile (PersistedPeers.encode #[{ endpoint := remembered, source := .persisted }])
+    let pool ← PeerPool.new NetworkParams.mainnet (manualPeers := #[manual]) (peersFile := some peersFile)
+      (censusCatalog := some census) (avoidOnReset := had.toArray) (seedResolver := some { lookup := fun _ _ _ => pure #[] })
+    -- the census is shuffled per round: twenty rounds, so an avoided peer dialled early would show
+    let mut orders : Array (List PeerCandidate) := #[]
+    for _ in [0:20] do orders := orders.push (← pool.localCandidates {}).toList
+    let ok (order : List PeerCandidate) : Bool :=
+      let census := order.drop 2
+      order.take 2 == [{ endpoint := manual, source := .manual }, { endpoint := remembered, source := .persisted }] &&
+      census.length == censusHosts.length && census.all (·.source == .census) &&
+      ((census.drop (censusHosts.length - had.length)).map (·.endpoint)).all had.contains
+    let bad := orders.find? (!ok ·)
+    check "reset order: manual, remembered, the other census peers, then the census peers it had"
+      bad.isNone s!"{(bad.getD []).map (·.endpoint.description)}"
+    let firsts := (orders.map fun o => ((o.drop 2).take 1).map (·.endpoint)).toList.eraseDups.length
+    check "reset order: the other census peers still in shuffled order" (firsts > 1) s!"{firsts} first choices"
+    -- a peer it had that is already connected (or cooling off) is left out like any other
+    let excluded ← pool.localCandidates (({} : Std.HashSet PeerEndpoint).insert (at8333 "1.1.1.1"))
+    check "reset order: an excluded peer it had is not dialled"
+      (excluded.size == censusHosts.length + 1 && !excluded.any (·.endpoint == at8333 "1.1.1.1") &&
+       excluded.back?.map (·.endpoint) == some (at8333 "77.88.8.8"))
+      s!"{excluded.map (·.endpoint.description)}"
   -- FilterSyncTests.overlayDeadlines: Tor and I2P peers get longer filter and block deadlines
   check "deadline: 100 clearnet filters, 30 s" (FilterSync.chunkTimeoutSeconds 100 == 30)
   check "deadline: 1000 clearnet filters, 120 s" (FilterSync.chunkTimeoutSeconds 1_000 == 120)

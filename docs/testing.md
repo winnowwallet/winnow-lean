@@ -19,8 +19,8 @@ Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested); and the six journeys headless against the app itself (LeanNative's `wire-journey`). |
-| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send and the 2-of-3 on one runner; Ledger, census and silent payments on the other). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested); and the eight journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump and Retry on one runner; Ledger, census, silent payments and spent-elsewhere on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
 
@@ -29,7 +29,7 @@ The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
 Debug must start the test run and journal it, Release must ignore it and boot
 into its ordinary storage.
 
-## The six journeys
+## The eight journeys
 
 The UI journeys are Lean (`LeanApp/Journeys.lean`), run on the Mac. Each step
 is one command to LeanNative's journey driver, the one XCUITest in the app's UI
@@ -66,6 +66,11 @@ against the node.
   finds out from the block: Send and the Transactions row say replaced, the
   balance drops and the fee bump goes. A payment of two coins, one of them
   spent the same way, gives the other coin back, and the phone spends it.
+- `retryAfterNoPeers`: the node goes off the network (`setnetworkactive
+  false`) while the app is in the background. Back in the foreground, Home
+  says it couldn't reach the network and offers Retry. With the node back,
+  Retry reconnects before the pool's own redial would, and the wallet finds
+  a payment. The node goes back on the network however the journey ends.
 
 What the journeys do not cover: a physical Ledger (CI's is simulated; the
 owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift
