@@ -34,6 +34,11 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   headers either side of every mainnet retarget, from a public Esplora server. Each header must hash to its
   block and meet its own target, so the server is trusted for nothing. crypto-test checks `expectedBits`
   against them.
+- [funding-sources-vectors](funding-sources-vectors) writes `Lean/Vectors/mainnet-funding-sources.json`: five
+  mainnet spends whose inputs are not segwit (key hashes with both key encodings, a 2-of-3 script hash, wrapped
+  segwit and a bare key), each input with the script it spent, from a public Esplora server. Each transaction, and
+  each one an input spends from, must hash to its txid, so the server is trusted for nothing. crypto-test holds
+  `FundingSources.revelation` to them.
 - [swift-utf8-vectors](swift-utf8-vectors) writes `Lean/Vectors/swift-utf8-decoding.json`, Swift's own
   `String(decoding:as: UTF8.self)` over well-formed and ill-formed UTF-8, which `crypto-test` holds
   `Winnow.Text.decodeUTF8Lossy` to. It needs Xcode's Swift and feeds the program to `xcrun swift` on stdin, so

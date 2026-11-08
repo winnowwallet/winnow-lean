@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Writes Lean/Vectors/mainnet-funding-sources.json: real mainnet spends whose inputs are not segwit, the oracle
+for `FundingSources.revelation` (crypto-test's funding sources section). Each input carries the script it spent,
+read from the transaction that made it, and what `revelation` must say of it: the spent script for a key hash or
+a script hash, nothing for a bare public key (its scriptSig holds only a signature).
+
+Reads them from a public Esplora server and trusts it for nothing: each transaction, and each one whose output
+an input spends, must hash to its txid here.
+
+  scripts/funding-sources-vectors            (from the repository root)
+"""
+import hashlib, json, sys, time, urllib.request
+from pathlib import Path
+
+API = "https://blockstream.info/api"
+OUT = Path(__file__).resolve().parent.parent / "Lean/Vectors/mainnet-funding-sources.json"
+# (txid, what it is): every input of each is the kind named
+SPENDS = [
+    ("fff2525b8931402dd09222c50775608f75787bd2b87e56995a7bdd30f79702c4", "P2PKH, uncompressed key (block 100000)"),
+    ("0de586d0c74780605c36c0f51dcd850d1772f41a92c549e3aa36f9e78e905284", "P2PKH, compressed key (block 400000)"),
+    ("afd896bcb5dcfef8498b2d4460c5fd6df370bf8ec628f08cd4cf25473960d955", "P2SH 2-of-3 multisig, its redeem script OP_PUSHDATA1 (block 400000)"),
+    ("870b0d8876821b3b49a10de90a3fd003ea8871750ae952e2fcaf471a91b6c772", "P2SH-P2WPKH: a scriptSig and a witness (block 550000)"),
+    ("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16", "P2PK: a signature only, nothing revealed (block 170)"),
+]
+
+
+def get(path):
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(f"{API}{path}", headers={"User-Agent": "funding-vectors"}), timeout=30) as r:
+                return r.read().decode().strip()
+        except Exception:
+            if attempt == 5:
+                raise
+            time.sleep(2 ** attempt)
+
+
+class Reader:
+    def __init__(self, data):
+        self.data, self.at = data, 0
+
+    def take(self, n):
+        if self.at + n > len(self.data):
+            sys.exit("a transaction is truncated")
+        out = self.data[self.at:self.at + n]
+        self.at += n
+        return out
+
+    def int(self, n):
+        return int.from_bytes(self.take(n), "little")
+
+    def varint(self):
+        first = self.int(1)
+        width = {0xfd: 2, 0xfe: 4, 0xff: 8}.get(first)
+        return self.int(width) if width else first
+
+
+def parse(raw):
+    """(inputs as (prev txid display hex, vout), output scripts, txid display hex) of a serialized transaction."""
+    r = Reader(raw)
+    version = r.take(4)
+    segwit = raw[4] == 0 and raw[5] == 1
+    if segwit:
+        r.take(2)
+    start = r.at
+    inputs = []
+    for _ in range(r.varint()):
+        prev = r.take(32)[::-1].hex()
+        vout = r.int(4)
+        r.take(r.varint())
+        r.take(4)
+        inputs.append((prev, vout))
+    outputs = []
+    for _ in range(r.varint()):
+        r.take(8)
+        outputs.append(r.take(r.varint()))
+    body = raw[start:r.at]
+    if segwit:
+        for _ in inputs:
+            for _ in range(r.varint()):
+                r.take(r.varint())
+    locktime = r.take(4)
+    if r.at != len(raw):
+        sys.exit("trailing bytes after a transaction")
+    txid = hashlib.sha256(hashlib.sha256(version + body + locktime).digest()).digest()[::-1].hex()
+    return inputs, outputs, txid
+
+
+def checked(txid):
+    raw = bytes.fromhex(get(f"/tx/{txid}/hex"))
+    inputs, outputs, computed = parse(raw)
+    if computed != txid:
+        sys.exit(f"{txid}: the server's bytes hash to {computed}")
+    time.sleep(0.1)
+    return raw, inputs, outputs
+
+
+def revelation(spent):
+    if len(spent) == 25 and spent[:3] == b"\x76\xa9\x14" and spent[23:] == b"\x88\xac":
+        return "publicKeyHash", spent.hex()
+    if len(spent) == 23 and spent[:2] == b"\xa9\x14" and spent[22:] == b"\x87":
+        return "scriptHash", spent.hex()
+    if len(spent) in (35, 67) and spent[0] == len(spent) - 2 and spent[-1] == 0xac:
+        return "unrecognized", None
+    sys.exit(f"an input spends a script this fixture does not expect: {spent.hex()}")
+
+
+def main():
+    rows = []
+    for txid, what in SPENDS:
+        raw, inputs, _ = checked(txid)
+        spent = []
+        for prev, vout in inputs:
+            _, _, prev_outputs = checked(prev)
+            script = prev_outputs[vout]
+            kind, revealed = revelation(script)
+            spent.append({"spent": script.hex(), "revelation": kind, "script": revealed})
+        rows.append({"txid": txid, "what": what, "raw": raw.hex(), "inputs": spent})
+    body = ",\n".join("  " + json.dumps(r, separators=(",", ":")) for r in rows)
+    OUT.write_text('{"source":"mainnet transactions, scripts/funding-sources-vectors",\n"spends":[\n' + body + "\n]}\n")
+    print(f"{len(rows)} transactions, {sum(len(r['inputs']) for r in rows)} inputs")
+
+
+main()
