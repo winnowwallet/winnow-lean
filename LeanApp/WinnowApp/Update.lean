@@ -51,10 +51,8 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     -- networking runs only while the scene is active (a cold background launch has no scene); a background
     -- task iOS launched during boot runs now
     let start : List Cmd := if m.active then [.startNetworking g m.settings] else []
-    let pending : List Cmd := match m.pendingBackgroundTask with
-      | some (id, kind) => [.runBackgroundTask id kind m.settings]
-      | none => []
-    let m := { m with pendingBackgroundTask := none }
+    let pending : List Cmd := m.pendingBackgroundTasks.map fun (id, kind) => .runBackgroundTask id kind m.settings
+    let m := { m with pendingBackgroundTasks := [] }
     match r with
     | .opened id => ({ m with stage := .ready, walletID := some id }, [.refresh g] ++ start ++ pending)
     -- activation builds the stack whatever the stage, so a new wallet is dated at a synced tip; onboarding
@@ -215,10 +213,17 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
   | .backgroundRefresh available => ({ m with backgroundRefreshAvailable := available }, [])
   | .bgtask id kind =>
     -- `handle(_:)`: ask for the next checks first; a task launched before the wallet opened waits for boot
-    if m.stage == .loading then ({ m with pendingBackgroundTask := some (id, kind) }, [.scheduleBackgroundTasks])
+    -- each identifier waits, and a second launch of one replaces it: the shell has ended the first
+    if m.stage == .loading then
+      ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) ++ [(id, kind)] },
+        [.scheduleBackgroundTasks])
     else (m, [.scheduleBackgroundTasks, .runBackgroundTask id kind m.settings])
   | .bgtaskExpired id _ =>
-    if m.pendingBackgroundTask.any (·.1 == id) then ({ m with pendingBackgroundTask := none }, [.expireBackgroundTask id])
+    -- expired before boot ran it: no run exists, so the task is answered here, once, unsuccessfully;
+    -- otherwise its run is expired, and an expiry after the run completed changes nothing
+    -- (records-test's `backgroundTaskCommands`)
+    if m.pendingBackgroundTasks.any (·.1 == id) then
+      ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) }, [.completeBackgroundTask id false])
     else (m, [.expireBackgroundTask id])
   | .scene active =>
     -- `scenePhaseChanged` journals the phase before acting on it
