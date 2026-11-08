@@ -189,24 +189,25 @@ def signScriptPath (p : PSBT) (index : Int) (privateKeys : Array ByteArray) (aux
   if signed == 0 then perr (.missingField s!"input {k} matching leaf key")
   return p.modifyInput k (·.setTapScriptSignatures signatures)
 
-def mergeMaps (maps : Array (Array KeyValue)) : RM (Array KeyValue) := do
+def mergeMaps (maps : Array (Array KeyValue)) : Except PSBTError (Array KeyValue) := do
   let mut merged : Array KeyValue := #[]
   for m in maps do
     for pair in m do
       match merged.findIdx? (·.key == pair.key) with
       | some j =>
-        if merged[j]!.value != pair.value then perr (.conflict pair.key)
+        if merged[j]!.value != pair.value then throw (.conflict pair.key)
         merged := merged.set! j pair
       | none => merged := merged.push pair
   return sortPairs merged
 
-/-- The union of several partial PSBTs of the same unsigned transaction. -/
-def combined (p : PSBT) (others : Array PSBT) : RM PSBT := do
+/-- The union of several partial PSBTs of the same unsigned transaction. The combiner never signs, so it
+throws only the document's errors (multisig-app-test `testRefusedAddressesAndPSBTsFromAnAccount`). -/
+def combined (p : PSBT) (others : Array PSBT) : Except PSBTError PSBT := do
   let all := #[p] ++ others
-  let reference ← liftP p.unsignedTransaction
-  unless all.all (fun o => o.inputs.size == p.inputs.size && o.outputs.size == p.outputs.size) do perr .inconsistentCounts
+  let reference ← p.unsignedTransaction
+  unless all.all (fun o => o.inputs.size == p.inputs.size && o.outputs.size == p.outputs.size) do throw .inconsistentCounts
   for o in all do
-    unless (← liftP o.unsignedTransaction) == reference do perr .inconsistentCounts
+    unless (← o.unsignedTransaction) == reference do throw .inconsistentCounts
   let mut inputs : Array Input := #[]
   for h : k in [0:p.inputs.size] do inputs := inputs.push ⟨← mergeMaps (all.map (·.inputs[k]!.pairs))⟩
   let mut outputs : Array Output := #[]

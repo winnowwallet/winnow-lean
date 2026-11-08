@@ -2110,8 +2110,8 @@ def testTheBuilderRemovesMembersAndKeys : IO Unit := do
 
 /-- #69: what an account refuses, in the words the app shows. Send, From: the account, refuses an address
 that is none and one of another network (`addressErrorText`), and more than it holds; the PSBT screen refuses
-pasted text that is no PSBT, one cut short, a PSBT from another account (`roleText` on the combiner's
-refusal) and a co-signer's copy that disagrees about a coin (`psbtErrorText`). -/
+pasted text that is no PSBT, one cut short, a PSBT from another account and a co-signer's copy that disagrees
+about a coin (`psbtErrorText`, the combiner's refusals among them). -/
 def testRefusedAddressesAndPSBTsFromAnAccount : IO Unit := do
   let phone ← phoneWith 0xA1
   let ms ← masters
