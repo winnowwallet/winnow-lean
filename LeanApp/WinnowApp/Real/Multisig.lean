@@ -40,7 +40,8 @@ def advancedModeOnlyText : String :=
 def invalidNameText : String :=
   "Use a name of 1 to 64 plain letters, digits and punctuation: the Ledger shows it on its screen."
 
-/-- `PSBTError.errorDescription`. -/
+/-- `PSBTError.errorDescription`: what the PSBT screen says of pasted text that is none, one cut short, another
+account's and a disagreeing copy (multisig-app-test `testRefusedAddressesAndPSBTsFromAnAccount`). -/
 def psbtErrorText : PSBTError → String
   | .invalidMagic => "That text is not a valid PSBT."
   | .truncated => "The PSBT ended before all of its data could be read."
@@ -335,6 +336,8 @@ def parsePSBT (text : String) : IO PSBT :=
   | .ok p => pure p
   | .error e => failText (psbtErrorText e)
 
+/-- A PSBT role's refusal as the screens show it: the combiner's are the document's (multisig-app-test
+`testRefusedAddressesAndPSBTsFromAnAccount`); it never signs, so a signing failure reaches here from no caller. -/
 def roleText (e : PSBTRoleError) : String :=
   match e with
   | .psbt p => psbtErrorText p

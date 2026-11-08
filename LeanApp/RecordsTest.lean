@@ -1247,6 +1247,54 @@ def paymentIndexAndPayTo (a b : Phone) : IO Unit := do
   IO.FS.writeBinFile path good
   check "payTo: the good file reads again" ((← (← a.reopen).records).peopleStorageNotice.isNone)
 
+/-! ### Refused cards, in their own words (#69) -/
+
+/-- The Add-person sheet refuses a card for another network, one from a newer Winnow and one that is no
+person card, each with the card's own text (`PersonCardError.description`), and Save stays off. -/
+def cardsRefusedOnTheAddPersonSheet (sh : Shell) (walletID : String) : IO Unit := do
+  let (m, _) ← sh.tap .openSend (readyModel walletID)
+  let (m, _) ← sh.tap (.send .openRecipients) m
+  let (m, _) ← sh.tap (.people (.openAdd {} "")) m
+  let (m, _) ← sh.tap (.people (.setName "Eve")) m
+  let newer := "{\"name\":\"Eve\",\"network\":\"regtest\",\"version\":2,\"winnow\":\"person-card\"}"
+  let cards : List (String × String × String) := [
+    ("another network's card", (PersonCard.make .mainnet "Eve" none).serialized,
+      "This card is for mainnet; this wallet is on regtest."),
+    ("a newer Winnow's card", newer,
+      "This card was made by a newer Winnow (card version 2). Update the app to read it."),
+    ("not a person card", "{\"name\":\"Eve\",\"winnow\":\"signer-card\"}", "That isn't a Winnow card.")]
+  for (what, card, text) in cards do
+    let (refused, _) ← sh.tap (.people (.setPasted card)) m
+    check s!"card refused: {what}, in the card's words" (refused.person.error == some text) s!"{refused.person.error}"
+    check s!"card refused: {what}, on the sheet, Save off"
+      (contains (renderedH (addPersonSheet refused [])) text && !refused.person.canSave refused)
+  discard <| sh.tap .closeSheet m
+
+/-! ### A store's seal, refused by case (#69) -/
+
+/-- `StoreSeal.read` with each `SealFailure`: a sealed file on a phone with no key, an unsealed one once the key
+exists, a seal whose code is not hex, and a payload changed under its seal. The case names are what
+`RecordsError.name` reports (the Signers merge and the journal read them). -/
+def sealFailures (root : System.FilePath) : IO Unit := do
+  let store : StoreSeal := { store := "people", keys := StoreKeyVault.inMemory (← IO.mkRef {}) }
+  let path := root / "seal-failures.json"
+  let payload := "{\"people\":[]}".toUTF8
+  discard <| obtain "seal: the first write establishes the key"
+    (store.write payload network path fun d p => IO.FS.writeBinFile p d)
+  let sealed ← IO.FS.readBinFile path
+  discard <| obtain "seal: and reads back" (store.read sealed network)
+  let fresh : StoreSeal := { store with keys := StoreKeyVault.inMemory (← IO.mkRef {}) }
+  let some nl := sealed.toList.idxOf? 0x0A | throw (IO.userError "seal: no newline")
+  let notHex := sealed.set! (nl - 1) 0x7A
+  let changed := sealed.set! (sealed.size - 2) (sealed[sealed.size - 2]! ^^^ 0x01)
+  for (what, kind, x) in [
+      ("a sealed file, and no key on this phone", "keyMissing", fresh.read sealed network),
+      ("an unsealed file, once the key exists", "unsealed", store.read payload network),
+      ("a seal that is not hex", "malformed", store.read notHex network),
+      ("a payload changed under its seal", "verificationFailed", store.read changed network)] do
+    refused s!"seal refused: {what}" (kind := kind)
+      (matching := (·.description == "The store file could not be verified.")) x
+
 /-! ### Backup and the recovery phrase (#64) -/
 
 /-- Where `needle` first starts in `s`, if anywhere. -/
@@ -1438,6 +1486,7 @@ def screens (root : System.FilePath) : IO Unit := do
   let sh ← Shell.new
   receiveScreen sh alice aliceID
   let (_, robertID) ← peopleScreens sh alice aliceID cardB otherAddress
+  cardsRefusedOnTheAddPersonSheet sh aliceID
   homeScreens sh alice aliceID robertID bobAddress (← alice.receiveAddress false) funder
   backupScreens sh root alice aliceID 0xA1
   backendRef.set Backend.pending
@@ -1659,6 +1708,7 @@ def main : IO UInt32 := runMain "records-test" do
     tamper root a
     reopenFromDisk a before
     paymentIndexAndPayTo a b
+    sealFailures root
     screens root
   catch e =>
     check "the script ran to the end" false (toString e)

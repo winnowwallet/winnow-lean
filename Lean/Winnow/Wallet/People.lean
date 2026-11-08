@@ -176,9 +176,11 @@ inductive PersonCardError where
   | wrongNetwork (card : String) (wallet : BitcoinNetwork)
   deriving Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def PersonCardError.name : PersonCardError → String
   | .notACard => "notACard" | .unsupportedVersion _ => "unsupportedVersion" | .wrongNetwork .. => "wrongNetwork"
 
+/-- What the Add-person sheet says of a refused card (records-test `cardsRefusedOnTheAddPersonSheet`). -/
 def PersonCardError.description : PersonCardError → String
   | .notACard => "That isn't a Winnow card."
   | .unsupportedVersion v => s!"This card was made by a newer Winnow (card version {v}). Update the app to read it."
@@ -261,7 +263,21 @@ structure PersonImport where
   source : PersonImport.Source
   deriving Inhabited, BEq
 
+/-- Why a paste was refused: a card, with the card's own error (its text names the version or the
+networks), or another module's error by its case name. -/
+inductive PasteFailure where
+  | card (e : PersonCardError)
+  | named (name : String)
+  deriving Inhabited
+
+def PasteFailure.name : PasteFailure → String
+  | .card e => e.name | .named n => n
+
 namespace PersonPaste
+
+abbrev PasteM := Except PasteFailure
+
+def named {α} (r : PM α) : PasteM α := r.mapError .named
 
 def asciiLower (s : String) : String := s.map Char.toLower
 
@@ -274,13 +290,13 @@ def addressError (text : String) (network : BitcoinNetwork) : Option String :=
     | .ok _ => none
     | .error e => some e.name
 
-def parseCard (text : String) (network : BitcoinNetwork) : PM PersonImport := do
-  let card ← (PersonCard.decode text).mapError (·.name)
-  unless card.network == Wallet.networkName network do throw "wrongNetwork"
+def parseCard (text : String) (network : BitcoinNetwork) : PasteM PersonImport := do
+  let card ← (PersonCard.decode text).mapError .card
+  unless card.network == Wallet.networkName network do throw (.card (.wrongNetwork card.network network))
   let mut payTo : Option PersonPayTo := none
   if let some raw := card.payTo.map Unicode.trimWhitespace then
     if !raw.isEmpty then
-      payTo ← if raw.startsWith "tr(" then (PersonPayTo.ofDescriptor raw network).mapError (·.name) |>.map some
+      payTo ← named <| if raw.startsWith "tr(" then (PersonPayTo.ofDescriptor raw network).mapError (·.name) |>.map some
         else if SilentPaymentAddress.looksLikeCode raw then (PersonPayTo.ofSilentPayment raw network).mapError (·.name) |>.map some
         else (PersonPayTo.ofAddress raw network).map some
   return { name := DisplayName.normalized card.name, payTo, source := .card }
@@ -298,23 +314,23 @@ def parseKeyExpression (text : String) (network : BitcoinNetwork) : PM PersonImp
   throw "unrecognised"
 
 /-- Whatever was pasted on the Add-person screen, validated into a person's fields. -/
-def parse (text : String) (network : BitcoinNetwork) : PM PersonImport := do
+def parse (text : String) (network : BitcoinNetwork) : PasteM PersonImport := do
   let trimmed := Unicode.trimWhitespace text
-  if trimmed.isEmpty then throw "empty"
+  if trimmed.isEmpty then throw (.named "empty")
   if trimmed.startsWith "{" then return ← parseCard trimmed network
   if trimmed.startsWith "tr(" || trimmed.startsWith "rawtr(" then
-    let payTo ← (PersonPayTo.ofDescriptor trimmed network).mapError (·.name)
+    let payTo ← named <| (PersonPayTo.ofDescriptor trimmed network).mapError (·.name)
     return { name := none, payTo := some payTo, source := .descriptor }
   -- a code: a wrong network is worth saying; anything else that merely looks like one is unrecognised
   if SilentPaymentAddress.looksLikeCode trimmed then
     match PersonPayTo.ofSilentPayment trimmed network with
     | .ok payTo => return { name := none, payTo := some payTo, source := .address }
-    | .error e@(.wrongHRP ..) => throw e.name
-    | .error _ => throw "unrecognised"
+    | .error e@(.wrongHRP ..) => throw (.named e.name)
+    | .error _ => throw (.named "unrecognised")
   if let .ok payTo := PersonPayTo.ofAddress trimmed network then
     return { name := none, payTo := some payTo, source := .address }
-  if let some e := addressError trimmed network then throw e
-  parseKeyExpression trimmed network
+  if let some e := addressError trimmed network then throw (.named e)
+  named (parseKeyExpression trimmed network)
 
 end PersonPaste
 

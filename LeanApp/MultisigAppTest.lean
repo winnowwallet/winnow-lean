@@ -2108,12 +2108,58 @@ def testTheBuilderRemovesMembersAndKeys : IO Unit := do
   let (kept, _) := stepMultisig (.removeMember 0) back
   check "this phone's own member, removed: it comes back" (keysOf kept == [[phoneKey], [carolKey]])
 
+/-- #69: what an account refuses, in the words the app shows. Send, From: the account, refuses an address
+that is none and one of another network (`addressErrorText`), and more than it holds; the PSBT screen refuses
+pasted text that is no PSBT, one cut short, a PSBT from another account (`roleText` on the combiner's
+refusal) and a co-signer's copy that disagrees about a coin (`psbtErrorText`). -/
+def testRefusedAddressesAndPSBTsFromAnAccount : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let ms ← masters
+  let (id, d) ← phone.buildWith "Shared" 2 [← keyExpression ms[1]!]
+  let (savingsID, savingsD) ← phone.buildWith "Savings" 2 [← keyExpression ms[2]!]
+  let height := (← phone.record id).createdAtHeight + 1
+  let mut seed : UInt8 := 0x61
+  for descriptor in [d, savingsD] do
+    let account ← need "account" (MultisigAccount.parse descriptor signet)
+    discard <| phone.multisig.applyMatch (block height #[fundingTx seed (← spk account 0)]) signet
+    seed := seed + 1
+  check "both accounts are funded" ((← phone.record id).balance == 60_000 && (← phone.record savingsID).balance == 60_000)
+  let destination ← accountDestination
+  failsWith "an account refuses an address that is none" (phone.backend.previewSend (accountInputs id "hello" 1_000))
+    "That address is invalid or unsupported by Winnow."
+  failsWith "an account refuses another network's address"
+    (phone.backend.previewSend (accountInputs id "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq" 1_000))
+    "That address belongs to a different Bitcoin network."
+  failsWith "an account refuses more than it holds" (phone.backend.previewSend (accountInputs id destination 60_000))
+    "Insufficient funds for this payment and its fee."
+  -- the PSBT screen, this phone's spend in hand
+  let mine ← Real.createMultisigSpend phone.env phone.multisig id destination 25_000 2.0 false
+  let paste (text : String) := Real.addPastedPSBT phone.env phone.multisig id (some mine.psbt) text
+  failsWith "pasted text that is no PSBT" (paste "hello") "That text is not a valid PSBT."
+  failsWith "a PSBT cut short after its magic" (paste "cHNidP8=")
+    "The operation couldn’t be completed. (WalletCore.WireError.truncated)"
+  let savings ← Real.createMultisigSpend phone.env phone.multisig savingsID destination 25_000 2.0 false
+  failsWith "a PSBT from another account is not combined" (paste savings.psbt)
+    "The PSBT's input or output count does not match its transaction."
+  -- a co-signer's copy that says the coin holds one sat more
+  let psbt ← needE "this phone's PSBT" unnamed (PSBT.ofBase64 mine.psbt)
+  let input := psbt.inputs[0]!
+  let some k := input.pairs.findIdx? (·.key == ByteArray.mk #[PSBT.InType.witnessUTXO]) | throw (IO.userError "no witness UTXO")
+  let pair := input.pairs[k]!
+  let changedPair : PSBT.KeyValue := { pair with value := pair.value.set! 0 (pair.value[0]! + 1) }
+  let changedInput : PSBT.Input := { input with pairs := input.pairs.set! k changedPair }
+  let disagreeing : PSBT := { psbt with inputs := psbt.inputs.set! 0 changedInput }
+  failsWith "a copy that disagrees about a coin is not combined" (paste disagreeing.base64)
+    "The PSBTs disagree about a field and cannot be combined safely."
+  check "the account's spend in hand still reviews" ((← Real.reviewMultisigPSBT phone.env phone.multisig id mine.psbt).screen.isSome)
+
 def accountTests : List (String × IO Unit) :=
   [ ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
   , ("testJoiningAnAccountFromAPastedDescriptor", testJoiningAnAccountFromAPastedDescriptor)
   , ("testNewAddressMovesTheAccountOn", testNewAddressMovesTheAccountOn)
   , ("testACollectionPageShowsItsDraftAndDiscardsIt", testACollectionPageShowsItsDraftAndDiscardsIt)
-  , ("testTheBuilderRemovesMembersAndKeys", testTheBuilderRemovesMembersAndKeys) ]
+  , ("testTheBuilderRemovesMembersAndKeys", testTheBuilderRemovesMembersAndKeys)
+  , ("testRefusedAddressesAndPSBTsFromAnAccount", testRefusedAddressesAndPSBTsFromAnAccount) ]
 
 def screenTests : List (String × IO Unit) :=
   [ ("testSignersAddOpenRenameRemove", testSignersAddOpenRenameRemove) ]

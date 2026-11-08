@@ -11,6 +11,7 @@ inductive TaprootError where
   | invalidInternalKey | invalidControlBlock | tweakFailed | leafNotFound
   deriving Repr, DecidableEq
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def TaprootError.name : TaprootError → String
   | .invalidInternalKey => "invalidInternalKey" | .invalidControlBlock => "invalidControlBlock"
   | .tweakFailed => "tweakFailed" | .leafNotFound => "leafNotFound"

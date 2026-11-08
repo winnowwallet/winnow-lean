@@ -42,7 +42,8 @@ def swiftQuoted (s : String) : String :=
     | '"' => "\\\"" | '\\' => "\\\\" | '\n' => "\\n" | '\r' => "\\r" | '\t' => "\\t" | '\x00' => "\\0"
     | c => if c.toNat < 0x20 || c.toNat == 0x7F then s!"\\u\{{String.mk (Nat.toDigits 16 c.toNat)}}" else c.toString) ++ "\""
 
-/-- `String(describing: error)` of a `KeyStoreError`, as the journal records it. -/
+/-- `String(describing: error)` of a `KeyStoreError`, as the journal records it (backend-test `refusalsFlow`: a
+protection upgrade that fails as the wallet opens). -/
 def keyStoreErrorDescribing : Keys.KeyStoreError → String
   | .notFound w => s!"notFound(walletID: {swiftQuoted w})"
   | .alreadyExists w => s!"alreadyExists(walletID: {swiftQuoted w})"

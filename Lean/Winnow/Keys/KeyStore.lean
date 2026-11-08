@@ -19,6 +19,7 @@ inductive KeyStoreError where
   | keychain (status : Int32)
   deriving Repr, DecidableEq
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def KeyStoreError.name : KeyStoreError → String
   | .notFound _ => "notFound" | .alreadyExists _ => "alreadyExists"
   | .malformedSecret => "malformedSecret" | .unsupportedSecretVersion _ => "unsupportedSecretVersion"
@@ -29,7 +30,8 @@ def errSecAuthFailed : Int32 := -25293
 def errSecInteractionNotAllowed : Int32 := -25308
 
 /-- `errorDescription`. A keychain status other than the three named ones is described by the Security
-framework (`SecCopyErrorMessageString`), which belongs to the keychain capability: `none` here. -/
+framework (`SecCopyErrorMessageString`), which belongs to the keychain capability: `none` here. Every case
+is what a send and the recovery phrase show with the Keychain refusing (backend-test `refusalsFlow`). -/
 def KeyStoreError.errorDescription : KeyStoreError → Option String
   | .notFound w => some s!"The protected key for wallet {w} is missing from this device."
   | .alreadyExists w => some s!"This device already contains a protected key for wallet {w}."

@@ -52,6 +52,7 @@ inductive DescriptorFailure where
   | bech32 (e : Bech32Error)
   deriving Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def DescriptorFailure.name : DescriptorFailure → String
   | .descriptor e => e.name | .taproot e => e.name | .multisig e => e.name
   | .bech32 e => e.name

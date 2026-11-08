@@ -18,6 +18,7 @@ inductive GCSError where
   | decodedValueOverflow
   deriving Repr, BEq, Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def GCSError.name : GCSError → String
   | .emptyKey => "emptyKey"
   | .invalidParameters => "invalidParameters"

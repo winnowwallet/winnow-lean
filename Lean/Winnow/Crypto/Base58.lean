@@ -10,6 +10,7 @@ inductive Base58Error where
   | invalidLength
   deriving Repr, BEq
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def Base58Error.name : Base58Error → String
   | .invalidCharacter _ => "invalidCharacter"
   | .invalidChecksum => "invalidChecksum"

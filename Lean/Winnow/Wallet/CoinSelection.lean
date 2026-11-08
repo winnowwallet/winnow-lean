@@ -29,6 +29,8 @@ def name : CoinSelectionError → String
   | .duplicateUTXO => "duplicateUTXO" | .invalidOutpoint => "invalidOutpoint" | .emptyScript => "emptyScript"
   | .invalidWitnessSize _ => "invalidWitnessSize" | .amountOverflow => "amountOverflow"
 
+/-- What Send says of a payment coin selection refuses (backend-test `refusalsFlow`: no coins, dust, more than
+the wallet holds). -/
 def description : CoinSelectionError → String
   | .noUTXOs => "There are no spendable coins."
   | .insufficientFunds available required =>

@@ -15,6 +15,7 @@ inductive SighashError where
   | singleWithoutCorrespondingOutput (index : Int)
   deriving Repr, BEq, Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def SighashError.name : SighashError → String
   | .invalidHashType _ => "invalidHashType" | .inputIndexOutOfRange .. => "inputIndexOutOfRange"
   | .spentOutputCountMismatch .. => "spentOutputCountMismatch"

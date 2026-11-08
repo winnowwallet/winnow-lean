@@ -77,12 +77,14 @@ inductive FeeBumpError where
   deriving Inhabited
 
 namespace FeeBumpError
+/-- Swift's case name (crypto-test `errorNames`). -/
 def name : FeeBumpError → String
   | .transactionNotPending => "transactionNotPending" | .noChangeOutput => "noChangeOutput"
   | .changeAlreadySpent => "changeAlreadySpent" | .invalidFeeRate _ => "invalidFeeRate"
   | .feeRateNotHigher .. => "feeRateNotHigher" | .insufficientChange .. => "insufficientChange"
 
-/-- `errorDescription` (the two-decimal rates are en_US `formatted`). -/
+/-- `errorDescription` (the two-decimal rates are en_US `formatted`): every refusal, reached by bumping what the
+wallet will not (backend-test `refusalsFlow`). -/
 def description : FeeBumpError → String
   | .transactionNotPending =>
     "This transaction is no longer pending or was created before fee-bump metadata was available."

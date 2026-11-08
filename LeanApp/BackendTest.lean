@@ -23,8 +23,9 @@ back after it → export (carrying the account) → import into a fresh
 directory (same balance, the account restored) → stop networking (no loop, no peer, no file change while blocks arrive) → an
 interrupted rollback replayed from its marker on the next start → reopen from
 disk → delete. Then `peopleFlow`, on two phones of its own: a person saved from a contact card and paid twice,
-the review's four warnings, a fake explorer, a fake peer ahead of the wallet. One `ok`/`FAIL` line per check; the
-exit code is the verdict. -/
+the review's four warnings, a fake explorer, a fake peer ahead of the wallet. Then `refusalsFlow`, on a phone of its
+own: what the wallet refuses (addresses, amounts, fee bumps, the Keychain), each in the words the app shows. One
+`ok`/`FAIL` line per check; the exit code is the verdict. -/
 
 /-- Every `Deps.journal` line of the run: which backend (A, B, C), the event, its fields. -/
 initialize journalEvents : IO.Ref (Array (String × String × List (String × String))) ← IO.mkRef #[]
@@ -607,6 +608,174 @@ def peopleFlow (dir : String) (n : Node) : IO Unit := do
   check "people: caught up, the warning is gone" (caughtUp == .synced) (showPhase caughtUp)
   let synced ← alice.previewSend { destination := carolAddress, amount := "1000000", network := .regtest }
   check "people: no warning once synced" (reviewWarnings synced == []) s!"{reviewWarnings synced}"
+
+/-! ## What the wallet refuses, in the words the app shows (#69) -/
+
+/-- A key store over `inner` that refuses, while `failure` holds an error, the way the device's Keychain does
+when it is locked, the unlock is cancelled or not confirmed, or its item is damaged; `upgradeFailure` the
+same for the protection upgrade that opening a wallet asks for. -/
+def refusingKeyStore (inner : Keys.KeyStore IO) (failure upgradeFailure : IO.Ref (Option Keys.KeyStoreError)) :
+    Keys.KeyStore IO :=
+  { inner with
+    load := fun id => do
+      if let some e ← failure.get then throw e
+      inner.load id
+    upgradeProtection := fun id => do
+      if let some e ← upgradeFailure.get then throw e
+      inner.upgradeProtection id }
+
+/-- `x` fails, with exactly `text`. -/
+def refusedWith {α} (what : String) (x : IO α) (text : String) : IO Unit := do
+  match ← attempt x with
+  | .ok _ => check what false "accepted"
+  | .error e => check what (e == text) e
+
+/-- `num / den` to two places, half to even (the exact value; the app rounds the double's shortest decimal). -/
+def twoPlaces (num den : Nat) : String :=
+  let q := num * 100 / den
+  let r := num * 100 % den
+  let cents := if 2 * r > den then q + 1 else if 2 * r < den then q else if q % 2 == 0 then q else q + 1
+  s!"{cents / 100}.{if cents % 100 < 10 then "0" else ""}{cents % 100}"
+
+/-- A transaction in the node's mempool: its fee in sats and its vsize. -/
+def mempoolFee (n : Node) (txid : String) : IO (Nat × Nat) := do
+  let entry ← n.json #["getmempoolentry", txid]
+  let some (.num base) := (entry.getObjValD "fees").getObjVal? "base" |>.toOption | throw (IO.userError s!"no fee for {txid}")
+  let sats := (base.mantissa * 100_000_000).toNat / 10 ^ base.exponent
+  return (sats, (entry.getObjValAs? Nat "vsize").toOption.getD 0)
+
+/-- A phone of its own (Rae), funded with two coins, and what it refuses: no coins yet; an address that is none,
+another network's, a future witness version's and a witness-v1 program of the wrong length; a dust payment
+and more than it holds. Then three sends the node takes (one without change, one at 2.351 sat/vB, one that
+spends that one's change and keeps 400 sats of change) and the fee bumps the wallet refuses: a payment it
+received, the one without change, a rate not above the current one, a rate past the maximum, a send whose
+change is spent, and a bump its change cannot pay. Then the Keychain locked, cancelled, not confirmed,
+failing, its item damaged or of an unknown version, and emptied: a send and the recovery phrase each show
+the key store's text, and a protection upgrade that fails on opening is journaled as Swift describes it. -/
+def refusalsFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let failure ← IO.mkRef (none : Option Keys.KeyStoreError)
+  let upgradeFailure ← IO.mkRef (none : Option Keys.KeyStoreError)
+  let raeDeps : Real.Deps := { deps secrets "Rae" with keyStore := refusingKeyStore (inMemoryKeyStore secrets) failure upgradeFailure }
+  let (rae, _) ← Backend.realWithEnv raeDeps
+  let dirRae := s!"{dir}/Rae/BTCSwift/regtest"
+  IO.FS.createDirAll dirRae
+  discard <| rae.openWallet .regtest dirRae
+  rae.startNetworking settings
+  let raeID ← rae.createWallet .regtest dirRae
+  let dest := (← n.wallet #["getnewaddress", "", "bech32m"]).trimAscii.toString
+  let pay (amount : Nat) (override : String := "") : SendInputs :=
+    { destination := dest, amount := toString amount, override, network := .regtest }
+  refusedWith "refused: no coins yet" (rae.previewSend (pay 10_000)) "There are no spendable coins."
+  let addr ← rae.receiveAddress false
+  let fundTxid := (← n.wallet #["sendtoaddress", addr, "0.5"]).trimAscii.toString
+  discard <| n.wallet #["sendtoaddress", addr, "0.2"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (funded, _) ← syncUntil rae 60_000 fun s p => s.balance == 70_000_000 && s.utxoCount == 2 && p == .synced
+  check "refusals: Rae holds two coins" (funded.balance == 70_000_000 && funded.utxoCount == 2) s!"{funded.balance}"
+  -- addresses
+  let program (size : Nat) := ByteArray.mk (Array.replicate size 0x01)
+  let some v2 := (SegwitAddress.encode "bcrt" 2 (program 32)).toOption | throw (IO.userError "witness v2 address")
+  let some v1Short := (SegwitAddress.encode "bcrt" 1 (program 20)).toOption | throw (IO.userError "witness v1 address")
+  let to (address : String) : SendInputs := { pay 10_000 with destination := address }
+  refusedWith "refused: an address that is none" (rae.previewSend (to "hello"))
+    "That address is invalid or unsupported by Winnow."
+  refusedWith "refused: a mainnet address on regtest" (rae.previewSend (to "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"))
+    "That address belongs to a different Bitcoin network."
+  refusedWith "refused: a future witness version" (rae.previewSend (to v2))
+    "That address uses future Bitcoin witness version 2. Winnow cannot safely send to it before the output type is activated."
+  refusedWith "refused: a witness-v1 program of 20 bytes" (rae.previewSend (to v1Short))
+    "That address uses an unsupported witness-v1 program length (20 bytes)."
+  refusedWith "refused: a dust payment" (rae.previewSend (pay 100)) "The 100-sat payment is below the 330-sat relay minimum."
+  -- C, without change: the 0.5 coin less its one-input fee with change and 130 sats (under the 330-sat dust)
+  let probe ← rae.previewSend (pay 49_000_000)
+  let rate := probe.feeRateMilli / 1000
+  -- both coins (key-path inputs of 66 witness bytes) to one P2TR output, no change: 169 vbytes
+  let bothVSize := (4 * (4 + 1 + 2 * 41 + 1 + 43 + 4) + 2 + 2 * 66 + 3) / 4
+  refusedWith "refused: more than the wallet holds" (rae.previewSend (pay 70_000_000))
+    s!"Insufficient funds: 70000000 sats are available, but {70_000_000 + bothVSize * rate} sats are required."
+  let noChange := pay (50_000_000 - probe.fee - 130)
+  let pC ← rae.previewSend noChange
+  check "refusals: C has no change" (pC.change.isNone && pC.inputCount == 1) s!"{pC.change}"
+  let txC := (← rae.sendPayment noChange pC).txid
+  -- A, at 2.351 sat/vB from the 0.2 coin: 363 sats over 154 vbytes, 2.357…, which shows as 2.36
+  let payA := pay 10_000_000 "2.351"
+  let pA ← rae.previewSend payA
+  let txA := (← rae.sendPayment payA pA).txid
+  check "refusals: the node holds C and A" (← waitUntil 20_000 (do let mp ← n.mempool; return mp.contains txC && mp.contains txA))
+  refusedWith "refused bump: a payment the wallet received" (rae.previewFeeBump fundTxid 10_000)
+    "This transaction is no longer pending or was created before fee-bump metadata was available."
+  refusedWith "refused bump: a send without change" (rae.previewFeeBump txC 10_000)
+    "This transaction has no change output to reduce for a same-input fee bump."
+  let (feeA, vsizeA) ← mempoolFee n txA
+  refusedWith "refused bump: a rate not above the current one" (rae.previewFeeBump txA 2_000)
+    s!"Choose a fee rate above {twoPlaces feeA vsizeA} sat/vB (requested 2.00 sat/vB)."
+  refusedWith "refused bump: past the maximum rate" (rae.previewFeeBump txA 20_000_000)
+    "Invalid replacement fee rate: 20000.0 sat/vB."
+  -- the Keychain refuses: a send and the recovery phrase say why
+  let changeA := pA.change.getD 0
+  let small := pay 1_000_000
+  let keychainRefusals : List (String × Keys.KeyStoreError × String) := [
+    ("locked", .keychain Keys.errSecInteractionNotAllowed,
+      "The wallet key can only be unlocked while Winnow is on screen and the device is unlocked."),
+    ("unlock cancelled", .keychain Keys.errSecUserCanceled, "Unlocking the wallet key was cancelled."),
+    ("unlock not confirmed", .keychain Keys.errSecAuthFailed,
+      "The device did not confirm it was you, so the wallet key stays locked."),
+    ("failing with another status", .keychain (-34018), "The device could not reach the protected wallet key (keychain status -34018)."),
+    ("item damaged", .malformedSecret, "The protected wallet key is damaged or has an unsupported format."),
+    ("item of an unknown version", .unsupportedSecretVersion "account/9",
+      "This wallet key uses an unsupported format version. Keep the key and open it with compatible wallet software.")]
+  for (what, e, text) in keychainRefusals do
+    failure.set (some e)
+    let p ← rae.previewSend small
+    refusedWith s!"Keychain {what}: the send" (rae.sendPayment small p) text
+    refusedWith s!"Keychain {what}: the recovery phrase" rae.revealMnemonic text
+  failure.set none
+  let kept ← secrets.get
+  secrets.set {}
+  let p ← rae.previewSend small
+  let missing := s!"The protected key for wallet {raeID} is missing from this device."
+  refusedWith "Keychain emptied: the send" (rae.sendPayment small p) missing
+  refusedWith "Keychain emptied: the recovery phrase" rae.revealMnemonic missing
+  secrets.set kept
+  check "Keychain back: the recovery phrase reads" ((← rae.revealMnemonic).length == 12)
+  let (unsent, _) ← rae.snapshot
+  check "refusals: no send went out while the Keychain refused" (unsent.balance == changeA) s!"{unsent.balance}, {changeA}"
+  -- B spends A's change and keeps 400 sats of change
+  let probeB ← rae.previewSend (pay (changeA - 5_000))
+  let payB := pay (changeA - probeB.fee - 400)
+  let pB ← rae.previewSend payB
+  check "refusals: B keeps 400 sats of change" (pB.change == some 400 && pB.inputCount == 1) s!"{pB.change}"
+  let txB := (← rae.sendPayment payB pB).txid
+  check "refusals: the node holds B" (← waitUntil 20_000 (do return (← n.mempool).contains txB))
+  refusedWith "refused bump: a send whose change is spent" (rae.previewFeeBump txA 10_000)
+    "This transaction's change has already been spent by another pending transaction."
+  -- at 20 sat/vB B's change cannot stay, and without it B (one P2TR output less) needs more than it can give
+  let (feeB, vsizeB) ← mempoolFee n txB
+  refusedWith "refused bump: more than the change can pay" (rae.previewFeeBump txB 20_000)
+    s!"The available change can pay at most {feeB + 400} sats in fees; this bump needs {(vsizeB - 43) * 20} sats."
+  -- a protection upgrade that fails when the wallet opens is journaled in Swift's words
+  let upgrades : List (Keys.KeyStoreError × String) := [
+    (.notFound raeID, s!"notFound(walletID: \"{raeID}\")"),
+    (.alreadyExists "a\"b", "alreadyExists(walletID: \"a\\\"b\")"),
+    (.malformedSecret, "malformedSecret"),
+    (.unsupportedSecretVersion "account/9\n", "unsupportedSecretVersion(\"account/9\\n\")"),
+    (.keychain Keys.errSecInteractionNotAllowed, "keychain(-25308)")]
+  for (e, described) in upgrades do
+    upgradeFailure.set (some e)
+    let tag := s!"Rae opens: {described}"
+    let (reopened, _) ← Backend.realWithEnv { raeDeps with journal := fun name fields => journalEvents.modify (·.push (tag, name, fields)) }
+    let boot ← reopened.openWallet .regtest dirRae
+    let events := (← journalEvents.get).filterMap fun (t, name, f) =>
+      if t == tag && name == "keychain.protectionUpgradeFailed" then some f else none
+    check s!"upgrade fails: {described}, and the wallet opens" (boot matches .opened _)
+    check s!"upgrade fails: journaled as {described}"
+      (events.size == 1 && events.all fun f => field f "walletID" == raeID && field f "error" == described)
+      s!"{events}"
+  upgradeFailure.set none
 
 /-! ## Repairing the peer list -/
 
@@ -1289,5 +1458,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; resetPeersFlow dir n; retryPeersFlow dir n
+    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; resetPeersFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

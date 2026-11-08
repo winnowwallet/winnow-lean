@@ -42,6 +42,12 @@ BIP340 signing against BIP340's own vectors.
   for (`Secp.smul?`, `smulJ`, `Fq.sqrt?`), over edge scalars, seeded random ones and the points they give.
   The BIP340 vectors above already run through it.
 
+* Error names (#69): one sample of every case of the errors other modules carry by name (`Bech32Error`,
+  `BIP32Error`, `GCSError`, `KeyStoreError`, `TaprootError`, `MultisigError`, `SighashError`, `DescriptorFailure`,
+  `SignerError`, `SignFailure`, `FeeBumpError`, `Base58Error`, `HDKeyParseError`, `P256KError`, `PersonCardError`)
+  with Swift's case name, each checked to have a sample of every case. `SwiftDouble.formatted2`'s rounding,
+  signs, grouping and its non-finite texts.
+
 Run from `Lean/`. Exits 1 on any failure. -/
 
 open Winnow Winnow.Keys Lean TestKit
@@ -462,6 +468,147 @@ def bip32 : IO Unit := do
   for row in invalid do
     check s!"bip32 refuses: {field row "why"}" (HDKey.deserialize (field row "key") matches .error _)
 
+/-! ## Error names (#69)
+
+Other modules carry these errors by case name (`WM.liftE (·.name)`, `PersonPaste`, `SignFailure.name` into
+`namedText`, `filterMatches`), and the app's texts and journal read those names. One sample of every case
+with the name Swift's enum gives it, as io-test's `errorTexts` does for the I/O layer's (#42). Each index
+function is an exhaustive match, so a new case does not compile until it has an index, and the check then
+fails until it has a sample. -/
+
+/-- Each sample's name, and a sample at every index `0 ..< cases`. -/
+def checkNames {ε} (what : String) (index : ε → Nat) (cases : Nat) (name : ε → String) (samples : List (ε × String)) :
+    IO Unit := do
+  for (e, n) in samples do
+    check s!"{what} name: {n}" (name e == n) (name e)
+  let seen := ((samples.map (index ·.1)).toArray.qsort (· < ·)).toList.eraseDups
+  check s!"{what}: a sample of each of its {cases} cases" (seen == List.range cases) s!"{seen}"
+
+def bech32Index : Bech32Error → Nat
+  | .invalidCharacter => 0 | .mixedCase => 1 | .missingSeparator => 2 | .emptyHRP => 3 | .invalidChecksum => 4
+  | .tooLong => 5 | .invalidDataValue => 6 | .invalidWitnessVersion => 7 | .invalidProgramLength => 8
+  | .invalidPadding => 9 | .invalidHRP => 10
+
+def bip32Index : BIP32Error → Nat
+  | .invalidSeed => 0 | .invalidPath => 1 | .hardenedDerivationFromPublicKey => 2 | .derivationFailed => 3
+  | .invalidSerializedKey => 4 | .invalidVersion => 5 | .depthExhausted => 6
+
+def gcsIndex : Net.GCSError → Nat
+  | .emptyKey => 0 | .invalidParameters => 1 | .tooManyElements _ => 2 | .encodedFilterTooLarge _ => 3
+  | .truncatedEncoding => 4 | .nonCanonicalEncoding => 5 | .decodedValueOverflow => 6
+
+def keyStoreIndex : KeyStoreError → Nat
+  | .notFound _ => 0 | .alreadyExists _ => 1 | .malformedSecret => 2 | .unsupportedSecretVersion _ => 3 | .keychain _ => 4
+
+def taprootIndex : TaprootError → Nat
+  | .invalidInternalKey => 0 | .invalidControlBlock => 1 | .tweakFailed => 2 | .leafNotFound => 3
+
+def multisigIndex : MultisigError → Nat
+  | .invalidThreshold => 0 | .tooManyKeys => 1 | .invalidKey => 2 | .invalidTimelock => 3
+
+def sighashIndex : SighashError → Nat
+  | .invalidHashType _ => 0 | .inputIndexOutOfRange .. => 1 | .spentOutputCountMismatch .. => 2
+  | .singleWithoutCorrespondingOutput _ => 3
+
+def descriptorFailureIndex : DescriptorFailure → Nat
+  | .descriptor _ => 0 | .taproot _ => 1 | .multisig _ => 2 | .bech32 _ => 3
+
+def signerIndex : SignerError → Nat
+  | .invalidPrivateKey => 0 | .spentOutputCountMismatch .. => 1 | .missingKey _ => 2 | .malformedLeafScript => 3
+
+def signFailureIndex : SignFailure → Nat
+  | .signer _ => 0 | .sighash _ => 1 | .crypto _ => 2
+
+def feeBumpIndex : FeeBumpError → Nat
+  | .transactionNotPending => 0 | .noChangeOutput => 1 | .changeAlreadySpent => 2 | .invalidFeeRate _ => 3
+  | .feeRateNotHigher .. => 4 | .insufficientChange .. => 5
+
+def base58Index : Base58Error → Nat
+  | .invalidCharacter _ => 0 | .invalidChecksum => 1 | .invalidLength => 2
+
+def hdKeyParseIndex : HDKeyParseError → Nat
+  | .base58 _ => 0 | .bip32 _ => 1
+
+def p256kIndex : P256KError → Nat
+  | .incorrectKeySize => 0 | .incorrectParameterSize => 1 | .underlyingCryptoError => 2
+
+def personCardIndex : PersonCardError → Nat
+  | .notACard => 0 | .unsupportedVersion _ => 1 | .wrongNetwork .. => 2
+
+def errorNames : IO Unit := do
+  checkNames "Bech32Error" bech32Index 11 (·.name) [
+    (.invalidCharacter, "invalidCharacter"), (.mixedCase, "mixedCase"), (.missingSeparator, "missingSeparator"),
+    (.emptyHRP, "emptyHRP"), (.invalidChecksum, "invalidChecksum"), (.tooLong, "tooLong"),
+    (.invalidDataValue, "invalidDataValue"), (.invalidWitnessVersion, "invalidWitnessVersion"),
+    (.invalidProgramLength, "invalidProgramLength"), (.invalidPadding, "invalidPadding"), (.invalidHRP, "invalidHRP")]
+  checkNames "BIP32Error" bip32Index 7 (·.name) [
+    (.invalidSeed, "invalidSeed"), (.invalidPath, "invalidPath"),
+    (.hardenedDerivationFromPublicKey, "hardenedDerivationFromPublicKey"), (.derivationFailed, "derivationFailed"),
+    (.invalidSerializedKey, "invalidSerializedKey"), (.invalidVersion, "invalidVersion"), (.depthExhausted, "depthExhausted")]
+  checkNames "GCSError" gcsIndex 7 (·.name) [
+    (.emptyKey, "emptyKey"), (.invalidParameters, "invalidParameters"), (.tooManyElements 0xFFFF_FFFF, "tooManyElements"),
+    (.encodedFilterTooLarge 4_000_001, "encodedFilterTooLarge"), (.truncatedEncoding, "truncatedEncoding"),
+    (.nonCanonicalEncoding, "nonCanonicalEncoding"), (.decodedValueOverflow, "decodedValueOverflow")]
+  checkNames "KeyStoreError" keyStoreIndex 5 (·.name) [
+    (.notFound "a1b2c3d4", "notFound"), (.alreadyExists "a1b2c3d4", "alreadyExists"), (.malformedSecret, "malformedSecret"),
+    (.unsupportedSecretVersion "account/9", "unsupportedSecretVersion"), (.keychain errSecInteractionNotAllowed, "keychain")]
+  checkNames "TaprootError" taprootIndex 4 (·.name) [
+    (.invalidInternalKey, "invalidInternalKey"), (.invalidControlBlock, "invalidControlBlock"),
+    (.tweakFailed, "tweakFailed"), (.leafNotFound, "leafNotFound")]
+  checkNames "MultisigError" multisigIndex 4 (·.name) [
+    (.invalidThreshold, "invalidThreshold"), (.tooManyKeys, "tooManyKeys"), (.invalidKey, "invalidKey"),
+    (.invalidTimelock, "invalidTimelock")]
+  checkNames "SighashError" sighashIndex 4 (·.name) [
+    (.invalidHashType 0x04, "invalidHashType"), (.inputIndexOutOfRange 2 1, "inputIndexOutOfRange"),
+    (.spentOutputCountMismatch 2 1, "spentOutputCountMismatch"),
+    (.singleWithoutCorrespondingOutput 1, "singleWithoutCorrespondingOutput")]
+  -- the wrappers read their payload's own name
+  checkNames "DescriptorFailure" descriptorFailureIndex 4 (·.name) [
+    (.descriptor .invalidChecksum, "invalidChecksum"), (.taproot .leafNotFound, "leafNotFound"),
+    (.multisig .tooManyKeys, "tooManyKeys"), (.bech32 .mixedCase, "mixedCase")]
+  checkNames "SignerError" signerIndex 4 (·.name) [
+    (.invalidPrivateKey, "invalidPrivateKey"), (.spentOutputCountMismatch 2 1, "spentOutputCountMismatch"),
+    (.missingKey "5120", "missingKey"), (.malformedLeafScript, "malformedLeafScript")]
+  checkNames "SignFailure" signFailureIndex 3 (·.name) [
+    (.signer (.missingKey "5120"), "missingKey"), (.sighash (.invalidHashType 0x04), "invalidHashType"),
+    (.crypto .underlyingCryptoError, "underlyingCryptoError")]
+  checkNames "FeeBumpError" feeBumpIndex 6 (·.name) [
+    (.transactionNotPending, "transactionNotPending"), (.noChangeOutput, "noChangeOutput"),
+    (.changeAlreadySpent, "changeAlreadySpent"), (.invalidFeeRate 20_000, "invalidFeeRate"),
+    (.feeRateNotHigher 5 3, "feeRateNotHigher"), (.insufficientChange 2_220 1_170, "insufficientChange")]
+  checkNames "Base58Error" base58Index 3 (·.name) [
+    (.invalidCharacter '0', "invalidCharacter"), (.invalidChecksum, "invalidChecksum"), (.invalidLength, "invalidLength")]
+  checkNames "HDKeyParseError" hdKeyParseIndex 2 (·.name) [
+    (.base58 .invalidChecksum, "invalidChecksum"), (.bip32 .invalidVersion, "invalidVersion")]
+  checkNames "P256KError" p256kIndex 3 (·.name) [
+    (.incorrectKeySize, "incorrectKeySize"), (.incorrectParameterSize, "incorrectParameterSize"),
+    (.underlyingCryptoError, "underlyingCryptoError")]
+  checkNames "PersonCardError" personCardIndex 3 (·.name) [
+    (.notACard, "notACard"), (.unsupportedVersion 9, "unsupportedVersion"), (.wrongNetwork "mainnet" .regtest, "wrongNetwork")]
+
+/-- `SwiftDouble.formatted2`, `formatted(.number.precision(.fractionLength(2)))` in en_US, which a refused fee
+bump shows (backend-test `refusalsFlow` reaches it with the wallet's rates): the shortest decimal of the double
+rounded half to even (2.675 is "2.68", where the binary value would round down), the integer part grouped, the
+sign kept, NaN and the infinities. -/
+def formattedTwoPlaces : IO Unit := do
+  let cases : List (Float × String) := [
+    (0, "0.00"), (5, "5.00"), (3, "3.00"), (100, "100.00"), (1_000, "1,000.00"), (10_000, "10,000.00"),
+    (0.126, "0.13"), (0.124, "0.12"),
+    -- ties go to the even cent
+    (0.125, "0.12"), (0.135, "0.14"), (0.005, "0.00"), (0.015, "0.02"), (1.005, "1.00"), (2.675, "2.68"),
+    (0.004, "0.00"), (1e-7, "0.00"),
+    -- a carry through the grouping
+    (999.995, "1,000.00"), (999_999.999, "1,000,000.00"),
+    -- negative
+    (-1.5, "-1.50"), (-0.125, "-0.12"), (-1_234.5678, "-1,234.57"),
+    -- large
+    (1_234_567.891, "1,234,567.89"), (123_456_789_012.345, "123,456,789,012.34"),
+    (1e21, "1,000,000,000,000,000,000,000.00"),
+    (0.0 / 0.0, "NaN"), (1.0 / 0.0, "∞"), (-1.0 / 0.0, "-∞")]
+  for (x, want) in cases do
+    let got := SwiftDouble.formatted2 x
+    check s!"formatted2 {want}" (got == want) got
+
 /-! ## Funding sources -/
 
 namespace FundingVectors
@@ -619,4 +766,6 @@ def main : IO UInt32 := runMain "crypto-test" do
   jsonExponents
   retargetRules
   mainnetRetargets
+  errorNames
+  formattedTwoPlaces
   fundingSources
