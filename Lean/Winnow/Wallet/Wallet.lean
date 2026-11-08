@@ -568,10 +568,13 @@ def apply (w : Wallet) (m : Net.BlockMatch) : WM MatchEffect := do
   w.stateRef.set s
   return effect
 
-/-- Enrich an existing receipt with its transaction, without replaying its effects. -/
-def rememberTransaction (w : Wallet) (tx : Transaction) : WM Unit := do
+/-- Enrich the receipt `txid` with its transaction, without replaying its effects. The receipt is found by the
+txid that was asked for, not by the answer's own, so an answer for another transaction is refused ("payment
+details do not match the transaction ID") instead of dropped or stored on another receipt. backend-test's
+`oldPaymentFlow` loads receipts this way and offers one a wrong transaction. -/
+def rememberTransaction (w : Wallet) (txid : ByteArray) (tx : Transaction) : WM Unit := do
   let s ← w.state
-  let some k := historyIndex s tx.txid | return
+  let some k := historyIndex s txid | return
   let updated := { s with history := s.history.modify k fun e =>
     { e with rawTransaction := some (tx.serialized false), fundingScripts := FundingSources.fundingScripts tx } }
   match updated.history[k]!.transaction with

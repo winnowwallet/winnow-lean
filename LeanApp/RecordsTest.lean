@@ -16,8 +16,9 @@ in-memory key store and two wallets made by `Wallet.create` (two phones: A and B
 Covers people (add, rename, label, attach, remove), every kind of paste, receive and sender labels, store
 tamper detection (on the sealed people file), a wrong-network store, a first write that fails, and
 reopening everything from disk; the People store's payment index and pay-to checks; and the screens the
-journeys open but never use (Home's payment screen, People, Settings, Receive, and `Model.fail` for every
-failure a screen can get), driven as a person uses them through the app's own `perform`. Exits 1 on any
+journeys open but never use (Home's payment screen, People, Settings, Receive, the recovery phrase and the
+backup file with Simple mode's Back up page and Restore from a file, and `Model.fail` for every failure a
+screen can get), driven as a person uses them through the app's own `perform`. Exits 1 on any
 failure. (The shared-savings and MuSig2 scenarios went with vaults, upstream 1cf93fb; cards and records
 written with a `signerKey` still read.) -/
 
@@ -578,7 +579,7 @@ def backgroundRuns : IO Unit := do
   check "system events: a launched task" ((system (Lean.Json.mkObj [("bgtask", Lean.Json.mkObj [("id", "x"), ("kind", "processing")])])) matches some (.bgtask "x" "processing"))
   check "system events: an expired task" ((system (Lean.Json.mkObj [("bgtaskExpired", Lean.Json.mkObj [("id", "x"), ("kind", "refresh")])])) matches some (.bgtaskExpired "x" "refresh"))
 
-/-! ## The screens, as a person uses them (#35, #44, #45, #48)
+/-! ## The screens, as a person uses them (#35, #44, #45, #48, #64)
 
 Each flow sends the Model what a tap sends (`step`), runs the commands through the app's own `perform`
 against a backend (the real one over a wallet opened from disk with no network, or a stub that records what
@@ -586,16 +587,18 @@ reaches it), hands every answer back through `onHost`, and reads the screen as t
 journeys open these screens; these flows use their controls. -/
 
 /-- The shell's side of `perform`: the answers it posts, collected; `auth` and the other capabilities say yes,
-`clipboard.get` answers `clipboard`. -/
+`clipboard.get` answers `clipboard`; the fire-and-forget capabilities (`clipboard.set`, `open`) asked for,
+with their arguments, in `caps`. -/
 structure Shell where
   posted : IO.Ref (Array Host)
   clipboard : IO.Ref String
+  caps : IO.Ref (Array (String × Lean.Json))
 
-def Shell.new : IO Shell := do return { posted := ← IO.mkRef #[], clipboard := ← IO.mkRef "" }
+def Shell.new : IO Shell := do return { posted := ← IO.mkRef #[], clipboard := ← IO.mkRef "", caps := ← IO.mkRef #[] }
 
 def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
   post h := s.posted.modify (·.push h)
-  cap _ _ _ := pure ()
+  cap name args _ := s.caps.modify (·.push (name, args))
   ask name _ := do
     if name == "clipboard.get" then return Task.pure (Lean.Json.mkObj [("text", Lean.Json.str (← s.clipboard.get))])
     return Task.pure (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
@@ -608,7 +611,7 @@ def answersTo : Cmd → Option Nat
   | .receiveAddress .. | .setReceiveLabel .. | .ownCard .. | .parsePaste .. | .addPerson .. | .editPerson ..
   | .updateRecipient .. | .labelSender .. | .removeSenderLabel .. | .catalogStatus .. | .connectedPeers ..
   | .resetPeers .. | .reconnect .. | .loadPaymentDetails .. | .exportBundle .. | .revealPhrase ..
-  | .deleteWallet .. | .paste .. => some 1
+  | .deleteWallet .. | .paste .. | .importWallet .. => some 1
   | _ => none
 
 /-- Runs `cs` through `perform`, each answer back through `onHost` and whatever that asks for in turn; the
@@ -1291,6 +1294,182 @@ def sealFailures (root : System.FilePath) : IO Unit := do
     refused s!"seal refused: {what}" (kind := kind)
       (matching := (·.description == "The store file could not be verified.")) x
 
+/-! ### Backup and the recovery phrase (#64) -/
+
+/-- Where `needle` first starts in `s`, if anywhere. -/
+def positionOf (s needle : String) : Option Nat :=
+  match s.splitOn needle with
+  | first :: _ :: _ => some first.length
+  | _ => none
+
+/-- The arguments the shell was last asked for `clipboard.set` with, from `perform`ing the copies in `cs`
+(not the badge's timer, whose answer would come back in the middle of a later flow). -/
+def clipboardAsked (sh : Shell) (cs : List Cmd) : IO (Option Lean.Json) := do
+  sh.caps.set #[]
+  for c in cs do if c matches .copy .. then WinnowApp.perform c sh.fx
+  return ((← sh.caps.get).toList.filter (·.1 == "clipboard.set")).getLast?.map (·.2)
+
+/-- #64: the screens between `revealMnemonic` and a person's eyes, as a person uses them. Advanced mode's
+Settings: Show recovery phrase, the words numbered two to a row, hidden while the screen is recorded, copied
+local-only for two minutes; going to the background closes it and the other two sensitive sheets (the backup
+file, Restore from a file) and forgets what they held, and a phrase that arrives after that is dropped.
+Simple mode's Back up page: Save a backup file with the phrase, and on a new phone Restore from a file pastes
+it through to the verification report, and that phone shows the same words. -/
+def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (walletID : String) (entropy : UInt8) : IO Unit := do
+  tmpDir.set (root / "tmp").toString
+  IO.FS.createDirAll (root / "tmp")
+  let expected := match Winnow.Keys.BIP39.mnemonic (ByteArray.mk (Array.replicate 16 entropy)) with
+    | .ok phrase => phrase.splitOn " "
+    | .error _ => []
+  let labels := expected.zipIdx.map fun (w, i) => s!"{i + 1}. {w}"
+  let showsWords (s : String) : Bool := expected.any fun w => contains s s!"\"{w}\"" || contains s s!". {w}\""
+  -- Advanced mode's Settings tab: Show recovery phrase
+  let (m, _) ← sh.tap (.selectTab 2) (readyModel walletID (advanced := true))
+  let settings := rendered m
+  check "reveal: Settings offers Show recovery phrase" (contains settings "Show recovery phrase" && !showsWords settings)
+  let (m, _) ← sh.tap (.backup .reveal) m
+  check "reveal: the sheet opens on the phone's twelve words" (m.topSheet == some .revealPhrase && expected.length == 12 &&
+    m.reveal.words == expected && !m.reveal.revealing) s!"{m.reveal.words}"
+  let sheet := rendered m
+  check "reveal: titled Recovery phrase" (contains sheet "Recovery phrase" && contains sheet "Copy recovery phrase")
+  check "reveal: each word with its number" (labels.all fun l => contains sheet s!"\"{l}\"")
+  let positions := labels.filterMap (positionOf sheet s!"\"{·}\"")
+  check "reveal: numbered 1 to 12 in order" (positions.length == 12 && (positions.zip positions.tail).all fun (a, b) => a < b)
+  let rec pairs : List String → List (String × String)
+    | a :: b :: rest => (a, b) :: pairs rest
+    | _ => []
+  check "reveal: two words to a row, 1 beside 2"
+    (pairs labels |>.all fun (a, b) => contains sheet (renderedH (.row [body a, .spacer, body b])))
+  check "reveal: six rows" ((pairs labels).length == 6 && !contains sheet "\"13. ")
+  -- the screen recorded or mirrored, as the shell says it
+  let some recording := system (Lean.Json.mkObj [("captured", Lean.Json.bool true)])
+    | check "capture: the shell's event reads" false; return
+  let (hidden, _) := onHost recording m
+  let shown := rendered hidden
+  check "capture: the words are hidden while the screen is recorded"
+    (hidden.captured && !showsWords shown && contains shown "Hidden while the screen is being recorded or mirrored.")
+  check "capture: the sheet stays, so the words come back" (hidden.topSheet == some .revealPhrase && hidden.reveal.words == expected)
+  let (back, _) := onHost (.captured false) hidden
+  check "capture: recording stops, the words show again"
+    ((labels.all fun l => contains (rendered back) s!"\"{l}\"") && !contains (rendered back) "Hidden while the screen")
+  -- Copy recovery phrase
+  let (copied, cs) := step (.backup .copyPhrase) m
+  check "copy: the button says how long" (contains (rendered copied) "Copied for 2 minutes")
+  let phrase := " ".intercalate expected
+  let some args ← clipboardAsked sh cs | check "copy: the phrase goes to the clipboard" false; return
+  check "copy: the whole phrase" ((args.getObjValAs? String "text").toOption == some phrase)
+  -- what the shell was asked, without the words
+  let policy := s!"localOnly {(args.getObjValAs? Bool "localOnly").toOption}, expiresIn {(args.getObjValAs? Nat "expiresIn").toOption}"
+  check "copy: local only, never Universal Clipboard" ((args.getObjValAs? Bool "localOnly").toOption == some true) policy
+  check "copy: expires after two minutes" ((args.getObjValAs? Nat "expiresIn").toOption == some 120) policy
+  let some other ← clipboardAsked sh (step (.copy "address" "bcrt1qaddress") m).2
+    | check "copy: an address goes to the clipboard" false; return
+  check "copy: an address is not held to the phrase's policy"
+    ((other.getObjValAs? Bool "localOnly").toOption == some false && (other.getObjValAs? Nat "expiresIn").toOption == some 300)
+  -- going to the background
+  let some leaving := system (Lean.Json.mkObj [("scene", Lean.Json.str "background")])
+    | check "background: the shell's event reads" false; return
+  let (gone, _) := onHost leaving copied
+  check "background: the phrase sheet closes and forgets the words"
+    (gone.sheets.isEmpty && gone.reveal.words.isEmpty && !gone.reveal.copied && !showsWords (rendered gone) &&
+     !contains (rendered gone) "Recovery phrase\"")
+  let (again, _) := onHost (.scene true) gone
+  check "background: coming back does not bring it back" (again.sheets.isEmpty && !showsWords (rendered again))
+  -- a phrase asked for, then the phone locked before it arrived
+  let (asking, cs) := step (.backup .reveal) again
+  let (locked, _) := onHost (.scene false) asking
+  let (locked, _) := onHost (.scene true) locked
+  let (late, _) ← sh.run locked cs
+  check "background: a phrase that arrives afterwards is dropped" (late.sheets.isEmpty && late.reveal.words.isEmpty && !showsWords (rendered late))
+  -- the backup file with the phrase in it
+  let (e, _) ← sh.tap (.backup .openExport) again
+  let (e, _) ← sh.tap (.backup (.setIncludeMnemonic true)) e
+  let (e, _) ← sh.tap (.backup .createExport) e
+  let (e, _) ← sh.tap (.backup .confirmExport) e
+  let some file := e.exportState.file | check "background: the backup file is made" false; return
+  check "background: the backup file is made, with the phrase" (e.topSheet == some .exportBundle &&
+    contains (← IO.FS.readFile file) (expected.headD "?"))
+  let (eGone, cs) := onHost (.scene false) e
+  let (eGone, _) ← sh.run eGone cs
+  check "background: the backup file sheet closes and forgets the file"
+    (eGone.sheets.isEmpty && eGone.exportState.file.isNone && !eGone.exportState.includeMnemonic &&
+     !contains (rendered eGone) "Backup ready")
+  check "background: and the staged file is removed" (← waitUntil 2_000 (every := 5) do return !(← System.FilePath.pathExists file))
+  -- a sheet that holds no key stays
+  let (cloudOpen, _) := step (.cloud .openBackup) again
+  let (cloudKept, _) := onHost (.scene false) cloudOpen
+  check "background: the iCloud backup sheet stays" (cloudOpen.topSheet == some .cloudBackup && cloudKept.topSheet == some .cloudBackup)
+  -- Restore from a file, before a wallet exists
+  let fresh : Model := { stage := .onboarding, active := true, settings := { network := .regtest } }
+  let (imp, _) := step .openImport fresh
+  let (imp, _) := step (.setImportText "{\"version\":1}") imp
+  check "background: Restore from a file holds the pasted text" (imp.topSheet == some .importWallet &&
+    contains (rendered imp) "Import wallet")
+  let (impGone, _) := onHost (.scene false) imp
+  check "background: Restore from a file closes and forgets the text"
+    (impGone.sheets.isEmpty && impGone.onboarding.importText.isEmpty && !contains (rendered impGone) "Import wallet")
+
+  -- Simple mode: Home's Save a backup file, the Back up page
+  let simple := readyModel walletID
+  check "Back up: Home offers it while nothing is backed up" (contains (rendered simple) "Save a backup file")
+  let (page, _) ← sh.tap (.home .openBackup) simple
+  let shown := rendered page
+  check "Back up: the page" (page.routes == [.backup] && contains shown "\"Back up\"" &&
+    contains shown "A backup file is a copy of this wallet you keep yourself." && contains shown "Save a backup file")
+  check "Back up: no recovery words and no iCloud control in Simple mode"
+    (!contains shown "Show recovery phrase" && !contains shown "iCloud backup keeps" && !showsWords shown)
+  let (page, _) ← sh.tap (.backup .openExport) page
+  check "Back up: Save a backup file opens the file sheet over the page"
+    (page.topSheet == some .exportBundle && contains (rendered page) "Create backup file" && contains (rendered page) "\"Back up\"")
+  let (page, _) ← sh.tap (.backup (.setIncludeMnemonic true)) page
+  check "Back up: including the phrase says what that means" (contains (rendered page) "This file includes your phone’s signing key.")
+  let (page, _) ← sh.tap (.backup .createExport) page
+  check "Back up: and asks first" (contains (rendered page) "Include the recovery phrase?" && page.exportState.file.isNone)
+  let (page, _) ← sh.tap (.backup .confirmExport) page
+  let some file := page.exportState.file | check "Back up: the file is ready" false; return
+  check "Back up: the file is ready to share" (contains (rendered page) "Backup ready" &&
+    contains (rendered page) "Includes your recovery words. Keep this file private.")
+  let bundle ← IO.FS.readFile file
+  let (page, cs) := step .closeSheet page
+  let (page, _) ← sh.run page cs
+  let (home, _) ← sh.tap (.home .pop) page
+  check "Back up: closing the sheet, then Back, is Home" (page.sheets.isEmpty && home.routes.isEmpty &&
+    contains (rendered home) "Save a backup file")
+
+  -- a new phone restores it: the import sheet through to the verification report
+  let restoreRoot := root / "screens-restore"
+  IO.FS.createDirAll (restoreRoot / "regtest")
+  -- no peer to verify against here (backend-test verifies an import against a node): the wait is cut short
+  let (restorer, _, _) ← Backend.realWithMultisig { keyStore := inMemoryKeyStore (← IO.mkRef {}), fetch := fun _ => throw (.other "offline"),
+                                                     importPeerWaitMs := 0 }
+  match ← restorer.openWallet .regtest (restoreRoot / "regtest").toString with
+  | .missing => pure ()
+  | _ => check "restore: the new phone has no wallet" false; return
+  backendRef.set restorer
+  rootDir.set restoreRoot.toString
+  check "restore: onboarding offers Restore from a file" (contains (rendered fresh) "Restore from a file")
+  let (r, _) ← sh.tap .openImport fresh
+  let sheet := rendered r
+  check "restore: the import sheet" (r.topSheet == some .importWallet && contains sheet "Import wallet" &&
+    contains sheet "Paste your backup file (JSON)" && contains sheet "Import and verify" && !contains sheet "Verification report")
+  sh.clipboard.set bundle
+  let (r, _) ← sh.tap .pasteImport r
+  check "restore: Paste from clipboard fills it" (r.onboarding.importText == bundle)
+  let (r, _) ← sh.tap .importWallet r
+  let some report := r.onboarding.importReport | check "restore: the verification report" false s!"{r.onboarding.error}"; return
+  let sheet := rendered r
+  check "restore: the verification report, then Continue" (r.walletID == some walletID && !r.onboarding.busy &&
+    contains sheet "Verification report" && contains sheet "Continue" && !contains sheet "Import and verify")
+  check "restore: the report says verification waits for peers" (report == Real.verificationWaitingText && contains sheet report) report
+  let (r, _) ← sh.tap .finishOnboarding r
+  check "restore: Continue opens the wallet" (r.stage == .ready && r.sheets.isEmpty)
+  let (r, _) ← sh.tap (.setAdvanced true) r
+  let (r, _) ← sh.tap (.selectTab 2) r
+  let (r, _) ← sh.tap (.backup .reveal) r
+  check "restore: the new phone shows the same twelve words" (r.topSheet == some .revealPhrase && r.reveal.words == expected)
+  backendRef.set backend
+  rootDir.set (root / "screens-alice").toString
+
 /-- The screen flows, in one directory. -/
 def screens (root : System.FilePath) : IO Unit := do
   failuresReachTheirScreens
@@ -1308,6 +1487,7 @@ def screens (root : System.FilePath) : IO Unit := do
   let (_, robertID) ← peopleScreens sh alice aliceID cardB otherAddress
   cardsRefusedOnTheAddPersonSheet sh aliceID
   homeScreens sh alice aliceID robertID bobAddress (← alice.receiveAddress false) funder
+  backupScreens sh root alice aliceID 0xA1
   backendRef.set Backend.pending
 
 /-- The explorer and manual-peer rules against what Foundation and the Swift app answered

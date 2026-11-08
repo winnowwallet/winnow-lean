@@ -11,6 +11,8 @@ open LeanNative
 
 /-! ## Onboarding -/
 
+/-- Restore from a file: paste a backup file, import it, the verification report (records-test's
+`backupScreens`). -/
 def importSheet (m : Model) (inner : List H) : H :=
   formSheet "Import wallet" (some .closeSheet) [closeBar "Close"]
     ([ .section "Backup file" "Use a backup file saved from Winnow (Save a backup file). Keep your recovery words too. Backups from other wallets may not include every coin type."

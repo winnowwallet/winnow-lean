@@ -114,6 +114,8 @@ def authenticateNow (fx : Effects Host) (reason : String) : IO Unit := do
   unless (auth.getObjValAs? Bool "ok").toOption.getD false do
     throw (IO.userError ((auth.getObjValAs? String "error").toOption.getD "Device authentication failed."))
 
+/-- What the shell's `clipboard.set` is asked for: the recovery phrase stays on this device and expires after
+two minutes, anything else may sync and lasts five (records-test's `backupScreens`). -/
 def clipPolicyArgs (text : String) : ClipPolicy → Json
   -- the shell's `clipboard.set` takes `text`; the policy rides along for a shell that honours it
   | .recoveryPhrase => Json.mkObj [("text", Json.str text), ("localOnly", Json.bool true), ("expiresIn", toJson (120 : Nat))]
