@@ -496,7 +496,7 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .runBackgroundTask id kind s => do
       -- iOS's task, its kind's budget, and one `bgtask.complete` however it ends (records-test's
       -- `backgroundTaskCommands`: done, short of the tip, failed, expired by iOS and by its budget,
-      -- launched again under the same identifier)
+      -- launched again under the same identifier, both kinds at once)
       let n ← backgroundSerial.modifyGet fun n => (n, n + 1)
       let complete (success : Bool) : IO Unit := do
         let current ← backgroundRuns.modifyGet fun rs => (rs.any (·.2.1 == n), rs.filter (·.2.1 != n))
@@ -506,15 +506,16 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
           discard <| fx.ask "bgtask.complete" (Json.mkObj [("id", Json.str id), ("success", Json.bool success)])
       let run ← Real.BackgroundSyncRun.new (Real.backgroundBudgetMs kind) (b.runBackgroundSync s) b.cancelBackgroundSync complete
         (deadline := ← backgroundDeadline.get)
-      let older ← backgroundRuns.modifyGet fun rs =>
-        (rs.filter (·.1 == id), (id, n, run) :: rs.filter (·.1 != id))
-      if older.isEmpty then run.start
+      let (superseded, ahead) ← backgroundRuns.modifyGet fun rs =>
+        ((rs.filter (·.1 == id), rs.filter (·.1 != id)), (id, n, run) :: rs.filter (·.1 != id))
+      if superseded.isEmpty && ahead.isEmpty then run.start
       else
-        -- a second launch of the same identifier, as LeanNative's `BackgroundTasks.launch`: the older run is
-        -- expired, and the newer one starts once it has drained, since the backend runs one check at a time
-        for (_, _, r) in older do r.expire
+        -- the backend runs one check at a time and refuses a second, so the newer run starts once every older
+        -- one has drained: a run of the same identifier is expired first, as LeanNative's
+        -- `BackgroundTasks.launch` does, and one of the other kind is left to finish
+        for (_, _, r) in superseded do r.expire
         discard <| IO.asTask (prio := .dedicated) do
-          for (_, _, r) in older do r.wait
+          for (_, _, r) in superseded ++ ahead do r.wait
           run.start
   | .expireBackgroundTask id => do
       -- records-test's `backgroundTaskCommands`: while it runs, and after it completed
