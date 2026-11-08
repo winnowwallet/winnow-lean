@@ -51,6 +51,11 @@ def start (r : BackgroundSyncRun) : IO Unit := r.run.start
 /-- `expire()`: cancel the work and the backend's networking; the completion follows when the work drains. -/
 def expire (r : BackgroundSyncRun) : IO Unit := r.run.expire
 
+/-- Until the completion has been delivered: a superseded run's successor starts after it
+(records-test's `backgroundTaskCommands`). Never from the shell's main thread. -/
+def wait (r : BackgroundSyncRun) : IO Unit := do
+  try discard r.run.wait catch _ => pure ()
+
 end BackgroundSyncRun
 
 /-! ## The backend's half -/
