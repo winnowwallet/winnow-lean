@@ -114,7 +114,8 @@ def Model.closeTop (m : Model) : Model × List Cmd :=
   if m.sheets.isEmpty then (m, []) else m.closeFrom (m.sheets.length - 1)
 
 /-- Sheets that never survive a background transition (BackupSection, ExportBundleView,
-RevealPhraseView, the onboarding import sheet). -/
+RevealPhraseView, the onboarding import sheet); records-test's `backupScreens` backgrounds each of them, and
+the iCloud backup sheet, which stays. -/
 def Sheet.isSensitive : Sheet → Bool
   | .importWallet | .exportBundle | .revealPhrase => true
   | _ => false
