@@ -20,9 +20,10 @@ initialize tmpDir : IO.Ref String ← IO.mkRef ""
 initialize backendRef : IO.Ref Backend ← IO.mkRef Backend.pending
 /-- The running status watcher's token: starting or stopping networking bumps it, ending the old one. -/
 initialize watcherToken : IO.Ref Nat ← IO.mkRef 0
-/-- The background checks running, by task identifier, each with the serial of its launch
-(`BackgroundSyncRun`): at most one per identifier, since a later launch supersedes the run before it. -/
-initialize backgroundRuns : IO.Ref (List (String × Nat × Real.BackgroundSyncRun)) ← IO.mkRef []
+/-- The background checks running, by task identifier, each with the serial of its launch here and the
+shell's tag for it (`BackgroundSyncRun`): at most one per identifier, since a later launch supersedes the
+run before it. -/
+initialize backgroundRuns : IO.Ref (List (String × Nat × Option Nat × Real.BackgroundSyncRun)) ← IO.mkRef []
 /-- The next launch's serial: a run's completion removes its own entry and no other. -/
 initialize backgroundSerial : IO.Ref Nat ← IO.mkRef 0
 instance : Nonempty LeanNative.Native.BackgroundRun.Deadline := ⟨.never⟩
@@ -470,6 +471,13 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       return .spendHandled g id txid
   | _ => pure ()
 
+/-- `bgtask.complete`: task `id` is over, naming its launch's `tag` when the shell gave one, so that the shell
+ignores the answer if a later launch of `id` is pending rather than end it. records-test's
+`backgroundTaskCommands` reads every one. -/
+def answerBackgroundTask (fx : Effects Host) (id : String) (success : Bool) (tag : Option Nat) : IO Unit :=
+  discard <| fx.ask "bgtask.complete" (Json.mkObj ([("id", Json.str id), ("success", Json.bool success)] ++
+    tag.toList.map fun t => ("tag", toJson t)))
+
 /-- The shell's capabilities: the clipboard, timers, links, the journal, iCloud and background tasks. -/
 def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
@@ -493,40 +501,40 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         ("after", toJson (900 : Nat))])
       discard <| fx.ask "bgtask.schedule" (Json.mkObj [("id", Json.str Real.backgroundProcessingID), ("kind", Json.str "processing"),
         ("after", toJson (900 : Nat)), ("requiresNetwork", Json.bool true), ("requiresPower", Json.bool false)])
-  | .runBackgroundTask id kind s => do
-      -- iOS's task, its kind's budget, and one `bgtask.complete` however it ends (records-test's
-      -- `backgroundTaskCommands`: done, short of the tip, failed, expired by iOS and by its budget,
-      -- launched again under the same identifier, both kinds at once)
+  | .runBackgroundTask id kind tag s => do
+      -- iOS's task, its kind's budget, and one `bgtask.complete` with the launch's tag however it ends
+      -- (records-test's `backgroundTaskCommands`: done, short of the tip, failed, expired by iOS and by its
+      -- budget, launched again under the same identifier, both kinds at once, a launch without a tag)
       let n ← backgroundSerial.modifyGet fun n => (n, n + 1)
       let complete (success : Bool) : IO Unit := do
         let current ← backgroundRuns.modifyGet fun rs => (rs.any (·.2.1 == n), rs.filter (·.2.1 != n))
         -- a superseded run's task is over already: the shell completed it unsuccessfully when iOS launched
         -- its successor, and a `bgtask.complete` under the same identifier would now end the successor
-        if current then
-          discard <| fx.ask "bgtask.complete" (Json.mkObj [("id", Json.str id), ("success", Json.bool success)])
+        if current then answerBackgroundTask fx id success tag
       let run ← Real.BackgroundSyncRun.new (Real.backgroundBudgetMs kind) (b.runBackgroundSync s) b.cancelBackgroundSync complete
         (deadline := ← backgroundDeadline.get)
       let (superseded, ahead) ← backgroundRuns.modifyGet fun rs =>
-        ((rs.filter (·.1 == id), rs.filter (·.1 != id)), (id, n, run) :: rs.filter (·.1 != id))
+        ((rs.filter (·.1 == id), rs.filter (·.1 != id)), (id, n, tag, run) :: rs.filter (·.1 != id))
       if superseded.isEmpty && ahead.isEmpty then run.start
       else
         -- the backend runs one check at a time and refuses a second, so the newer run starts once every older
         -- one has drained: a run of the same identifier is expired first, as LeanNative's
         -- `BackgroundTasks.launch` does, and one of the other kind is left to finish
-        for (_, _, r) in superseded do r.expire
+        for (_, _, _, r) in superseded do r.expire
         discard <| IO.asTask (prio := .dedicated) do
-          for (_, _, r) in superseded ++ ahead do r.wait
+          for (_, _, _, r) in superseded ++ ahead do r.wait
           run.start
-  | .expireBackgroundTask id => do
-      -- records-test's `backgroundTaskCommands`: while it runs, and after it completed
-      match (← backgroundRuns.get).find? (·.1 == id) with
-      | some (_, _, run) => run.expire
+  | .expireBackgroundTask id tag => do
+      -- records-test's `backgroundTaskCommands`: while it runs, after it completed, and naming an older launch
+      match (← backgroundRuns.get).find? fun (i, _, t, _) => i == id && sameLaunch tag t with
+      | some (_, _, _, run) => run.expire
       -- the run has completed and the shell has its answer: a second `bgtask.complete` could only end a
-      -- task iOS launched since under the same identifier, and a task still pending is the shell's to end
+      -- task iOS launched since under the same identifier, and a task still pending is the shell's to end;
+      -- an expiry naming an older launch than the run registered under `id` leaves that run alone
       | none => pure ()
-  | .completeBackgroundTask id success =>
+  | .completeBackgroundTask id success tag =>
       -- expired before boot ran it (records-test's `backgroundTaskCommands`)
-      discard <| fx.ask "bgtask.complete" (Json.mkObj [("id", Json.str id), ("success", Json.bool success)])
+      answerBackgroundTask fx id success tag
   | .backgroundRefreshStatus =>
     fx.cap "bgtask.refreshStatus" Json.null fun r =>
       .backgroundRefresh ((r.getObjValAs? String "status").toOption.getD "available" == "available")

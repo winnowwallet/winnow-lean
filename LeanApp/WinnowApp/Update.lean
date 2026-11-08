@@ -51,7 +51,7 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     -- networking runs only while the scene is active (a cold background launch has no scene); a background
     -- task iOS launched during boot runs now
     let start : List Cmd := if m.active then [.startNetworking g m.settings] else []
-    let pending : List Cmd := m.pendingBackgroundTasks.map fun (id, kind) => .runBackgroundTask id kind m.settings
+    let pending : List Cmd := m.pendingBackgroundTasks.map fun (id, kind, tag) => .runBackgroundTask id kind tag m.settings
     let m := { m with pendingBackgroundTasks := [] }
     match r with
     | .opened id => ({ m with stage := .ready, walletID := some id }, [.refresh g] ++ start ++ pending)
@@ -211,20 +211,21 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
   | .copiedExpired key => if m.copied == some key then ({ m with copied := none }, []) else (m, [])
   | .captured on => ({ m with captured := on }, [])
   | .backgroundRefresh available => ({ m with backgroundRefreshAvailable := available }, [])
-  | .bgtask id kind =>
+  | .bgtask id kind tag =>
     -- `handle(_:)`: ask for the next checks first; a task launched before the wallet opened waits for boot
     -- each identifier waits, and a second launch of one replaces it: the shell has ended the first
     if m.stage == .loading then
-      ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) ++ [(id, kind)] },
+      ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) ++ [(id, kind, tag)] },
         [.scheduleBackgroundTasks])
-    else (m, [.scheduleBackgroundTasks, .runBackgroundTask id kind m.settings])
-  | .bgtaskExpired id _ =>
-    -- expired before boot ran it: no run exists, so the task is answered here, once, unsuccessfully;
-    -- otherwise its run is expired, and an expiry after the run completed changes nothing
-    -- (records-test's `backgroundTaskCommands`)
-    if m.pendingBackgroundTasks.any (·.1 == id) then
-      ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) }, [.completeBackgroundTask id false])
-    else (m, [.expireBackgroundTask id])
+    else (m, [.scheduleBackgroundTasks, .runBackgroundTask id kind tag m.settings])
+  | .bgtaskExpired id _ tag =>
+    -- expired before boot ran it: no run exists, so the task is answered here, once, unsuccessfully, with
+    -- its launch's tag; otherwise its run is expired, and an expiry after the run completed, or one naming an
+    -- older launch than the one waiting or running, changes nothing (records-test's `backgroundTaskCommands`)
+    if let some (_, _, t) := m.pendingBackgroundTasks.find? (fun (i, _, t) => i == id && sameLaunch tag t) then
+      ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) },
+        [.completeBackgroundTask id false t])
+    else (m, [.expireBackgroundTask id tag])
   | .scene active =>
     -- `scenePhaseChanged` journals the phase before acting on it
     let phase : Cmd := .journal "app.scenePhase" [("phase", if active then "active" else "background")]
@@ -373,19 +374,20 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
 neither stop syncing nor discard the result it is waiting for) and screen capture. The privacy cover
 over an inactive scene is the shell's. -/
 def system (j : Lean.Json) : Option Host :=
-  let task (key : String) : Option (String × String) := do
+  let task (key : String) : Option (String × String × Option Nat) := do
     let t ← (j.getObjVal? key).toOption
     let id ← (t.getObjValAs? String "id").toOption
-    return (id, (t.getObjValAs? String "kind").toOption.getD "refresh")
+    return (id, (t.getObjValAs? String "kind").toOption.getD "refresh", (t.getObjValAs? Nat "tag").toOption)
   match j.getObjValAs? String "scene", j.getObjValAs? Bool "captured", task "bgtask", task "bgtaskExpired" with
   | .ok "active", _, _, _ => some (.scene true)
   | .ok "background", _, _, _ => some (.scene false)
   | .ok "inactive", _, _, _ => some .sceneInactive
   | .ok _, _, _, _ => none
   | _, .ok on, _, _ => some (.captured on)
-  -- background tasks: launched (`{"bgtask":{"id","kind"}}`) and expired (`{"bgtaskExpired":…}`)
-  | _, _, some (id, kind), _ => some (.bgtask id kind)
-  | _, _, _, some (id, kind) => some (.bgtaskExpired id kind)
+  -- background tasks: launched (`{"bgtask":{"id","kind","tag"}}`) and expired (`{"bgtaskExpired":…}`); the
+  -- launch's `tag` is missing from a shell that sends none (records-test's `backgroundRuns`)
+  | _, _, some (id, kind, tag), _ => some (.bgtask id kind tag)
+  | _, _, _, some (id, kind, tag) => some (.bgtaskExpired id kind tag)
   | _, _, _, _ => none
 
 def update (msg : Msg) (m : Model) : Model := (step msg m).1

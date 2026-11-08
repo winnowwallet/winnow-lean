@@ -492,10 +492,18 @@ structure Model where
   /-- `isActive`: the scene is in the foreground (the shell's scene phase). A cold background launch has no
   active scene, so boot opens the wallet without starting foreground networking. -/
   active : Bool := false
-  /-- The background tasks iOS launched before the wallet was open (id, kind), in launch order, one per
-  identifier: each runs once boot lands (records-test's `backgroundTaskCommands`). -/
-  pendingBackgroundTasks : List (String × String) := []
+  /-- The background tasks iOS launched before the wallet was open (id, kind, the launch's tag), in launch
+  order, one per identifier: each runs once boot lands (records-test's `backgroundTaskCommands`). -/
+  pendingBackgroundTasks : List (String × String × Option Nat) := []
   deriving Repr, Inhabited
+
+/-- An expiry's tag names this launch: the two tags are the same, or either is unknown (a shell that sends
+none). As LeanNative's `BackgroundTasks.expire` matches its runs; records-test's `backgroundTaskCommands`
+(an expiry naming the older launch, before and after boot). -/
+def sameLaunch (expiry launch : Option Nat) : Bool :=
+  match expiry, launch with
+  | some a, some b => a == b
+  | _, _ => true
 
 /-! ## Messages -/
 
@@ -573,10 +581,11 @@ inductive Host where
   | captured (on : Bool)
   /-- Background App Refresh is available (`bgtask.refreshStatus`). -/
   | backgroundRefresh (available : Bool)
-  /-- iOS launched the background task `id` (`refresh` or `processing`). -/
-  | bgtask (id kind : String)
-  /-- iOS expired it. -/
-  | bgtaskExpired (id kind : String)
+  /-- iOS launched the background task `id` (`refresh` or `processing`); `tag` is the shell's for this launch
+  (none from a shell that sends none), and every `bgtask.complete` for it carries it. -/
+  | bgtask (id kind : String) (tag : Option Nat)
+  /-- iOS expired the launch `tag` of `id`. -/
+  | bgtaskExpired (id kind : String) (tag : Option Nat)
   deriving Inhabited
 
 inductive SendMsg where
@@ -887,15 +896,17 @@ inductive Cmd where
   | cloudScene (active : Bool)
   /-- `BackgroundSyncScheduler.schedule()`: one refresh and one processing request, each replacing its own. -/
   | scheduleBackgroundTasks
-  /-- Run the launched task `id` as one bounded background check (`BackgroundSyncRun`), then complete it. -/
-  | runBackgroundTask (id kind : String) (settings : Settings)
-  /-- The task's expiration handler: the run is cancelled and completes unsuccessfully once it drains. An
-  expiry with no run under `id` (it has already completed) is ignored: the shell has its one answer.
+  /-- Run the launched task `id` as one bounded background check (`BackgroundSyncRun`), then complete it,
+  naming the launch's `tag`. -/
+  | runBackgroundTask (id kind : String) (tag : Option Nat) (settings : Settings)
+  /-- The task's expiration handler: the run of launch `tag` is cancelled and completes unsuccessfully once it
+  drains. An expiry with no run under `id` (it has already completed), or naming an older launch than the
+  run's (`sameLaunch`), is ignored: the shell has its one answer, and the newer run is left alone.
   records-test's `backgroundTaskCommands`. -/
-  | expireBackgroundTask (id : String)
-  /-- Answer the shell that task `id` is over without running it: iOS expired it while the app was still
-  booting, so no run was ever made for it (records-test's `backgroundTaskCommands`). -/
-  | completeBackgroundTask (id : String) (success : Bool)
+  | expireBackgroundTask (id : String) (tag : Option Nat)
+  /-- Answer the shell that launch `tag` of task `id` is over without running it: iOS expired it while the app
+  was still booting, so no run was ever made for it (records-test's `backgroundTaskCommands`). -/
+  | completeBackgroundTask (id : String) (success : Bool) (tag : Option Nat)
   deriving Inhabited
 
 instance : Lean.ToJson Cmd := ⟨fun _ => Lean.Json.null⟩

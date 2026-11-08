@@ -31,9 +31,9 @@ jobs:
   app:
     # a draft pull request runs nothing until it is ready for review
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@51ed949d881b3f6829448b51387d4a20b5fb1989
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@76afb26bbfc2e1da2d5f7324212cc8f3d16044fd
     with:
-      leannative: 51ed949d881b3f6829448b51387d4a20b5fb1989
+      leannative: 76afb26bbfc2e1da2d5f7324212cc8f3d16044fd
       # GitHub's hosted macOS runner (macos-26: Xcode 26, iOS 26 simulators), the reusable workflow's default; or,
       # when the repository variable MACOS_RUNNER is set, that label (a self-hosted Mac while GitHub's are backed
       # up: delete the variable before it goes away, or the jobs wait for it). A fork's pull request always runs
