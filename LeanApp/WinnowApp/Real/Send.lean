@@ -150,10 +150,10 @@ def sendPayment (env : Env) (inputs : SendInputs) (p : Preview) : IO SentPayment
   let tip ← match c.stack with
     | some s => s.chain.height
     | none => pure 0
-  let prepared ← env.walletOp (w.buildSend review.payments review.feeRate tip (silentPayments := review.silentPayments))
+  let prepared ← env.walletWrite c.walletSerial "send.build" (w.buildSend review.payments review.feeRate tip (silentPayments := review.silentPayments))
   unless review.authorizes prepared.built prepared.resolvedSilentPayments do failWith .sendReviewChanged
   let txid ← broadcastTx env prepared.built.transaction (some review.feeRate)
-  env.walletOp (w.commit prepared)
+  env.walletWrite c.walletSerial "send.commit" (w.commit prepared)
   if let some (id, some index) := review.recipient then env.hooks.advancePersonIndex id index
   if let some r := review.summary.recipient then
     env.journal "person.paid" [("name", r.name),
@@ -196,12 +196,12 @@ def bumpFee (env : Env) (txid : String) (p : WinnowApp.FeeBumpPreview) : IO Stri
   let some w := c.wallet | failWith .noWallet
   let some s := c.stack | failWith .noStack
   let some (_, preview) := c.bumps.find? (fun (t, b) => t == txid && bumpSummary b == p) | failWith .sendReviewChanged
-  let prepared ← env.walletOp (w.buildFeeBump preview.originalTxid preview.feeRateSatPerVByte)
+  let prepared ← env.walletWrite c.walletSerial "feeBump.build" (w.buildFeeBump preview.originalTxid preview.feeRateSatPerVByte)
   unless preview.authorizes prepared.built do failWith .sendReviewChanged
   let vsize := TransactionBuilder.vsize prepared.built.transaction
   let rate := Float.ofInt prepared.built.fee.toInt / vsize.toFloat
   let replacement ← broadcastTx env prepared.built.transaction (some rate)
-  try env.walletOp (w.commitFeeBump prepared)
+  try env.walletWrite c.walletSerial "feeBump.commit" (w.commitFeeBump prepared)
   catch e =>
     runNet (s.broadcaster.cancel replacement)
     throw e
@@ -212,7 +212,14 @@ def bumpFee (env : Env) (txid : String) (p : WinnowApp.FeeBumpPreview) : IO Stri
   return Winnow.displayHex replacement
 
 /-- `loadPaymentDetails(_:)`: the stored raw transaction from the relay queue or its block. backend-test's
-`oldPaymentFlow` drops receipts' transactions and loads them back both ways, and with no stack. -/
+`oldPaymentFlow` drops receipts' transactions and loads them back both ways, and with no stack.
+
+A transaction that arrives after the generation or the open wallet changed (`walletSerial`: Swift's
+`self.wallet === wallet`, not the wallet ID) is dropped: written, the old wallet's state would replace the new
+wallet's file. The check and the write are one step under the wallet lock, which every such change takes.
+backend-test's `paymentRaceFlow` changes the wallet as it arrives (the background, another wallet's backup, the
+same wallet's backup, an erase), and between the check and the write (the background, the same backup), where
+the change waits. -/
 def loadPaymentDetails (env : Env) (txid : String) : IO Unit := do
   let c ← env.get
   let some w := c.wallet | return
@@ -228,9 +235,13 @@ def loadPaymentDetails (env : Env) (txid : String) : IO Unit := do
       match s.filters with
       | some f => if entry.height > 0 then runNet (f.transaction id entry.height) else failWith .paymentDetailsUnavailable
       | none => failWith .paymentDetailsUnavailable
-  let c' ← env.get
-  if c'.generation != c.generation || !(c'.wallet.map (·.id) == some w.id) then return
-  env.walletOp (w.rememberTransaction id tx)
+  env.deps.paymentFetched txid
+  -- the check and the write are one step: a change of generation or wallet waits for it (`withWalletLock`)
+  env.withWalletLock do
+    let c' ← env.get
+    if c'.generation != c.generation || c'.walletSerial != c.walletSerial then return
+    env.deps.paymentChecked txid
+    runWM (w.rememberTransaction id tx)
 
 /-! ## Mempool windows -/
 

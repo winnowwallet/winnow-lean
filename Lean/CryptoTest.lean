@@ -535,6 +535,12 @@ def p256kIndex : P256KError → Nat
 def personCardIndex : PersonCardError → Nat
   | .notACard => 0 | .unsupportedVersion _ => 1 | .wrongNetwork .. => 2
 
+def walletErrorIndex : WalletError → Nat
+  | .invalidDescriptor _ => 0 | .descriptorMismatch => 1 | .accountKeyMismatch => 2 | .invalidBundle _ => 3
+  | .noPayments => 4 | .changeOutputMissing => 5 | .transactionTooLarge .. => 6 | .mnemonicUnavailable => 7
+  | .invalidTransactionAmounts => 8 | .unsupportedWalletData => 9 | .storageTooLarge _ => 10
+  | .paymentDetailsMismatch => 11
+
 def errorNames : IO Unit := do
   checkNames "Bech32Error" bech32Index 11 (·.name) [
     (.invalidCharacter, "invalidCharacter"), (.mixedCase, "mixedCase"), (.missingSeparator, "missingSeparator"),
@@ -585,6 +591,15 @@ def errorNames : IO Unit := do
     (.underlyingCryptoError, "underlyingCryptoError")]
   checkNames "PersonCardError" personCardIndex 3 (·.name) [
     (.notACard, "notACard"), (.unsupportedVersion 9, "unsupportedVersion"), (.wrongNetwork "mainnet" .regtest, "wrongNetwork")]
+  -- `HistoryEntry.transaction` and the multisig spend records carry these by name; `paymentDetailsMismatch` is
+  -- the port's own (Swift cannot be handed another payment's transaction)
+  checkNames "WalletError" walletErrorIndex 12 (·.name) [
+    (.invalidDescriptor "tr(x)", "invalidDescriptor"), (.descriptorMismatch, "descriptorMismatch"),
+    (.accountKeyMismatch, "accountKeyMismatch"), (.invalidBundle "bad txid", "invalidBundle"), (.noPayments, "noPayments"),
+    (.changeOutputMissing, "changeOutputMissing"), (.transactionTooLarge 100_001 100_000, "transactionTooLarge"),
+    (.mnemonicUnavailable, "mnemonicUnavailable"), (.invalidTransactionAmounts, "invalidTransactionAmounts"),
+    (.unsupportedWalletData, "unsupportedWalletData"), (.storageTooLarge 16_777_216, "storageTooLarge"),
+    (.paymentDetailsMismatch, "paymentDetailsMismatch")]
 
 /-- `SwiftDouble.formatted2`, `formatted(.number.precision(.fractionLength(2)))` in en_US, which a refused fee
 bump shows (backend-test `refusalsFlow` reaches it with the wallet's rates): the shortest decimal of the double

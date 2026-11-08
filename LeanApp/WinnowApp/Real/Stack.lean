@@ -73,23 +73,24 @@ def finishRollback (dir : String) : IO Unit := removeQuietly (dirFile dir rollba
 
 /-- `rollBackStores(to:)`: the target is recorded first; nothing changes if it cannot be (backend-test's
 step 7e). -/
-def rollBackStores (env : Env) (dir : Option String) (w : Wallet) (b : TxBroadcaster) (fork : UInt32) : IO Unit := do
+def rollBackStores (env : Env) (dir : Option String) (w : Wallet) (serial : Nat) (b : TxBroadcaster) (fork : UInt32) :
+    IO Unit := do
   let some dir := dir | failWith .noStorage
   writeAtomic (dirFile dir rollbackMarkerName) (toString fork).toUTF8
-  env.walletOp (w.rollBack fork)
+  env.walletWrite serial "sync.rollBack" (w.rollBack fork)
   env.hooks.multisigRollBack fork
   -- reactivates any own send whose confirming block fell (#157)
   runNet (b.rollBack fork)
 
 /-- `resumeInterruptedRollback()`: redo a rollback a crash interrupted, before anything scans (backend-test's
 step 9b). -/
-def resumeInterruptedRollback (env : Env) (dir : String) (w : Option Wallet) (s : Stack) : IO Unit := do
+def resumeInterruptedRollback (env : Env) (dir : String) (w : Option Wallet) (serial : Nat) (s : Stack) : IO Unit := do
   let marker := dirFile dir rollbackMarkerName
   let some text ← (try some <$> IO.FS.readFile marker catch _ => pure none) | return
   let some fork := text.trimAscii.copy.toNat? | return
   if fork > 0xFFFF_FFFF then return
   let fork := fork.toUInt32
-  if let some w := w then env.walletOp (w.rollBack fork)
+  if let some w := w then env.walletWrite serial "resume.rollBack" (w.rollBack fork)
   env.hooks.multisigRollBack fork
   runNet (s.broadcaster.rollBack fork)
   if let some f := s.filters then runNet (f.rollBack fork)
@@ -197,7 +198,7 @@ partial def buildStackIfNeeded (env : Env) : IO Unit := do
       if !installed then stack.shutdown; return
       observeBroadcasterFailures env broadcaster epoch
       -- Before anything scans; fails closed (the marker stays and the error is shown).
-      resumeInterruptedRollback env dir c.wallet stack
+      resumeInterruptedRollback env dir c.wallet c.walletSerial stack
     catch e =>
       env.modify fun c => if c.generation == epoch then { c with lastSyncError := some (toString e) } else c
       env.journal "network.stackFailed" [("error", toString e)]
@@ -209,7 +210,8 @@ partial def buildStackIfNeeded (env : Env) : IO Unit := do
 def suspendAndStop (env : Env) (keepActive : Bool) : IO Unit := do
   let routing := (← env.get).activeGateways
   let fresh ← RoutedHTTPClient.ofGateways env.deps.fetch routing
-  let (old, stack, windows) ← env.modifyGet fun c =>
+  -- under the wallet lock: a wallet write checked against this generation finishes first
+  let (old, stack, windows) ← env.withWalletLock <| env.modifyGet fun c =>
     ((c.http, c.stack, c.receiveWindow.toList ++ c.relayWindows.toList.map (·.2)),
      { c with generation := c.generation + 1, active := keepActive && c.active, http := fresh, httpGateways := routing, stack := none,
               gatewayDiscovery := none, discoveringGateways := false,
@@ -298,22 +300,22 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
       match s.filters with
       | some f =>
         if c.syncing then (none, c)
-        else (some (w, s, f, c.generation, c.dir), { c with syncing := true, syncPasses := c.syncPasses + 1 })
+        else (some (w, s, f, c.generation, c.walletSerial, c.dir), { c with syncing := true, syncPasses := c.syncPasses + 1 })
       | none => (none, c)
     | _, _ => (none, c)
-  let some (w, s, f, gen, dir) := claim | return false
+  let some (w, s, f, gen, serial, dir) := claim | return false
   try
     let pass : NetM Unit := do
       let scripts := (← WM.toNet w.watchScripts) ++ (← (env.hooks.multisigWatchScripts w.network : IO _))
       let b := s.broadcaster
-      f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w b fork : IO Unit)) (onMatch := fun m => do
-        let effect ← env.walletOpNet (w.apply m)
+      f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w serial b fork : IO Unit)) (onMatch := fun m => do
+        let effect ← env.walletWriteNet serial "sync.apply" (w.apply m)
         for discarded in effect.discardedReplacements do b.cancel discarded
         for discarded in ← (env.hooks.multisigApply m w.network : IO _) do b.cancel discarded
         let pending ← b.pendingTxids
         for tx in m.block.transactions do
           if pending.contains tx.txid then b.markConfirmed tx.txid m.height)
-      env.walletOpNet (w.recordScanHeight (← f.nextScanHeight))
+      env.walletWriteNet serial "sync.recordScanHeight" (w.recordScanHeight (← f.nextScanHeight))
       b.pruneConfirmed (← f.nextScanHeight)
       if let some d := dir then (finishRollback d : IO Unit)
     match ← pass.attempt with
@@ -331,10 +333,11 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
           try IO.FS.writeFile (lastCompleteCheckPath d) (toString now) catch _ => pure ()
       return complete
     | .error e =>
-      try env.walletOp (w.recordScanHeight (← f.nextScanHeight)) catch _ => pure ()
-      -- a suspend, network switch or expired background check ended this generation: nothing failed
+      try env.walletWrite serial "sync.recordScanHeight" (w.recordScanHeight (← f.nextScanHeight)) catch _ => pure ()
+      -- a suspend, network switch or expired background check ended this generation, or the wallet was erased or
+      -- replaced: nothing failed
       let transient := isTransientSyncError e
-      env.modify fun c => if c.generation == gen then
+      env.modify fun c => if c.generation == gen && c.walletSerial == serial then
           { c with lastSyncError := some e.description,
                    transientSyncFailures := if transient then c.transientSyncFailures + 1 else 0,
                    transientSyncError := if transient then some e.description else none }
