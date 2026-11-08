@@ -566,11 +566,11 @@ def backgroundRuns : IO Unit := do
   check "background: the manifest passes LeanNative's capability checks" WinnowApp.manifest.problems.isEmpty
   -- the Model: a cold launch's task waits for boot, boot without a scene starts no networking
   let (m, cs) := onHost (.bgtask Real.backgroundRefreshID "refresh") ({} : Model)
-  check "Model: a task launched during boot waits for the wallet" (m.pendingBackgroundTask == some (Real.backgroundRefreshID, "refresh") &&
+  check "Model: a task launched during boot waits for the wallet" (m.pendingBackgroundTasks == [(Real.backgroundRefreshID, "refresh")] &&
     cs.any (· matches .scheduleBackgroundTasks) && !cs.any (· matches .runBackgroundTask ..))
   let (m, cs) := onHost (.booted 0 (.opened "w")) m
   check "Model: boot runs it, without foreground networking" (cs.any (· matches .runBackgroundTask ..) &&
-    !cs.any (· matches .startNetworking ..) && m.pendingBackgroundTask.isNone)
+    !cs.any (· matches .startNetworking ..) && m.pendingBackgroundTasks.isEmpty)
   let (m, cs) := onHost (.scene true) m
   check "Model: the scene becoming active starts networking" (cs.any (· matches .startNetworking ..) && m.active)
   let (_, cs) := onHost (.scene false) m
@@ -1585,8 +1585,8 @@ def TaskCheck.backend (c : TaskCheck) (sh : TaskShell) : Backend :=
 /-- #68: a background task's launch and expiry through `perform`: the budget for its kind, and exactly one
 `bgtask.complete` under its id with the run's success, whether the check finishes, falls short, fails, or
 is expired by iOS or its budget, when iOS expires it after it completed, when iOS launches it again while
-it runs (the older check stops and drains before the newer runs), and when iOS expires it before it
-started. -/
+it runs (the older check stops and drains before the newer runs), when iOS launches both kinds, or one
+twice, while the app boots, and when iOS expires it before it started. -/
 def backgroundTaskCommands : IO Unit := do
   let budgets ← IO.mkRef (#[] : Array (Nat × IO Unit))
   backgroundDeadline.set fun ms => do
@@ -1683,11 +1683,47 @@ def backgroundTaskCommands : IO Unit := do
   -- launched during boot: it waits for the wallet, then runs
   let (sh, c) ← start (.ok true)
   let m ← sh.event "bgtask" refresh "refresh" {}
-  check "launched during boot: waits for the wallet" (m.pendingBackgroundTask.isSome && (← c.runs.get).isEmpty)
+  check "launched during boot: waits for the wallet" (!m.pendingBackgroundTasks.isEmpty && (← c.runs.get).isEmpty)
   let (_, cs) := onHost (.booted 0 (.opened "w")) m
   for cmd in cs.filter (· matches .runBackgroundTask ..) do WinnowApp.perform cmd sh.fx
   let done ← sh.settled
   check "launched during boot: runs once the wallet opens, completes once"
+    (done == #[(refresh, some true, true)] && (← c.runs.get).size == 1) (reprStr done)
+  -- boot lands: perform the runs it starts, then the completions once `n` have come
+  let boot (sh : TaskShell) (m : Model) (n : Nat) : IO (Array (String × Option Bool × Bool)) := do
+    let (_, cs) := onHost (.booted 0 (.opened "w")) m
+    for cmd in cs.filter (· matches .runBackgroundTask ..) do WinnowApp.perform cmd sh.fx
+    discard <| waitUntil 5_000 (every := 2) do return (← sh.completions).size ≥ n
+    IO.sleep 150
+    sh.completions
+  -- iOS launches both kinds while the app boots: each waits, and each runs once the wallet opens
+  let (sh, c) ← start (.ok true)
+  let m ← sh.event "bgtask" refresh "refresh" {}
+  let m ← sh.event "bgtask" processing "processing" m
+  check "two launched during boot: both wait for the wallet"
+    (m.pendingBackgroundTasks.map (·.1) == [refresh, processing] && (← c.runs.get).isEmpty)
+  let done ← boot sh m 2
+  check "two launched during boot: each runs once the wallet opens, with its kind's budget"
+    ((← c.runs.get).size == 2 && (← budgets.get).map (·.1) == #[25_000, 120_000])
+  check "two launched during boot: each completed once, successfully, under its own id"
+    (done.size == 2 && done.contains (refresh, some true, true) && done.contains (processing, some true, true)) (reprStr done)
+  check "two launched during boot: nothing left running" (← WinnowApp.backgroundRuns.get).isEmpty
+  -- one of the two expires before boot lands: it is answered at once, the other still runs
+  let (sh, c) ← start (.ok true)
+  let m ← sh.event "bgtask" refresh "refresh" {}
+  let m ← sh.event "bgtask" processing "processing" m
+  let m ← sh.event "bgtaskExpired" refresh "refresh" m
+  let done ← boot sh m 2
+  check "one of two expired during boot: it completes unsuccessfully, the other runs and completes"
+    (done == #[(refresh, some false, true), (processing, some true, true)] && (← c.runs.get).size == 1 &&
+      (← budgets.get).map (·.1) == #[120_000]) (reprStr done)
+  -- the same task launched twice during boot (the shell has ended the first): it runs once
+  let (sh, c) ← start (.ok true)
+  let m ← sh.event "bgtask" refresh "refresh" {}
+  let m ← sh.event "bgtask" refresh "refresh" m
+  check "launched twice during boot: waits once" (m.pendingBackgroundTasks == [(refresh, "refresh")])
+  let done ← boot sh m 1
+  check "launched twice during boot: runs once, completes once"
     (done == #[(refresh, some true, true)] && (← c.runs.get).size == 1) (reprStr done)
   -- expired before it started: iOS's time ran out while the app was still booting
   let (sh, c) ← start (.ok true)

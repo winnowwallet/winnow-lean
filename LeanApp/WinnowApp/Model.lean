@@ -492,8 +492,9 @@ structure Model where
   /-- `isActive`: the scene is in the foreground (the shell's scene phase). A cold background launch has no
   active scene, so boot opens the wallet without starting foreground networking. -/
   active : Bool := false
-  /-- A background task iOS launched before the wallet was open (id, kind): it runs once boot lands. -/
-  pendingBackgroundTask : Option (String × String) := none
+  /-- The background tasks iOS launched before the wallet was open (id, kind), in launch order, one per
+  identifier: each runs once boot lands (records-test's `backgroundTaskCommands`). -/
+  pendingBackgroundTasks : List (String × String) := []
   deriving Repr, Inhabited
 
 /-! ## Messages -/
