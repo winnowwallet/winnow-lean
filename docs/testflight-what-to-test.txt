@@ -1,19 +1,16 @@
-Winnow 0.9.10: the same wallet, rewritten in Lean
+Winnow 0.9.11: the same wallet, rewritten in Lean
 
-New in 0.9.10
+New in 0.9.11
 
-Nothing should look different: only how Winnow is tested changed. Its UI tests are now Lean programs, and the app is built from the same code as 0.9.9. Please use the wallet as you normally do and report anything that no longer responds: a payment, a fee bump, the iCloud backup, Face ID, a multisig account or the Ledger.
+Fixes found by new tests; nothing looks different. Please try:
+1. Erase the wallet, or import a backup, while the Wallet tab says it is syncing. The erased wallet must not come back after a restart, and an imported one must stay the one you imported.
+2. Open an old payment's details, then go to the background or import a backup before they load. The new wallet must not show the old payment.
+3. Settings → Connected peers → Reset and shuffle peers (Advanced mode). If it cannot forget the saved peers it now says so and stays online, instead of going offline with a file error. Home's Retry no longer turns networking on after you stopped it.
+4. Leave Winnow in the background for a few hours. When iOS starts two background checks at once they now run one after the other, instead of the second failing.
 
-0.9.9 changed only how Winnow is tested; 0.9.8 checked signatures against BIP340's test vectors; 0.9.7 split the app's largest functions; 0.9.6 said that the peer list ships with the app; 0.9.5 generated the Xcode project from Lean.
+Also fixed: a payment that loses a coin to another spend shows Replaced, even when it shares only one coin with it; a locked Keychain at Send, and a person card for another network, show what went wrong; a multisig account's recovery text counts its own members; transactions Bitcoin Core refuses are refused too.
 
-New in 0.9.3
-
-Nothing should look different. Winnow now builds on LeanNative, the framework drawn out of it, so the parts that talk to iOS were rewritten underneath: background checks, the Keychain, iCloud backup, Face ID and the Ledger over Bluetooth. Please try:
-1. Background checks: leave Winnow in the background for a few hours (not force-quit); in Advanced mode the Wallet tab's Sync section should then say "Chain last checked" a short time ago.
-2. iCloud backup: while Winnow prepares the backup and Face ID asks, lock the phone or switch apps. No error should show, and Settings → Backup should end at "Backed up".
-3. Ledger: pair, create an account and sign a payment over Bluetooth.
-
-Also in 0.9.2: answers survive leaving the app, payments sent just before the background reach the network at once, the Wallet tab no longer jumps while it syncs, and backups carry payments not yet confirmed.
+0.9.10 and 0.9.9 changed only how Winnow is tested; 0.9.8 checked signatures against BIP340's vectors; 0.9.5 generated the Xcode project from Lean; 0.9.3 moved Winnow onto LeanNative (background checks, Keychain, iCloud backup, Face ID, Ledger over Bluetooth).
 
 This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Signers. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
 
