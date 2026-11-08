@@ -996,8 +996,11 @@ def oldPaymentFlow (dir : String) (n : Node) : IO Unit := do
   let some w := (← envB.get).wallet | throw (IO.userError "no wallet")
   let onDisk ← IO.FS.readBinFile walletFile
   let wrong ← attempt (envB.walletOp (w.rememberTransaction (ofDisplayHex! shTxid) pkhTx))
-  check "old payments: another payment's transaction is refused"
-    (match wrong with | .error e => (e.splitOn "payment details do not match the transaction ID").length > 1 | .ok _ => false)
+  check "old payments: another payment's transaction is refused, in a payment's words"
+    (match wrong with
+     | .error e => e == "The transaction received for this payment has a different transaction ID, so it was not saved." &&
+         e == WalletError.paymentDetailsMismatch.description
+     | .ok _ => false)
     (match wrong with | .error e => e | .ok _ => "stored")
   check "old payments: the refused transaction is not kept"
     (bare (← b.snapshot).1 shTxid && onDisk == (← IO.FS.readBinFile walletFile))
@@ -1019,6 +1022,111 @@ def oldPaymentFlow (dir : String) (n : Node) : IO Unit := do
   check "old payments: what was loaded is on disk"
     ([pkhTxid, shTxid, queued, unrelayed].all (fun t => (history? reopened t).any (·.outputs.isSome)) &&
      ((history? reopened shTxid).map (·.fundingAddresses)) == some [shAddress])
+
+/-- A phone's network directory copied whole (wallet, headers, peers). -/
+partial def copyDirectory (src dst : System.FilePath) : IO Unit := do
+  IO.FS.createDirAll dst
+  for e in ← src.readDir do
+    if ← e.path.isDir then copyDirectory e.path (dst / e.fileName)
+    else IO.FS.writeBinFile (dst / e.fileName) (← IO.FS.readBinFile e.path)
+
+def readIfThere (p : System.FilePath) : IO (Option ByteArray) := do
+  if ← p.pathExists then return some (← IO.FS.readBinFile p) else return none
+
+/-- The wallet changes while an old payment's transaction is on its way (`Deps.paymentFetched` is the moment it
+has arrived, before `loadPaymentDetails` writes it). The phone sends a payment that confirms, and its transaction
+is dropped from `wallet.json`; four phones restored from those files each open the payment, and as its
+transaction arrives the phone goes to the background, imports another wallet's backup, imports its own wallet's
+backup again (the same wallet ID, a new wallet), or erases its wallet and makes a new one. Each time the answer is
+dropped without an error and `wallet.json` gains nothing; the new wallet shows nothing of the old payment, and
+after the trip to the background, opening the payment again loads it. -/
+def paymentRaceFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let keys ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let arrived ← IO.mkRef (pure () : IO Unit)
+  let racing : Real.Deps := { deps keys "Race" with paymentFetched := fun _ => do (← arrived.get) }
+  let phone (name : String) : String := s!"{dir}/{name}/BTCSwift/regtest"
+  -- the phone pays from a coin Core sent it, and the payment confirms
+  let (a, _) ← Backend.realWithEnv racing
+  IO.FS.createDirAll (phone "Race")
+  discard <| a.openWallet .regtest (phone "Race")
+  a.startNetworking settings
+  discard <| a.createWallet .regtest (phone "Race")
+  discard <| n.wallet #["sendtoaddress", ← a.receiveAddress false, "1.0"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  discard <| syncUntil a 60_000 fun s p => s.balance == 100_000_000 && p == .synced
+  let inputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "10000000", network := .regtest }
+  let sent := (← a.sendPayment inputs (← a.previewSend inputs)).txid
+  check "payment race: the send reaches the node" (← waitUntil 20_000 (do return (← n.mempool).contains sent))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (paid, _) ← syncUntil a 60_000 fun s p => (history? s sent).any (·.height > 0) && p == .synced
+  check "payment race: the send confirms" ((history? paid sent).any fun h => h.height > 0 && h.outputs.isSome)
+  let ownBackup ← a.exportBundle true
+  a.stopNetworking
+  -- another wallet's backup, its recovery phrase included
+  let (o, _) ← Backend.realWithEnv (deps keys "Other")
+  IO.FS.createDirAll (phone "Other")
+  discard <| o.openWallet .regtest (phone "Other")
+  o.startNetworking settings
+  let otherID ← o.createWallet .regtest (phone "Other")
+  let otherBackup ← o.exportBundle true
+  o.stopNetworking
+  dropPaymentDetails (System.FilePath.mk (phone "Race") / "wallet.json") [sent]
+  -- one phone per race, from the same files: `change` runs as the transaction arrives
+  let race (name : String) (change : Backend → String → IO Unit) : IO (Backend × Status) := do
+    let home := phone name
+    copyDirectory (phone "Race") home
+    let (b, _) ← Backend.realWithEnv racing
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    let (opened, _) ← syncUntil b 60_000 fun _ p => p == .synced
+    check s!"payment race, {name}: the payment opens without its transaction" (bare opened sent)
+    let file := System.FilePath.mk home / "wallet.json"
+    let changed ← IO.mkRef (none : Option (Option ByteArray))
+    arrived.set do
+      change b home
+      changed.set (some (← readIfThere file))
+    let loaded ← attempt (b.loadPaymentDetails sent)
+    arrived.set (pure ())
+    let after ← readIfThere file
+    let (s, _) ← b.snapshot
+    let changed ← changed.get
+    check s!"payment race, {name}: the wallet changed as the transaction arrived" changed.isSome
+    check s!"payment race, {name}: the late answer is dropped without an error" (loaded matches .ok _)
+      (match loaded with | .error e => e | .ok _ => "")
+    check s!"payment race, {name}: wallet.json gains nothing" (changed == some after)
+    return (b, s)
+  -- the phone goes to the background: the same wallet, a new generation
+  let (b, s) ← race "Background" fun b _ => b.stopNetworking
+  check "payment race, Background: the payment is still without its transaction" (bare s sent)
+  b.startNetworking settings
+  discard <| syncUntil b 60_000 fun _ p => p == .synced
+  b.loadPaymentDetails sent
+  let (back, _) ← b.snapshot
+  check "payment race, Background: back from the background, opening the payment loads it"
+    (history? back sent == history? paid sent) s!"{(history? back sent).map (·.outputs.isSome)}"
+  b.stopNetworking
+  -- another wallet's backup imported over this one
+  let imported ← IO.mkRef ""
+  let (b, s) ← race "Another" fun b home => do imported.set (← b.importBundle .regtest home otherBackup).1
+  check "payment race, Another: the other wallet is open" ((← imported.get) == otherID) (← imported.get)
+  check "payment race, Another: it shows nothing of the old payment" (history? s sent).isNone
+  b.stopNetworking
+  -- this wallet's own backup imported again: the same wallet ID, but not the wallet that asked
+  let (b, s) ← race "Same" fun b home => discard <| b.importBundle .regtest home ownBackup
+  check "payment race, Same: the imported wallet shows the payment as its backup has it"
+    (history? s sent == history? paid sent) s!"{(history? s sent).map (·.outputs.isSome)}"
+  b.stopNetworking
+  -- erased, and a new wallet made
+  let (b, s) ← race "Erased" fun b home => do
+    b.deleteWallet
+    b.startNetworking settings
+    discard <| b.createWallet .regtest home
+  check "payment race, Erased: the new wallet shows nothing of the old payment" (history? s sent).isNone
+  b.stopNetworking
 
 set_option maxRecDepth 4096 in
 def flow (dir : String) (n : Node) : IO Unit := do
@@ -1458,5 +1566,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; resetPeersFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; resetPeersFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

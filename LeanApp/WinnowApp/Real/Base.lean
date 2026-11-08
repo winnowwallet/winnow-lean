@@ -104,6 +104,9 @@ structure Deps where
   clearnet: tests, and test mode unless `WINNOW_E2E_LIVE_GATEWAYS=1` (a UI journey never depends on the
   developer's tailnet). -/
   discoverGateways : Option (IO PeerGatewayConfiguration) := none
+  /-- Runs once `loadPaymentDetails` has the payment's transaction, before it checks that the wallet it asked
+  for is still the one open; nothing in the app. backend-test's `paymentRaceFlow` changes the wallet here. -/
+  paymentFetched : (txid : String) → IO Unit := fun _ => pure ()
   hooks : Hooks := {}
 
 /-! ## AppModel's errors and the texts the app shows -/
@@ -268,6 +271,10 @@ structure Core where
   dir : Option String := none
   settings : Option Settings := none
   wallet : Option Wallet := none
+  /-- Moves each time `wallet` is replaced or let go (`Core.withWallet`): the same number is Swift's
+  `self.wallet === wallet`. A wallet ID is not enough, since importing a wallet's own backup again makes a
+  new wallet with the same ID (backend-test `paymentRaceFlow`). -/
+  walletSerial : Nat := 0
   stack : Option Stack := none
   /-- `networkGeneration`: bumps on every suspend, network switch and rebuild. -/
   generation : Nat := 0
@@ -321,6 +328,10 @@ structure Core where
   syncPasses : Nat := 0
   phaseTicks : Nat := 0
   liveLoops : Nat := 0
+
+/-- `w` (or none) becomes the open wallet, and `walletSerial` moves: opening, adopting a created or imported
+wallet, switching network, erasing. -/
+def Core.withWallet (c : Core) (w : Option Wallet) : Core := { c with wallet := w, walletSerial := c.walletSerial + 1 }
 
 structure Env where
   deps : Deps

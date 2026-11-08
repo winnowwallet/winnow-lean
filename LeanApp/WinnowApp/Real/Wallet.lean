@@ -19,7 +19,8 @@ def switchTo (env : Env) (n : WinnowApp.Network) (dir : String) : IO Unit := do
   suspendAndStop env false
   env.hooks.walletChanged
   let checked ← readLastCompleteCheck dir
-  env.modify fun c => { c with network := some n, dir := some dir, wallet := none, reviews := #[], bumps := #[],
+  env.modify fun c =>
+    { (c.withWallet none) with network := some n, dir := some dir, reviews := #[], bumps := #[],
                                lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                transientSyncFailures := 0, transientSyncError := none, lastCompleteCheck := checked }
 
@@ -62,7 +63,7 @@ def openWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO BootResul
   | .error _ => return .damaged damagedWalletText
   | .ok w =>
     let installed ← env.modifyGet fun c =>
-      if c.dir == some dir && c.wallet.isNone then (true, { c with wallet := some w }) else (false, c)
+      if c.dir == some dir && c.wallet.isNone then (true, c.withWallet (some w)) else (false, c)
     if !installed then
       if let some w' := (← env.get).wallet then return ← bootResult dir w'.id
     -- `upgradeKeyProtection`: best effort, attributes only
@@ -186,7 +187,7 @@ def adopt (env : Env) (w : Wallet) (startSync : Bool) : IO Unit := do
     removeQuietly (dirFile dir name)
   if let some n := n then
     if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
-  env.modify fun c => { c with wallet := some w, stack := none, reviews := #[], bumps := #[] }
+  env.modify fun c => { (c.withWallet (some w)) with stack := none, reviews := #[], bumps := #[] }
   if let some existing := stack then
     if (← existing.chain.startHeight) > (← w.nextScanHeight) then
       -- the windows watch the pool that stops here
@@ -367,7 +368,8 @@ def deleteWallet (env : Env) : IO Unit := do
   if let some dir := c.dir then
     for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "receive-labels.json", "cloud-backup.json"] do
       removeQuietly (dirFile dir name)
-  env.modify fun c => { c with wallet := none, lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
+  env.modify fun c =>
+    { (c.withWallet none) with lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                reviews := #[], bumps := #[] }
   if let (some n, some dir) := (c.network, c.dir) then
     if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
