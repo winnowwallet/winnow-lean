@@ -206,7 +206,7 @@ def readMnemonic (env : Env) (walletID : String) : IO (Option String) := do
   match ← (env.deps.keyStore.load walletID).run with
   | .ok (.mnemonic words) => return some words
   | .ok (.masterKey _) | .ok (.accountKey ..) => return none
-  | .error e => failText (keyStoreErrorText e)
+  | .error e => failText e.errorDescription
 
 /-- `createWallet()`: a fresh wallet dated at the chain tip, adopted; its id and recovery words (which go
 only to the iCloud backup's preparation, never to a screen). -/
@@ -363,7 +363,7 @@ def deleteWallet (env : Env) : IO Unit := do
   suspendAndStop env false
   match ← (env.deps.keyStore.delete w.id).run with
   | .ok () => pure ()
-  | .error e => failText (keyStoreErrorText e)
+  | .error e => failText e.errorDescription
   if let some dir := c.dir then
     for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "receive-labels.json", "cloud-backup.json"] do
       removeQuietly (dirFile dir name)
