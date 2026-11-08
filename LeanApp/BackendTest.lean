@@ -1039,13 +1039,18 @@ is dropped from `wallet.json`; four phones restored from those files each open t
 transaction arrives the phone goes to the background, imports another wallet's backup, imports its own wallet's
 backup again (the same wallet ID, a new wallet), or erases its wallet and makes a new one. Each time the answer is
 dropped without an error and `wallet.json` gains nothing; the new wallet shows nothing of the old payment, and
-after the trip to the background, opening the payment again loads it. -/
+after the trip to the background, opening the payment again loads it. Two more phones try the change once the
+check has passed and before the write (`Deps.paymentChecked`): the background, and the phone's own backup again.
+Neither lands (finishes, or writes the wallet file) in two seconds; the payment loads, then the change goes
+ahead. -/
 def paymentRaceFlow (dir : String) (n : Node) : IO Unit := do
   let settings := regtestSettings n
   let mineAddr ← n.wallet #["getnewaddress"]
   let keys ← IO.mkRef ({} : Keys.InMemorySecrets)
   let arrived ← IO.mkRef (pure () : IO Unit)
-  let racing : Real.Deps := { deps keys "Race" with paymentFetched := fun _ => do (← arrived.get) }
+  let checked ← IO.mkRef (pure () : IO Unit)
+  let racing : Real.Deps := { deps keys "Race" with paymentFetched := fun _ => do (← arrived.get)
+                                                    paymentChecked := fun _ => do (← checked.get) }
   let phone (name : String) : String := s!"{dir}/{name}/BTCSwift/regtest"
   -- the phone pays from a coin Core sent it, and the payment confirms
   let (a, _) ← Backend.realWithEnv racing
@@ -1099,6 +1104,35 @@ def paymentRaceFlow (dir : String) (n : Node) : IO Unit := do
       (match loaded with | .error e => e | .ok _ => "")
     check s!"payment race, {name}: wallet.json gains nothing" (changed == some after)
     return (b, s)
+  -- the same, but `change` is tried once the check has passed and before the write: it must wait for the write
+  let between (name : String) (change : Backend → String → IO Unit) : IO (Backend × Status) := do
+    let home := phone name
+    copyDirectory (phone "Race") home
+    let (b, _) ← Backend.realWithEnv racing
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    let (opened, _) ← syncUntil b 60_000 fun _ p => p == .synced
+    check s!"payment race, {name}: the payment opens without its transaction" (bare opened sent)
+    let file := System.FilePath.mk home / "wallet.json"
+    let pending ← IO.mkRef (none : Option (Task (Except IO.Error Unit)))
+    let landed ← IO.mkRef false
+    checked.set do
+      let before ← readIfThere file
+      let t ← IO.asTask (change b home) (prio := .dedicated)
+      pending.set (some t)
+      -- two seconds for the change to land: to finish, or to write the wallet file
+      landed.set (← waitUntil 2_000 (do return (← IO.hasFinished t) || (← readIfThere file) != before))
+    let loaded ← attempt (b.loadPaymentDetails sent)
+    checked.set (pure ())
+    let finished ← match ← pending.get with
+      | some t => do let r ← IO.wait t; pure (r.toBool, match r with | .error e => toString e | .ok _ => "")
+      | none => pure (false, "never tried")
+    check s!"payment race, {name}: the change tried between the check and the write waits for the write"
+      (finished.2 != "never tried" && !(← landed.get))
+    check s!"payment race, {name}: the payment loads" (loaded matches .ok _) (match loaded with | .error e => e | .ok _ => "")
+    check s!"payment race, {name}: then the change goes ahead" finished.1 finished.2
+    let (s, _) ← b.snapshot
+    return (b, s)
   -- the phone goes to the background: the same wallet, a new generation
   let (b, s) ← race "Background" fun b _ => b.stopNetworking
   check "payment race, Background: the payment is still without its transaction" (bare s sent)
@@ -1118,6 +1152,16 @@ def paymentRaceFlow (dir : String) (n : Node) : IO Unit := do
   -- this wallet's own backup imported again: the same wallet ID, but not the wallet that asked
   let (b, s) ← race "Same" fun b home => discard <| b.importBundle .regtest home ownBackup
   check "payment race, Same: the imported wallet shows the payment as its backup has it"
+    (history? s sent == history? paid sent) s!"{(history? s sent).map (·.outputs.isSome)}"
+  b.stopNetworking
+  -- the phone goes to the background between the check and the write: the payment loads first
+  let (b, s) ← between "BackgroundBetween" fun b _ => b.stopNetworking
+  check "payment race, BackgroundBetween: the payment has its transaction"
+    (history? s sent == history? paid sent) s!"{(history? s sent).map (·.outputs.isSome)}"
+  b.stopNetworking
+  -- this wallet's own backup imported between the check and the write: the import's file comes after the write
+  let (b, s) ← between "SameBetween" fun b home => discard <| b.importBundle .regtest home ownBackup
+  check "payment race, SameBetween: the imported wallet shows the payment as its backup has it"
     (history? s sent == history? paid sent) s!"{(history? s sent).map (·.outputs.isSome)}"
   b.stopNetworking
   -- erased, and a new wallet made

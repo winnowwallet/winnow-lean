@@ -209,7 +209,8 @@ partial def buildStackIfNeeded (env : Env) : IO Unit := do
 def suspendAndStop (env : Env) (keepActive : Bool) : IO Unit := do
   let routing := (← env.get).activeGateways
   let fresh ← RoutedHTTPClient.ofGateways env.deps.fetch routing
-  let (old, stack, windows) ← env.modifyGet fun c =>
+  -- under the wallet lock: a wallet write checked against this generation finishes first
+  let (old, stack, windows) ← env.withWalletLock <| env.modifyGet fun c =>
     ((c.http, c.stack, c.receiveWindow.toList ++ c.relayWindows.toList.map (·.2)),
      { c with generation := c.generation + 1, active := keepActive && c.active, http := fresh, httpGateways := routing, stack := none,
               gatewayDiscovery := none, discoveringGateways := false,

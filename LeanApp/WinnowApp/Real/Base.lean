@@ -107,6 +107,9 @@ structure Deps where
   /-- Runs once `loadPaymentDetails` has the payment's transaction, before it checks that the wallet it asked
   for is still the one open; nothing in the app. backend-test's `paymentRaceFlow` changes the wallet here. -/
   paymentFetched : (txid : String) → IO Unit := fun _ => pure ()
+  /-- Runs inside `loadPaymentDetails`'s one locked step, after that check and before the write; nothing in the
+  app. backend-test's `paymentRaceFlow` tries a wallet change here, which must wait for the write. -/
+  paymentChecked : (txid : String) → IO Unit := fun _ => pure ()
   hooks : Hooks := {}
 
 /-! ## AppModel's errors and the texts the app shows -/
@@ -271,8 +274,8 @@ structure Core where
   dir : Option String := none
   settings : Option Settings := none
   wallet : Option Wallet := none
-  /-- Moves each time `wallet` is replaced or let go (`Core.withWallet`): the same number is Swift's
-  `self.wallet === wallet`. A wallet ID is not enough, since importing a wallet's own backup again makes a
+  /-- Moves each time `wallet` is replaced or let go (`Core.withWallet`), and as a new wallet's file is about to
+  be written (`Env.replacingWallet`): the same number is Swift's `self.wallet === wallet`. A wallet ID is not enough, since importing a wallet's own backup again makes a
   new wallet with the same ID (backend-test `paymentRaceFlow`). -/
   walletSerial : Nat := 0
   stack : Option Stack := none
@@ -344,9 +347,22 @@ def get (env : Env) : IO Core := env.core.atomically (m := IO) MonadStateOf.get
 def modify (env : Env) (f : Core → Core) : IO Unit := env.core.atomically (m := IO) (_root_.modify f)
 def modifyGet {α} (env : Env) (f : Core → α × Core) : IO α := env.core.atomically (m := IO) (MonadStateOf.modifyGet f)
 
+/-- `x` under the wallet lock, which is not reentrant: `x` makes no wallet call and no change of the open
+wallet (each takes the lock itself). Besides the wallet calls, the changes of what a wallet write is for take
+it, briefly: a new generation (`suspendAndStop`), a new open wallet (`Core.withWallet`), a new wallet's file
+about to be made (`replacingWallet`). So `loadPaymentDetails` checks and writes in one step (backend-test
+`paymentRaceFlow`). The core lock is only ever taken inside it, never around it. -/
+def withWalletLock {α} (env : Env) (x : IO α) : IO α :=
+  env.walletLock.atomically (m := IO) (liftM x : Std.AtomicT Unit IO α)
+
 /-- One `Wallet` actor call: wallet mutations never interleave. -/
-def walletOp {α} (env : Env) (x : WM α) : IO α :=
-  env.walletLock.atomically (m := IO) (liftM (runWM x) : Std.AtomicT Unit IO α)
+def walletOp {α} (env : Env) (x : WM α) : IO α := env.withWalletLock (runWM x)
+
+/-- A new wallet's file is about to be written where the open wallet's is (`createWallet`, `importDecoded`):
+from here an answer for the open wallet no longer counts (`walletSerial` moves; the wallet stays open until
+`adopt`, and stays if the new one fails). -/
+def replacingWallet (env : Env) : IO Unit :=
+  env.withWalletLock (env.modify fun c => { c with walletSerial := c.walletSerial + 1 })
 
 /-- The same inside a network callback. -/
 def walletOpNet {α} (env : Env) (x : WM α) : NetM α := do

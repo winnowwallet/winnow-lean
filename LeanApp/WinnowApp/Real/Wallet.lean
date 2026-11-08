@@ -19,7 +19,7 @@ def switchTo (env : Env) (n : WinnowApp.Network) (dir : String) : IO Unit := do
   suspendAndStop env false
   env.hooks.walletChanged
   let checked ← readLastCompleteCheck dir
-  env.modify fun c =>
+  env.withWalletLock <| env.modify fun c =>
     { (c.withWallet none) with network := some n, dir := some dir, reviews := #[], bumps := #[],
                                lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                transientSyncFailures := 0, transientSyncError := none, lastCompleteCheck := checked }
@@ -62,7 +62,7 @@ def openWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO BootResul
   match ← (Wallet.open path env.deps.keyStore env.deps.random).run with
   | .error _ => return .damaged damagedWalletText
   | .ok w =>
-    let installed ← env.modifyGet fun c =>
+    let installed ← env.withWalletLock <| env.modifyGet fun c =>
       if c.dir == some dir && c.wallet.isNone then (true, c.withWallet (some w)) else (false, c)
     if !installed then
       if let some w' := (← env.get).wallet then return ← bootResult dir w'.id
@@ -187,7 +187,7 @@ def adopt (env : Env) (w : Wallet) (startSync : Bool) : IO Unit := do
     removeQuietly (dirFile dir name)
   if let some n := n then
     if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
-  env.modify fun c => { (c.withWallet (some w)) with stack := none, reviews := #[], bumps := #[] }
+  env.withWalletLock <| env.modify fun c => { (c.withWallet (some w)) with stack := none, reviews := #[], bumps := #[] }
   if let some existing := stack then
     if (← existing.chain.startHeight) > (← w.nextScanHeight) then
       -- the windows watch the pool that stops here
@@ -216,6 +216,7 @@ def createWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO (String
   buildStackIfNeeded env
   let some stack := (← env.get).stack | failWith .noStack
   let knownHeight ← creationHeightForNewWallet stack
+  env.replacingWallet
   let w ← runWM (Wallet.create (Network.tx n) env.deps.keyStore (some (walletPath dir)) (entropy := env.deps.entropy) (creationHeight := knownHeight)
     (random := env.deps.random))
   adopt env w true
@@ -293,6 +294,7 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
   env.hooks.signerValidate (bundle.signers.getD #[]) (Network.tx n)
   env.journal "import.started" (bundleFields bundle)
   switchTo env n dir
+  env.replacingWallet
   let w ← runWM (Wallet.importing bundle env.deps.keyStore (some (walletPath dir)) env.deps.random)
   adopt env w false
   env.hooks.multisigRestore (bundle.vaults.getD #[])
@@ -368,7 +370,7 @@ def deleteWallet (env : Env) : IO Unit := do
   if let some dir := c.dir then
     for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "receive-labels.json", "cloud-backup.json"] do
       removeQuietly (dirFile dir name)
-  env.modify fun c =>
+  env.withWalletLock <| env.modify fun c =>
     { (c.withWallet none) with lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                reviews := #[], bumps := #[] }
   if let (some n, some dir) := (c.network, c.dir) then

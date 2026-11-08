@@ -216,8 +216,10 @@ def bumpFee (env : Env) (txid : String) (p : WinnowApp.FeeBumpPreview) : IO Stri
 
 A transaction that arrives after the generation or the open wallet changed (`walletSerial`: Swift's
 `self.wallet === wallet`, not the wallet ID) is dropped: written, the old wallet's state would replace the new
-wallet's file. backend-test's `paymentRaceFlow` changes the wallet as it arrives: the background, another
-wallet's backup, the same wallet's backup, an erase. -/
+wallet's file. The check and the write are one step under the wallet lock, which every such change takes.
+backend-test's `paymentRaceFlow` changes the wallet as it arrives (the background, another wallet's backup, the
+same wallet's backup, an erase), and between the check and the write (the background, the same backup), where
+the change waits. -/
 def loadPaymentDetails (env : Env) (txid : String) : IO Unit := do
   let c ← env.get
   let some w := c.wallet | return
@@ -234,9 +236,12 @@ def loadPaymentDetails (env : Env) (txid : String) : IO Unit := do
       | some f => if entry.height > 0 then runNet (f.transaction id entry.height) else failWith .paymentDetailsUnavailable
       | none => failWith .paymentDetailsUnavailable
   env.deps.paymentFetched txid
-  let c' ← env.get
-  if c'.generation != c.generation || c'.walletSerial != c.walletSerial then return
-  env.walletOp (w.rememberTransaction id tx)
+  -- the check and the write are one step: a change of generation or wallet waits for it (`withWalletLock`)
+  env.withWalletLock do
+    let c' ← env.get
+    if c'.generation != c.generation || c'.walletSerial != c.walletSerial then return
+    env.deps.paymentChecked txid
+    runWM (w.rememberTransaction id tx)
 
 /-! ## Mempool windows -/
 
