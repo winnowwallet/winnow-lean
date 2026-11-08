@@ -342,7 +342,8 @@ def importBundle (env : Env) (n : WinnowApp.Network) (dir : String) (json : Stri
 def exportBundle (env : Env) (includeMnemonic : Bool) : IO String := do
   let c ← env.get
   let some w := c.wallet | failWith .noWallet
-  if let some f := c.stack.bind (·.filters) then env.walletOp (w.recordScanHeight (← f.nextScanHeight))
+  if let some f := c.stack.bind (·.filters) then
+    env.walletWrite c.walletSerial "export.recordScanHeight" (w.recordScanHeight (← f.nextScanHeight))
   let b ← runWM (w.exportBundle includeMnemonic)
   let accounts ← env.hooks.multisigBackup
   let signers ← env.hooks.signerBackup
@@ -358,7 +359,9 @@ def revealMnemonic (env : Env) : IO (List String) := do
   let some words ← readMnemonic env w.id | failText WalletError.mnemonicUnavailable.description
   return words.splitOn " "
 
-/-- `destroyWallet()`: networking down, the key first, then the per-wallet files (headers and peers stay). -/
+/-- `destroyWallet()`: networking down, the key first, then the per-wallet files (headers and peers stay). The
+wallet is let go before its files go, so a write through it still in flight (a sync pass) is refused rather than
+writing `wallet.json` back (backend-test `oldWalletWritesFlow`). -/
 def deleteWallet (env : Env) : IO Unit := do
   let c ← env.get
   let some w := c.wallet | failWith .noWallet
@@ -367,12 +370,12 @@ def deleteWallet (env : Env) : IO Unit := do
   match ← (env.deps.keyStore.delete w.id).run with
   | .ok () => pure ()
   | .error e => failText (keyStoreErrorText e)
-  if let some dir := c.dir then
-    for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "receive-labels.json", "cloud-backup.json"] do
-      removeQuietly (dirFile dir name)
   env.withWalletLock <| env.modify fun c =>
     { (c.withWallet none) with lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                reviews := #[], bumps := #[] }
+  if let some dir := c.dir then
+    for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "receive-labels.json", "cloud-backup.json"] do
+      removeQuietly (dirFile dir name)
   if let (some n, some dir) := (c.network, c.dir) then
     if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
   env.journal "wallet.destroyed" [("walletID", w.id)]
@@ -381,8 +384,9 @@ def deleteWallet (env : Env) : IO Unit := do
 
 /-- `currentReceiveAddress()` (peeked) or `freshReceiveAddress()` (marks it used, shows the next). -/
 def receiveAddress (env : Env) (fresh : Bool) : IO String := do
-  let some w := (← env.get).wallet | failWith .noWallet
-  if fresh then discard <| env.walletOp w.freshReceiveAddress
+  let c ← env.get
+  let some w := c.wallet | failWith .noWallet
+  if fresh then discard <| env.walletWrite c.walletSerial "receive.fresh" w.freshReceiveAddress
   let address ← runWM (w.address .receive (← w.nextReceiveIndex))
   -- `currentReceiveAddress()` journals what it shows; `freshReceiveAddress()` does not
   unless fresh do env.journal "address.receive" [("address", address)]

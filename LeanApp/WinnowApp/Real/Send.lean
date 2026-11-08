@@ -150,10 +150,10 @@ def sendPayment (env : Env) (inputs : SendInputs) (p : Preview) : IO SentPayment
   let tip ← match c.stack with
     | some s => s.chain.height
     | none => pure 0
-  let prepared ← env.walletOp (w.buildSend review.payments review.feeRate tip (silentPayments := review.silentPayments))
+  let prepared ← env.walletWrite c.walletSerial "send.build" (w.buildSend review.payments review.feeRate tip (silentPayments := review.silentPayments))
   unless review.authorizes prepared.built prepared.resolvedSilentPayments do failWith .sendReviewChanged
   let txid ← broadcastTx env prepared.built.transaction (some review.feeRate)
-  env.walletOp (w.commit prepared)
+  env.walletWrite c.walletSerial "send.commit" (w.commit prepared)
   if let some (id, some index) := review.recipient then env.hooks.advancePersonIndex id index
   if let some r := review.summary.recipient then
     env.journal "person.paid" [("name", r.name),
@@ -196,12 +196,12 @@ def bumpFee (env : Env) (txid : String) (p : WinnowApp.FeeBumpPreview) : IO Stri
   let some w := c.wallet | failWith .noWallet
   let some s := c.stack | failWith .noStack
   let some (_, preview) := c.bumps.find? (fun (t, b) => t == txid && bumpSummary b == p) | failWith .sendReviewChanged
-  let prepared ← env.walletOp (w.buildFeeBump preview.originalTxid preview.feeRateSatPerVByte)
+  let prepared ← env.walletWrite c.walletSerial "feeBump.build" (w.buildFeeBump preview.originalTxid preview.feeRateSatPerVByte)
   unless preview.authorizes prepared.built do failWith .sendReviewChanged
   let vsize := TransactionBuilder.vsize prepared.built.transaction
   let rate := Float.ofInt prepared.built.fee.toInt / vsize.toFloat
   let replacement ← broadcastTx env prepared.built.transaction (some rate)
-  try env.walletOp (w.commitFeeBump prepared)
+  try env.walletWrite c.walletSerial "feeBump.commit" (w.commitFeeBump prepared)
   catch e =>
     runNet (s.broadcaster.cancel replacement)
     throw e

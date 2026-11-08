@@ -995,7 +995,7 @@ def oldPaymentFlow (dir : String) (n : Node) : IO Unit := do
     | none => throw (IO.userError "getrawtransaction gave no hex")
   let some w := (← envB.get).wallet | throw (IO.userError "no wallet")
   let onDisk ← IO.FS.readBinFile walletFile
-  let wrong ← attempt (envB.walletOp (w.rememberTransaction (ofDisplayHex! shTxid) pkhTx))
+  let wrong ← attempt (envB.walletWrite (← envB.get).walletSerial "test.remember" (w.rememberTransaction (ofDisplayHex! shTxid) pkhTx))
   check "old payments: another payment's transaction is refused, in a payment's words"
     (match wrong with
      | .error e => e == "The transaction received for this payment has a different transaction ID, so it was not saved." &&
@@ -1171,6 +1171,97 @@ def paymentRaceFlow (dir : String) (n : Node) : IO Unit := do
     discard <| b.createWallet .regtest home
   check "payment race, Erased: the new wallet shows nothing of the old payment" (history? s sent).isNone
   b.stopNetworking
+
+/-- What `openWallet` found, for a check's detail. -/
+def bootText : BootResult → String
+  | .opened id => s!"opened {id}" | .missing => "missing" | .damaged m => s!"damaged: {m}"
+
+/-- Writes through a wallet that is erased or replaced while they are on their way (`Deps.walletWriting` is the
+moment a sync pass is about to write). A phone with a coin is copied to three phones; on each a block arrives and
+`syncNow` scans it, and as the pass is about to write, the wallet is replaced by another wallet's backup (at the
+scan height), or erased (at the scan height, and as the block's payment is applied). The pass's writes are
+refused: an erased wallet's `wallet.json` does not come back, so the phone started again has no wallet rather
+than the erased one again (its watch-only half, which opens without the key), and the replacing wallet stays the
+one on disk, with no sync error from the old pass. -/
+def oldWalletWritesFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let keys ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let writing ← IO.mkRef (none : Option (String × IO Unit))
+  let fired ← IO.mkRef false
+  -- each phone its own key store, so an erase on one leaves the next its key
+  let stale (k : IO.Ref Keys.InMemorySecrets) : Real.Deps := { deps k "Stale" with walletWriting := fun what => do
+    if let some (at_, act) ← writing.get then
+      if what == at_ then
+        writing.set none
+        act
+        fired.set true }
+  let phone (name : String) : String := s!"{dir}/{name}/BTCSwift/regtest"
+  -- another wallet's backup, its recovery phrase included
+  let (o, _) ← Backend.realWithEnv (deps keys "StaleOther")
+  IO.FS.createDirAll (phone "StaleOther")
+  discard <| o.openWallet .regtest (phone "StaleOther")
+  o.startNetworking settings
+  let otherID ← o.createWallet .regtest (phone "StaleOther")
+  let otherBackup ← o.exportBundle true
+  o.stopNetworking
+  -- the phone, with a coin
+  let (a, _) ← Backend.realWithEnv (stale keys)
+  IO.FS.createDirAll (phone "Stale")
+  discard <| a.openWallet .regtest (phone "Stale")
+  a.startNetworking settings
+  let ownID ← a.createWallet .regtest (phone "Stale")
+  discard <| n.wallet #["sendtoaddress", ← a.receiveAddress false, "0.5"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  discard <| syncUntil a 60_000 fun s p => s.balance == 50_000_000 && p == .synced
+  a.stopNetworking
+  -- one phone per change, from the same files: `change` runs as the pass is about to write `at_`
+  let race (name at_ : String) (pay : Bool) (change : Backend → String → IO Unit) :
+      IO (Backend × IO.Ref Keys.InMemorySecrets) := do
+    let home := phone name
+    copyDirectory (phone "Stale") home
+    let k ← IO.mkRef (← keys.get)
+    let (b, _) ← Backend.realWithEnv (stale k)
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    discard <| syncUntil b 60_000 fun _ p => p == .synced
+    fired.set false
+    writing.set (some (at_, change b home))
+    if pay then discard <| n.wallet #["sendtoaddress", ← b.receiveAddress false, "0.1"]
+    n.mine 1 mineAddr
+    n.waitFilterIndex
+    let changed ← waitUntil 60_000 (do b.syncNow; fired.get)
+    writing.set none
+    check s!"stale writes, {name}: the wallet changed as the sync pass was about to write ({at_})" changed
+    return (b, k)
+  -- the same phone started again: its files and its key store
+  let reopened (name : String) (k : IO.Ref Keys.InMemorySecrets) : IO BootResult := do
+    let (r, _) ← Backend.realWithEnv (stale k)
+    r.openWallet .regtest (phone name)
+  -- another wallet's backup imported as the pass is about to record its scan height
+  let imported ← IO.mkRef ""
+  let (b, k) ← race "Replaced" "sync.recordScanHeight" false fun b home => do
+    imported.set (← b.importBundle .regtest home otherBackup).1
+  check "stale writes, Replaced: the other wallet is open" ((← imported.get) == otherID) (← imported.get)
+  let (s, _) ← b.snapshot
+  check "stale writes, Replaced: the old pass leaves the new wallet no sync error" s.lastSyncError.isNone
+    (s.lastSyncError.getD "")
+  b.stopNetworking
+  let boot ← reopened "Replaced" k
+  check s!"stale writes, Replaced: started again, the phone opens the other wallet, not {ownID}"
+    (match boot with | .opened id => id == otherID | _ => false) (bootText boot)
+  -- erased as the pass is about to record its scan height, and as it applies a payment
+  for (name, at_, pay) in [("Erased", "sync.recordScanHeight", false), ("ErasedMidBlock", "sync.apply", true)] do
+    let (b, k) ← race name at_ pay fun b _ => b.deleteWallet
+    let (s, _) ← b.snapshot
+    check s!"stale writes, {name}: the erased wallet's file does not come back"
+      !(← (System.FilePath.mk (phone name) / "wallet.json").pathExists)
+    check s!"stale writes, {name}: no sync error after the erase" s.lastSyncError.isNone (s.lastSyncError.getD "")
+    b.stopNetworking
+    let boot ← reopened name k
+    check s!"stale writes, {name}: started again, the phone has no wallet to open (the erased one does not reappear)"
+      (boot matches .missing) (bootText boot)
 
 set_option maxRecDepth 4096 in
 def flow (dir : String) (n : Node) : IO Unit := do
@@ -1610,5 +1701,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; resetPeersFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

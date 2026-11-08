@@ -1400,13 +1400,13 @@ def testATransferBetweenTheWalletAndAnAccountIsOneRow : IO Unit := do
   let walletScript ← match ← (w.scriptPubKey .receive 0).run with
     | .ok sc => pure sc | .error _ => throw (IO.userError "script")
   let walletFunding := spend #[⟨zeros 32 0x46, 0⟩] #[{ value := 30_000, scriptPubKey := walletScript }]
-  discard <| phone.env.walletOp (w.apply (block (t.height + 1) #[walletFunding]))
+  discard <| phone.env.walletWrite (← phone.env.get).walletSerial "test.apply" (w.apply (block (t.height + 1) #[walletFunding]))
   let change ← match ← (w.scriptPubKey .change 0).run with
     | .ok sc => pure sc | .error _ => throw (IO.userError "script")
   let transfer := spend #[⟨walletFunding.txid, 0⟩]
     #[{ value := 20_000, scriptPubKey := ← spk t.account 1 }, { value := 9_500, scriptPubKey := change }]
   let m := block (t.height + 2) #[transfer]
-  discard <| phone.env.walletOp (w.apply m)
+  discard <| phone.env.walletWrite (← phone.env.get).walletSerial "test.apply" (w.apply m)
   discard <| phone.multisig.applyMatch m signet
   let s ← phone.status
   check "balances" (s.balance == 9_500 && s.accountsBalance == 80_000) s!"{s.balance} {s.accountsBalance}"

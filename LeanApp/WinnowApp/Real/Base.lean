@@ -110,6 +110,10 @@ structure Deps where
   /-- Runs inside `loadPaymentDetails`'s one locked step, after that check and before the write; nothing in the
   app. backend-test's `paymentRaceFlow` tries a wallet change here, which must wait for the write. -/
   paymentChecked : (txid : String) → IO Unit := fun _ => pure ()
+  /-- Runs as a write through a wallet (`Env.walletWrite`, named by `what`, such as "sync.apply") is about to
+  take the wallet lock; nothing in the app. backend-test's `oldWalletWritesFlow` erases or replaces the wallet
+  here, which the write must not outlive. -/
+  walletWriting : (what : String) → IO Unit := fun _ => pure ()
   hooks : Hooks := {}
 
 /-! ## AppModel's errors and the texts the app shows -/
@@ -125,9 +129,13 @@ inductive AppError where
   | noStorage
   | paymentDetailsUnavailable
   | feeDecisionRequired (rate floor : Float)
+  /-- Not in Swift, whose actor writes through whichever wallet it was handed: a write through a wallet that
+  was erased or replaced since it was read (`Env.walletWrite`). -/
+  | walletReplaced
 
 def AppError.text : AppError → String
   | .noWallet => "No wallet is open."
+  | .walletReplaced => "The wallet changed before this finished, so nothing was saved to it."
   | .paymentDetailsUnavailable => "Payment details aren’t available on this phone."
   | .feeDecisionRequired rate floor =>
     s!"Connected peers require at least {SwiftDouble.description floor} sat/vB to relay this payment, above the selected {SwiftDouble.description rate} sat/vB. " ++
@@ -355,8 +363,16 @@ about to be made (`replacingWallet`). So `loadPaymentDetails` checks and writes 
 def withWalletLock {α} (env : Env) (x : IO α) : IO α :=
   env.walletLock.atomically (m := IO) (liftM x : Std.AtomicT Unit IO α)
 
-/-- One `Wallet` actor call: wallet mutations never interleave. -/
-def walletOp {α} (env : Env) (x : WM α) : IO α := env.withWalletLock (runWM x)
+/-- One `Wallet` actor call, through the wallet that was open at `serial` (the `walletSerial` read with it):
+wallet mutations never interleave, and once that wallet was erased or replaced the write is refused
+(`walletReplaced`) instead of writing its old state where the next wallet's file is. `what` names the write for
+`Deps.walletWriting`. backend-test's `oldWalletWritesFlow` erases the wallet and imports another as a sync pass
+is about to write. -/
+def walletWrite {α} (env : Env) (serial : Nat) (what : String) (x : WM α) : IO α := do
+  env.deps.walletWriting what
+  env.withWalletLock do
+    if (← env.get).walletSerial != serial then failWith .walletReplaced
+    runWM x
 
 /-- A new wallet's file is about to be written where the open wallet's is (`createWallet`, `importDecoded`):
 from here an answer for the open wallet no longer counts (`walletSerial` moves; the wallet stays open until
@@ -365,11 +381,10 @@ def replacingWallet (env : Env) : IO Unit :=
   env.withWalletLock (env.modify fun c => { c with walletSerial := c.walletSerial + 1 })
 
 /-- The same inside a network callback. -/
-def walletOpNet {α} (env : Env) (x : WM α) : NetM α := do
-  let r : Except WalletFailure α ← (env.walletLock.atomically (m := IO) (liftM x.run : Std.AtomicT Unit IO _) : IO _)
-  match r with
+def walletWriteNet {α} (env : Env) (serial : Nat) (what : String) (x : WM α) : NetM α := do
+  match ← (env.walletWrite serial what x).toBaseIO with
   | .ok a => pure a
-  | .error e => throw (.other e.text)
+  | .error e => throw (.other (toString e))
 
 def hooks (env : Env) : Hooks := env.deps.hooks
 
