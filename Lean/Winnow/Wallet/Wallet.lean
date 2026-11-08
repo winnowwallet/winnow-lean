@@ -569,18 +569,20 @@ def apply (w : Wallet) (m : Net.BlockMatch) : WM MatchEffect := do
   return effect
 
 /-- Enrich the receipt `txid` with its transaction, without replaying its effects. The receipt is found by the
-txid that was asked for, not by the answer's own, so an answer for another transaction is refused ("payment
-details do not match the transaction ID") instead of dropped or stored on another receipt. backend-test's
-`oldPaymentFlow` loads receipts this way and offers one a wrong transaction. -/
+txid that was asked for, not by the answer's own, so an answer for another transaction is refused
+(`paymentDetailsMismatch`) instead of dropped or stored on another receipt; the stored payment is then checked
+as `transaction()` checks it, its error whole. backend-test's `oldPaymentFlow` loads receipts this way and
+offers one a wrong transaction. -/
 def rememberTransaction (w : Wallet) (txid : ByteArray) (tx : Transaction) : WM Unit := do
   let s ← w.state
   let some k := historyIndex s txid | return
+  unless tx.txid == txid do throw (.wallet .paymentDetailsMismatch)
   let updated := { s with history := s.history.modify k fun e =>
     { e with rawTransaction := some (tx.serialized false), fundingScripts := FundingSources.fundingScripts tx } }
-  match updated.history[k]!.transaction with
+  match updated.history[k]!.checkedTransaction with
   | .ok _ => pure ()
-  | .error e => throw (if e == "invalidBundle" then .wallet (.invalidBundle "payment details do not match the transaction ID")
-      else if e == "invalidTransactionAmounts" then .wallet .invalidTransactionAmounts else .named e)
+  | .error (.inl e) => throw (.wallet e)
+  | .error (.inr n) => throw (.named n)
   w.persist updated
   w.stateRef.set updated
 
