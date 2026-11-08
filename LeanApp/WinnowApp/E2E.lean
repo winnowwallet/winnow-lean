@@ -13,8 +13,8 @@ Release with `#if DEBUG`) and the app is launched with `WINNOW_E2E=1`. Then:
 * storage moves to `Application Support/BTCSwiftE2E-<run>` and the Keychain to the service
   `org.btc-swift.wallet.e2e.<run>` (settings live in the storage directory, so the defaults suite moves
   with it); `WINNOW_E2E_RESET=1` wipes both;
-* the wallet's entropy is pinned (`WINNOW_E2E_ENTROPY` hex or `WINNOW_E2E_MNEMONIC`) — without one the
-  launch fails closed, because capture runs publish their screenshots;
+* the wallet's entropy is pinned (`WINNOW_E2E_ENTROPY`, hex) — without it the launch fails closed, because
+  capture runs publish their screenshots;
 * a manual peer, a custom signet challenge, the peer count, the sync interval, the network, the first
   tab, advanced mode and the clipboard can be set (the census URL and keys went with the census download,
   upstream e5ce950);
@@ -25,7 +25,8 @@ Release with `#if DEBUG`) and the app is launched with `WINNOW_E2E=1`. Then:
   looks like a secret.
 
 Differences: `safeRunID` keeps ASCII letters and digits (Swift keeps any `Character.isLetter` /
-`isNumber`); the journal writes `fields` with sorted keys (Swift's dictionary order is unspecified). -/
+`isNumber`); the journal writes `fields` with sorted keys (Swift's dictionary order is unspecified); there
+is no `WINNOW_E2E_MNEMONIC` (Swift's other way to pin the seed, which no run used). -/
 
 namespace WinnowApp.E2E
 open Winnow
@@ -78,29 +79,12 @@ def swiftInt? (s : String) : Option Int :=
     let v : Int := if neg then -(n : Int) else n
     if v < -(2 ^ 63 : Int) || v ≥ (2 ^ 63 : Int) then none else some v
 
-/-- `entropyFrom(mnemonic:)`: words split on spaces (empty pieces dropped), each looked up in the
-English list, the bits packed without a checksum check, as Swift does. -/
-def entropyFrom (mnemonic : String) : Option ByteArray := do
-  let words := (mnemonic.splitOn " ").filter (!·.isEmpty)
-  let mut bits : Array Bool := #[]
-  for w in words do
-    let some i := Keys.BIP39.wordlist.idxOf? w | none
-    for k in (List.range 11).reverse do bits := bits.push ((i >>> k) &&& 1 == 1)
-  let checksumLength := words.length / 3
-  let entropyLength := (bits.size - checksumLength) / 8
-  let mut out := ByteArray.mk (Array.replicate entropyLength 0)
-  for i in [0:entropyLength * 8] do
-    if bits[i]! then out := out.set! (i / 8) (out[i / 8]! ||| ((1 : UInt8) <<< (7 - (i % 8)).toUInt8))
-  return out
-
-/-- `E2EMode.resolve(environment:)`, over a lookup of the launch environment. -/
+/-- `E2EMode.resolve(environment:)`, over a lookup of the launch environment. The seed comes only from
+`WINNOW_E2E_ENTROPY`; Swift's `WINNOW_E2E_MNEMONIC` went unused by every run and is gone (#68), so a run
+that sets only it fails closed (records-test's `testModeSeed`). -/
 def resolve (env : String → Option String) : Resolution :=
   if env "WINNOW_E2E" != some "1" then .inactive else
-  let entropy : Option ByteArray :=
-    match env "WINNOW_E2E_ENTROPY" with
-    | some hex => Wire.dataOfHex? hex
-    | none => (env "WINNOW_E2E_MNEMONIC").bind entropyFrom
-  match entropy with
+  match (env "WINNOW_E2E_ENTROPY").bind Wire.dataOfHex? with
   | none => .missingPinnedEntropy
   | some e =>
     .active

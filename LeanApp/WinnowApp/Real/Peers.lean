@@ -53,7 +53,8 @@ def reconnect (env : Env) (s : Settings) : IO Unit := do
   env.modify fun c => { c with active := true }
   activate env
 
-/-- `retryPeerDiscovery()`: Automatic routing asks for the gateways again (`reconnect`). -/
+/-- `retryPeerDiscovery()`: Automatic routing asks for the gateways again (`reconnect`). backend-test's
+`retryPeersFlow` taps it after a failed start under Automatic and Direct routing, and with networking stopped. -/
 def retryPeers (env : Env) : IO Unit := do
   let c ← env.get
   if let some s := c.settings then
@@ -88,7 +89,8 @@ def connectedPeers (env : Env) : IO (List PeerInfo) := do
   return out.toList
 
 /-- `resetPeers()`: forget learned peers (manual peers and the shipped list stay), avoid the current ones
-first next time, and come back up. -/
+first next time, and come back up. backend-test's `resetPeersFlow` resets on a running stack and on a stopped
+one. -/
 def resetPeers (env : Env) : IO Unit := do
   let c ← env.get
   let avoid ← match c.stack with

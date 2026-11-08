@@ -2,6 +2,7 @@ import WinnowApp.Real.CloudAppState
 import WinnowApp.Real
 import WinnowApp.View
 import WinnowApp.E2E
+import WinnowApp.Main
 import LeanNative.Erase
 import LeanNative.Json
 import Lean.Data.Json
@@ -16,7 +17,8 @@ import TestKit.Regtest
   the controller around them (iCloud Keychain, CloudKit, scheduling) needs the shell and is not here;
 * `../Lean/Vectors/cloud-backup.json`, written by upstream's `CloudWalletBackup.swift` (verbatim, over a
   copy of d2ca878's WalletCore): its version 1 and version 2 backups open here, its `wallet-…` purposes
-  and the backup digest (and the canonical JSON under it) match byte for byte.
+  and the backup digest (and the canonical JSON under it) match byte for byte;
+* the app's device check before the iCloud backup (`declinedDeviceCheck`, #68), over a fake shell.
 
 `--write <dir>` also leaves a Lean-made backup (`lean-backup.json`) and its key (`lean-backup.key`) there for
 the Swift side to open. Run from `LeanApp/`. Exits 1 on any failure. -/
@@ -456,7 +458,8 @@ structure CloudPhone where
 
 open Real in
 def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO) (auth : Bool) (cloud : Option MemoryCloud := none)
-    (cloudKeys : Option CloudBackupKeys := none) (whileAuthenticating : IO Unit := pure ()) : TM CloudPhone := do
+    (cloudKeys : Option CloudBackupKeys := none) (whileAuthenticating : IO Unit := pure ())
+    (deviceCheck : Option (String → IO Unit) := none) : TM CloudPhone := do
   let vars := [("WINNOW_E2E", "1"), ("WINNOW_E2E_RUN", "cloud"), ("WINNOW_E2E_ENTROPY", "04040404040404040404040404040404"),
                ("WINNOW_E2E_PEER", "127.0.0.1:1"), ("WINNOW_E2E_CHALLENGE", "51")]
   let .active mode := WinnowApp.E2E.resolve (fun k => vars.lookup k) | throw "test mode did not resolve"
@@ -466,10 +469,13 @@ def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO
   let deps : Deps := { keyStore := keys, networkParams := mode.networkParams, peerCount := 1, importPeerWaitMs := 1_000,
                        fetch := fun _ => throw (.other "offline") }
   let (backend, env, app) ← Backend.realWithCloud deps (store := cloud.store) (keys := cloudKeys)
-    (authenticate := fun _ => do
+    (authenticate := fun reason => do
       attempts.modify (· + 1)
       whileAuthenticating
-      unless auth do throw (IO.userError "Authentication was denied."))
+      -- the app's own check over a scripted shell (`declinedDeviceCheck`), or `auth` as the answer
+      match deviceCheck with
+      | some check => check reason
+      | none => unless auth do throw (IO.userError "Authentication was denied."))
     (scheduleDelayMs := 50)
   let dir := (root / name / "signet").toString
   IO.FS.createDirAll dir
@@ -774,6 +780,104 @@ def scopedPreparationTests (root : System.FilePath) : TM Unit := do
     p.backend.cloudScene false
     p.backend.stopNetworking
 
+/-! ## The device check before the iCloud backup (#68) -/
+
+/-- #68: the app's own device check (`WinnowApp.authenticateNow`, the one `chooseBackend` gives the backend)
+before the iCloud backup's preparation and restore, over a shell whose `auth` answers as the person did
+(LeanNative's `auth`: `ok`, and the system's text and `LAError` when not). Declined, the backup is not
+prepared and the restore stops before the phone has a wallet; the restore, approved, goes
+ahead. Test mode skips the check unless `WINNOW_E2E_DEVICE_AUTH=1`. -/
+def declinedDeviceCheck (root : System.FilePath) : TM Unit := do
+  let asked ← IO.mkRef (#[] : Array (String × Lean.Json))
+  let declined := Lean.Json.mkObj [("ok", false), ("error", "Canceled by user."), ("name", "userCancel"), ("code", (-2 : Int))]
+  let answer ← IO.mkRef declined
+  let posted ← IO.mkRef (#[] : Array Host)
+  let fx : LeanNative.Native.Effects Host :=
+    { post := fun h => posted.modify (·.push h), cap := fun _ _ _ => pure (),
+      ask := fun name args => do
+        asked.modify (·.push (name, args))
+        let auth ← answer.get
+        return Task.pure (if name == "auth" then auth else Lean.Json.mkObj [("ok", true)]) }
+  let prompts : IO (Array String) := do
+    return (← asked.get).filterMap fun (n, a) => if n == "auth" then (a.getObjValAs? String "reason").toOption else none
+  WinnowApp.e2eRef.set none
+  -- an existing wallet's automatic preparation, declined
+  let p ← cloudPhone root "check-prepare" (← newKeys) true (deviceCheck := some (WinnowApp.authenticateNow fx))
+  p.bootExisting
+  p.activate
+  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).message.isSome
+  let st ← p.backend.cloudStatus
+  let c ← p.app.controller.get
+  check "declined check: the person is asked once, for the backup" ((← prompts) == #["Protect your wallet with automatic iCloud backup"])
+  check "declined check: the backup is not prepared" (!c.enabled && c.configuration.isNone && st.statusTitle == "Not backed up")
+  check "declined check: nothing is uploaded" ((← p.cloud.records.get).isEmpty && (← p.cloud.saveAttempts.get) == 0)
+  check "declined check: the reason is shown" (st.message == some "Canceled by user.") (reprStr st.message)
+  p.backend.cloudTick
+  IO.sleep 100
+  check "declined check: not asked again in this foreground session" ((← prompts).size == 1 && !(← p.app.controller.get).enabled)
+  p.backend.cloudScene false
+  p.backend.stopNetworking
+  -- phone A's backup, to restore on phone B
+  let cloud ← Real.MemoryCloud.new
+  let sharedKeys ← Real.memoryCloudKeys
+  let a ← cloudPhone root "check-restoreA" (← newKeys) true (some cloud) (some sharedKeys)
+  discard <| a.backend.openWallet .signet a.dir
+  a.activate
+  let id ← a.backend.createWallet .signet a.dir
+  a.app.controller.update do
+    let bundle ← a.app.exportedBundle
+    return { bundle, appState := some (← a.app.cloudAppState bundle).encoded }
+  a.backend.cloudScene false
+  a.backend.stopNetworking
+  asked.set #[]
+  let b ← cloudPhone root "check-restoreB" (← newKeys) true (some cloud) (some sharedKeys)
+    (deviceCheck := some (WinnowApp.authenticateNow fx))
+  discard <| b.backend.openWallet .signet b.dir
+  b.backend.discoverCloudBackups
+  let some backup := (← b.backend.cloudStatus).available.head? | throw "phone B finds no backup"
+  -- the restore sheet's Restore, through the app's `perform` on phone B's backend
+  WinnowApp.backendRef.set b.backend
+  WinnowApp.rootDir.set (root / "check-restoreB").toString
+  let found ← b.backend.cloudStatus
+  let onboarding : Model := { stage := .onboarding, active := true, settings := { network := .signet }, cloud := found }
+  let sheet := (step (.cloud .openRestore) onboarding).1
+  let restore (m : Model) : TM Model := do
+    let before := (← posted.get).size
+    let (m, cs) := step (.cloud (.restore backup.id)) m
+    for c in cs do WinnowApp.perform c fx
+    unless ← waitUntil 10_000 (every := 5) (do return (← posted.get).size > before) do throw "the restore posted no answer"
+    return (onHost (← posted.get)[before]! m).1
+  let m ← restore sheet
+  check "declined restore: the person is asked once" ((← prompts) == #["Restore your wallet and signing key from iCloud"])
+  check "declined restore: the sheet says why and is no longer restoring"
+    (m.onboarding.restoreError == some "Canceled by user." && !m.onboarding.restoring && !m.onboarding.restored && m.walletID.isNone)
+    (reprStr m.onboarding.restoreError)
+  check "declined restore: no wallet on the phone" (!(← (System.FilePath.mk b.dir / "wallet.json").pathExists) &&
+    (← b.env.get).wallet.isNone && (← b.backend.openWallet .signet b.dir) matches .missing)
+    (reprStr (← b.backend.openWallet .signet b.dir))
+  check "declined restore: no backup of its own started" ((← b.app.controller.get).configuration.isNone && (← cloud.records.get).size == 1)
+  -- the same restore, approved
+  answer.set (Lean.Json.mkObj [("ok", true)])
+  let m ← restore m
+  check "approved restore: asked again, then restored" ((← prompts).size == 2 && m.onboarding.restored &&
+    m.onboarding.restoreError == some "Restored. Network verification will resume when peers are reachable.")
+    s!"{(← prompts)} {m.onboarding.restored} {m.onboarding.restoreError}"
+  check "approved restore: the same wallet" ((← b.env.get).wallet.map (·.id) == some id)
+  b.backend.stopNetworking
+  WinnowApp.backendRef.set Backend.pending
+  -- test mode: skipped, unless the run asks for the check
+  let vars := [("WINNOW_E2E", "1"), ("WINNOW_E2E_ENTROPY", "04040404040404040404040404040404")]
+  let mode (more : List (String × String)) : Option WinnowApp.E2E.Mode :=
+    match WinnowApp.E2E.resolve (fun k => (vars ++ more).lookup k) with | .active m => some m | _ => none
+  answer.set declined
+  asked.set #[]
+  WinnowApp.e2eRef.set (mode [])
+  check "test mode: the check is skipped" (!(← fails (WinnowApp.authenticateNow fx "Restore")) && (← prompts).isEmpty)
+  WinnowApp.e2eRef.set (mode [("WINNOW_E2E_DEVICE_AUTH", "1")])
+  check "test mode with WINNOW_E2E_DEVICE_AUTH=1: asked, and declined it stops"
+    ((← failsWith (WinnowApp.authenticateNow fx "Restore") "Canceled by user.") && (← prompts) == #["Restore"])
+  WinnowApp.e2eRef.set none
+
 def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
   let writeDir := match args with | "--write" :: d :: _ => some d | _ => none
   runTest "roundTripRestoresSigningAndAddressCounters" roundTripRestoresSigningAndAddressCounters
@@ -795,4 +899,5 @@ def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
   runTest "automaticCloud" (automaticCloudTests root)
   runTest "scopedPreparation" (scopedPreparationTests root)
   runTest "restoreFromICloud" (restoreFromICloud root)
+  runTest "declinedDeviceCheck" (declinedDeviceCheck root)
   try IO.FS.removeDirAll root catch _ => pure ()

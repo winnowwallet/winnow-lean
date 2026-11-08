@@ -467,7 +467,8 @@ in full service is left as its caller put it. -/
 def stopIfRelayOnly (p : PeerPool) : IO Unit := do
   if (← p.state.get).mode == .relayOnly then p.stop
 
-/-- Forgets every remembered good peer (manual peers survive). Call after `stop`. -/
+/-- Forgets every remembered good peer (manual peers survive). Call after `stop`. backend-test's
+`resetPeersFlow` runs it through Settings → Reset peers. -/
 def forgetKnownGood (p : PeerPool) : IO Unit := do
   if let some f := p.peersFile then
     if ← fileExists f then IO.FS.removeFile f
