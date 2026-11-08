@@ -607,6 +607,113 @@ def peopleFlow (dir : String) (n : Node) : IO Unit := do
   let synced ← alice.previewSend { destination := carolAddress, amount := "1000000", network := .regtest }
   check "people: no warning once synced" (reviewWarnings synced == []) s!"{reviewWarnings synced}"
 
+/-! ## Repairing the peer list -/
+
+/-- The endpoints `peers.json` holds; none while there is no file. -/
+def rememberedPeers (file : System.FilePath) : IO (Array PeerEndpoint) := do
+  if !(← file.pathExists) then return #[]
+  return ((PersistedPeers.decode (← IO.FS.readBinFile file)).getD #[]).map (·.endpoint)
+
+/-- Connected to exactly `peer`, within `ms`. -/
+def connectedTo (b : Backend) (peer : PeerEndpoint) (ms : Nat) : IO Bool :=
+  waitUntil ms (do return ((← b.connectedPeers).map (·.endpoint)) == [peer.description])
+
+/-- Mine a block and sync to it. -/
+def syncsToNewBlock (n : Node) (b : Backend) (mineAddr : String) : IO Bool := do
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let tip ← n.height
+  let (s, p) ← syncUntil b 60_000 fun s p => s.tipHeight == tip && s.nextScanHeight == tip + 1 && p == .synced
+  return s.tipHeight == tip && p == .synced
+
+/-- Settings → Reset peers, on a running stack and on a stopped one: a peer the pool learned (one it remembers
+but nobody configured) is forgotten with `peers.json`, the manual peer is dialled again, the rebuilt pool is told
+to avoid the peers connected before (`avoidOnReset`), and the wallet syncs the next block. -/
+def resetPeersFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let keys ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (r, env) ← Backend.realWithEnv (deps keys "Reset")
+  let dirR := s!"{dir}/Reset/BTCSwift/regtest"
+  IO.FS.createDirAll dirR
+  discard <| r.openWallet .regtest dirR
+  r.startNetworking settings
+  discard <| r.createWallet .regtest dirR
+  let node : PeerEndpoint := { host := "127.0.0.1", port := n.p2p }
+  let peersFile := System.FilePath.mk dirR / "peers.json"
+  check "reset peers: connected to the manual peer" (← connectedTo r node 30_000)
+  check "reset peers: the manual peer is remembered" (← waitUntil 10_000 (do return (← rememberedPeers peersFile).contains node))
+  -- a peer learned some other time (nothing listens on port 1): the pool remembers it, nobody configured it
+  let learned : PeerEndpoint := { host := "127.0.0.1", port := 1 }
+  let withLearned := PersistedPeers.encode #[{ endpoint := node, source := .manual }, { endpoint := learned, source := .persisted }]
+  r.stopNetworking
+  IO.FS.writeBinFile peersFile withLearned
+  r.startNetworking settings
+  check "reset peers: back on the manual peer, the learned one remembered too"
+    ((← connectedTo r node 30_000) && (← rememberedPeers peersFile).contains learned)
+  -- 1. on a running stack
+  let before := (← r.connectedPeers).map (·.endpoint)
+  r.resetPeers
+  let avoided := match (← env.get).stack with
+    | some s => s.pool.avoidOnReset.toList.map (·.description)
+    | none => []
+  check "reset peers (running): the rebuilt pool avoids the peers it had" (avoided == before && !before.isEmpty)
+    s!"{avoided} vs {before}"
+  check "reset peers (running): the manual peer survives, and is dialled again" (← connectedTo r node 30_000)
+  let relearned ← waitUntil 10_000 (do return (← rememberedPeers peersFile) == #[node])
+  check "reset peers (running): peers.json forgot the learned peer, and remembers only the manual one" relearned
+    s!"{(← rememberedPeers peersFile).map (·.description)}"
+  check "reset peers (running): the wallet syncs the next block" (← syncsToNewBlock n r mineAddr)
+  -- 2. on a stopped stack
+  r.stopNetworking
+  IO.FS.writeBinFile peersFile withLearned
+  r.resetPeers
+  check "reset peers (stopped): peers.json is gone" (!(← peersFile.pathExists))
+  let d ← env.diagnostics
+  check "reset peers (stopped): nothing is started, nothing to avoid"
+    (!d.hasStack && !d.active && (← env.get).peersToAvoid.isEmpty) s!"{repr d}"
+  r.startNetworking settings
+  check "reset peers (stopped): started again, the manual peer is dialled" (← connectedTo r node 30_000)
+  check "reset peers (stopped): peers.json remembers only the manual peer"
+    (← waitUntil 10_000 (do return (← rememberedPeers peersFile) == #[node])) s!"{(← rememberedPeers peersFile).map (·.description)}"
+  check "reset peers (stopped): the wallet syncs the next block" (← syncsToNewBlock n r mineAddr)
+  check "reset peers: journaled each time" (((← journaled "peers.reset").filter (·.1 == "Reset")).size == 2)
+  r.stopNetworking
+
+/-- The Retry button after peer discovery fails: with the node off the network a start finds no peer
+(`peerDiscoveryFailed`, where Home shows Retry); with it back, Retry connects at once, long before the pool's
+own 30-second monitor would, and the wallet syncs. Under Automatic routing Retry rebuilds the stack
+(`reconnect`); under Direct it asks the running pool to dial again, and with networking stopped starts nothing. -/
+def retryPeersFlow (dir : String) (n : Node) : IO Unit := do
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let keys ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (t, env) ← Backend.realWithEnv (deps keys "Retry")
+  let dirT := s!"{dir}/Retry/BTCSwift/regtest"
+  IO.FS.createDirAll dirT
+  discard <| t.openWallet .regtest dirT
+  discard <| t.createWallet .regtest dirT
+  let node : PeerEndpoint := { host := "127.0.0.1", port := n.p2p }
+  for (routing, settings) in [("Automatic", regtestSettings n),
+      ("Direct", { regtestSettings n with peerGatewaySettings := { mode := "direct" } })] do
+    discard <| n.cli #["setnetworkactive", "false"]
+    t.startNetworking settings
+    let failed ← waitUntil 30_000 (do return (← t.snapshot).2 == .peerDiscoveryFailed)
+    check s!"retry ({routing}): with the node off the network, peer discovery fails" failed (showPhase (← t.snapshot).2)
+    discard <| n.cli #["setnetworkactive", "true"]
+    t.retryPeers
+    check s!"retry ({routing}): Retry connects at once" (← connectedTo t node 10_000)
+      s!"{(← t.connectedPeers).map (·.endpoint)}, {showPhase (← t.snapshot).2}"
+    check s!"retry ({routing}): the wallet syncs the next block" (← syncsToNewBlock n t mineAddr)
+    t.stopNetworking
+  -- Direct routing, networking stopped
+  let quiet ← waitUntil 5_000 (do return (← env.diagnostics).liveLoops == 0)
+  t.retryPeers
+  -- long enough for a phase tick, had Retry started anything
+  IO.sleep 1_500
+  let d ← env.diagnostics
+  check "retry: with networking stopped, Retry starts nothing"
+    (quiet && !d.hasStack && !d.active && d.liveLoops == 0) s!"{repr d}"
+
 set_option maxRecDepth 4096 in
 def flow (dir : String) (n : Node) : IO Unit := do
   say s!"node: bitcoind regtest pid {n.pid}, p2p {n.p2p}"
@@ -864,6 +971,7 @@ def flow (dir : String) (n : Node) : IO Unit := do
   bImp.stopNetworking
   -- 9. Stop networking: nothing keeps running.
   a.stopNetworking
+  -- Direct routing, networking stopped
   let quiet ← waitUntil 5_000 (do
     return (← envA.diagnostics).liveLoops == 0 && (← envB.diagnostics).liveLoops == 0)
   check "stopNetworking: no loop thread left" quiet s!"{repr (← envA.diagnostics)}"
@@ -1044,5 +1152,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n
+    try withNode dir fun n => do flow dir n; peopleFlow dir n; resetPeersFlow dir n; retryPeersFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()
