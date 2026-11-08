@@ -126,7 +126,8 @@ def cloudRestoreSheet (m : Model) (inner : List H) : H :=
      (match o.restoreError with | some e => [caption e] | none => []) ++
      (match c.message with | some t => [caption t] | none => [])) inner (largeTitle := true)
 
-/-- Beginner mode's Back up page. -/
+/-- Beginner mode's Back up page: the backup file, without the recovery words or the iCloud control
+(records-test's `backupScreens`). -/
 def backupScreen (m : Model) (overlays : List H) : H :=
   .screen "Back up" (some (.home .pop)) ([.list [backupSection m]] ++ overlays)
 
@@ -147,7 +148,8 @@ def exportSheet (m : Model) (inner : List H) : H :=
       | none => [.section "" "" [.button "Create backup file" .primary (if e.busy then none else some (.backup .createExport))]]))
     inner
 
-/-- Two words per row, numbered, like the reveal grid. -/
+/-- Two words per row, numbered, like the reveal grid; nothing but a notice while the screen is recorded or
+mirrored (records-test's `backupScreens`). -/
 def wordGrid (words : List String) (captured : Bool := false) : H :=
   if captured then
     .row [.icon "record.circle", body "Hidden while the screen is being recorded or mirrored."] else
@@ -158,6 +160,7 @@ def wordGrid (words : List String) (captured : Bool := false) : H :=
     | [] => []
   .col (pairs numbered)
 
+/-- RevealPhraseView: the words and Copy (records-test's `backupScreens`). -/
 def revealSheet (m : Model) (inner : List H) : H :=
   formSheet "Recovery phrase" (some .closeSheet) [closeBar "Close"]
     [ .section "" "These words are this phone's signing key. Keep them private. Winnow cannot restore from the words alone; save a backup file for your history."
