@@ -35,6 +35,9 @@ inductive WalletError where
   | invalidTransactionAmounts
   | unsupportedWalletData
   | storageTooLarge (maxBytes : Int)
+  /-- Not in Swift, whose `rememberTransaction` finds the receipt by the answer's own txid: the transaction
+  offered for a payment is another one (`Wallet.rememberTransaction`). -/
+  | paymentDetailsMismatch
   deriving Inhabited, BEq
 
 namespace WalletError
@@ -45,7 +48,7 @@ def name : WalletError → String
   | .changeOutputMissing => "changeOutputMissing" | .transactionTooLarge .. => "transactionTooLarge"
   | .mnemonicUnavailable => "mnemonicUnavailable"
   | .invalidTransactionAmounts => "invalidTransactionAmounts" | .unsupportedWalletData => "unsupportedWalletData"
-  | .storageTooLarge _ => "storageTooLarge"
+  | .storageTooLarge _ => "storageTooLarge" | .paymentDetailsMismatch => "paymentDetailsMismatch"
 
 /-- `errorDescription`. -/
 def description : WalletError → String
@@ -65,6 +68,7 @@ def description : WalletError → String
     "This wallet contains unsupported signing data and cannot be opened here. " ++
       "Keep the original wallet file and use compatible wallet software to recover these coins."
   | .storageTooLarge maxBytes => s!"The wallet file is larger than the {maxBytes.tdiv 1_048_576} MB this wallet can hold and was not read."
+  | .paymentDetailsMismatch => "The transaction received for this payment has a different transaction ID, so it was not saved."
 end WalletError
 
 inductive FeeBumpError where
