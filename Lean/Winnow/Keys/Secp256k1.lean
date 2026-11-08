@@ -31,6 +31,7 @@ inductive P256KError where
   | incorrectKeySize | incorrectParameterSize | underlyingCryptoError
   deriving Repr, DecidableEq, Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def P256KError.name : P256KError → String
   | .incorrectKeySize => "incorrectKeySize"
   | .incorrectParameterSize => "incorrectParameterSize"

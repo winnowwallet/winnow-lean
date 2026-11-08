@@ -140,7 +140,9 @@ def AppError.text : AppError → String
 def failWith {α} (e : AppError) : IO α := throw (IO.userError e.text)
 def failText {α} (t : String) : IO α := throw (IO.userError t)
 
-/-- `AddressError.errorDescription` (AddressDecoder.swift). -/
+/-- `AddressError.errorDescription` (AddressDecoder.swift): Send's refusal of what was typed as the address, the
+wallet's (backend-test `refusalsFlow`) and an account's (multisig-app-test
+`testRefusedAddressesAndPSBTsFromAnAccount`). -/
 def addressErrorText : AddressError → String
   | .invalidAddress _ => "That address is invalid or unsupported by Winnow."
   | .wrongNetwork _ => "That address belongs to a different Bitcoin network."
@@ -153,7 +155,8 @@ the Send screen shows Swift's generic text for it. -/
 def silentPaymentErrorText (e : SilentPaymentAddressError) : String :=
   s!"The operation couldn’t be completed. (WalletCore.SilentPaymentAddressError.{e.name})"
 
-/-- `KeyStoreError.errorDescription`. -/
+/-- `KeyStoreError.errorDescription`: what a locked, refusing or emptied Keychain shows, at a send, the
+recovery phrase or the iCloud backup (backend-test `refusalsFlow`). -/
 def keyStoreErrorText (e : Keys.KeyStoreError) : String :=
   match e.errorDescription with
   | some t => t
@@ -167,9 +170,6 @@ def namedText (n : String) : String :=
   match n with
   | "noUTXOs" => "There are no spendable coins."
   | "insufficientFunds" => "Insufficient funds for this payment and its fee."
-  | "notFound" => "The protected key for this wallet is missing from this device."
-  | "alreadyExists" => "This device already contains a protected key for this wallet."
-  | "malformedSecret" => "The protected wallet key is damaged or has an unsupported format."
   | "dataCorrupted" => "The data couldn’t be read because it isn’t in the correct format."
   | n => s!"The operation couldn’t be completed. (WalletCore.{n})"
 
@@ -177,6 +177,7 @@ def namedText (n : String) : String :=
 def _root_.Winnow.WalletFailure.text : WalletFailure → String
   | .wallet e => e.description
   | .feeBump e => e.description
+  | .keys e => keyStoreErrorText e
   | .named n => namedText n
   | .io e => toString e
 

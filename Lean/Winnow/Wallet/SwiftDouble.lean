@@ -121,7 +121,8 @@ def group (s : String) : String := Id.run do
   return String.ofList out
 
 /-- `x.formatted(.number.precision(.fractionLength(2)))` in en_US: the shortest decimal rounded half-even
-to two places, the integer part grouped with commas. -/
+to two places, the integer part grouped with commas (crypto-test `formattedTwoPlaces`; a refused fee bump's
+rates, backend-test `refusalsFlow`). -/
 def formatted2 (x : Float) : String :=
   let sign := if isNegative x then "-" else ""
   if x.isNaN then sign ++ "NaN"

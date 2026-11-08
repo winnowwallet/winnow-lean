@@ -37,6 +37,7 @@ inductive SealFailure where
   | verificationFailed
   deriving Repr, BEq, Inhabited
 
+/-- Swift's case name, as `RecordsError.name` reports a refused seal (records-test `sealFailures`). -/
 def SealFailure.name : SealFailure → String
   | .unsealed => "unsealed" | .keyMissing => "keyMissing" | .malformed => "malformed"
   | .verificationFailed => "verificationFailed"
@@ -171,16 +172,18 @@ def describe (name : String) (network : Tx.BitcoinNetwork) : String :=
     .unsupportedDerivation, .noFixedScript]
   if let some e := payTo.find? (·.name == name) then e.description
   else if name == "wrongNetwork" then (PersonPayToError.wrongNetwork network).description
-  else if name == "notACard" then PersonCardError.notACard.description
   else if name == "empty" then PersonPasteError.empty.description
   else if name == "unrecognised" then PersonPasteError.unrecognised.description
   else if name == "invalidAddress" then "That isn't a valid Bitcoin address."
-  else if name == "unsupportedVersion" then "This card was made by a newer Winnow. Update the app to read it."
   else s!"The operation could not be completed ({name})."
 
 def namedError (name : String) (network : Tx.BitcoinNetwork) : RecordsError := .named name (describe name network)
 
 def liftNamed {α} (network : Tx.BitcoinNetwork) (r : Except String α) : RM α := RM.lift (namedError · network) r
+
+/-- A refused paste: a card in its own words (`PersonCardError.description`), anything else by its name. -/
+def liftPaste {α} (network : Tx.BitcoinNetwork) (r : Except PasteFailure α) : RM α :=
+  RM.lift (fun | .card e => .named e.name e.description | .named n => namedError n network) r
 
 def liftWallet {α} (network : Tx.BitcoinNetwork) (x : WM α) : RM α := do
   match ← RM.io x.run with

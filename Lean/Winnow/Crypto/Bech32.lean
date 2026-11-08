@@ -9,6 +9,7 @@ inductive Bech32Error where
   | invalidDataValue | invalidWitnessVersion | invalidProgramLength | invalidPadding | invalidHRP
   deriving Repr, BEq
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def Bech32Error.name : Bech32Error → String
   | .invalidCharacter => "invalidCharacter" | .mixedCase => "mixedCase"
   | .missingSeparator => "missingSeparator" | .emptyHRP => "emptyHRP"

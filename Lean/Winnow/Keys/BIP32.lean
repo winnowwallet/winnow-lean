@@ -18,6 +18,7 @@ inductive BIP32Error where
   | depthExhausted
   deriving Repr, DecidableEq, Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def BIP32Error.name : BIP32Error → String
   | .invalidSeed => "invalidSeed" | .invalidPath => "invalidPath"
   | .hardenedDerivationFromPublicKey => "hardenedDerivationFromPublicKey"
@@ -29,6 +30,7 @@ inductive HDKeyParseError where
   | base58 (e : Base58Error)
   | bip32 (e : BIP32Error)
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def HDKeyParseError.name : HDKeyParseError → String
   | .base58 e => e.name
   | .bip32 e => e.name

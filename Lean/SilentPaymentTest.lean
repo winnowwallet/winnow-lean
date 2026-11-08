@@ -198,8 +198,8 @@ def main : IO UInt32 := runMain "silent-payment-test" do
     check "person: no scripts to watch" ((payTo.scripts 20 .signet).toOption == some #[])
     check "person: identified by its keys" ((payTo.identity .signet).toOption == some (scan ++ spend))
     check "person: no fixed script" (errOf (payTo.scriptPubKeyAt 0 .signet) == some "noFixedScript")
-  | .error e => check s!"person: a pasted code ({e})" false
-  check "person: a mainnet code on signet says so" (errOf (PersonPaste.parse mainnetCode .signet) == some "wrongHRP")
-  check "person: a code-shaped paste that is not one" (errOf (PersonPaste.parse "sp1qqexample" .signet) == some "unrecognised")
+  | .error e => check s!"person: a pasted code ({e.name})" false
+  check "person: a mainnet code on signet says so" (errOf ((PersonPaste.parse mainnetCode .signet).mapError (·.name)) == some "wrongHRP")
+  check "person: a code-shaped paste that is not one" (errOf ((PersonPaste.parse "sp1qqexample" .signet).mapError (·.name)) == some "unrecognised")
   let card : PersonCard := { network := "signet", name := "Robin", payTo := some signet }
   check "person: a card paying a code" ((PersonPaste.parse card.serialized .signet).toOption.bind (·.payTo) == some (.silentPayment signet))

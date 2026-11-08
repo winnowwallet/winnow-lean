@@ -181,7 +181,7 @@ def setReceiveLabel (s : RecordsStore) (w : Wallet) (address label : String) : R
 
 /-- `PersonPaste.parse`, as the Add-person screen previews it. -/
 def parsePaste (network : BitcoinNetwork) (text : String) : RM PastePreview := do
-  let p ← liftNamed network (PersonPaste.parse text network)
+  let p ← liftPaste network (PersonPaste.parse text network)
   return { name := p.name, payTo := p.payTo.map (·.derivesFreshAddresses) }
 
 def withPeople (s : RecordsStore) (w : Option Wallet) (f : PeopleStore → RM PeopleStore) : RM Records :=
@@ -204,7 +204,7 @@ def addPerson (s : RecordsStore) (w : Option Wallet) (name : String) (paste : Op
     (provenance : Option Provenance) (source : Option String) (labelTxid : Option String) : RM Records := do
   let network := s.network
   let pasted := paste.bind fun t => if (Wire.trimWhitespace t).isEmpty then none else some t
-  let parsed ← pasted.mapM fun t => liftNamed network (PersonPaste.parse t network)
+  let parsed ← pasted.mapM fun t => liftPaste network (PersonPaste.parse t network)
   let id ← RM.io uuidString
   match labelTxid with
   | some txid =>
@@ -228,7 +228,7 @@ def addPerson (s : RecordsStore) (w : Option Wallet) (name : String) (paste : Op
 /-- `attachDestination(id:payTo:provenance:source:)` from a pasted address or card. -/
 def attachDestination (s : RecordsStore) (w : Option Wallet) (personID paste : String) (provenance : Provenance)
     (source : Option String) : RM Records := do
-  let p ← liftNamed s.network (PersonPaste.parse paste s.network)
+  let p ← liftPaste s.network (PersonPaste.parse paste s.network)
   let some payTo := p.payTo | throw (.app .personCannotBePaid)
   withPeople s w fun ps => ps.attachDestination s.keys s.writeData personID payTo provenance source
 

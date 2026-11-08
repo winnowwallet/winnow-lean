@@ -20,6 +20,7 @@ inductive SignerError where
   | malformedLeafScript
   deriving Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def SignerError.name : SignerError → String
   | .invalidPrivateKey => "invalidPrivateKey" | .spentOutputCountMismatch .. => "spentOutputCountMismatch"
   | .missingKey _ => "missingKey" | .malformedLeafScript => "malformedLeafScript"
@@ -31,6 +32,7 @@ inductive SignFailure where
   | crypto (e : P256KError)
   deriving Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def SignFailure.name : SignFailure → String
   | .signer e => e.name | .sighash e => e.name | .crypto e => e.name
 

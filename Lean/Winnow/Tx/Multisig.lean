@@ -13,6 +13,7 @@ inductive MultisigError where
   | invalidThreshold | tooManyKeys | invalidKey | invalidTimelock
   deriving Repr, BEq, Inhabited
 
+/-- Swift's case name, which the errors and texts that carry this one read (crypto-test `errorNames`). -/
 def MultisigError.name : MultisigError → String
   | .invalidThreshold => "invalidThreshold" | .tooManyKeys => "tooManyKeys" | .invalidKey => "invalidKey"
   | .invalidTimelock => "invalidTimelock"

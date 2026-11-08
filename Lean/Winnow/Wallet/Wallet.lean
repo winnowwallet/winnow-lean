@@ -38,13 +38,16 @@ open Tx (BitcoinNetwork)
 inductive WalletFailure where
   | wallet (e : WalletError)
   | feeBump (e : FeeBumpError)
-  /-- An error of another module, by its case name (`insufficientFunds`, `notFound`, `keyNotFound`, …). -/
+  /-- The key store's own error, kept whole: a locked or emptied Keychain is described by its status and the
+  wallet it names (backend-test `refusalsFlow`, a send and the recovery phrase with the Keychain locked). -/
+  | keys (e : KeyStoreError)
+  /-- An error of another module, by its case name (`insufficientFunds`, `keyNotFound`, …). -/
   | named (name : String)
   | io (e : IO.Error)
   deriving Inhabited
 
 def WalletFailure.name : WalletFailure → String
-  | .wallet e => e.name | .feeBump e => e.name | .named n => n | .io _ => "ioError"
+  | .wallet e => e.name | .feeBump e => e.name | .keys e => e.name | .named n => n | .io _ => "ioError"
 
 abbrev WM := ExceptT WalletFailure IO
 
@@ -57,11 +60,11 @@ def WM.wallet {α} (r : Except WalletError α) : WM α :=
 def WM.io {α} (x : IO α) : WM α := ExceptT.mk do
   try return .ok (← x) catch e => return .error (.io e)
 
-/-- A keyed-store call, with `KeyStoreError`'s case name. -/
+/-- A keyed-store call, its `KeyStoreError` kept whole. -/
 def WM.keys {α} (x : ExceptT KeyStoreError IO α) : WM α := do
   match ← WM.io x.run with
   | .ok a => pure a
-  | .error e => throw (.named e.name)
+  | .error e => throw (.keys e)
 
 /-! ## Injectable randomness -/
 
@@ -887,7 +890,7 @@ def exportBundle (w : Wallet) (includeMnemonic : Bool := false) : WM ImportBundl
       | .ok (.mnemonic words) => pure (some words)
       | .ok (.masterKey _) | .ok (.accountKey ..) => throw (.wallet .mnemonicUnavailable)
       | .error (.notFound _) => throw (.wallet .mnemonicUnavailable)
-      | .error e => throw (.named e.name)
+      | .error e => throw (.keys e)
     else pure none
   return ImportBundle.«export» w.descriptor.serialized (networkName w.network) lastKnownHeight s.utxos s.history
     s.nextReceiveIndex s.nextChangeIndex mnemonic s.scannedThroughHash s.pendingSends
@@ -946,8 +949,8 @@ def importedKeyMaterial (bundle : ImportBundle) (network : BitcoinNetwork) (keyS
     | .ok () => pure ()
     | .error (.alreadyExists _) =>
       let existing ← WM.keys (keyStore.load walletID)
-      unless existing == .mnemonic mnemonic do throw (.named "alreadyExists")
-    | .error e => throw (.named e.name)
+      unless existing == .mnemonic mnemonic do throw (.keys (.alreadyExists walletID))
+    | .error e => throw (.keys e)
     return (derived, account.neutered)
   let some text := bundle.descriptor | throw (.wallet (.invalidBundle "no usable descriptor"))
   let parsed ← WM.liftE (·.name) (Descriptor.parse text)
