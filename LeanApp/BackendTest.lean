@@ -4,6 +4,7 @@ import TestKit.Check
 import TestKit.FakeNode
 import TestKit.Fixtures
 import TestKit.Regtest
+import Std.Data.TreeMap.Raw.Basic
 open Lean Winnow Winnow.IO Winnow.Net WinnowApp TestKit TestKit.Regtest
 
 /-! `backend-test`: `Backend.realWithMultisig` end to end against a disposable regtest bitcoind, through the
@@ -607,6 +608,142 @@ def peopleFlow (dir : String) (n : Node) : IO Unit := do
   let synced ← alice.previewSend { destination := carolAddress, amount := "1000000", network := .regtest }
   check "people: no warning once synced" (reviewWarnings synced == []) s!"{reviewWarnings synced}"
 
+/-! ## Payments whose transaction this phone does not hold -/
+
+/-- `wallet.json` with these receipts' transactions gone, as a wallet from before they were stored has them. -/
+def dropPaymentDetails (path : System.FilePath) (txids : List String) : IO Unit := do
+  let j ← IO.ofExcept (Json.parse (← IO.FS.readFile path))
+  let bare (e : Json) : Json := match e with
+    | .obj kvs =>
+      if txids.contains ((e.getObjValAs? String "txid").toOption.getD "") then
+        .obj ((kvs.erase "rawTransaction").erase "fundingScripts")
+      else e
+    | e => e
+  let history := ((j.getObjValAs? (Array Json) "history").toOption.getD #[]).map bare
+  IO.FS.writeFile path (j.setObjVal! "history" (.arr history)).compress
+
+/-- `broadcast.json` without this payment: a phone that never relayed it. -/
+def dropRelayed (path : System.FilePath) (txid : String) : IO Unit := do
+  let j ← IO.ofExcept (Json.parse (← IO.FS.readFile path))
+  let key := hex (ofDisplayHex! txid)
+  let kept := match j.getObjValD "transactions" with
+    | .obj kvs => .obj (kvs.erase key)
+    | other => other
+  IO.FS.writeFile path (j.setObjVal! "transactions" kept).compress
+
+def bare (s : Status) (txid : String) : Bool :=
+  (history? s txid).any fun h => h.outputs.isNone && h.fundingAddresses.isEmpty
+
+/-- Old payments, as a phone that never stored their transactions opens them: Core pays the wallet from a key
+hash and from a script hash (wrapped segwit), the sync sees where each came from; the wallet then sends two
+payments the node holds unconfirmed. With the four transactions dropped from `wallet.json` (and one payment from
+`broadcast.json`), opening a payment loads it: not without networking; from the relay queue while unconfirmed;
+"not available" when neither the queue nor a block has it; from its block through the filters; and a transaction
+for another payment is refused. Each one loaded is the row the sync first made, and stays on disk. -/
+def oldPaymentFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let keys ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (a, _) ← Backend.realWithEnv (deps keys "Old")
+  let dirOld := s!"{dir}/Old/BTCSwift/regtest"
+  IO.FS.createDirAll dirOld
+  discard <| a.openWallet .regtest dirOld
+  a.startNetworking settings
+  discard <| a.createWallet .regtest dirOld
+  -- one Core wallet with a coin at a key hash, one with a coin at a script hash; each pays the phone
+  let payer (name kind : String) : IO String := do
+    discard <| n.cli #["createwallet", name]
+    let address := (← n.cli #[s!"-rpcwallet={name}", "getnewaddress", "", kind]).trimAscii.toString
+    discard <| n.wallet #["sendtoaddress", address, "2.0"]
+    return address
+  let pkhAddress ← payer "pkhPayer" "legacy"
+  let shAddress ← payer "shPayer" "p2sh-segwit"
+  n.mine 1 mineAddr
+  let pay (name amount : String) (fresh : Bool) : IO String := do
+    return (← n.cli #[s!"-rpcwallet={name}", "sendtoaddress", ← a.receiveAddress fresh, amount]).trimAscii.toString
+  let pkhTxid ← pay "pkhPayer" "1.0" false
+  let shTxid ← pay "shPayer" "0.5" true
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (got, _) ← syncUntil a 60_000 fun s p => s.balance == 150_000_000 && p == .synced
+  check "old payments: paid from a key hash and a script hash" (got.balance == 150_000_000) s!"{got.balance}"
+  check "old payments: a key-hash payment shows its sender's address"
+    (((history? got pkhTxid).map (·.fundingAddresses)) == some [pkhAddress]) s!"{(history? got pkhTxid).map (·.fundingAddresses)}"
+  check "old payments: a script-hash payment shows its sender's address"
+    (((history? got shTxid).map (·.fundingAddresses)) == some [shAddress]) s!"{(history? got shTxid).map (·.fundingAddresses)}"
+  -- two payments the node holds and no block has taken
+  let send (amount : String) : IO String := do
+    let inputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount, network := .regtest }
+    return (← a.sendPayment inputs (← a.previewSend inputs)).txid
+  let queued ← send "10000000"
+  let unrelayed ← send "5000000"
+  check "old payments: both sends reach the node"
+    (← waitUntil 20_000 (do let mp ← n.mempool; return mp.contains queued && mp.contains unrelayed))
+  let (before, _) ← a.snapshot
+  a.stopNetworking
+  -- the phone loses the four transactions, and forgets it relayed one of the sends
+  let walletFile := System.FilePath.mk dirOld / "wallet.json"
+  dropPaymentDetails walletFile [pkhTxid, shTxid, queued, unrelayed]
+  dropRelayed (System.FilePath.mk dirOld / "broadcast.json") unrelayed
+  let (b, envB) ← Backend.realWithEnv (deps keys "Old")
+  discard <| b.openWallet .regtest dirOld
+  let (opened, _) ← b.snapshot
+  check "old payments: opened without their transactions"
+    ([pkhTxid, shTxid, queued, unrelayed].all (bare opened)) s!"{opened.history.map (·.txid)}"
+  b.loadPaymentDetails pkhTxid
+  check "old payments: without networking, opening a payment loads nothing" (bare (← b.snapshot).1 pkhTxid)
+  b.startNetworking settings
+  discard <| syncUntil b 60_000 fun _ p => p == .synced
+  let (synced, _) ← b.snapshot
+  check "old payments: a sync does not bring them back" ([pkhTxid, shTxid, queued, unrelayed].all (bare synced))
+  -- unconfirmed: from the relay queue, or nowhere
+  b.loadPaymentDetails queued
+  let (s1, _) ← b.snapshot
+  check "old payments: an unconfirmed send loads from the relay queue"
+    ((history? s1 queued).any (·.outputs.isSome) && history? s1 queued == history? before queued)
+  let missing ← attempt (b.loadPaymentDetails unrelayed)
+  check "old payments: an unconfirmed send the queue does not hold is not available"
+    (match missing with | .error e => e == Real.AppError.paymentDetailsUnavailable.text | .ok _ => false)
+    (match missing with | .error e => e | .ok _ => "loaded")
+  -- confirmed: from the block, through the filters
+  b.loadPaymentDetails pkhTxid
+  let (s2, _) ← b.snapshot
+  check "old payments: a key-hash payment loads from its block, its sender's address with it"
+    (history? s2 pkhTxid == history? before pkhTxid && ((history? s2 pkhTxid).map (·.fundingAddresses)) == some [pkhAddress])
+    s!"{(history? s2 pkhTxid).map (·.fundingAddresses)}"
+  -- another payment's transaction is refused, and nothing is written
+  let height := ((history? s2 pkhTxid).map (·.height)).getD 0
+  let blockHash := (← n.cli #["getblockhash", toString height]).trimAscii.toString
+  let pkhTx ← match Winnow.ofHex? (← n.cli #["getrawtransaction", pkhTxid, "false", blockHash]).trimAscii.toString with
+    | some raw => IO.ofExcept ((Transaction.decode raw).mapError (·.name))
+    | none => throw (IO.userError "getrawtransaction gave no hex")
+  let some w := (← envB.get).wallet | throw (IO.userError "no wallet")
+  let onDisk ← IO.FS.readBinFile walletFile
+  let wrong ← attempt (envB.walletOp (w.rememberTransaction (ofDisplayHex! shTxid) pkhTx))
+  check "old payments: another payment's transaction is refused"
+    (match wrong with | .error e => (e.splitOn "payment details do not match the transaction ID").length > 1 | .ok _ => false)
+    (match wrong with | .error e => e | .ok _ => "stored")
+  check "old payments: the refused transaction is not kept"
+    (bare (← b.snapshot).1 shTxid && onDisk == (← IO.FS.readBinFile walletFile))
+  b.loadPaymentDetails shTxid
+  let (s3, _) ← b.snapshot
+  check "old payments: a script-hash payment loads from its block, its sender's address with it"
+    (history? s3 shTxid == history? before shTxid && ((history? s3 shTxid).map (·.fundingAddresses)) == some [shAddress])
+    s!"{(history? s3 shTxid).map (·.fundingAddresses)}"
+  -- the payment nothing held: its block brings it
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (s4, _) ← syncUntil b 60_000 fun s _ => (history? s unrelayed).any (·.height > 0)
+  check "old payments: once confirmed, the payment nothing held has its transaction"
+    ((history? s4 unrelayed).any fun h => h.height > 0 && h.outputs.isSome)
+  b.stopNetworking
+  let (c, _) ← Backend.realWithEnv (deps keys "Old")
+  discard <| c.openWallet .regtest dirOld
+  let (reopened, _) ← c.snapshot
+  check "old payments: what was loaded is on disk"
+    ([pkhTxid, shTxid, queued, unrelayed].all (fun t => (history? reopened t).any (·.outputs.isSome)) &&
+     ((history? reopened shTxid).map (·.fundingAddresses)) == some [shAddress])
+
 set_option maxRecDepth 4096 in
 def flow (dir : String) (n : Node) : IO Unit := do
   say s!"node: bitcoind regtest pid {n.pid}, p2p {n.p2p}"
@@ -1044,5 +1181,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n
+    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()
