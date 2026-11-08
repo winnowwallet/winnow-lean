@@ -149,7 +149,8 @@ def recoveryWords (a : CloudApp) (walletID : String) : IO String := do
 unavailable), then authentication, the words, the copy. The preparation's scope is checked before the
 prompt, and the words and the copy start only as the scope's task after the answer, so a wallet switch, a
 network switch or the background while the person answers ends it before the protected part starts; this
-app's own conditions (the same wallet, network, an active scene) are checked with it. -/
+app's own conditions (the same wallet, network, an active scene) are checked with it. Declined, nothing is
+prepared (cloud-backup-test's `declinedDeviceCheck`, over the app's `authenticateNow`). -/
 def prepareExisting (a : CloudApp) (walletID : String) (network : Option WinnowApp.Network)
     (token : LeanNative.Native.EffectScope.Token) : IO Unit := do
   let live : IO Bool := do return (← a.preparation.isValid token) && (← a.accepts walletID network)
@@ -256,7 +257,8 @@ structure CloudRestored where
 namespace CloudApp
 
 /-- `restoreCloudBackup(_:)` (after authentication here): only onto a network with no wallet; nothing
-replaces a wallet already on this phone. -/
+replaces a wallet already on this phone. A declined check stops it before anything is written
+(cloud-backup-test's `declinedDeviceCheck`; restored end to end in `restoreFromICloud`). -/
 def restore (a : CloudApp) (n : WinnowApp.Network) (dir id : String) : IO CloudRestored := do
   if (← a.walletID).isSome || !a.allows then failWith .noWallet
   a.restoreNotice.set none

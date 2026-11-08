@@ -23,7 +23,8 @@ def backgroundRefreshID : String := "com.btcswift.winnow.chain-refresh"
 def backgroundProcessingID : String := "com.btcswift.winnow.chain-processing"
 
 /-- The time a task of `kind` is given before the run expires itself (`.seconds(120)` for processing,
-`.seconds(25)` for refresh). -/
+`.seconds(25)` for refresh). records-test's `backgroundTaskCommands` reads each kind's budget from the
+deadline `perform` arms for a launched task. -/
 def backgroundBudgetMs (kind : String) : Nat := if kind == "processing" then 120_000 else 25_000
 
 /-- `BackgroundSyncRun`: LeanNative's `BackgroundRun` (`LeanNative.Native.BackgroundRun`) with the task's budget
@@ -35,9 +36,14 @@ structure BackgroundSyncRun where
 
 namespace BackgroundSyncRun
 
-def new (budgetMs : Nat) (work : IO Bool) (cancel : IO Unit) (completion : Bool → IO Unit) : IO BackgroundSyncRun := do
+/-- A run that expires itself `budgetMs` after it starts. `deadline` turns the budget into the deadline that
+does it: `Deadline.after` everywhere but records-test's `backgroundTaskCommands`, which records the budget
+and fires the deadline itself (`WinnowApp.backgroundDeadline`). -/
+def new (budgetMs : Nat) (work : IO Bool) (cancel : IO Unit) (completion : Bool → IO Unit)
+    (deadline : Nat → BaseIO LeanNative.Native.BackgroundRun.Deadline := fun ms => pure (.after ms)) :
+    IO BackgroundSyncRun := do
   return ⟨← LeanNative.Native.BackgroundRun.new
-    { work, cancel, completion := fun o => completion o.success, deadline := .after budgetMs }⟩
+    { work, cancel, completion := fun o => completion o.success, deadline := ← deadline budgetMs }⟩
 
 /-- `start()`: the work, and the deadline that expires it. A second start does nothing. -/
 def start (r : BackgroundSyncRun) : IO Unit := r.run.start
