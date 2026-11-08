@@ -492,8 +492,9 @@ structure Model where
   /-- `isActive`: the scene is in the foreground (the shell's scene phase). A cold background launch has no
   active scene, so boot opens the wallet without starting foreground networking. -/
   active : Bool := false
-  /-- A background task iOS launched before the wallet was open (id, kind): it runs once boot lands. -/
-  pendingBackgroundTask : Option (String × String) := none
+  /-- The background tasks iOS launched before the wallet was open (id, kind), in launch order, one per
+  identifier: each runs once boot lands (records-test's `backgroundTaskCommands`). -/
+  pendingBackgroundTasks : List (String × String) := []
   deriving Repr, Inhabited
 
 /-! ## Messages -/
@@ -888,8 +889,13 @@ inductive Cmd where
   | scheduleBackgroundTasks
   /-- Run the launched task `id` as one bounded background check (`BackgroundSyncRun`), then complete it. -/
   | runBackgroundTask (id kind : String) (settings : Settings)
-  /-- The task's expiration handler: the run is cancelled and completes unsuccessfully once it drains. -/
+  /-- The task's expiration handler: the run is cancelled and completes unsuccessfully once it drains. An
+  expiry with no run under `id` (it has already completed) is ignored: the shell has its one answer.
+  records-test's `backgroundTaskCommands`. -/
   | expireBackgroundTask (id : String)
+  /-- Answer the shell that task `id` is over without running it: iOS expired it while the app was still
+  booting, so no run was ever made for it (records-test's `backgroundTaskCommands`). -/
+  | completeBackgroundTask (id : String) (success : Bool)
   deriving Inhabited
 
 instance : Lean.ToJson Cmd := ⟨fun _ => Lean.Json.null⟩

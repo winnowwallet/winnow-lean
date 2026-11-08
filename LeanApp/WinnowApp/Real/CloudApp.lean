@@ -143,7 +143,7 @@ def recoveryWords (a : CloudApp) (walletID : String) : IO String := do
   match ← (a.env.deps.keyStore.load walletID).run with
   | .ok (.mnemonic words) => return words
   | .ok _ | .error (.notFound _) => CloudBackupError.unsupportedWallet.throw
-  | .error e => failText (keyStoreErrorText e)
+  | .error e => failText e.errorDescription
 
 /-- `prepareExistingCloudBackup(walletID:network:)`: the account first (no prompt when iCloud is
 unavailable), then authentication, the words, the copy. The preparation's scope is checked before the

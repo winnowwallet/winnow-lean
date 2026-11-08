@@ -470,7 +470,7 @@ def shellCloudKeys (ask : Ask) : CloudBackupKeys :=
       let key ← IO.getRandomBytes 32
       match ← (callAsk ask (Client.Keychain.set (item id) key) : IO _) with
       | .ok () => return key
-      | .error e => failText (keyStoreErrorText (keychainError e)) }
+      | .error e => failText (keychainError e).errorDescription }
 
 /-- Memory versions for tests (`MemoryCloudBackups`, `MemoryCloudKeys`). -/
 structure MemoryCloud where

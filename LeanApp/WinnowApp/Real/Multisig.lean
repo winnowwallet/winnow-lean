@@ -336,13 +336,6 @@ def parsePSBT (text : String) : IO PSBT :=
   | .ok p => pure p
   | .error e => failText (psbtErrorText e)
 
-/-- A PSBT role's refusal as the screens show it: the combiner's are the document's (multisig-app-test
-`testRefusedAddressesAndPSBTsFromAnAccount`); it never signs, so a signing failure reaches here from no caller. -/
-def roleText (e : PSBTRoleError) : String :=
-  match e with
-  | .psbt p => psbtErrorText p
-  | .sign s => namedText s.name
-
 /-- `createMultisigSpend(record:address:amount:feeRateSatPerVByte:path:)`: one payment, change to the next
 change address, on the signers' path or (old enough coins) the recovery path. -/
 def createMultisigSpend (env : Env) (a : MultisigApp) (id address : String) (amount : Int) (feeRate : Float)
@@ -370,7 +363,7 @@ def reviewMultisigPSBT (env : Env) (a : MultisigApp) (id text : String) : IO Mul
 def combine (env : Env) (r : MultisigAccountRecord) (psbt other : PSBT) : IO PSBT := do
   let combined ← match psbt.combined #[other] with
     | .ok c => pure c
-    | .error e => failText (roleText e)
+    | .error e => failText (psbtErrorText e)
   discard <| reviewSpend env r (← accountOf r (← currentNetwork env)) combined
   return combined
 

@@ -29,21 +29,21 @@ def errSecUserCanceled : Int32 := -128
 def errSecAuthFailed : Int32 := -25293
 def errSecInteractionNotAllowed : Int32 := -25308
 
-/-- `errorDescription`. A keychain status other than the three named ones is described by the Security
-framework (`SecCopyErrorMessageString`), which belongs to the keychain capability: `none` here. Every case
+/-- `errorDescription`. A keychain status other than the three named ones says which status it was (the
+Swift app has the Security framework's sentence for it, which belongs to the keychain capability). Every case
 is what a send and the recovery phrase show with the Keychain refusing (backend-test `refusalsFlow`). -/
-def KeyStoreError.errorDescription : KeyStoreError → Option String
-  | .notFound w => some s!"The protected key for wallet {w} is missing from this device."
-  | .alreadyExists w => some s!"This device already contains a protected key for wallet {w}."
-  | .malformedSecret => some "The protected wallet key is damaged or has an unsupported format."
+def KeyStoreError.errorDescription : KeyStoreError → String
+  | .notFound w => s!"The protected key for wallet {w} is missing from this device."
+  | .alreadyExists w => s!"This device already contains a protected key for wallet {w}."
+  | .malformedSecret => "The protected wallet key is damaged or has an unsupported format."
   | .unsupportedSecretVersion _ =>
-    some "This wallet key uses an unsupported format version. Keep the key and open it with compatible wallet software."
+    "This wallet key uses an unsupported format version. Keep the key and open it with compatible wallet software."
   | .keychain s =>
-    if s == errSecUserCanceled then some "Unlocking the wallet key was cancelled."
-    else if s == errSecAuthFailed then some "The device did not confirm it was you, so the wallet key stays locked."
+    if s == errSecUserCanceled then "Unlocking the wallet key was cancelled."
+    else if s == errSecAuthFailed then "The device did not confirm it was you, so the wallet key stays locked."
     else if s == errSecInteractionNotAllowed then
-      some "The wallet key can only be unlocked while Winnow is on screen and the device is unlocked."
-    else none
+      "The wallet key can only be unlocked while Winnow is on screen and the device is unlocked."
+    else s!"The device could not reach the protected wallet key (keychain status {s})."
 
 /-- The signing secret of a wallet, as held by a `KeyStore`. -/
 inductive WalletSecret where

@@ -169,15 +169,6 @@ the Send screen shows Swift's generic text for it. -/
 def silentPaymentErrorText (e : SilentPaymentAddressError) : String :=
   s!"The operation couldn’t be completed. (WalletCore.SilentPaymentAddressError.{e.name})"
 
-/-- `KeyStoreError.errorDescription`: what a locked, refusing or emptied Keychain shows, at a send, the
-recovery phrase or the iCloud backup (backend-test `refusalsFlow`). -/
-def keyStoreErrorText (e : Keys.KeyStoreError) : String :=
-  match e.errorDescription with
-  | some t => t
-  | none => match e with
-    | .keychain s => s!"The device could not reach the protected wallet key (keychain status {s})."
-    | _ => "The protected wallet key could not be read."
-
 /-- Text for a failure another module reports only by its case name (its payload was dropped where
 it was lifted into `WalletFailure.named`). -/
 def namedText (n : String) : String :=
@@ -191,7 +182,7 @@ def namedText (n : String) : String :=
 def _root_.Winnow.WalletFailure.text : WalletFailure → String
   | .wallet e => e.description
   | .feeBump e => e.description
-  | .keys e => keyStoreErrorText e
+  | .keys e => e.errorDescription
   | .named n => namedText n
   | .io e => toString e
 
