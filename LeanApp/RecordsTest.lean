@@ -17,7 +17,8 @@ Covers people (add, rename, label, attach, remove), every kind of paste, receive
 tamper detection (on the sealed people file), a wrong-network store, a first write that fails, and
 reopening everything from disk; the People store's payment index and pay-to checks; and the screens the
 journeys open but never use (Home's payment screen, People, Settings, Receive, and `Model.fail` for every
-failure a screen can get), driven as a person uses them through the app's own `perform`. Exits 1 on any
+failure a screen can get), driven as a person uses them through the app's own `perform`; background tasks
+launched and expired through `perform` (`backgroundTaskCommands`), and test mode's one seed variable. Exits 1 on any
 failure. (The shared-savings and MuSig2 scenarios went with vaults, upstream 1cf93fb; cards and records
 written with a `signerKey` still read.) -/
 
@@ -1283,6 +1284,181 @@ def foundationURLRules : IO Unit := do
     check s!"saved peer dials as validated: {repr text}"
       ((Real.parsePeerEndpoint text).map (·.description) == want)
 
+/-! ## Background tasks through `perform` (#68)
+
+iOS launches a task with a system event and expires it with another; the simulator refuses
+`bgtask.schedule`, so outside a phone (LeanNative/leannative#22) only this runs them. Each case sends the
+shell's event through `system`, the Model and the app's own `perform`, against a shell that records what it
+is asked and a backend whose check the case decides, and reads the `bgtask.complete` the shell gets. The
+deadline is a manual one (`backgroundDeadline`) that records each run's budget and that the case fires. -/
+
+/-- The shell, for background tasks: what it is asked, each with whether the backend's check had drained
+by then. -/
+structure TaskShell where
+  asked : IO.Ref (Array (String × Lean.Json × Bool))
+  drained : IO.Ref Bool
+
+def TaskShell.new : IO TaskShell := do return { asked := ← IO.mkRef #[], drained := ← IO.mkRef true }
+
+def TaskShell.fx (s : TaskShell) : LeanNative.Native.Effects Host where
+  post _ := pure ()
+  cap _ _ _ := pure ()
+  ask name args := do
+    let drained ← s.drained.get
+    s.asked.modify (·.push (name, args, drained))
+    return Task.pure (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
+
+/-- The `bgtask.complete`s so far: the task, its `success`, and whether the check had drained. -/
+def TaskShell.completions (s : TaskShell) : IO (Array (String × Option Bool × Bool)) := do
+  return (← s.asked.get).filterMap fun (n, a, d) =>
+    if n == "bgtask.complete" then some ((a.getObjValAs? String "id").toOption.getD "", (a.getObjValAs? Bool "success").toOption, d)
+    else none
+
+/-- The completions once the first has come and a later one has had time to follow. -/
+def TaskShell.settled (s : TaskShell) : IO (Array (String × Option Bool × Bool)) := do
+  discard <| waitUntil 5_000 (every := 2) do return !(← s.completions).isEmpty
+  IO.sleep 150
+  s.completions
+
+/-- The shell's system event `{key: {id, kind}}` through `system`, the Model and `perform`. -/
+def TaskShell.event (s : TaskShell) (key id kind : String) (m : Model) : IO Model := do
+  let some h := system (Lean.Json.mkObj [(key, Lean.Json.mkObj [("id", Lean.Json.str id), ("kind", Lean.Json.str kind)])])
+    | throw (IO.userError s!"{key} is not a system event")
+  let (m, cs) := onHost h m
+  for c in cs do WinnowApp.perform c s.fx
+  return m
+
+/-- The backend's background check as a case decides it: its result, and whether it holds until asked to
+stop and then released (`gate`), as the real check drains its networking. -/
+structure TaskCheck where
+  result : Except String Bool
+  holds : Bool
+  runs : IO.Ref (Array String)
+  cancels : IO.Ref Nat
+  gate : IO.Promise Unit
+
+def TaskCheck.new (result : Except String Bool) (holds := false) : IO TaskCheck := do
+  return { result, holds, runs := ← IO.mkRef #[], cancels := ← IO.mkRef 0, gate := ← IO.Promise.new }
+
+def TaskCheck.backend (c : TaskCheck) (sh : TaskShell) : Backend :=
+  { Backend.pending with
+    runBackgroundSync := fun s => do
+      c.runs.modify (·.push s.network.name)
+      sh.drained.set false
+      if c.holds then
+        while (← c.cancels.get) == 0 || !(← c.gate.isResolved) do IO.sleep 2
+      sh.drained.set true
+      match c.result with
+      | .ok done => return done
+      | .error e => throw (IO.userError e)
+    cancelBackgroundSync := c.cancels.modify (· + 1) }
+
+/-- #68: a background task's launch and expiry through `perform`: the budget for its kind, and exactly one
+`bgtask.complete` under its id with the run's success, whether the check finishes, falls short, fails, or
+is expired by iOS or its budget, and when iOS expires it before it started. -/
+def backgroundTaskCommands : IO Unit := do
+  let budgets ← IO.mkRef (#[] : Array (Nat × IO Unit))
+  backgroundDeadline.set fun ms => do
+    let (d, fire) ← LeanNative.Native.BackgroundRun.Deadline.manual
+    budgets.modify (·.push (ms, fire))
+    return d
+  let refresh := Real.backgroundRefreshID
+  let processing := Real.backgroundProcessingID
+  let asleep : Model := { readyModel "w" with active := false }
+  let start (result : Except String Bool) (holds := false) : IO (TaskShell × TaskCheck) := do
+    let sh ← TaskShell.new
+    let c ← TaskCheck.new result holds
+    backendRef.set (c.backend sh)
+    budgets.set #[]
+    return (sh, c)
+  let started (c : TaskCheck) : IO Bool := waitUntil 2_000 (every := 2) do return (← c.runs.get).size == 1
+  -- a refresh that reaches the tip
+  let (sh, c) ← start (.ok true)
+  discard <| sh.event "bgtask" refresh "refresh" asleep
+  let done ← sh.settled
+  let schedules := (← sh.asked.get).filterMap fun (n, a, _) =>
+    if n == "bgtask.schedule" then some ((a.getObjValAs? String "id").toOption, (a.getObjValAs? String "kind").toOption) else none
+  check "refresh task: asks iOS for the next checks, one of each" (schedules.size == 2 &&
+    schedules.contains (some refresh, some "refresh") && schedules.contains (some processing, some "processing"))
+  check "refresh task: the check runs once, on the wallet's network" ((← c.runs.get) == #["regtest"])
+  check "refresh task: 25 s to run" ((← budgets.get).map (·.1) == #[25_000])
+  check "refresh task: completed once, successfully, under iOS's id" (done == #[(refresh, some true, true)]) (reprStr done)
+  check "refresh task: nothing left running" (← WinnowApp.backgroundRuns.get).isEmpty
+  -- a processing task whose check falls short of the tip
+  let (sh, c) ← start (.ok false)
+  discard <| sh.event "bgtask" processing "processing" asleep
+  let done ← sh.settled
+  check "processing task: 120 s to run" ((← budgets.get).map (·.1) == #[120_000])
+  check "processing task: short of the tip, completed once, unsuccessfully"
+    (done == #[(processing, some false, true)] && (← c.runs.get).size == 1) (reprStr done)
+  -- a check that fails
+  let (sh, _) ← start (.error "the peer hung up")
+  discard <| sh.event "bgtask" refresh "refresh" asleep
+  let done ← sh.settled
+  check "failed check: completed once, unsuccessfully" (done == #[(refresh, some false, true)]) (reprStr done)
+  -- iOS expires it while it runs, twice: the check is stopped once and drains before the completion
+  let (sh, c) ← start (.ok true) (holds := true)
+  let m ← sh.event "bgtask" processing "processing" asleep
+  check "expired while running: the check started" (← started c)
+  let m ← sh.event "bgtaskExpired" processing "processing" m
+  discard <| sh.event "bgtaskExpired" processing "processing" m
+  IO.sleep 50
+  check "expired while running: the backend is asked to stop, once" ((← c.cancels.get) == 1)
+  check "expired while running: nothing completes until the check drains" (← sh.completions).isEmpty
+  c.gate.resolve ()
+  let done ← sh.settled
+  check "expired while running: completed once, unsuccessfully, after the check drained"
+    (done == #[(processing, some false, true)]) (reprStr done)
+  check "expired while running: nothing left running" (← WinnowApp.backgroundRuns.get).isEmpty
+  -- the budget runs out: the deadline perform armed expires the run
+  let (sh, c) ← start (.ok true) (holds := true)
+  discard <| sh.event "bgtask" refresh "refresh" asleep
+  check "budget spent: the check started" (← started c)
+  let some (ms, fire) := (← budgets.get)[0]? | throw (IO.userError "no deadline was armed")
+  check "budget spent: a refresh's 25 s" (ms == 25_000)
+  fire
+  IO.sleep 50
+  check "budget spent: the backend is asked to stop" ((← c.cancels.get) == 1 && (← sh.completions).isEmpty)
+  c.gate.resolve ()
+  let done ← sh.settled
+  check "budget spent: completed once, unsuccessfully" (done == #[(refresh, some false, true)]) (reprStr done)
+  -- launched during boot: it waits for the wallet, then runs
+  let (sh, c) ← start (.ok true)
+  let m ← sh.event "bgtask" refresh "refresh" {}
+  check "launched during boot: waits for the wallet" (m.pendingBackgroundTask.isSome && (← c.runs.get).isEmpty)
+  let (_, cs) := onHost (.booted 0 (.opened "w")) m
+  for cmd in cs.filter (· matches .runBackgroundTask ..) do WinnowApp.perform cmd sh.fx
+  let done ← sh.settled
+  check "launched during boot: runs once the wallet opens, completes once"
+    (done == #[(refresh, some true, true)] && (← c.runs.get).size == 1) (reprStr done)
+  -- expired before it started: iOS's time ran out while the app was still booting
+  let (sh, c) ← start (.ok true)
+  let m ← sh.event "bgtask" refresh "refresh" {}
+  let m ← sh.event "bgtaskExpired" refresh "refresh" m
+  let done ← sh.settled
+  check "expired before it started: completed once, unsuccessfully" (done == #[(refresh, some false, true)]) (reprStr done)
+  let (_, cs) := onHost (.booted 0 (.opened "w")) m
+  check "expired before it started: boot does not run it, no check ran"
+    (!cs.any (· matches .runBackgroundTask ..) && (← c.runs.get).isEmpty && (← budgets.get).isEmpty)
+  backgroundDeadline.set fun ms => pure (.after ms)
+  backendRef.set Backend.pending
+
+/-- #68: test mode pins the seed one way, `WINNOW_E2E_ENTROPY`. A run that sets only Swift's
+`WINNOW_E2E_MNEMONIC`, or entropy that is not hex, stops rather than create a real seed. -/
+def testModeSeed : IO Unit := do
+  let resolve (vars : List (String × String)) := WinnowApp.E2E.resolve fun k => ((("WINNOW_E2E", "1") :: vars).lookup k)
+  check "test mode: WINNOW_E2E_ENTROPY pins the seed"
+    (match resolve [("WINNOW_E2E_ENTROPY", "000102030405060708090a0b0c0d0e0f")] with
+     | .active m => m.entropy.map (·.toList) == some ((List.range 16).map (·.toUInt8))
+     | _ => false)
+  check "test mode: a recovery phrase alone pins nothing"
+    (resolve [("WINNOW_E2E_MNEMONIC", "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about")]
+      matches .missingPinnedEntropy)
+  check "test mode: entropy that is not hex pins nothing" (resolve [("WINNOW_E2E_ENTROPY", "abandon")] matches .missingPinnedEntropy)
+  check "test mode: nothing set pins nothing" (resolve [] matches .missingPinnedEntropy)
+  check "test mode: the launch reads one seed variable"
+    (WinnowApp.e2eVariables.filter (fun v => v == "WINNOW_E2E_ENTROPY" || v == "WINNOW_E2E_MNEMONIC") == ["WINNOW_E2E_ENTROPY"])
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
@@ -1291,6 +1467,8 @@ def main : IO UInt32 := runMain "records-test" do
   peerGatewayModel
   syncBookkeepingScreens
   backgroundRuns
+  backgroundTaskCommands
+  testModeSeed
   try
     let a ← newPhone root "A"
     let b ← newPhone root "B"

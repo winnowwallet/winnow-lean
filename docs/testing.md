@@ -70,7 +70,11 @@ against the node.
 What the journeys do not cover: a physical Ledger (CI's is simulated; the
 owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift
 app), receiving silent payments (Winnow does not), live Tor and I2P gateways,
-iCloud, background tasks scheduled by iOS, and iPad layouts.
+iCloud, background tasks scheduled by iOS, and iPad layouts. Two of those
+paths run headless instead: `records-test` sends a background task's launch and
+expiry through the app's `perform` with a fake shell, and `cloud-backup-test`
+declines the device check before the iCloud backup's preparation and restore.
+Neither has run against the shell on a phone (LeanNative/leannative#22).
 
 ## Run them locally
 

@@ -22,6 +22,12 @@ initialize backendRef : IO.Ref Backend ← IO.mkRef Backend.pending
 initialize watcherToken : IO.Ref Nat ← IO.mkRef 0
 /-- The background checks running, by task identifier (`BackgroundSyncRun`). -/
 initialize backgroundRuns : IO.Ref (List (String × Real.BackgroundSyncRun)) ← IO.mkRef []
+instance : Nonempty LeanNative.Native.BackgroundRun.Deadline := ⟨.never⟩
+/-- How a launched task's budget (`backgroundBudgetMs`) becomes the deadline that expires its run:
+`Deadline.after`. Only records-test's `backgroundTaskCommands` replaces it, with a manual deadline that
+records the budget it was given and that the test fires. -/
+initialize backgroundDeadline : IO.Ref (Nat → BaseIO LeanNative.Native.BackgroundRun.Deadline) ←
+  IO.mkRef fun ms => pure (.after ms)
 /-- Test mode (`E2E.lean`), resolved at boot in a Debug build only. -/
 initialize e2eRef : IO.Ref (Option E2E.Mode) ← IO.mkRef none
 /-- `<Application Support>` itself: test mode's journal lives in its run directory there. -/
@@ -40,7 +46,7 @@ def journal (name : String) (fields : List (String × String) := []) : IO Unit :
 
 /-- The launch-environment names test mode reads. -/
 def e2eVariables : List String :=
-  ["WINNOW_E2E", "WINNOW_E2E_ENTROPY", "WINNOW_E2E_MNEMONIC", "WINNOW_E2E_RUN", "WINNOW_E2E_PEER",
+  ["WINNOW_E2E", "WINNOW_E2E_ENTROPY", "WINNOW_E2E_RUN", "WINNOW_E2E_PEER",
    "WINNOW_E2E_CHALLENGE", "WINNOW_E2E_RESET", "WINNOW_E2E_CLIPBOARD", "WINNOW_E2E_NETWORK", "WINNOW_E2E_TAB",
    "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_ADVANCED", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
    "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS"]
@@ -59,7 +65,7 @@ def resolveE2E : IO (Option E2E.Mode) := do
       IO.Process.exit 1
     return some m
   | .missingPinnedEntropy =>
-    IO.eprintln "WINNOW_E2E=1 without a readable WINNOW_E2E_ENTROPY or WINNOW_E2E_MNEMONIC. A capture run must never generate a real seed: its screenshots are published."
+    IO.eprintln "WINNOW_E2E=1 without a readable WINNOW_E2E_ENTROPY. A capture run must never generate a real seed: its screenshots are published."
     IO.Process.exit 1
 
 def settingsPath : IO System.FilePath := return System.FilePath.mk (← rootDir.get) / "settings.json"
@@ -106,7 +112,9 @@ def authenticated (fx : Effects Host) (gen : Nat) (ctx reason : String) (act : I
       fx.post (.failed gen (if cancelled then ctx ++ ".cancelled" else ctx) err)
 
 /-- `authenticateSensitiveAction(reason:)` for the backend's own flows (the iCloud backup's preparation
-and restore): throws when the owner declines or cancels. Skipped in automated Debug runs, as `authenticated`. -/
+and restore): throws when the owner declines or cancels. Skipped in automated Debug runs, as `authenticated`.
+cloud-backup-test's `declinedDeviceCheck` runs it against a shell that declines, then approves, and in
+test mode with and without `WINNOW_E2E_DEVICE_AUTH=1`. -/
 def authenticateNow (fx : Effects Host) (reason : String) : IO Unit := do
   if let some m ← e2eRef.get then
     if !m.requireDeviceAuthentication then return
@@ -481,13 +489,17 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       discard <| fx.ask "bgtask.schedule" (Json.mkObj [("id", Json.str Real.backgroundProcessingID), ("kind", Json.str "processing"),
         ("after", toJson (900 : Nat)), ("requiresNetwork", Json.bool true), ("requiresPower", Json.bool false)])
   | .runBackgroundTask id kind s => do
+      -- iOS's task, its kind's budget, and one `bgtask.complete` however it ends (records-test's
+      -- `backgroundTaskCommands`: done, short of the tip, failed, expired by iOS and by its budget)
       let complete (success : Bool) : IO Unit := do
         backgroundRuns.modify (·.filter (·.1 != id))
         discard <| fx.ask "bgtask.complete" (Json.mkObj [("id", Json.str id), ("success", Json.bool success)])
       let run ← Real.BackgroundSyncRun.new (Real.backgroundBudgetMs kind) (b.runBackgroundSync s) b.cancelBackgroundSync complete
+        (deadline := ← backgroundDeadline.get)
       backgroundRuns.modify ((id, run) :: ·)
       run.start
   | .expireBackgroundTask id => do
+      -- records-test's `backgroundTaskCommands`: while it runs, and before it started
       match (← backgroundRuns.get).lookup id with
       | some run => run.expire
       -- expired before it started: it completes unsuccessfully
