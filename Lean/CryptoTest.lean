@@ -31,6 +31,12 @@ BIP340 signing against BIP340's own vectors.
   `requireDifficulty` must take them and refuse others. Core's `pow_tests.cpp` and `arith_uint256_tests.cpp` cover
   what mainnet never did: the 4× easier clamp and a negative timespan. `requireBoundedAdjustment` is held to 4×
   easier and to powLimit, either side of each.
+* `Vectors/mainnet-funding-sources.json`: mainnet spends of a key hash (both key encodings), a script hash (a
+  multisig, and wrapped segwit, which has a witness too) and a bare key, written by
+  `scripts/funding-sources-vectors`. `FundingSources.revelation` must name the script each input spent, as the
+  transaction that made it has it, or nothing for the bare key. Then the same pushes re-encoded with
+  `OP_PUSHDATA1/2/4` must reveal the same scripts, and truncated pushes and non-push opcodes must be
+  `unrecognized`.
 * The fast curve (`Secp.Fast`), which compiled code runs in place of the proved scalar multiplication,
   lift_x and point addition (`@[implemented_by]`): each `…Fast` function against the proved code it stands in
   for (`Secp.smul?`, `smulJ`, `Fq.sqrt?`), over edge scalars, seeded random ones and the points they give.
@@ -456,6 +462,151 @@ def bip32 : IO Unit := do
   for row in invalid do
     check s!"bip32 refuses: {field row "why"}" (HDKey.deserialize (field row "key") matches .error _)
 
+/-! ## Funding sources -/
+
+namespace FundingVectors
+open FundingSources
+
+def kindName : Revelation → String
+  | .publicKeyHash => "publicKeyHash" | .scriptHash => "scriptHash" | .witnessKeyHash => "witnessKeyHash"
+  | .witnessScriptHash => "witnessScriptHash" | .taprootScriptPath => "taprootScriptPath" | .coinbase => "coinbase"
+  | .taprootKeyPath => "taprootKeyPath" | .unrecognized => "unrecognized"
+
+/-- The pushes of a scriptSig made only of direct pushes and `OP_PUSHDATA1`, read here rather than by
+`pushedItems` (the mainnet scriptSigs are, and this re-encodes them). -/
+partial def plainPushes (s : ByteArray) (i : Nat := 0) (acc : Array ByteArray := #[]) : Array ByteArray :=
+  if i ≥ s.size then acc
+  else if s[i]! == 0x4C then plainPushes s (i + 2 + s[i + 1]!.toNat) (acc.push (s.extract (i + 2) (i + 2 + s[i + 1]!.toNat)))
+  else plainPushes s (i + 1 + s[i]!.toNat) (acc.push (s.extract (i + 1) (i + 1 + s[i]!.toNat)))
+
+/-- `d` pushed with `op` (`OP_PUSHDATA1`, `2` or `4`), its length little-endian, whatever the length. -/
+def pushWith (op : UInt8) (d : ByteArray) : ByteArray :=
+  let width := if op == 0x4C then 1 else if op == 0x4D then 2 else 4
+  ByteArray.mk #[op] ++ ByteArray.mk ((Array.range width).map fun k => (d.size >>> (8 * k)).toUInt8) ++ d
+
+/-- `d` as a direct push (at most 75 bytes) or `OP_PUSHDATA1`. -/
+def push (d : ByteArray) : ByteArray := if d.size ≤ 0x4B then ByteArray.mk #[d.size.toUInt8] ++ d else pushWith 0x4C d
+
+def spendOf (scriptSig : ByteArray) (witness : Array ByteArray := #[]) : Transaction.Input :=
+  { previousOutput := { txid := ByteArray.mk (Array.replicate 32 0x11), vout := 0 }, scriptSig, sequence := 0xFFFF_FFFF, witness }
+
+def says (r : Revelation × Option ByteArray) (kind : String) (script : Option ByteArray) : Bool :=
+  kindName r.1 == kind && r.2 == script
+
+def shown (r : Revelation × Option ByteArray) : String := s!"{kindName r.1} {r.2.map hex}"
+
+/-- Real mainnet spends (`scripts/funding-sources-vectors`): every input's revelation is the script it spent, read
+from the transaction that made it (nothing for a bare public key's), and `fundingScripts` lists them. Returns a
+key-hash spend's and a script-hash spend's scriptSig and spent script, for the hand-made cases. -/
+def mainnet : IO ((ByteArray × ByteArray) × (ByteArray × ByteArray)) := do
+  let j ← IO.ofExcept (Json.parse (← IO.FS.readFile "Vectors/mainnet-funding-sources.json"))
+  let rows ← IO.ofExcept (j.getObjValAs? (Array Json) "spends")
+  let mut keyHash : Option (ByteArray × ByteArray) := none
+  let mut scriptHash : Option (ByteArray × ByteArray) := none
+  let mut kinds : Array String := #[]
+  for row in rows do
+    let txid := field row "txid"
+    let tx ← match Transaction.decode (bytesOf row "raw") with
+      | .ok t => pure t
+      | .error _ => throw (IO.userError s!"funding sources: {txid} does not decode")
+    check s!"funding sources {txid.take 8}: the bytes are the transaction" (displayHex tx.txid == txid)
+    let inputs ← IO.ofExcept (row.getObjValAs? (Array Json) "inputs")
+    check s!"funding sources {txid.take 8}: one row per input" (inputs.size == tx.inputs.size)
+    let mut revealed : Array ByteArray := #[]
+    for (input, want) in tx.inputs.zip inputs do
+      let kind := field want "revelation"
+      let script := (want.getObjValAs? String "script").toOption.map ofHex!
+      let r := revelation input
+      check s!"funding sources {txid.take 8} ({field row "what"}): {kind}" (says r kind script) (shown r)
+      if let some sc := script then
+        if !revealed.contains sc then revealed := revealed.push sc
+      kinds := kinds.push kind
+      if kind == "publicKeyHash" && input.scriptSig.size < 140 then keyHash := some (input.scriptSig, bytesOf want "spent")
+      if kind == "scriptHash" && input.witness.isEmpty then scriptHash := some (input.scriptSig, bytesOf want "spent")
+    check s!"funding sources {txid.take 8}: fundingScripts" (fundingScripts tx == revealed)
+  IO.println s!"  funding sources: {rows.size} mainnet spends, {kinds.size} inputs"
+  check "funding sources: a key hash, a script hash and a bare key ran"
+    (["publicKeyHash", "scriptHash", "unrecognized"].all kinds.contains)
+  let some kh := keyHash | throw (IO.userError "funding sources: no compressed key-hash spend")
+  let some sh := scriptHash | throw (IO.userError "funding sources: no script-hash spend without a witness")
+  return (kh, sh)
+
+/-- Pushes in every encoding a consensus-valid scriptSig may use reveal the same script; truncated pushes, and
+non-push opcodes before, between or after the pushes, reveal nothing. -/
+def handMade (keyHash scriptHash : ByteArray × ByteArray) : IO Unit := do
+  let (pkSig, pkSpent) := keyHash
+  let (shSig, shSpent) := scriptHash
+  let pk := plainPushes pkSig
+  let sh := plainPushes shSig
+  let concat (xs : Array ByteArray) : ByteArray := xs.foldl (· ++ ·) .empty
+  check "funding sources: the key-hash spend is a signature and a key" (pk.size == 2 && concat (pk.map push) == pkSig)
+  check "funding sources: the script-hash spend's redeem script is OP_PUSHDATA1"
+    (sh.size ≥ 2 && concat (sh.map push) == shSig && sh.back!.size > 0x4B)
+  let redeem := sh.back!
+  let shHead := concat (sh.pop.map push)
+  let long := ByteArray.mk (Array.replicate 300 0x51)
+  let longHash := some (p2sh (hash160 long))
+  let reveals : List (String × ByteArray × String × Option ByteArray) := [
+    ("key hash, both pushes OP_PUSHDATA1", concat (pk.map (pushWith 0x4C)), "publicKeyHash", some pkSpent),
+    ("key hash, both pushes OP_PUSHDATA2", concat (pk.map (pushWith 0x4D)), "publicKeyHash", some pkSpent),
+    ("key hash, both pushes OP_PUSHDATA4", concat (pk.map (pushWith 0x4E)), "publicKeyHash", some pkSpent),
+    ("script hash, the redeem script OP_PUSHDATA2", shHead ++ pushWith 0x4D redeem, "scriptHash", some shSpent),
+    ("script hash, the redeem script OP_PUSHDATA4", shHead ++ pushWith 0x4E redeem, "scriptHash", some shSpent),
+    ("script hash, every push OP_PUSHDATA4", concat (sh.map (pushWith 0x4E)), "scriptHash", some shSpent),
+    ("a 300-byte redeem script, OP_PUSHDATA2", pushWith 0x4D long, "scriptHash", longHash),
+    ("a 300-byte redeem script, OP_PUSHDATA4", pushWith 0x4E long, "scriptHash", longHash),
+    ("a 300-byte redeem script after OP_0", ByteArray.mk #[0x00] ++ pushWith 0x4D long, "scriptHash", longHash)]
+  for (what, scriptSig, kind, script) in reveals do
+    let r := revelation (spendOf scriptSig)
+    check s!"funding sources: {what}" (says r kind script) (shown r)
+  -- a scriptSig is read even when a witness is there too (P2SH-wrapped segwit)
+  let wrapped := revelation (spendOf (pushWith 0x4D redeem) #[ByteArray.mk #[0x01], redeem])
+  check "funding sources: a scriptSig with a witness reads the scriptSig" (says wrapped "scriptHash" (some shSpent)) (shown wrapped)
+  let b (xs : List UInt8) : ByteArray := ByteArray.mk xs.toArray
+  let bytes (n : Nat) : ByteArray := ByteArray.mk (Array.replicate n 0x51)
+  let refused : List (String × ByteArray) := [
+    ("the key-hash spend less its last byte", pkSig.extract 0 (pkSig.size - 1)),
+    ("the script-hash spend less its last byte", shSig.extract 0 (shSig.size - 1)),
+    ("a direct push of 5 with 2 bytes", b [0x05, 0xAA, 0xBB]),
+    ("the key-hash pushes, then a push of 75 with none", pkSig ++ b [0x4B]),
+    ("OP_PUSHDATA1 with no length", b [0x4C]),
+    ("the key-hash pushes, then OP_PUSHDATA1 with no length", pkSig ++ b [0x4C]),
+    ("OP_PUSHDATA1 of 5 with 4 bytes", b [0x4C, 0x05] ++ bytes 4),
+    ("OP_PUSHDATA2 with no length", b [0x4D]),
+    ("OP_PUSHDATA2 with one length byte", b [0x4D, 0x2C]),
+    ("OP_PUSHDATA2 of 300 with 299 bytes", b [0x4D, 0x2C, 0x01] ++ bytes 299),
+    ("the redeem script OP_PUSHDATA2, one byte short", shHead ++ (pushWith 0x4D redeem).extract 0 (redeem.size + 2)),
+    ("OP_PUSHDATA4 with no length", b [0x4E]),
+    ("OP_PUSHDATA4 with three length bytes", b [0x4E, 0x2C, 0x01, 0x00]),
+    ("OP_PUSHDATA4 of 300 with 299 bytes", b [0x4E, 0x2C, 0x01, 0x00, 0x00] ++ bytes 299),
+    ("OP_PUSHDATA4 of 4294967295 with 10 bytes", b [0x4E, 0xFF, 0xFF, 0xFF, 0xFF] ++ bytes 10),
+    ("OP_PUSHDATA4 of 2^24 + 300 with 300 bytes", b [0x4E, 0x2C, 0x01, 0x00, 0x01] ++ bytes 300),
+    ("only OP_0", b [0x00]),
+    ("a lone public key", push pk[1]!),
+    ("a lone signature", push pk[0]!)]
+  for (what, scriptSig) in refused do
+    let r := revelation (spendOf scriptSig)
+    check s!"funding sources: unrecognized, {what}" (says r "unrecognized" none) (shown r)
+  -- each non-push opcode before the key-hash pushes, between them, and after the script-hash pushes
+  let ops : List (String × UInt8) := [("OP_1NEGATE", 0x4F), ("OP_RESERVED", 0x50), ("OP_1", 0x51), ("OP_16", 0x60),
+    ("OP_NOP", 0x61), ("OP_DUP", 0x76), ("OP_CHECKSIG", 0xAC), ("OP_INVALIDOPCODE", 0xFF)]
+  for (name, op) in ops do
+    for (where_, scriptSig) in [("before the key-hash pushes", b [op] ++ pkSig),
+        ("between the key-hash pushes", push pk[0]! ++ b [op] ++ push pk[1]!),
+        ("after the script-hash pushes", shSig ++ b [op]),
+        ("before the script-hash pushes", b [op] ++ shSig)] do
+      let r := revelation (spendOf scriptSig)
+      check s!"funding sources: unrecognized, {name} {where_}" (says r "unrecognized" none) (shown r)
+  check "funding sources: no scriptSig and no witness is unrecognized" (says (revelation (spendOf .empty)) "unrecognized" none)
+  IO.println s!"  funding sources: {reveals.length} re-encoded reveals, {refused.length + ops.length * 4 + 1} refusals"
+
+end FundingVectors
+
+/-- `FundingSources.revelation` for inputs that are not segwit: real mainnet spends, then hand-made scriptSigs. -/
+def fundingSources : IO Unit := do
+  let (keyHash, scriptHash) ← FundingVectors.mainnet
+  FundingVectors.handMade keyHash scriptHash
+
 def main : IO UInt32 := runMain "crypto-test" do
   fips197
   wycheproof
@@ -468,3 +619,4 @@ def main : IO UInt32 := runMain "crypto-test" do
   jsonExponents
   retargetRules
   mainnetRetargets
+  fundingSources
