@@ -31,7 +31,8 @@ def pushHeader (s : ByteArray) (op : UInt8) (i : Nat) : Option (Nat × Nat) :=
   else if op == 0x4E then if avail < 4 then none else some (4, (readLE s i 4).toNat)
   else none
 
-/-- A scriptSig's pushed items; `none` for any non-push opcode or a truncated push. -/
+/-- A scriptSig's pushed items; `none` for any non-push opcode or a truncated push. crypto-test's funding sources
+section runs truncated pushes, `OP_PUSHDATA1/2/4` either side of their lengths, and non-push opcodes. -/
 def pushedItems (s : ByteArray) : Option (Array ByteArray) := Id.run do
   let mut items : Array ByteArray := #[]
   let mut i := 0
@@ -50,6 +51,9 @@ def pushedItems (s : ByteArray) : Option (Array ByteArray) := Id.run do
 def p2pkh (h : ByteArray) : ByteArray := ByteArray.mk #[0x76, 0xA9, 0x14] ++ h ++ ByteArray.mk #[0x88, 0xAC]
 def p2sh (h : ByteArray) : ByteArray := ByteArray.mk #[0xA9, 0x14] ++ h ++ ByteArray.mk #[0x87]
 
+/-- What a non-segwit input's scriptSig reveals: a signature and a key are a key hash, a last push that is
+neither is a redeem script. crypto-test holds it to mainnet key-hash, script-hash and bare-key spends
+(`Vectors/mainnet-funding-sources.json`); backend-test's `oldPaymentFlow` receives from both kinds on regtest. -/
 def legacyRevelation (scriptSig : ByteArray) : Revelation × Option ByteArray :=
   match pushedItems scriptSig with
   | none => (.unrecognized, none)

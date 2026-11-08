@@ -211,7 +211,8 @@ def bumpFee (env : Env) (txid : String) (p : WinnowApp.FeeBumpPreview) : IO Stri
     ("replacement", Winnow.displayHex replacement), ("raw", hex (prepared.built.transaction.serialized true))]
   return Winnow.displayHex replacement
 
-/-- `loadPaymentDetails(_:)`: the stored raw transaction from the relay queue or its block. -/
+/-- `loadPaymentDetails(_:)`: the stored raw transaction from the relay queue or its block. backend-test's
+`oldPaymentFlow` drops receipts' transactions and loads them back both ways, and with no stack. -/
 def loadPaymentDetails (env : Env) (txid : String) : IO Unit := do
   let c ← env.get
   let some w := c.wallet | return
@@ -229,7 +230,7 @@ def loadPaymentDetails (env : Env) (txid : String) : IO Unit := do
       | none => failWith .paymentDetailsUnavailable
   let c' ← env.get
   if c'.generation != c.generation || !(c'.wallet.map (·.id) == some w.id) then return
-  env.walletOp (w.rememberTransaction tx)
+  env.walletOp (w.rememberTransaction id tx)
 
 /-! ## Mempool windows -/
 
