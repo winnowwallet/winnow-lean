@@ -850,10 +850,56 @@ def resetPeersFlow (dir : String) (n : Node) : IO Unit := do
   check "reset peers: journaled each time" (((← journaled "peers.reset").filter (·.1 == "Reset")).size == 2)
   r.stopNetworking
 
+/-- Settings → Reset peers when `peers.json` cannot be removed (here a directory stands in its place): the reset
+fails with a sentence for Settings, the system's reason without the file's path, and is not journaled; networking
+comes back up on the peers it had, so the manual peer is dialled again and the wallet syncs the next block. With
+networking stopped the same failure is reported and starts nothing. -/
+def resetPeersFailureFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let keys ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (r, env) ← Backend.realWithEnv (deps keys "ResetFails")
+  let dirR := s!"{dir}/ResetFails/BTCSwift/regtest"
+  IO.FS.createDirAll dirR
+  discard <| r.openWallet .regtest dirR
+  r.startNetworking settings
+  discard <| r.createWallet .regtest dirR
+  let node : PeerEndpoint := { host := "127.0.0.1", port := n.p2p }
+  check "reset fails: connected to the manual peer" (← connectedTo r node 30_000)
+  let peersFile := System.FilePath.mk dirR / "peers.json"
+  r.stopNetworking
+  if ← peersFile.pathExists then IO.FS.removeFile peersFile
+  IO.FS.createDirAll (peersFile / "kept")
+  r.startNetworking settings
+  check "reset fails: connected, with a directory where peers.json goes" (← connectedTo r node 30_000)
+  let told (shown : Option String) : Bool := match shown with
+    | some t => t.startsWith "Winnow could not forget its saved peers: " && t.endsWith ". It keeps using them." &&
+        !t.contains '\n' && (t.splitOn dirR).length == 1
+    | none => false
+  let attempt : IO (Option String) := do try r.resetPeers; pure none catch e => pure (some (toString e))
+  -- 1. on a running stack
+  let shown ← attempt
+  check "reset fails (running): Settings is told why, in a sentence" (told shown) s!"{shown}"
+  let d ← env.diagnostics
+  check "reset fails (running): networking is back up" (d.hasStack && d.active) s!"{repr d}"
+  check "reset fails (running): the manual peer is dialled again" (← connectedTo r node 30_000)
+  check "reset fails (running): the wallet syncs the next block, no error on Home"
+    ((← syncsToNewBlock n r mineAddr) && (← r.snapshot).1.lastSyncError.isNone) s!"{(← r.snapshot).1.lastSyncError}"
+  -- 2. on a stopped stack
+  r.stopNetworking
+  let shownStopped ← attempt
+  check "reset fails (stopped): Settings is told why" (told shownStopped) s!"{shownStopped}"
+  IO.sleep 1_500
+  let d ← env.diagnostics
+  check "reset fails (stopped): nothing is started" (!d.hasStack && !d.active && d.liveLoops == 0) s!"{repr d}"
+  check "reset fails: never journaled as a reset" (((← journaled "peers.reset").filter (·.1 == "ResetFails")).isEmpty)
+  IO.FS.removeDirAll peersFile
+
 /-- The Retry button after peer discovery fails: with the node off the network a start finds no peer
 (`peerDiscoveryFailed`, where Home shows Retry); with it back, Retry connects at once, long before the pool's
 own 30-second monitor would, and the wallet syncs. Under Automatic routing Retry rebuilds the stack
-(`reconnect`); under Direct it asks the running pool to dial again, and with networking stopped starts nothing. -/
+(`reconnect`); under Direct it asks the running pool to dial again. With networking stopped (the app in the
+background) Retry starts nothing under either: Automatic's rebuild leaves it stopped. -/
 def retryPeersFlow (dir : String) (n : Node) : IO Unit := do
   let mineAddr ← n.wallet #["getnewaddress"]
   let keys ← IO.mkRef ({} : Keys.InMemorySecrets)
@@ -875,14 +921,13 @@ def retryPeersFlow (dir : String) (n : Node) : IO Unit := do
       s!"{(← t.connectedPeers).map (·.endpoint)}, {showPhase (← t.snapshot).2}"
     check s!"retry ({routing}): the wallet syncs the next block" (← syncsToNewBlock n t mineAddr)
     t.stopNetworking
-  -- Direct routing, networking stopped
-  let quiet ← waitUntil 5_000 (do return (← env.diagnostics).liveLoops == 0)
-  t.retryPeers
-  -- long enough for a phase tick, had Retry started anything
-  IO.sleep 1_500
-  let d ← env.diagnostics
-  check "retry: with networking stopped, Retry starts nothing"
-    (quiet && !d.hasStack && !d.active && d.liveLoops == 0) s!"{repr d}"
+    let quiet ← waitUntil 5_000 (do return (← env.diagnostics).liveLoops == 0)
+    t.retryPeers
+    -- long enough for a phase tick, had Retry started anything
+    IO.sleep 1_500
+    let d ← env.diagnostics
+    check s!"retry ({routing}): with networking stopped, Retry starts nothing"
+      (quiet && !d.hasStack && !d.active && d.liveLoops == 0 && (← t.connectedPeers).isEmpty) s!"{repr d}"
 
 /-! ## Payments whose transaction this phone does not hold -/
 
@@ -1458,5 +1503,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; resetPeersFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

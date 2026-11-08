@@ -46,15 +46,18 @@ def stopNetworking (env : Env) : IO Unit := do
     return
   suspendAndStop env false
 
-/-- `reconnect()`: rebuild the stack so changed peer settings take effect. -/
+/-- `reconnect()`: rebuild the stack so changed peer settings take effect. Networking the scene stopped stays
+stopped (`activate` only runs while active, as upstream's `isActive` guard): the settings are kept for the next
+start. backend-test's `retryPeersFlow` taps Retry with networking stopped under Automatic routing, which comes
+here. -/
 def reconnect (env : Env) (s : Settings) : IO Unit := do
   env.modify fun c => c.withSettings s
   suspendAndStop env true
-  env.modify fun c => { c with active := true }
   activate env
 
 /-- `retryPeerDiscovery()`: Automatic routing asks for the gateways again (`reconnect`). backend-test's
-`retryPeersFlow` taps it after a failed start under Automatic and Direct routing, and with networking stopped. -/
+`retryPeersFlow` taps it after a failed start under Automatic and Direct routing, and with networking stopped
+under each, when it starts nothing; the journey `retryAfterNoPeers` taps Home's Retry. -/
 def retryPeers (env : Env) : IO Unit := do
   let c ← env.get
   if let some s := c.settings then
@@ -89,8 +92,10 @@ def connectedPeers (env : Env) : IO (List PeerInfo) := do
   return out.toList
 
 /-- `resetPeers()`: forget learned peers (manual peers and the shipped list stay), avoid the current ones
-first next time, and come back up. backend-test's `resetPeersFlow` resets on a running stack and on a stopped
-one. -/
+first next time, and come back up. When `peers.json` cannot be removed nothing was forgotten: networking still
+comes back up, on the peers it had, and the failure is thrown for Settings to show (upstream recorded it as a sync
+error and left the stack down until the app next came to the foreground). backend-test's `resetPeersFlow` resets
+on a running stack and on a stopped one, and `resetPeersFailureFlow` with a directory where `peers.json` goes. -/
 def resetPeers (env : Env) : IO Unit := do
   let c ← env.get
   let avoid ← match c.stack with
@@ -98,16 +103,19 @@ def resetPeers (env : Env) : IO Unit := do
     | none => pure #[]
   env.modify fun c => { c with peersToAvoid := avoid }
   suspendAndStop env true
-  try
-    match c.stack, c.dir with
-    | some s, _ => s.pool.forgetKnownGood
-    | none, some d =>
-      let f := dirFile d "peers.json"
-      if ← f.pathExists then IO.FS.removeFile f
-    | none, none => pure ()
-  catch e =>
-    env.modify fun c => { c with lastSyncError := some (toString e) }
-    return
+  let failed ← try
+      match c.stack, c.dir with
+      | some s, _ => s.pool.forgetKnownGood
+      | none, some d =>
+        let f := dirFile d "peers.json"
+        if ← f.pathExists then IO.FS.removeFile f
+      | none, none => pure ()
+      pure none
+    catch e => pure (some e)
+  if let some e := failed then
+    activate env
+    let reason := ((toString e).splitOn "\n").head!
+    throw (IO.userError s!"Winnow could not forget its saved peers: {reason}. It keeps using them.")
   env.journal "peers.reset" []
   activate env
 

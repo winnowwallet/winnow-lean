@@ -212,7 +212,8 @@ private def interleavedCatalogEndpoints (p : PeerPool) : IO (Array PeerEndpoint)
       if h : i < l.size then out := out.push l[i]
   return out
 
-/-- Manual peers, then persisted good peers, then the shipped census. -/
+/-- Manual peers, then persisted good peers, then the shipped census, the peers a reset left (`avoidOnReset`)
+last. io-test's "reset order" checks read this order off a mainnet-shaped census. -/
 def localCandidates (p : PeerPool) (excluded : Std.HashSet PeerEndpoint) : IO (Array PeerCandidate) := do
   let s ← p.state.get
   let mut ordered : Array PeerCandidate := p.manualPeers.map ({ endpoint := ·, source := .manual })
@@ -468,7 +469,8 @@ def stopIfRelayOnly (p : PeerPool) : IO Unit := do
   if (← p.state.get).mode == .relayOnly then p.stop
 
 /-- Forgets every remembered good peer (manual peers survive). Call after `stop`. backend-test's
-`resetPeersFlow` runs it through Settings → Reset peers. -/
+`resetPeersFlow` runs it through Settings → Reset peers, and `resetPeersFailureFlow` when `peers.json` cannot be
+removed (it throws, and the pool keeps what it knew). -/
 def forgetKnownGood (p : PeerPool) : IO Unit := do
   if let some f := p.peersFile then
     if ← fileExists f then IO.FS.removeFile f

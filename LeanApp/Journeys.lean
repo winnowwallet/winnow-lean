@@ -5,7 +5,7 @@ import Journeys.Screens
 
 /-! # The UI journeys
 
-Seven journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Eight journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -586,9 +586,47 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     waitForBalance (smallCoin - payment - fee)
     discard <| h.cli #["unloadwallet", other]⟩
 
+/-- The phone cannot reach the Bitcoin network. The fixture's node goes off the network (`setnetworkactive
+false`) while Winnow is in the background; back in the foreground, Home says it couldn't reach the network and
+offers Retry. With the node back, Retry reconnects at once, well before the pool would try again by itself
+(30 seconds after it started), and the wallet finds a payment the node sends it. The node serves every journey
+of the run, so it goes back on the network however this one ends. -/
+def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
+  let r ← Run.new "retry"
+  let h := r.host
+  r.launch "retry"
+  createWallet
+  let address ← step "the wallet syncs with its one peer" do
+    let address ← Receive.address
+    Receive.close
+    waitSynced
+    pure address
+  try
+    let failedAt ← step "the node goes off the network: back in the foreground, Home offers Retry" do
+      home
+      discard <| h.cli #["setnetworkactive", "false"]
+      let start ← IO.monoMsNow
+      activate
+      waitFor retryPeersButton 30
+      here (.text "^Couldn't reach the Bitcoin network")
+      shot "60-home-retry"
+      pure ((← IO.monoMsNow) - start)
+    step "the node is back: Retry reconnects at once, and the wallet finds a payment" do
+      discard <| h.cli #["setnetworkactive", "true"]
+      tap retryPeersButton
+      -- the pool's own redial comes 30 s after the foreground started it; Retry must beat it
+      let within := 25 - Float.ofNat failedAt / 1000
+      expect (within ≥ 10) s!"Home took {failedAt} ms to offer Retry, too long to tell Retry from the pool's redial"
+      waitUntil within "Retry did not reconnect" do return (← text syncSummaryText) == "Up to date"
+      expectGone retryPeersButton
+      discard <| h.fund address funding
+      waitForBalance funding
+  finally
+    discard <| h.cli #["setnetworkactive", "true"]⟩
+
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, shippedCensus, silentPaymentSend,
-   feeBumpReplaceConfirm, spentElsewhere]
+   feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers]
 
 end WinnowJourneys
 
