@@ -888,8 +888,13 @@ inductive Cmd where
   | scheduleBackgroundTasks
   /-- Run the launched task `id` as one bounded background check (`BackgroundSyncRun`), then complete it. -/
   | runBackgroundTask (id kind : String) (settings : Settings)
-  /-- The task's expiration handler: the run is cancelled and completes unsuccessfully once it drains. -/
+  /-- The task's expiration handler: the run is cancelled and completes unsuccessfully once it drains. An
+  expiry with no run under `id` (it has already completed) is ignored: the shell has its one answer.
+  records-test's `backgroundTaskCommands`. -/
   | expireBackgroundTask (id : String)
+  /-- Answer the shell that task `id` is over without running it: iOS expired it while the app was still
+  booting, so no run was ever made for it (records-test's `backgroundTaskCommands`). -/
+  | completeBackgroundTask (id : String) (success : Bool)
   deriving Inhabited
 
 instance : Lean.ToJson Cmd := ⟨fun _ => Lean.Json.null⟩

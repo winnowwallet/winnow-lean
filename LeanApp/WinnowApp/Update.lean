@@ -218,7 +218,11 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
     if m.stage == .loading then ({ m with pendingBackgroundTask := some (id, kind) }, [.scheduleBackgroundTasks])
     else (m, [.scheduleBackgroundTasks, .runBackgroundTask id kind m.settings])
   | .bgtaskExpired id _ =>
-    if m.pendingBackgroundTask.any (·.1 == id) then ({ m with pendingBackgroundTask := none }, [.expireBackgroundTask id])
+    -- expired before boot ran it: no run exists, so the task is answered here, once, unsuccessfully;
+    -- otherwise its run is expired, and an expiry after the run completed changes nothing
+    -- (records-test's `backgroundTaskCommands`)
+    if m.pendingBackgroundTask.any (·.1 == id) then
+      ({ m with pendingBackgroundTask := none }, [.completeBackgroundTask id false])
     else (m, [.expireBackgroundTask id])
   | .scene active =>
     -- `scenePhaseChanged` journals the phase before acting on it
