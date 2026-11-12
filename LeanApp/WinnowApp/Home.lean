@@ -155,11 +155,14 @@ def paymentRow (m : Model) (p : DisplayedPayment) (tappable := true) : H :=
     | .transfer _ _ moved => body s!"{groupDigits moved} sats"
     | _ => amountText h.net
   if !advanced then
-    -- Simple: an arrow for the direction, who and the status under each other, the amount alone
+    -- Simple: an arrow for the direction, who and the status under each other, the amount alone. The arrow
+    -- is its own icon beside the texts (it keeps its size; the texts wrap), not a symbol inside the title:
+    -- drawn inside it, a title above an account's name and a status was squeezed to a few letters
     let arrow := if h.net > 0 then "arrow.down.left" else if h.net < 0 then "arrow.up.right" else "arrow.left.arrow.right"
-    .row [ .col ([.identified rowID (match action with
-                    | some a => navLink title (some a) (symbol := arrow)
-                    | none => Html.symbol arrow (body title))] ++
+    .row [ .icon arrow
+         , .col ([.identified rowID (match action with
+                    | some a => navLink title (some a)
+                    | none => body title)] ++
                  (match p.source with
                   | .account name => [.identified (Ids.paymentAccount (h.txid)) (caption name)]
                   | _ => []) ++

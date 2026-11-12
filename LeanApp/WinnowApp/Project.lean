@@ -53,9 +53,10 @@ def manifest : Manifest where
   -- automatic iCloud backup (WinnowApp/Real/CloudBackup.lean): the private database of upstream's container
   -- (CloudKit/schema.ckdb's WalletBackup records)
   iCloudContainers := ["iCloud.com.btcswift.app"]
-  -- the shell draws its text in Hiragino Sans (iOS ships it, so nothing is bundled)
-  -- and squarer, as the site's card is: rows on the page under ruled headers, rectangular buttons
-  info := [("ITSAppUsesNonExemptEncryption", false), ("LNFontFamily", "Hiragino Sans"), ("LNShape", "square")]
+  -- the shell draws squarer, as the site's card is: rows on the page under ruled headers, rectangular
+  -- buttons; its text stays in the system font (Hiragino Sans, tried here, cut the descenders off: its g
+  -- hangs below the line height the font declares)
+  info := [("ITSAppUsesNonExemptEncryption", false), ("LNShape", "square")]
   -- the look of winnowwallet.com, light or dark as the system is: its amber and Bitcoin orange
   -- (Assets.xcassets/AccentColor, site.css's --seed) as the tint every button, link and symbol draws in
   settings := [("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME", "AccentColor")]
