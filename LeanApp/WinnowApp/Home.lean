@@ -180,11 +180,13 @@ def paymentRow (m : Model) (p : DisplayedPayment) (tappable := true) : H :=
        , .spacer
        , amount ]
 
-/-- A warning the home keeps to one short line: a filled symbol and a few words in the warning colour,
+/-- A warning the home keeps to one short line: a filled symbol and a few words beside an accent rule,
 tapped for the whole message in an alert, which leads on to the Settings page with the details and Retry. -/
 def compactWarning (id label : String) (kind : HomeWarning) (symbol := "exclamationmark.triangle.fill")
     (tone : LeanNative.Tone := .warning) : H :=
-  .identified id (Html.decor { tone, symbol } (.button label .plain (some (.home (.explainWarning kind)))))
+  -- Colour the rule rather than the text, so the warning stays readable in light mode.
+  Html.tone (if tone == .warning then .standard else tone) (Html.callout
+    [.identified id (Html.symbol symbol (.button label .plain (some (.home (.explainWarning kind)))))])
 
 /-- The home's network problem, in a few words: no peer can be reached, or syncing keeps failing (a dropped
 peer or two stays quiet: `simpleSyncError`). -/
@@ -228,15 +230,18 @@ def peerRoutingBanner (m : Model) : H :=
 /-- The headline balance: the largest type in the app. -/
 def balanceText (m : Model) : H := .identified Ids.balanceText (.text (satsText (totalBalance m)) .largeTitle)
 
-/-- The balance card: one cell, the amount large, then its status line and the network's badge; under it a row
-for each warning, its tinted words alone (a row of the list is a button with no box around it), and on mainnet
-the routing line. The error and Retry are in Settings → Network → Sync. -/
+/-- The balance card: test-network badge, amount and status in one cell, followed by a row for each warning
+control and, on mainnet, the routing line. The error and Retry are in Settings → Network → Sync. -/
 def balanceSection (m : Model) : H :=
-  let tag : List H := if m.settings.network == .mainnet then [] else
-    [.spacer, .identified Ids.networkTag (Html.badge (Html.tone .warning (caption s!"{m.settings.network.label} · test coins")))]
-  let status := syncLine m ++ tag
+  let summary := m.phase.summary m.status.syncing
+  let network : List H := if m.settings.network == .mainnet then [] else
+    [.identified Ids.networkTag (Html.badge (caption s!"{m.settings.network.label} · test coins"))]
   .section "" ""
-    ([.col ([caption "Balance", balanceText m] ++ accountsBalanceLine m ++ (if status.isEmpty then [] else [.row status]))] ++
+    ([.col (network ++
+       [caption (if summary == .synced then "Balance" else "Last known balance"), balanceText m] ++
+       accountsBalanceLine m ++
+       syncLine m)] ++
+     -- Keep the latest warning → explanation → Settings flow, including quiet transient failures.
      (match networkWarningLabel m with
       | some label => [compactWarning Ids.homeNetworkWarning label .network]
       | none => []) ++
@@ -256,10 +261,10 @@ def accountsSection (m : Model) : List H :=
             Html.tone .secondary (body (satsText a.balance))]))]
 
 def homeSections (m : Model) : List H :=
-  [ balanceSection m ] ++ protectionCards m ++
+  [ balanceSection m ] ++
   [ .section "" "" [.row [.identified Ids.receiveButton (Html.symbol "arrow.down.left" (.button "Receive" .plain (some .openReceive))),
                           .identified Ids.openSendButton (Html.symbol "arrow.up.right" (.button "Send" .primary (some .openSend)))]] ] ++
-  accountsSection m ++
+  protectionCards m ++ accountsSection m ++
   [ activitySection m
   , beginnerBackupSection m ]
 

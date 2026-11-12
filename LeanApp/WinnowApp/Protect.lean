@@ -220,17 +220,17 @@ def stepLedgerCard (msg : LedgerCardMsg) (m : Model) : Model × List Cmd :=
 def protectionCards (m : Model) : List H :=
   let card (id title text action : String) (msg : Msg) (dismissID : String) (hardware : Bool) : H :=
     .identified id (.section "" ""
-      [ .row [Html.tone .warning (.icon (if hardware then "lock.shield" else "person.3")), .text title .headline]
-      , caption text
+      [ Html.callout [ .row [Html.tone .warning (.icon (if hardware then "lock.shield" else "person.3")), .text title .headline]
+      , body text
       , .button action .primary (some msg)
-      , .identified dismissID (.button "Don't show again" .plain (some (.home (.dismissCard hardware)))) ])
+      , .identified dismissID (.button "Don't show again" .plain (some (.home (.dismissCard hardware)))) ] ])
   (if m.showsHardwareCard then
     [card Ids.hardwareWalletCard "This is more than a phone should hold alone"
-      "A phone can be lost, stolen or broken into. A Ledger keeps a second key off the phone, so a payment needs both."
+      "A phone can be lost, stolen or broken into. Move your Bitcoin into an account requiring your phone and Ledger to approve a payment. Pairing alone does not protect your existing balance."
       "Protect it with a Ledger" (.home .protectWithLedger) Ids.dismissHardwareCard true] else []) ++
   (if m.showsMultipartyCard then
     [card Ids.multipartyCard "Large amounts invite wrench attacks"
-      "When no one person can move the money, threatening one person gets nothing. Share the signing with people you trust."
+      "Share signing with people you trust so no one person can move the money alone. This reduces reliance on one person; it does not eliminate threats or coercion."
       "Build an account with other people's keys" (.home .buildWithOthers) Ids.dismissMultipartyCard false] else [])
 
 /-- The nearby card (a medium sheet) and its Set up. -/

@@ -77,14 +77,15 @@ def backupSection (m : Model) : H :=
 backed up. -/
 def beginnerBackupSection (m : Model) : H :=
   let c := m.cloud
-  .section "Backup" ""
-    ([ .identified Ids.cloudBackupStatus (Html.symbol (if c.statusTitle == "Backed up" then "checkmark.icloud" else "icloud") (body c.statusTitle)) ] ++
+  let contents : List H :=
+    [ .identified Ids.cloudBackupStatus (Html.symbol (if c.statusTitle == "Backed up" then "checkmark.icloud" else "icloud") (body c.statusTitle)) ] ++
      (match c.lastSavedText with | some t => [caption s!"Last saved {t}"] | none => []) ++
      (match c.message with | some t => [caption t] | none => []) ++
      (if c.statusTitle == "Not backed up" then
-       [ caption "Your wallet still works. Until iCloud backup works, keep a backup file yourself."
+       [ body "Your wallet still works. Until iCloud backup works, keep a backup file yourself."
        , .identified Ids.backupButton (navLink "Save a backup file" (some (.home .openBackup)) (symbol := "doc.badge.arrow.up")) ]
-      else []))
+      else [])
+  .section "Backup" "" (if c.statusTitle == "Not backed up" then [Html.callout contents] else contents)
 
 /-- CloudBackupView (Settings → Backup → iCloud backup): the switch and the state. -/
 def cloudBackupSheet (m : Model) (inner : List H) : H :=

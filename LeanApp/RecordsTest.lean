@@ -477,12 +477,12 @@ def homeWarnings : IO Unit := do
   let off : Model := { base with phase := .peerDiscoveryFailed, status := { base.status with lastSyncError := some err } }
   let home := wire (homeSections off)
   check "warnings: offline is one short line" (contains home "homeNetworkWarning" && contains home "Offline")
-  -- a row of the balance card, not in its cell, so the shell draws it as tinted words with no box
-  let rowIds (s : H) : List String := match s with
-    | .section _ _ cs => cs.filterMap fun c => match c with | .identified i _ => some i | _ => none
-    | _ => []
-  check "warnings: each is a row of the balance card, not in its cell" ((rowIds (balanceSection off)).contains "homeNetworkWarning" &&
-    (rowIds (balanceSection base)).contains "peerRoutingBanner" && !contains (wire [balanceSection off]) "syncSummaryText")
+  -- a row of the balance card (in its callout), not in the cell with the amount
+  let inRow (s : H) (id : String) : Bool := match s with
+    | .section _ _ (_ :: rows) => rows.any fun r => contains (wire [r]) id
+    | _ => false
+  check "warnings: each is a row of the balance card, not in its cell" (inRow (balanceSection off) "homeNetworkWarning" &&
+    inRow (balanceSection base) "peerRoutingBanner" && !contains (wire [balanceSection off]) "syncSummaryText")
   check "warnings: no Retry on the home" (!contains home "retryPeersButton")
   check "warnings: no error text on the home" (!contains home err && !contains home "check your connection")
   let (asked, cmds) := stepHome (.explainWarning .network) off

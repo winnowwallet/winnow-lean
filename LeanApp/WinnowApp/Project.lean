@@ -57,9 +57,12 @@ def manifest : Manifest where
   -- the shell draws squarer, as the site's card is: rows on the page under ruled headers, rectangular
   -- buttons; its text stays in the system font (Hiragino Sans, tried here, cut the descenders off: its g
   -- hangs below the line height the font declares)
-  info := [("ITSAppUsesNonExemptEncryption", false), ("LNShape", "square")]
-  -- the tint every button, link and symbol draws in (Assets.xcassets/AccentColor): in dark the Bitcoin
-  -- orange of winnowwallet.com, in light the system's blue, as the app was before it had an accent
+  info := [("ITSAppUsesNonExemptEncryption", false), ("LNShape", "square"),
+           ("LNButtonCornerRadius", 10),
+           ("LNPrimaryBackgroundColor", "BrandOrange"), ("LNPrimaryForegroundColor", "ButtonInk"),
+           ("LNCalloutBackgroundColor", "NoticeSurface"), ("LNCalloutAccentColor", "BrandOrange")]
+  -- Readable action text: ink on white, orange on charcoal. Primary fills and callout rules use the
+  -- same bold orange in both appearances, with dark text on filled buttons. System fonts scale normally.
   settings := [("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME", "AccentColor")]
   -- the UI test target holds only LeanNative's test kit and its journey driver (LNDriver): the journeys are Lean,
   -- on the Mac (Journeys.lean), run by scripts/journeys (CI: LeanNative's ui-tests with scripts/ui-fixture)

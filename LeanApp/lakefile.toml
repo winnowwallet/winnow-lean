@@ -13,8 +13,8 @@ path = "../Lean"
 # .github/workflows/ci.yml.
 [[require]]
 name = "leannative"
-git = "https://github.com/LeanNative/leannative.git"
-rev = "59180b0c95c0bb94289ac2febffdaa6316917748"
+git = "https://github.com/LonnieRae/leannative.git"
+rev = "7c64b70bca625abee0aaad6454cdbbbd4173bc26"
 subDir = "framework/lean"
 
 [[lean_lib]]
@@ -38,6 +38,10 @@ name = "FoundationVectors"
 [[lean_exe]]
 name = "records-test"
 root = "RecordsTest"
+
+[[lean_exe]]
+name = "home-presentation-test"
+root = "HomePresentationTest"
 
 # The app's Ledger transport over the shell's ble.* capabilities, against a fake peripheral backed by
 # the Lean Ledger simulator.
