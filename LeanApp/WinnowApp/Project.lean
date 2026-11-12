@@ -36,13 +36,14 @@ def manifest : Manifest where
     -- the census list this build ships (CensusCatalog.bundled reads peers.json beside the executable),
     -- fetched by scripts/import-census (scripts/build-ios runs it when the list is missing)
     "../../build/census/peers.json"]
-  uses := ["auth", "keychain.*", "build", "clipboard.*", "paths", "exclude-from-backup", "http.get", "open",
+  uses := ["auth", "keychain.*", "build", "clipboard.*", "paths", "exclude-from-backup", "http.get", "open", "appearance",
            "ble.*", "bgtask.*", "cloudkit.*"]
   usage := [
     ("NSFaceIDUsageDescription", "Approve payments and reveal your recovery words."),
-    -- a paired Ledger signs multisig spends over the shell's ble.* capabilities (upstream's text)
+    -- a paired Ledger signs multisig spends over the shell's ble.* capabilities (upstream's text), and the
+    -- home looks for one nearby (`ble.scan`, the nearby card; onboarding's Bluetooth card asks first)
     ("NSBluetoothAlwaysUsageDescription",
-     "Winnow talks to your Ledger over Bluetooth to have it sign multisig payments you approve on its screen."),
+     "Winnow notices a Ledger nearby while it is open, and talks to your Ledger over Bluetooth to have it sign multisig payments you approve on its screen."),
     -- Automatic routing asks Tailscale's MagicDNS and probes the gateways it names (upstream's text)
     ("NSLocalNetworkUsageDescription",
      "Winnow checks your Tailscale gateways and connects to Bitcoin nodes you configure.")]
@@ -53,7 +54,13 @@ def manifest : Manifest where
   -- automatic iCloud backup (WinnowApp/Real/CloudBackup.lean): the private database of upstream's container
   -- (CloudKit/schema.ckdb's WalletBackup records)
   iCloudContainers := ["iCloud.com.btcswift.app"]
-  info := [("ITSAppUsesNonExemptEncryption", false)]
+  -- the shell draws squarer, as the site's card is: rows on the page under ruled headers, rectangular
+  -- buttons; its text stays in the system font (Hiragino Sans, tried here, cut the descenders off: its g
+  -- hangs below the line height the font declares)
+  info := [("ITSAppUsesNonExemptEncryption", false), ("LNShape", "square")]
+  -- the tint every button, link and symbol draws in (Assets.xcassets/AccentColor): in dark the Bitcoin
+  -- orange of winnowwallet.com, in light the system's blue, as the app was before it had an accent
+  settings := [("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME", "AccentColor")]
   -- the UI test target holds only LeanNative's test kit and its journey driver (LNDriver): the journeys are Lean,
   -- on the Mac (Journeys.lean), run by scripts/journeys (CI: LeanNative's ui-tests with scripts/ui-fixture)
   -- against a regtest fixture

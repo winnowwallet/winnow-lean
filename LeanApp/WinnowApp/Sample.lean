@@ -22,14 +22,18 @@ def sampleHistory : List HistoryItem :=
       outputs := some [ { index := 0, address := some "tb1qbobsample000000000000000000000000000", script := "0014b0b", amount := 49550, ownedByWallet := false }
                       , { index := 1, address := some "tb1pchange000000000000000000000000000000000000000000000000", script := "5120c4a", amount := 30000, ownedByWallet := true } ] }
   , { txid := "a11ce00000000000000000000000000000000000000000000000000000000001", height := 213990,
-      received := 120000, spent := 0, fee := none,
-      outputs := some [ { index := 0, address := some "tb1preceive00000000000000000000000000000000000000000000000", script := "5120ab1", amount := 120000, ownedByWallet := true } ],
+      received := 13_852_000, spent := 0, fee := none,
+      outputs := some [ { index := 0, address := some "tb1preceive00000000000000000000000000000000000000000000000", script := "5120ab1", amount := 13_852_000, ownedByWallet := true } ],
       fundingAddresses := ["tb1qalicefunding0000000000000000000000000"] } ]
 
+/-- The Nano X `WINNOW_LEAN_SAMPLE_LEDGER=1` has advertising nearby. -/
+def sampleNearbyLedger : NearbyLedger := { id := "sample-nano-x", name := "Nano X 7C4E", rssi := some (-58) }
+
+/-- The sample's wallet holds 0.138 BTC: above `hardwareWalletThresholdSats`, so the home suggests a Ledger. -/
 def Backend.sample : Backend :=
   { Backend.pending with
     openWallet := fun _ _ => pure (.opened "sample-wallet")
-    snapshot := pure ({ balance := 138000, utxoCount := 2, history := sampleHistory, feeBumpable := [sampleHistory[0]!.txid],
+    snapshot := pure ({ balance := 13_790_000, utxoCount := 2, history := sampleHistory, feeBumpable := [sampleHistory[0]!.txid],
                         peerCount := 0, tipHeight := 214020, nextScanHeight := 214021, feeFloorMilli := some 1000 }, .peerDiscoveryFailed)
     records := pure { people := [sampleAlice, sampleBob, sampleCarol],
                       senderByTxid := [(sampleHistory[2]!.txid, "p-alice")],

@@ -80,13 +80,17 @@ def Run.paste (r : Run) (text : String) (button : Find) : UI Unit := do
 
 /-! ## Onboarding and home -/
 
-/-- Creates the wallet (creation opens it): the home screen with its balance. -/
-def createWallet : UI Unit := do
+/-- Creates the wallet (creation opens it): the home screen with its balance. With the simulated Ledger
+(`bluetooth`), onboarding ends with the Bluetooth card over the home instead, which the journey answers. -/
+def createWallet (bluetooth := false) : UI Unit := do
   waitFor createWalletButton 60
   shot "01-onboarding"
   tap createWalletButton
-  waitFor receiveButton 60
-  waitFor balanceText 30
+  if bluetooth then
+    waitFor bluetoothIntroCard 60
+  else
+    waitFor receiveButton 60
+    waitFor balanceText 30
 
 def balance : UI (Option Nat) := amount balanceText
 
@@ -97,21 +101,37 @@ def waitForBalance (target : Nat) (f : Find := balanceText) : UI Unit :=
 def waitSynced : UI Unit :=
   waitUntil 60 "sync is not Up to date" do return (← text syncSummaryText) == "Up to date"
 
-/-- Advanced mode, through its alert, then the Wallet tab. -/
-def turnOnAdvanced : UI Unit := do
-  tap advancedModeButton
-  waitFor (.alert "Turn on") 10
-  tap (.alert "Turn on")
-  waitFor (.tab "Wallet") 15
-  tap (.tab "Wallet")
-
-/-- Back to the Wallet tab's list (the builder and the account it opened are both on its stack). -/
+/-- Back to the home: the Send sheet closed, and whatever is pushed (Settings, the builder and the account it
+opened) popped. -/
 def backToWalletList : UI Unit := do
-  for _ in [0:4] do
+  for _ in [0:6] do
+    if ← exists? closeSendButton then
+      tap closeSendButton
+      pause 0.5
+      continue
     if ← exists? balanceText then break
     if ← exists? .back then tap .back
     pause 0.5
   waitFor balanceText 10
+
+/-- The home's Settings button: Appearance, Network, Security, Backup. -/
+def openSettings : UI Unit := do
+  waitFor settingsButton 10
+  tap settingsButton
+  waitFor networkSyncButton 10
+
+/-- Settings → Security → Multisig accounts: Create, Join and the accounts. -/
+def openMultisigAccounts : UI Unit := do
+  openSettings
+  scrolled multisigAccountsButton
+  tap multisigAccountsButton
+  waitFor multisigBuildButton 10
+
+/-- The home's account row: its page. -/
+def openAccountRow (account : String) : UI Unit := do
+  waitFor (multisigAccount account) 30
+  scrolled (multisigAccount account)
+  tap (multisigAccount account)
 
 /-! ## Receive -/
 
@@ -158,7 +178,9 @@ def send (h : Host) : UI String := do
 /-- Send, From: the account: the review names the signatures it needs; "Sign and continue" signs here and
 opens the collection step. -/
 def fromAccount (r : Run) (account destination : String) (sats : Nat) (needs : String) : UI Unit := do
-  tap (.tab "Send")
+  backToWalletList
+  tap openSendButton
+  waitFor (sendFrom account) 10
   tap (sendFrom account)
   waitFor sendSourceNote 10
   fill r destination sats
@@ -190,9 +212,17 @@ def rateText (milli : Nat) : String :=
   let three := (toString (1000 + frac)).toList.drop 1
   s!"{milli / 1000}.{String.ofList (three.reverse.dropWhile (· == '0')).reverse}"
 
-/-- Advanced mode's Network floor, once the peers have reported one (their BIP133 feefilter), in
-thousandths of sat/vB. -/
+/-- The form's folded Fee: its priority, the resolved rate, the Network floor and the override. -/
+def openFee : UI Unit := do
+  unless ← exists? feeOverrideField do
+    scrolled sendFeeDisclosure
+    tap sendFeeDisclosure
+  waitFor feeOverrideField 10
+
+/-- The Fee's Network floor, once the peers have reported one (their BIP133 feefilter), in thousandths of
+sat/vB. -/
 def floorMilli : UI Nat := do
+  openFee
   scrolled feeFloorText
   let found ← IO.mkRef 0
   waitUntil 60 "the peers reported no relay floor" do
@@ -200,8 +230,9 @@ def floorMilli : UI Nat := do
     return (← found.get) > 0
   found.get
 
-/-- Advanced mode's fee override typed; the rate the form resolves it to, once it has. -/
+/-- The Fee's override typed; the rate the form resolves it to, once it has. -/
 def override (rate : String) : UI String := do
+  openFee
   scrolled feeOverrideField
   type feeOverrideField rate
   let resolved ← IO.mkRef ""
@@ -209,6 +240,15 @@ def override (rate : String) : UI String := do
     resolved.set (← text resolvedRateText)
     return (← resolved.get).endsWith " sat/vB"
   resolved.get
+
+/-- On the review: the wallet's balance reaches `target` (the review's folded Transaction details show what it
+holds now), the review left open. -/
+def waitForReviewBalance (target : Nat) : UI Unit := do
+  unless ← exists? reviewBalance do
+    scrolled reviewDetailsDisclosure
+    tap reviewDetailsDisclosure
+  waitUntil 90 s!"the review's balance did not reach {target}" (every := 0.25) do
+    return (← amount reviewBalance) == some target
 
 /-- With the sent payment's details open: waits for the node to request the payment, and reads its txid. A list
 holds only the rows on screen, so both are scrolled to. -/
@@ -223,8 +263,8 @@ end Send
 
 namespace Bump
 
-/-- Bump fee on the payment screen, once the wallet offers it for this payment (Advanced mode, a payment of
-its own still awaiting confirmation): the sheet with the payment's current rate. -/
+/-- Bump fee on the payment screen, once the wallet offers it for this payment (a payment of its own still
+awaiting confirmation): the sheet with the payment's current rate. -/
 def start : UI Unit := do
   waitUntil 30 "the payment screen offers no Bump fee" do scrollTo bumpFeeButton
   tap bumpFeeButton
@@ -353,9 +393,19 @@ end Account
 
 namespace Ledger
 
-/-- Settings → Signers → Pair a Ledger, named `name`. -/
+/-- Onboarding's Bluetooth card answered Continue, then the card the scan brings for the simulated Ledger
+answered Not now: the home, with no card left to come. -/
+def notNow : UI Unit := do
+  tap allowBluetoothButton
+  waitFor ledgerNearbyCard 30
+  tap ledgerNotNowButton
+  expectGone ledgerNearbyCard 10
+  waitFor receiveButton 10
+
+/-- Settings → Security → Hardware wallets and keys → Pair a Ledger, named `name`. -/
 def pair (name : String) : UI Unit := do
-  tap (.tab "Settings")
+  openSettings
+  scrolled signersButton
   tap signersButton
   tap signersPairLedgerButton
   type ledgerNameField name

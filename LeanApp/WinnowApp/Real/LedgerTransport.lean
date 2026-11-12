@@ -1,11 +1,12 @@
 import Lean.Data.Json
 import Winnow.Ledger
 import WinnowApp.Real.Shell
+import WinnowApp.Model
 import LeanNative.Native.Client.Bluetooth
 
 /-! # A Ledger over the shell's Bluetooth: LedgerBluetooth.swift's transport
 
-The shell offers generic Bluetooth LE (`ble.state`, `ble.connect`, `ble.subscribe`, `ble.write`,
+The shell offers generic Bluetooth LE (`ble.state`, `ble.scan`, `ble.connect`, `ble.subscribe`, `ble.write`,
 `ble.read`, `ble.close`), asked through LeanNative's typed client (`LeanNative.Native.Client.Bluetooth`).
 Everything Ledger-specific lives here and in `Winnow.Ledger`: the services and characteristics, the frame-size request, the
 0x05 framing and reassembly. The steps and their timeouts are Swift's: power on 15 s, connect 45 s,
@@ -137,5 +138,21 @@ def withLedger {α} (open_ : IO LedgerSession) (p : Program α) : IO (Except Led
 /-- Test mode's Ledger: the simulator from `Winnow.Ledger`, one per app run. -/
 def simulatedLedger (device : IO.Ref Simulator) : IO LedgerSession :=
   pure { exchange := Simulator.transport device, close := pure () }
+
+open LeanNative.Native in
+/-- The Ledgers advertising nearby: `ble.scan` for the Ledger services, 4 s, connecting to none (a Ledger the
+system already holds connected is reported too). Bluetooth off, not allowed or absent sees nothing. -/
+def scanLedgers (ask : Ask) : IO (List NearbyLedger) := do
+  match ← (callAsk ask (Client.Bluetooth.scan Bluetooth.serviceIdentifiers.toList (some 4)) : IO _) with
+  | .ok ads => pure (ads.toList.map fun a => { id := a.id, name := a.name.getD "Nano", rssi := a.rssi })
+  | .error _ => pure []
+
+open LeanNative.Native in
+/-- `ble.state`, asked once so iOS asks the person for Bluetooth (onboarding's card); the answer is not used. -/
+def askBluetooth (ask : Ask) : IO Unit := do
+  discard <| (callAsk ask Client.Bluetooth.state : IO _)
+
+/-- Test mode's simulated Ledger, as a scan sees it. -/
+def simulatedAdvertisement : NearbyLedger := { id := "simulated-ledger", name := "Nano X E2E0", rssi := some (-50) }
 
 end WinnowApp.Real

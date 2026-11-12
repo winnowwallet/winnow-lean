@@ -78,23 +78,23 @@ def Real.MultisigApp.install (a : Real.MultisigApp) (env : Real.Env) (base : Bac
   { base with
     multisigOverview := Real.overview env a
     checkMultisigDescriptor := Real.checkMultisigDescriptor env a
-    addMultisigAccount := fun adv name d => do
+    addMultisigAccount := fun name d => do
       let r ← Real.addMultisigAccount env a name d
-      return (r.id, ← Real.registerAfterSaving env a adv r)
+      return (r.id, ← Real.registerAfterSaving env a r)
     removeMultisigAccount := Real.removeMultisigAccount a
     newMultisigReceiveAddress := Real.newMultisigReceiveAddress a
-    createMultisigAccount := fun adv name k members rec => do
-      let r ← Real.createMultisigAccount env a adv name k members rec
-      return (r.id, r.descriptor, ← Real.registerAfterSaving env a adv r)
-    registerLedger := fun adv id => discard <| Real.registerLedger env a adv id
-    pairLedger := fun adv name => do return (← Real.pairLedger env a adv name).id
-    addSignerKeys := fun adv name text => do return (← Real.addSignerKeys env a adv name text).id
+    createMultisigAccount := fun name k members rec => do
+      let r ← Real.createMultisigAccount env a name k members rec
+      return (r.id, r.descriptor, ← Real.registerAfterSaving env a r)
+    registerLedger := fun id => discard <| Real.registerLedger env a id
+    pairLedger := fun name => do return (← Real.pairLedger env a name).id
+    addSignerKeys := fun name text => do return (← Real.addSignerKeys env a name text).id
     renameSigner := Real.renameSigner a
     removeSigner := Real.removeSigner a
     verifyLedgerAddress := Real.verifyLedgerAddress env a
     -- a payment from an account goes through the account's review; the wallet's otherwise
     previewSend := fun inputs => if inputs.accountID.isSome then Real.previewAccountSend env a inputs else base.previewSend inputs
-    signAndDraft := fun adv inputs p => Real.signAndDraft env a adv inputs p
+    signAndDraft := fun inputs p => Real.signAndDraft env a inputs p
     signDraft := Real.signDraft env a
     signDraftWithLedger := Real.signDraftWithLedger env a
     adoptDraft := Real.adoptDraft env a

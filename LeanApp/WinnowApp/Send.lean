@@ -1,26 +1,25 @@
 import WinnowApp.Multisig
 import WinnowApp.Ids
 
-/-! SendView.swift: the form (address or saved person, amount, Advanced fee controls), the review with
-Winnow's four warnings, and the status with the relay log. -/
+/-! SendView.swift as the one Send sheet: the form (From when an account exists, address or saved person,
+amount, the fee folded away and Normal by default), the review with Winnow's four warnings and its folded
+transaction details, and the status with the relay log. -/
 
 namespace WinnowApp
 open LeanNative
 
-/-- `SendView.reviewInputs`: what a preview must have been made for. Priority and override count only
-in Advanced mode; a person's payment index is part of it, so a review for an earlier address is void. -/
+/-- `SendView.reviewInputs`: what a preview must have been made for; a person's payment index is part of it,
+so a review for an earlier address is void. -/
 def Model.sendInputs (m : Model) : SendInputs :=
   let i := m.send.inputs
   let person := i.personID.bind m.person? |>.filter (·.isSavedRecipient)
-  let account := if m.settings.advancedMode then i.accountID.bind m.multisigInfo? else none
+  let account := i.accountID.bind m.multisigInfo?
   { i with destination := if person.isSome then "" else i.destination
-           priority := if m.settings.advancedMode then i.priority else 1
-           override := if m.settings.advancedMode then i.override else ""
            network := m.settings.network
            personID := person.map (·.id)
            paymentIndex := person.map (·.nextPaymentIndex)
            walletID := m.walletID
-           -- From is Advanced mode's: a Simple-mode review is always the wallet's
+           -- an account no longer on this phone is the wallet's
            accountID := account.map (·.id)
            -- the recovery path only for an account that has one
            recovery := i.recovery && account.any (·.hasRecovery) }
@@ -62,12 +61,14 @@ def stepSend (msg : SendMsg) (m : Model) : Model × List Cmd :=
         (m.fail "send" "Another payment is already being signed and broadcast. Wait for it to finish.", [])
       else
         -- an account's payment is signed here and goes out from the collection step
-        let cmd := if p.account.isSome then Cmd.signAndDraft g m.settings.advancedMode m.sendInputs p
+        let cmd := if p.account.isSome then Cmd.signAndDraft g m.sendInputs p
           else .sendPayment g m.sendInputs p
         ({ m with send := { m.send with sending := true, error := none }, spendingInFlight := true }, [cmd])
   | .editPayment => if m.send.sending then (m, []) else ({ m with send := { m.send with preview := none, error := none } }, [])
   | .newPayment =>
-    ({ m with send := { inputs := { network := m.settings.network } }, expanded := m.expanded.erase "send.details" }, [.resolveRate g { network := m.settings.network } m.status.feeFloorMilli])
+    ({ m with send := { inputs := { network := m.settings.network } },
+              expanded := (m.expanded.erase "send.details").erase "send.fee" |>.erase "send.review" },
+     [.resolveRate g { network := m.settings.network } m.status.feeFloorMilli])
 
 /-- A relay event about the sent transaction (SendView's `apply`). -/
 def Model.onRelay (m : Model) (txid : String) (e : RelayEvent) : Model :=
@@ -88,10 +89,15 @@ def Model.onRelay (m : Model) (txid : String) (e : RelayEvent) : Model :=
 
 /-! ## View -/
 
-/-- From (Advanced mode, when this phone has accounts): the wallet, or a multisig account whose payment needs
-the other signers before it goes out. -/
+/-- The fee priorities (1, Normal, is the default). -/
+def feePriorityLabels : List String := ["Low", "Normal", "High"]
+
+def feePriorityLabel (i : Nat) : String := (feePriorityLabels[i]?).getD "Normal"
+
+/-- From (when this phone has accounts): the wallet, or a multisig account whose payment needs the other
+signers before it goes out. -/
 def sourceSection (m : Model) : List H :=
-  if !m.settings.advancedMode || m.multisig.accounts.isEmpty then [] else
+  if m.multisig.accounts.isEmpty then [] else
   let selected := m.sendInputs.accountID
   let row (title : String) (balance : Int) (id : Option String) (identifier : String) : H :=
     .identified identifier
@@ -134,14 +140,15 @@ def sendForm (m : Model) : List H :=
   sourceSection m ++ [toSection,
     .section "Amount" "You'll see the network fee before you send."
       [ .row [.identified Ids.amountField (.input .number "" "0" i.amount (send .setAmount) none), caption "sats"] ] ] ++
-  (if m.settings.advancedMode then
-    [ .section "Fee" "The rate uses your override, recent confirmed fees, or a preset, never below the peers' relay floor. It is not a live fee-market estimate."
-        [ .picker "Priority" ["Low", "Medium", "High"] i.priority (fun n => .send (.setPriority n))
-        , .identified Ids.resolvedRateText (.labeled "Resolved rate" ((m.send.resolvedRateMilli.map feeRateText).getD "Set at review"))
-        , .identified Ids.feeFloorText (.labeled "Network floor" ((m.status.feeFloorMilli.map feeRateText).getD "unknown"))
-        -- a decimal rate: the number pad has no decimal point
-        , .identified Ids.feeOverrideField (.input .decimal "" "Override (sat/vB, optional)" i.override (send .setOverride) none) ] ]
-   else []) ++
+  -- folded, and Normal until changed
+  [ .section "" (if m.isExpanded "send.fee" then "The rate uses your override, recent confirmed fees, or a preset, never below the peers' relay floor. It is not a live fee-market estimate." else "")
+      [ .identified Ids.sendFeeDisclosure (.disclosure s!"Fee · {feePriorityLabel i.priority}{if i.override.trimAscii.isEmpty then "" else " · override"}"
+          (m.isExpanded "send.fee") (Msg.setExpanded "send.fee")
+          [ .picker "Priority" feePriorityLabels i.priority (fun n => .send (.setPriority n))
+          , .identified Ids.resolvedRateText (.labeled "Resolved rate" ((m.send.resolvedRateMilli.map feeRateText).getD "Set at review"))
+          , .identified Ids.feeFloorText (.labeled "Network floor" ((m.status.feeFloorMilli.map feeRateText).getD "unknown"))
+          -- a decimal rate: the number pad has no decimal point
+          , .identified Ids.feeOverrideField (.input .decimal "" "Override (sat/vB, optional)" i.override (send .setOverride) none) ]) ] ] ++
   [ .section "" ""
       [ .identified Ids.reviewButton (.button (if m.send.reviewing then "Preparing review…" else "Review payment") .primary
           (if m.send.reviewing || !canReview inputs then none else some (.send .review))) ] ]
@@ -152,7 +159,7 @@ def paymentAmounts (p : Preview) : H :=
                    .identified Ids.reviewTotal (.labeled "Total" (satsText (p.amount + p.fee))) ]
 
 /-- A warning on the review; backend-test's `peopleFlow` reaches all four of `sendReview`'s. -/
-def warning (iconName text : String) : H := .section "" "" [.row [Html.tone .warning (.icon iconName), caption text]]
+def warning (iconName text : String) : H := .section "" "" [warningRow text iconName]
 
 def sendReview (m : Model) (p : Preview) : List H :=
   let warnings : List H :=
@@ -186,24 +193,26 @@ def sendReview (m : Model) (p : Preview) : List H :=
   [ .section "" ""
       [ .identified Ids.sendButton (.button action .primary (if m.send.sending then none else some (.send .sendPayment)))
       , .button "Edit payment" .plain (if m.send.sending then none else some (.send .editPayment)) ] ] ++
-  (if m.settings.advancedMode then
-    [ .section "Transaction details" ""
-        ([ .labeled "Rate" (feeRateText p.feeRateMilli), .labeled "Inputs" s!"{p.inputCount}" ] ++
-         (match p.change with | some c => [.labeled "Change back" (satsText c)] | none => [])) ]
-   else [])
+  [ .section "" ""
+      [ .identified Ids.reviewDetailsDisclosure (.disclosure "Transaction details" (m.isExpanded "send.review") (Msg.setExpanded "send.review")
+          ([ .labeled "Rate" (feeRateText p.feeRateMilli), .labeled "Inputs" s!"{p.inputCount}" ] ++
+           (match p.change with | some c => [.labeled "Change back" (satsText c)] | none => []) ++
+           -- what the source holds now, as the wallet last read it (a review made before a block can go stale)
+           [.identified Ids.reviewBalance (.labeled "Balance now" (satsText (match p.account with
+              | some a => ((m.multisigInfo? a.id).map (·.balance)).getD 0
+              | none => m.status.balance)))])) ] ]
 
 def sendStatus (m : Model) (txid : String) : List H :=
   let s := m.send
   [ .section ""  ""
       ((if s.confirmedHeight.isSome then [.row [Html.tone .positive (.icon "checkmark.circle.fill"), .identified Ids.broadcastConfirmed (body "Payment confirmed")]]
         else if ((m.historyItem? txid).bind (·.replacedBy)).isSome then
-          [.row [Html.tone .warning (.icon "exclamationmark.triangle"), .identified Ids.broadcastReplaced (body "Replaced")],
+          [.row [Html.tone .warning (.icon "exclamationmark.triangle.fill"), .identified Ids.broadcastReplaced (body "Replaced")],
            caption "This transaction will not confirm: another one spent its coins."]
         else [.row [Html.tone .warning (.icon "clock"), .identified Ids.broadcastPending (body "Waiting for confirmation")],
-              caption (if m.settings.advancedMode then "You can leave this screen. Follow this payment in Wallet."
-                       else "You can close this screen. The payment stays in Activity until it confirms.")]) ++
+              caption "You can close this screen. The payment stays in Activity until it confirms."]) ++
        (if s.feeFloorNotice then
-         [.row [.icon "exclamationmark.triangle", caption "The network now requires a higher fee. This payment may be delayed. Advanced mode lets you raise its fee in Wallet."]]
+         [warningRow "The network now requires a higher fee. This payment may be delayed. Raise its fee with Bump fee on its screen in Activity."]
         else [])) ] ++
   (match s.preview with
    | some p => [paymentAmounts p] ++ (match p.account with
@@ -237,7 +246,7 @@ def sendTitle (m : Model) : String :=
   if m.send.sentTxid.isSome then "Payment" else if m.send.collecting.isSome then "Collect signatures"
   else if m.send.preview.isSome then "Review payment" else "Send"
 
-/-- Beginner mode's Send sheet. -/
+/-- The Send sheet (Send on the home, a saved person, an account's "Send from this account"). -/
 def sendSheet (m : Model) (inner : List H) : H :=
   formSheet (sendTitle m) (if m.send.sending then none else some .closeSheet)
     [if m.send.sentTxid.isNone then closeBar "Cancel" Ids.closeSendButton

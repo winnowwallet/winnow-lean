@@ -4,7 +4,7 @@ import LeanNative.Native.EffectScope
 
 /-! # AppModel's iCloud backup (the `AppModel` extension in AppModel.swift, upstream d2ca878 :3485–3651)
 
-Automatic backup runs unless turned off, in Simple and Advanced mode, and never decides whether the
+Automatic backup runs unless turned off, in every part of the app, and never decides whether the
 wallet can be used:
 
 * **Creation and import** stage only ciphertext while the creation's authentication is valid
@@ -20,8 +20,9 @@ wallet can be used:
   signer merges, imports the bundle and, inside the import's commit, applies the context and starts this
   device's own backup record bound to the same account.
 
-Test mode never uses iCloud (`allowsCloudBackup`). The context's display name and Advanced switch are the
-Model's settings here: a restore hands them back (`CloudRestored.context`) for the Model to save. -/
+Test mode never uses iCloud (`allowsCloudBackup`). The context's display name is the Model's setting here: a
+restore hands it back (`CloudRestored.context`) for the Model to save. The context's Advanced switch stays in
+the format (shared with the Swift app); this app has one mode, writes it on and applies nothing from it. -/
 
 namespace WinnowApp
 open Winnow Winnow.IO
@@ -84,7 +85,10 @@ def cloudAppState (a : CloudApp) (bundle : ImportBundle) : IO CloudAppState := d
   let settings := ((← a.env.get).settings).getD {}
   let state : CloudAppState := {
     network := bundle.network, descriptor := bundle.descriptor, people := ← RM.toIO st.people.backup,
-    receiveLabels := ← RM.toIO labels.backup, ownDisplayName := settings.ownDisplayName, advancedMode := settings.advancedMode }
+    receiveLabels := ← RM.toIO labels.backup, ownDisplayName := settings.ownDisplayName,
+    -- the format (shared with the Swift app) keeps its Advanced switch: this app's one mode has every
+    -- feature Advanced had, so a backup says it is on
+    advancedMode := true }
   RM.toIO (state.validate bundle)
   return state
 
@@ -218,7 +222,7 @@ def walletChanged (a : CloudApp) : IO Unit := do
   a.preparing.set none
   a.controller.configure none none
 
-/-- `setAutomaticCloudBackup(_:)` (Advanced's switch). -/
+/-- `setAutomaticCloudBackup(_:)` (Settings → Backup → iCloud backup). -/
 def setAutomatic (a : CloudApp) (enabled : Bool) : IO Unit := do
   let some walletID ← a.walletID | return
   a.configureCurrent
@@ -231,7 +235,7 @@ def setAutomatic (a : CloudApp) (enabled : Bool) : IO Unit := do
   catch e => a.controller.reportPreparationFailure e
 
 /-- `applyCloudAppState(_:)`: people, signers and labels restored; the display name and Advanced switch
-handed back to the Model. -/
+handed back to the Model (which saves the name only). -/
 def applyAppState (a : CloudApp) (state : CloudAppState) : IO Unit := do
   let store ← a.host.store
   RM.toIO (store.modify fun st => do

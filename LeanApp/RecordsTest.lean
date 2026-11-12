@@ -17,7 +17,7 @@ Covers people (add, rename, label, attach, remove), every kind of paste, receive
 tamper detection (on the sealed people file), a wrong-network store, a first write that fails, and
 reopening everything from disk; the People store's payment index and pay-to checks; and the screens the
 journeys open but never use (Home's payment screen, People, Settings, Receive, the recovery phrase and the
-backup file with Simple mode's Back up page and Restore from a file, and `Model.fail` for every failure a
+backup file with the Back up page and Restore from a file, and `Model.fail` for every failure a
 screen can get), driven as a person uses them through the app's own `perform`; background tasks launched and
 expired through `perform` (`backgroundTaskCommands`), and test mode's one seed variable. Exits 1 on any
 failure. (The shared-savings and MuSig2 scenarios went with vaults, upstream 1cf93fb; cards and records
@@ -298,7 +298,7 @@ def reopenFromDisk (a : Phone) (before : Records) : IO Unit := do
   check "people.json: seal over the sorted-key envelope"
     (file == SealedStoreFile.sealed (PeopleStore.encode st.people.records st.people.senderByTxid) "people" network key)
 
-/-- Upstream d2ca878's `BackgroundSyncTests`: Simple mode waits out dropped peers but shows other errors at
+/-- Upstream d2ca878's `BackgroundSyncTests`: the home waits out dropped peers but shows other errors at
 once, and only link failures count as transient. -/
 def syncErrorBookkeeping : IO Unit := do
   let dropped := (Winnow.IO.NetError.peer (.disconnected "closed")).description
@@ -339,7 +339,7 @@ def relaunch (s : Settings) : Settings :=
 open Winnow.IO in
 def peerGatewayModel : IO Unit := do
   -- testAutomaticDefaultAndManualOverridePersistAcrossModes
-  let m : Model := { stage := .ready, settings := { advancedMode := true } }
+  let m : Model := { stage := .ready }
   check "gateways: Automatic by default" (m.settings.peerGatewaySettings.mode == "automatic" && (relaunch {}).peerGatewaySettings == {})
   let m := m.loadGatewayDraft
   let config : PeerGatewayConfiguration := { networks := [.i2p], i2pProxy := some { host := "gateway", port := 4447 } }
@@ -351,12 +351,13 @@ def peerGatewayModel : IO Unit := do
   check "gateways: Apply saves the manual gateways" (m.settings.peerGatewaySettings == { mode := "manual", manual := config })
     (reprStr m.settings.peerGatewaySettings)
   check "gateways: Apply saves and reconnects" (cs.length == 2 && cs.any (· matches .reconnect ..) && cs.any (· matches .saveSettings _))
-  let m := (step (.setAdvanced false) m).1
+  -- leaving the peers screen and coming back keeps the saved override
+  let m := (stepHome .pop { m with routes := [.settings, .network .peers] }).1
   let relaunched := relaunch m.settings
-  check "gateways: the manual override survives Simple mode and a relaunch" (relaunched.peerGatewaySettings == { mode := "manual", manual := config })
+  check "gateways: the manual override survives leaving the screen and a relaunch" (relaunched.peerGatewaySettings == { mode := "manual", manual := config })
   let http ← RoutedHTTPClient.ofGateways (fun _ => throw (.other "offline")) relaunched.peerGatewaySettings.initialActive
   check "gateways: I2P alone makes no HTTP request" (!http.enabled)
-  let m := { m with settings := { m.settings with advancedMode := true } }.loadGatewayDraft
+  let m := (stepHome (.openNetwork .peers) m).1
   let m := (stepSettings (.setGatewayNetwork .i2p false) m).1
   let (bad, badCmds) := stepSettings .applyGateways m
   check "gateways: an invalid edit does not overwrite the settings"
@@ -382,9 +383,10 @@ def peerGatewayModel : IO Unit := do
   check "banner: the private line" ((PeerRoutingState.overlay true true).message == "Private: peers reached through Tor and I2P")
   check "banner: a fallback says the IP is seen" (contains (PeerRoutingState.direct true).message "can see your IP address")
   check "banner: mixed says the IP is seen" (contains PeerRoutingState.mixed.message "can see your IP address")
-  let banner := (LeanNative.Html.toWire (.list (beginnerSections { m with settings := { network := .mainnet } }) : H)).toJson.compress
-  check "banner: Simple mode shows it on mainnet" (contains banner "peerRoutingBanner" && contains banner "Direct: peers can see your IP address. No Tor")
-  let signet := (LeanNative.Html.toWire (.list (beginnerSections { m with settings := { network := .signet } }) : H)).toJson.compress
+  let banner := (LeanNative.Html.toWire (.list (homeSections { m with settings := { network := .mainnet } }) : H)).toJson.compress
+  check "banner: the home shows it on mainnet, in a few words" (contains banner "peerRoutingBanner" && contains banner "Peers see your IP" &&
+    !contains banner "No Tor or I2P gateway found")
+  let signet := (LeanNative.Html.toWire (.list (homeSections { m with settings := { network := .signet } }) : H)).toJson.compress
   check "banner: not on signet" (!contains signet "peerRoutingBanner")
   -- testCandidateCountFollowsRoutedNetworks
   let entry : CensusEntry := { host := "8.8.8.8", port := 8333, userAgent := "/Satoshi:30/", startHeight := 900_000 }
@@ -465,22 +467,64 @@ def peerGatewayModel : IO Unit := do
   check "background: Direct only as chosen" (backgroundRoutingAllowed "direct" {} true)
   check "background: Manual as chosen" (backgroundRoutingAllowed "manual" overlay true)
 
-/-- Sync bookkeeping as the screens show it (upstream 66c6a48): Simple mode waits out dropped peers, Advanced
-shows every error; Advanced's Sync section says when the chain was last checked. -/
+/-- The home keeps a warning to one short line and explains it in an alert, which leads to the Settings page
+with the details (and, for the network, Retry). -/
+def homeWarnings : IO Unit := do
+  IO.println "home warnings"
+  let wire (hs : List H) := (LeanNative.Html.toWire (.list hs : H)).toJson.compress
+  let base : Model := { stage := .ready, settings := { network := .mainnet } }
+  let err := "No peer answered within 30 s (3 tried)"
+  let off : Model := { base with phase := .peerDiscoveryFailed, status := { base.status with lastSyncError := some err } }
+  let home := wire (homeSections off)
+  check "warnings: offline is one short line" (contains home "homeNetworkWarning" && contains home "Offline")
+  check "warnings: no Retry on the home" (!contains home "retryPeersButton")
+  check "warnings: no error text on the home" (!contains home err && !contains home "check your connection")
+  let (asked, cmds) := stepHome (.explainWarning .network) off
+  check "warnings: a tap explains" (asked.confirm == some (.homeWarning .network) && cmds.isEmpty)
+  let alert := wire (confirms asked)
+  check "warnings: the alert says what happened and the error" (contains alert "Couldn't reach the Bitcoin network" && contains alert err)
+  check "warnings: the alert leads to Settings" (contains alert "warningSettingsButton" && contains alert "Network settings")
+  let (sync, _) := stepHome (.warningSettings .network) asked
+  check "warnings: Network settings opens Settings, then Sync" (sync.routes == [.settings, .network .sync] && sync.confirm.isNone)
+  let page := wire (syncSections sync)
+  check "warnings: Sync has Retry and the error" (contains page "retryPeersButton" && contains page "syncLastError" && contains page err)
+  check "warnings: Sync's last error is a row that stays" (contains (wire (syncSections base)) "syncLastError")
+  let mismatch := "Peer sent a filter header that does not match"
+  let failing : Model := { base with phase := .synced, status := { base.status with lastSyncError := some mismatch } }
+  let home := wire (homeSections failing)
+  check "warnings: a failing sync is a short line too" (contains home "homeNetworkWarning" && contains home "Sync problem" && !contains home mismatch)
+  check "warnings: its alert shows the error" (contains (wire (confirms (stepHome (.explainWarning .network) failing).1)) mismatch)
+  let dropped := "The connection to the peer was lost"
+  let quietStatus : Status := { base.status with lastSyncError := some dropped, transientSyncError := some dropped, transientSyncFailures := 1 }
+  let quiet : Model := { base with phase := .synced, status := quietStatus }
+  check "warnings: a dropped peer stays quiet" (!contains (wire (homeSections quiet)) "homeNetworkWarning")
+  let home := wire (homeSections base)
+  check "warnings: routing is a short line" (contains home "peerRoutingBanner" && contains home "Peers see your IP")
+  let (routing, _) := stepHome (.explainWarning .routing) base
+  let alert := wire (confirms routing)
+  check "warnings: routing's alert has the whole message" (contains alert "Peers can see your IP address" &&
+    contains alert "No Tor or I2P gateway found" && contains alert "Peers and routing")
+  let (peers, _) := stepHome (.warningSettings .routing) routing
+  check "warnings: Peers and routing opens Settings, then Peers" (peers.routes == [.settings, .network .peers] && peers.confirm.isNone)
+
+/-- Sync bookkeeping as the screens show it (upstream 66c6a48): the home waits out dropped peers, Settings →
+Network → Sync shows every error and says when the chain was last checked. -/
 def syncBookkeepingScreens : IO Unit := do
   let dropped := (Winnow.IO.NetError.peer (.disconnected "closed")).description
   let status (n : Nat) : Status := { lastSyncError := some dropped, transientSyncError := some dropped, transientSyncFailures := n }
-  let simple (n : Nat) := (LeanNative.Html.toWire (.list (beginnerSections { stage := .ready, status := status n }) : H)).toJson.compress
-  let advanced (n : Nat) := (LeanNative.Html.toWire (.list (walletSections { stage := .ready, settings := { advancedMode := true }, status := status n }) : H)).toJson.compress
-  check "Simple mode: a dropped peer stays quiet" (!contains (simple 1) "closed")
-  check "Simple mode: the third says so in plain words" (contains (simple 3) "Winnow keeps losing its connection to Bitcoin peers.")
-  check "Advanced mode: every error shows" (contains (advanced 1) dropped)
-  check "Advanced: never fully checked" (contains (advanced 0) "Chain not fully checked yet")
+  let home (n : Nat) := (LeanNative.Html.toWire (.list (homeSections { stage := .ready, status := status n }) : H)).toJson.compress
+  let sync (n : Nat) := (LeanNative.Html.toWire (.list (syncSections { stage := .ready, status := status n }) : H)).toJson.compress
+  check "home: a dropped peer stays quiet" (!contains (home 1) "closed")
+  check "home: the third is a short warning" (contains (home 3) "homeNetworkWarning" && contains (home 3) "Sync problem")
+  let explained := (LeanNative.Html.toWire (.list (confirms (stepHome (.explainWarning .network) { stage := .ready, status := status 3 }).1) : H)).toJson.compress
+  check "home: tapped, it says so in plain words" (contains explained "Winnow keeps losing its connection to Bitcoin peers.")
+  check "Sync screen: every error shows" (contains (sync 1) dropped)
+  check "Sync screen: never fully checked" (contains (sync 0) "Chain not fully checked yet")
   let st : Status := { lastCheckedAgo := some (relativeAgo 300) }
-  let mm : Model := { stage := .ready, settings := { advancedMode := true }, status := st, backgroundRefreshAvailable := false }
-  let checked := (LeanNative.Html.toWire (.list (walletSections mm) : H)).toJson.compress
-  check "Advanced: last checked" (contains checked "Chain last checked 5 min ago")
-  check "Advanced: Background App Refresh off" (contains checked "Background App Refresh is off, so Winnow checks the chain only while open.")
+  let mm : Model := { stage := .ready, status := st, backgroundRefreshAvailable := false }
+  let checked := (LeanNative.Html.toWire (.list (syncSections mm) : H)).toJson.compress
+  check "Sync screen: last checked" (contains checked "Chain last checked 5 min ago")
+  check "Sync screen: Background App Refresh off" (contains checked "Background App Refresh is off, so Winnow checks the chain only while open.")
   check "relative: under a minute" (relativeAgo 59 == "under a minute")
   check "relative: hours and minutes" (relativeAgo (2 * 3600 + 3 * 60) == "2 hr, 3 min")
   check "relative: days" (relativeAgo (3 * 86400 + 4 * 3600) == "3 days, 4 hr" && relativeAgo 86400 == "1 day")
@@ -661,9 +705,9 @@ def screenPhone (root : System.FilePath) (name : String) (entropy : UInt8) : IO 
   | _ => throw (IO.userError s!"{name}: the wallet did not open")
 
 /-- The model of a ready phone on regtest, in the foreground. -/
-def readyModel (walletID : String) (advanced := false) : Model :=
+def readyModel (walletID : String) : Model :=
   { stage := .ready, active := true, walletID := some walletID,
-    settings := { network := .regtest, advancedMode := advanced } }
+    settings := { network := .regtest } }
 
 /-! ### Model.fail (#48) -/
 
@@ -789,16 +833,17 @@ def failuresReachTheirScreens : IO Unit := do
   check "so does Send opened again" (!(opened.closeSheet .send).1.isExpanded "send.details")
   let review : WinnowApp.FeeBumpPreview := { feeRateMilli := 5_000, fee := 700, change := some 9_300 }
   let bump : FeeBump := { txid := "tt", bumping := true, targetText := "5", reviewed := some ("5", review) }
-  let bumping := { readyModel "w" (advanced := true) with feeBump := bump }.present .feeBump
+  let bumping := { readyModel "w" with feeBump := bump }.present .feeBump
   check "fail feeBump: the sheet says Signing while it runs" (contains (rendered bumping) "Signing & broadcasting")
   let (m, _) := onHost (.failed 0 "feeBump" "The replacement was refused") bumping
   check "fail feeBump: the sheet shows it and offers Sign & replace again"
     (contains (rendered m) "The replacement was refused" && contains (rendered m) "Sign & replace" && !m.spendingInFlight)
-  let pairing := { readyModel "w" (advanced := true) with routes := [.ledgerPair], ledgerPair := { name := "Nano X", pairing := true } }
+  let pairing := { readyModel "w" with routes := [.ledgerPair], ledgerPair := { name := "Nano X", pairing := true } }
   let (m, _) := onHost (.failed 0 "ledgerPair" "No Ledger answered") pairing
   check "fail ledgerPair: Pair a Ledger shows it, Pair again" (contains (rendered m) "No Ledger answered" && contains (rendered m) "\"Pair\"")
-  let unknown := (onHost (.failed 0 "somethingNew" "the sync line") (readyModel "w" (advanced := true))).1
-  check "fail: an unknown context shows on the Sync line" (contains (rendered unknown) "the sync line")
+  let unknown := (onHost (.failed 0 "somethingNew" "the sync line") (readyModel "w")).1
+  check "fail: an unknown context is a sync problem on the home" (contains (rendered unknown) "Sync problem")
+  check "fail: and shows on the Sync screen" (contains (LeanNative.Html.toWire (.list (syncSections unknown) : H)).toJson.compress "the sync line")
 
 /-! ### Settings (#44) -/
 
@@ -841,10 +886,11 @@ def settingsScreen (root : System.FilePath) : IO Unit := do
   let saved (f : Settings → Bool) : IO Bool := waitUntil 5_000 (every := 5) do
     try return f (← savedFile) catch _ => return false
   let tap (msg : SettingsMsg) (m : Model) := sh.tap (.settings msg) m
-  -- the Settings tab: the census line and the connected peers load as it appears
-  let m := readyModel "w" (advanced := true)
-  let (m, _) ← sh.tap (.selectTab 2) m
-  check "settings: the tab asks for the peers and the census line" ((← called "connectedPeers") && (← called "catalogStatus"))
+  -- Settings → Network → Peers and routing: the census line and the connected peers load as it appears
+  let m := readyModel "w"
+  let (m, _) ← sh.tap (.home .openSettings) m
+  let (m, _) ← sh.tap (.home (.openNetwork .peers)) m
+  check "settings: the peers page asks for the peers and the census line" ((← called "connectedPeers") && (← called "catalogStatus"))
   check "settings: both shown" (contains (rendered m) "Observed 2026-09-28: 412 candidates." && contains (rendered m) "203.0.113.7:8333" &&
     contains (rendered m) "floor 1000 sat/kvB")
   -- a manual peer: added, saved and shown; the same one again changes nothing; nonsense is refused
@@ -875,20 +921,21 @@ def settingsScreen (root : System.FilePath) : IO Unit := do
   let (m, _) ← sh.run m' cs
   check "Verify from genesis: the backend reconnects from block 0" (← called "reconnect [peer.example:8333] genesis=true")
   check "Verify from genesis: saved" (← saved (·.verifyFromGenesis))
-  check "Verify from genesis: the toggle is on, with its note" (contains (rendered m) "Turning this off later keeps the chain you already verified.")
+  let onPage (page : NetworkPage) (m : Model) := rendered { m with routes := [.settings, .network page] }
+  check "Verify from genesis: the toggle is on, with its note" (contains (onPage .verification m) "Turning this off later keeps the chain you already verified.")
   check "Verify from genesis: the same value again does nothing" (stepSettings (.setVerifyFromGenesis true) m).2.isEmpty
   -- the explorer: a preset, then a custom Esplora URL
   let (m, _) ← tap (.setExplorer 1) m
   check "explorer: mempool.space saved" (m.settings.scoped.explorer == .mempool)
-  check "explorer: no URL field for a preset" (!contains (rendered m) "Esplora-compatible website URL")
+  check "explorer: no URL field for a preset" (!contains (onPage .explorer m) "Esplora-compatible website URL")
   let (m, _) ← tap (.setExplorer 2) m
-  check "explorer: Custom shows the URL field" (contains (rendered m) "Esplora-compatible website URL")
+  check "explorer: Custom shows the URL field" (contains (onPage .explorer m) "Esplora-compatible website URL")
   let (m, _) ← tap (.setEsploraURL "  https://esplora.example/api  ") m
   check "explorer: the custom URL is saved trimmed" (m.settings.scoped.esploraURL == "https://esplora.example/api" && m.settings.scoped.explorer == .custom)
   check "explorer: saved to settings.json" (← saved fun s => s.regtest.explorer == .custom && s.regtest.esploraURL == "https://esplora.example/api")
   check "explorer: the backend has it"
     (← waitUntil 2_000 (every := 5) (called "updateSettings [peer.example:8333] WinnowApp.Explorer.custom https://esplora.example/api genesis=true"))
-  check "explorer: Selected shows it" (contains (rendered m) "Selected: https://esplora.example/api")
+  check "explorer: Selected shows it" (contains (onPage .explorer m) "Selected: https://esplora.example/api")
   check "explorer: a relaunch keeps it" ((relaunch m.settings).esploraBaseURL == "https://esplora.example/api")
   check "explorer: an index past the list does nothing" (stepSettings (.setExplorer 7) m).2.isEmpty
   -- what the explorer trades away, and the design papers
@@ -1117,8 +1164,8 @@ def homeScreens (sh : Shell) (backend : Backend) (walletID robertID bobAddress o
   check "payment: the row" (contains sections[0]! "Sent to Robert" && contains sections[0]! "Pending")
   check "payment: Robert, the amount, Rename and Remove" (contains sections[1]! "Robert" && contains sections[1]! (satsText 50_000) &&
     contains sections[1]! "Rename recipient" && contains sections[1]! "Remove from saved recipients")
-  check "payment: Simple mode folds the address and the transaction ID under their titles"
-    (contains sections[1]! "\"Address\"" && contains sections[2]! "\"Transaction ID\"" && !contains (rendered m) "View transaction")
+  check "payment: the address and the transaction ID fold under their titles"
+    (contains sections[1]! "\"Address\"" && contains sections[2]! "\"Transaction ID\"" && !m.isExpanded "pay.addr.0" && !m.isExpanded "pay.txid")
   let (m, _) ← sh.tap (.setExpanded s!"pay.addr.0" true) m
   let (m, _) ← sh.tap (.setExpanded "pay.txid" true) m
   check "payment: unfolded" (m.isExpanded "pay.addr.0" && m.isExpanded "pay.txid" && contains (rendered m) bobAddress && contains (rendered m) t1)
@@ -1182,13 +1229,14 @@ def homeScreens (sh : Shell) (backend : Backend) (walletID robertID bobAddress o
     (contains (rendered failed) "The peer did not send it." && contains (rendered failed) "Load payment details")
   check "unstored: not while syncing" (stepHome .loadPayment { failed with status := { failed.status with syncing := true } }).2.isEmpty
   let (m, _) := stepHome .pop m
-  -- Advanced: the full transaction, and Bump fee for a payment that can be bumped
-  let adv := { m with settings := { m.settings with advancedMode := true } }
-  let (adv, _) := stepHome (.openPayment t1) adv
+  -- one mode: Bump fee for a payment that can be bumped, the transaction behind its title
+  let (adv, _) := stepHome (.openPayment t1) m
   let s := rendered adv
-  check "Advanced: the txid in full, View transaction, Bump fee" (contains s t1 && contains s "View transaction" && contains s "Bump fee")
+  check "payment: Bump fee, the transaction folded" (contains s "Bump fee" && !adv.isExpanded "pay.txid")
+  let (adv, _) := step (.setExpanded "pay.txid" true) adv
+  check "payment: unfolded, the txid in full and View transaction" (contains (rendered adv) t1 && contains (rendered adv) "View transaction")
   let (adv2, _) := stepHome (.openPayment t2) (stepHome .pop adv).1
-  check "Advanced: no Bump fee for a payment received" (!contains (rendered adv2) "Bump fee")
+  check "payment: no Bump fee for a payment received" (!contains (rendered adv2) "Bump fee")
   -- a payment gone from the history, and the Back up page
   let (gone, _) := stepHome (.openPayment (hex (ByteArray.mk (Array.replicate 32 0x44)))) m
   check "gone: says so" (contains (rendered gone) "This payment is no longer in the wallet")
@@ -1312,11 +1360,11 @@ def clipboardAsked (sh : Shell) (cs : List Cmd) : IO (Option Lean.Json) := do
   for c in cs do if c matches .copy .. then WinnowApp.perform c sh.fx
   return ((← sh.caps.get).toList.filter (·.1 == "clipboard.set")).getLast?.map (·.2)
 
-/-- #64: the screens between `revealMnemonic` and a person's eyes, as a person uses them. Advanced mode's
-Settings: Show recovery phrase, the words numbered two to a row, hidden while the screen is recorded, copied
+/-- #64: the screens between `revealMnemonic` and a person's eyes, as a person uses them. Settings' Backup
+section: Show recovery phrase, the words numbered two to a row, hidden while the screen is recorded, copied
 local-only for two minutes; going to the background closes it and the other two sensitive sheets (the backup
 file, Restore from a file) and forgets what they held, and a phrase that arrives after that is dropped.
-Simple mode's Back up page: Save a backup file with the phrase, and on a new phone Restore from a file pastes
+The Back up page: Save a backup file with the phrase, and on a new phone Restore from a file pastes
 it through to the verification report, and that phone shows the same words. -/
 def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (walletID : String) (entropy : UInt8) : IO Unit := do
   tmpDir.set (root / "tmp").toString
@@ -1326,8 +1374,8 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
     | .error _ => []
   let labels := expected.zipIdx.map fun (w, i) => s!"{i + 1}. {w}"
   let showsWords (s : String) : Bool := expected.any fun w => contains s s!"\"{w}\"" || contains s s!". {w}\""
-  -- Advanced mode's Settings tab: Show recovery phrase
-  let (m, _) ← sh.tap (.selectTab 2) (readyModel walletID (advanced := true))
+  -- Settings' Backup section: Show recovery phrase
+  let (m, _) ← sh.tap (.home .openSettings) (readyModel walletID)
   let settings := rendered m
   check "reveal: Settings offers Show recovery phrase" (contains settings "Show recovery phrase" && !showsWords settings)
   let (m, _) ← sh.tap (.backup .reveal) m
@@ -1412,15 +1460,15 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
   check "background: Restore from a file closes and forgets the text"
     (impGone.sheets.isEmpty && impGone.onboarding.importText.isEmpty && !contains (rendered impGone) "Import wallet")
 
-  -- Simple mode: Home's Save a backup file, the Back up page
+  -- Home's Save a backup file, the Back up page
   let simple := readyModel walletID
   check "Back up: Home offers it while nothing is backed up" (contains (rendered simple) "Save a backup file")
   let (page, _) ← sh.tap (.home .openBackup) simple
   let shown := rendered page
   check "Back up: the page" (page.routes == [.backup] && contains shown "\"Back up\"" &&
-    contains shown "A backup file is a copy of this wallet you keep yourself." && contains shown "Save a backup file")
-  check "Back up: no recovery words and no iCloud control in Simple mode"
-    (!contains shown "Show recovery phrase" && !contains shown "iCloud backup keeps" && !showsWords shown)
+    contains shown "A backup file is a copy you keep yourself." && contains shown "Save a backup file")
+  check "Back up: Show recovery phrase and the iCloud control, the words themselves hidden"
+    (contains shown "Show recovery phrase" && contains shown "iCloud" && !showsWords shown)
   let (page, _) ← sh.tap (.backup .openExport) page
   check "Back up: Save a backup file opens the file sheet over the page"
     (page.topSheet == some .exportBundle && contains (rendered page) "Create backup file" && contains (rendered page) "\"Back up\"")
@@ -1465,9 +1513,9 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
     contains sheet "Verification report" && contains sheet "Continue" && !contains sheet "Import and verify")
   check "restore: the report says verification waits for peers" (report == Real.verificationWaitingText && contains sheet report) report
   let (r, _) ← sh.tap .finishOnboarding r
-  check "restore: Continue opens the wallet" (r.stage == .ready && r.sheets.isEmpty)
-  let (r, _) ← sh.tap (.setAdvanced true) r
-  let (r, _) ← sh.tap (.selectTab 2) r
+  check "restore: Continue opens the wallet, with the Bluetooth card" (r.stage == .ready && r.sheets == [.bluetoothIntro])
+  let (r, _) ← sh.tap (.ledgerCard .skipBluetooth) r
+  let (r, _) ← sh.tap (.home .openSettings) r
   let (r, _) ← sh.tap (.backup .reveal) r
   check "restore: the new phone shows the same twelve words" (r.topSheet == some .revealPhrase && r.reveal.words == expected)
   backendRef.set backend
@@ -1857,6 +1905,7 @@ def main : IO UInt32 := runMain "records-test" do
   syncErrorBookkeeping
   foundationURLRules
   peerGatewayModel
+  homeWarnings
   syncBookkeepingScreens
   backgroundRuns
   backgroundTaskCommands

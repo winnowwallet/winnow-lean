@@ -11,7 +11,7 @@ namespace WinnowApp
 
 /-! ## Sync -/
 
-/-- `AppModel.syncStatusText` (AppModel.swift:220): one line for the advanced Sync section; none when there is nothing to show. -/
+/-- `AppModel.syncStatusText` (AppModel.swift:220): one line for Settings → Network → Sync; none when there is nothing to show. -/
 def syncStatusText : SyncPhase → Option String
   | .idle | .synced => none
   | .connecting c t => some s!"Connecting to peers ({c} of {t})…"
@@ -29,7 +29,7 @@ def filterScanText (p : SyncPhase) (fallbackScanned fallbackTip : Nat) : Option 
   | some (s, t) => if t == 0 then none else some s!"block {groupDigits (min s t)} of {groupDigits t}"
   | none => none
 
-/-- `AppModel.simpleSyncError` (upstream d2ca878, AppModel.swift:234): what Simple mode shows under the
+/-- `AppModel.simpleSyncError` (upstream d2ca878, AppModel.swift:234): what the home shows under the
 balance. A peer dropping mid-scan is routine and the next pass recovers on another peer, so one or two in
 a row stay quiet and a third is said in plain words; any other error shows at once. -/
 def simpleSyncError (lastError transientError : Option String) (failures : Nat) : Option String :=
@@ -94,6 +94,23 @@ def message : PeerRoutingState → String
   | .direct true => "Direct: peers can see your IP address. No Tor or I2P gateway found; connect Tailscale, then return to Winnow."
   | .direct false => "Direct: peers can see your IP address"
   | .offline => "Offline: peer routing settings are invalid"
+
+/-- A state the person should act on: a peer can see the phone's IP address, or no peer can be reached. -/
+def warns : PeerRoutingState → Bool
+  | .mixed | .direct _ | .offline => true
+  | .checking | .overlay .. => false
+
+/-- The home's short line for a state that warns; tapped, it shows `message` in full. -/
+def shortLabel : PeerRoutingState → String
+  | .mixed => "Some peers see your IP"
+  | .direct _ => "Peers see your IP"
+  | .offline => "Routing settings invalid"
+  | .checking | .overlay .. => ""
+
+/-- The title of the alert the short line opens. -/
+def alertTitle : PeerRoutingState → String
+  | .offline => "Peer routing is offline"
+  | _ => "Peers can see your IP address"
 
 def symbol : PeerRoutingState → String
   | .checking => "network"
@@ -451,13 +468,6 @@ def Settings.explorerHost (s : Settings) : String := (urlHost s.esploraBaseURL).
 
 /-! ## Settings rules -/
 
-/-- `AppModel.showsNetworkPicker` / `showsManualPeers` / `showsChainVerification` / `showsExplorerSettings`
-(AppModel.swift:1901, :1911–1913). -/
-def Settings.showsNetworkPicker (s : Settings) : Bool := s.advancedMode || s.network != .mainnet
-def Settings.showsManualPeers (s : Settings) : Bool := s.advancedMode || !s.manualPeers.isEmpty
-def Settings.showsChainVerification (s : Settings) : Bool := s.advancedMode || s.verifyFromGenesis
-def Settings.showsExplorerSettings (s : Settings) : Bool := s.advancedMode || !s.scoped.esploraURL.isEmpty
-
 /-- `CharacterSet.whitespaces` (Zs and tab; Foundation counts U+200B too): the measured
 `whitespacesAndNewlines` without the newlines. -/
 def isWhitespace (c : Char) : Bool :=
@@ -603,5 +613,15 @@ def bestLeafSignatures (paths : List (Nat × Nat)) : Option (Nat × Nat) :=
     | some b =>
       let need (x : Nat × Nat) := x.2 - x.1
       if need p < need b || (need p == need b && p.1 > b.1) then some p else some b) none
+
+/-! ## Protection as the balance grows -/
+
+/-- The balance, in sats, at which the home suggests a hardware wallet: 0.1 BTC, about $10,000 at $100,000 a
+bitcoin. Sats on purpose (no price fetch): revisit as the price moves. -/
+def hardwareWalletThresholdSats : Int := 10_000_000
+
+/-- The balance, in sats, at which the home suggests multisig with other people's keys: 0.5 BTC, about a
+$50,000 car at $100,000 a bitcoin. Sats on purpose, like `hardwareWalletThresholdSats`. -/
+def multipartyThresholdSats : Int := 50_000_000
 
 end WinnowApp

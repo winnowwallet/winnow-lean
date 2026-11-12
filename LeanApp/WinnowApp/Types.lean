@@ -14,6 +14,26 @@ inductive Network where
   | regtest
   deriving Repr, BEq, Inhabited, ToJson, FromJson
 
+/-- How the app is drawn: as the system is, or always light or always dark (the shell's `appearance`). -/
+inductive Appearance where
+  | system
+  | light
+  | dark
+  deriving Repr, BEq, Inhabited, ToJson, FromJson
+
+def Appearance.all : List Appearance := [.system, .light, .dark]
+
+def Appearance.label : Appearance → String
+  | .system => "System"
+  | .light => "Light"
+  | .dark => "Dark"
+
+/-- The `appearance` capability's `style`. -/
+def Appearance.style : Appearance → String
+  | .system => "system"
+  | .light => "light"
+  | .dark => "dark"
+
 def Network.name : Network → String
   | .mainnet => "mainnet"
   | .signet => "signet"
@@ -43,7 +63,7 @@ instance : ToJson Winnow.IO.PeerGatewaySettings := ⟨Winnow.IO.PeerGatewaySetti
 /-- AppModel's settings (UserDefaults in the original; `settings.json` here). -/
 structure Settings where
   network : Network := .mainnet
-  advancedMode : Bool := false
+  appearance : Appearance := .system
   verifyFromGenesis : Bool := false
   ownDisplayName : String := ""
   /-- The removed Tor option was on (shown once, then cleared). -/
@@ -53,6 +73,14 @@ structure Settings where
   regtest : NetworkSettings := {}
   /-- `peerGatewaySettings` (global, not per network): Automatic, Direct only, or the manual gateways. -/
   peerGatewaySettings : Winnow.IO.PeerGatewaySettings := {}
+  /-- The home's "more than a phone should hold alone" card was dismissed (`Pure.lean`'s thresholds). -/
+  hardwareCardDismissed : Bool := false
+  /-- The home's "Large amounts invite wrench attacks" card was dismissed. -/
+  multipartyCardDismissed : Bool := false
+  /-- The nearby Ledgers answered Not now, by the identifier their advertisement carries. -/
+  ledgersNotNow : List String := []
+  /-- Onboarding's Bluetooth card was shown (once, whatever was answered). -/
+  bluetoothIntroShown : Bool := false
   deriving Repr, Inhabited, ToJson
 
 /-- Reads every field with its default when absent, so a settings file from an older build still loads. -/
@@ -66,13 +94,17 @@ instance : FromJson NetworkSettings where
 instance : FromJson Settings where
   fromJson? j := pure
     { network := (j.getObjValAs? Network "network").toOption.getD .mainnet
-      advancedMode := (j.getObjValAs? Bool "advancedMode").toOption.getD false
+      appearance := (j.getObjValAs? Appearance "appearance").toOption.getD .system
       verifyFromGenesis := (j.getObjValAs? Bool "verifyFromGenesis").toOption.getD false
       ownDisplayName := (j.getObjValAs? String "ownDisplayName").toOption.getD ""
       torRemovedNotice := (j.getObjValAs? Bool "torRemovedNotice").toOption.getD false
       mainnet := (j.getObjValAs? NetworkSettings "mainnet").toOption.getD {}
       signet := (j.getObjValAs? NetworkSettings "signet").toOption.getD {}
       regtest := (j.getObjValAs? NetworkSettings "regtest").toOption.getD {}
+      hardwareCardDismissed := (j.getObjValAs? Bool "hardwareCardDismissed").toOption.getD false
+      multipartyCardDismissed := (j.getObjValAs? Bool "multipartyCardDismissed").toOption.getD false
+      ledgersNotNow := (j.getObjValAs? (List String) "ledgersNotNow").toOption.getD []
+      bluetoothIntroShown := (j.getObjValAs? Bool "bluetoothIntroShown").toOption.getD false
       -- absent: Automatic; present but unreadable: offline (`PeerGatewaySettings.unreadable`)
       peerGatewaySettings := match j.getObjVal? "peerGatewaySettings" with
         | .ok v => (Winnow.IO.PeerGatewaySettings.ofJson? v).getD Winnow.IO.PeerGatewaySettings.unreadable
@@ -311,7 +343,7 @@ end WinnowApp
 
 namespace WinnowApp
 
-/-! ## Multisig accounts (Advanced mode) -/
+/-! ## Multisig accounts (Settings → Security) -/
 
 /-- One output of a reviewed spend. -/
 structure MultisigOutputLine where
