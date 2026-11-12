@@ -14,6 +14,26 @@ inductive Network where
   | regtest
   deriving Repr, BEq, Inhabited, ToJson, FromJson
 
+/-- How the app is drawn: as the system is, or always light or always dark (the shell's `appearance`). -/
+inductive Appearance where
+  | system
+  | light
+  | dark
+  deriving Repr, BEq, Inhabited, ToJson, FromJson
+
+def Appearance.all : List Appearance := [.system, .light, .dark]
+
+def Appearance.label : Appearance → String
+  | .system => "System"
+  | .light => "Light"
+  | .dark => "Dark"
+
+/-- The `appearance` capability's `style`. -/
+def Appearance.style : Appearance → String
+  | .system => "system"
+  | .light => "light"
+  | .dark => "dark"
+
 def Network.name : Network → String
   | .mainnet => "mainnet"
   | .signet => "signet"
@@ -44,6 +64,7 @@ instance : ToJson Winnow.IO.PeerGatewaySettings := ⟨Winnow.IO.PeerGatewaySetti
 structure Settings where
   network : Network := .mainnet
   advancedMode : Bool := false
+  appearance : Appearance := .system
   verifyFromGenesis : Bool := false
   ownDisplayName : String := ""
   /-- The removed Tor option was on (shown once, then cleared). -/
@@ -67,6 +88,7 @@ instance : FromJson Settings where
   fromJson? j := pure
     { network := (j.getObjValAs? Network "network").toOption.getD .mainnet
       advancedMode := (j.getObjValAs? Bool "advancedMode").toOption.getD false
+      appearance := (j.getObjValAs? Appearance "appearance").toOption.getD .system
       verifyFromGenesis := (j.getObjValAs? Bool "verifyFromGenesis").toOption.getD false
       ownDisplayName := (j.getObjValAs? String "ownDisplayName").toOption.getD ""
       torRemovedNotice := (j.getObjValAs? Bool "torRemovedNotice").toOption.getD false

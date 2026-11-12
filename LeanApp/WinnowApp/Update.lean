@@ -45,7 +45,7 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
   | .launched forced tab => ({ m with forcedNetwork := forced, tab := tab }, [])
   | .settingsLoaded s =>
     let m := { m with settings := s }.loadGatewayDraft
-    (m, [.openWallet m.generation s.network true])
+    (m, [.setAppearance s.appearance, .openWallet m.generation s.network true])
   | .booted g r =>
     if !m.current g then (m, []) else
     -- networking runs only while the scene is active (a cold background launch has no scene); a background

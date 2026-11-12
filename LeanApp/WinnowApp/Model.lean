@@ -48,6 +48,8 @@ inductive Route where
   | payment (txid : String)
   /-- Beginner mode's Back up page. -/
   | backup
+  /-- Simple mode's Settings (Advanced mode has a Settings tab instead). -/
+  | settings
   /-- MultisigRoute (Advanced mode's Wallet tab): join with a descriptor, build, an account, its PSBT screen. -/
   | multisigAdd
   | multisigBuild
@@ -621,6 +623,7 @@ inductive ReceiveMsg where
 inductive HomeMsg where
   | openPayment (txid : String)
   | openBackup
+  | openSettings
   | pop
   | loadPayment
   | editRecipient (address : String) (personID : Option String)
@@ -637,6 +640,8 @@ inductive HomeMsg where
   deriving Inhabited
 
 inductive SettingsMsg where
+  /-- An index of `Appearance.all`. -/
+  | setAppearance (i : Nat)
   | setManualPeer (s : String)
   | addManualPeer
   | removeManualPeer (i : Nat)
@@ -826,6 +831,8 @@ inductive Cmd where
   | copy (text : String) (policy : ClipPolicy)
   | timer (ms : Nat) (h : Host)
   | openURL (url : String)
+  /-- The shell draws the app light, dark or as the system is (`appearance`). -/
+  | setAppearance (a : Appearance)
   | deleteWallet (gen : Nat)
   | startNetworking (gen : Nat) (settings : Settings)
   | stopNetworking

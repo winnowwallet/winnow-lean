@@ -36,7 +36,7 @@ def manifest : Manifest where
     -- the census list this build ships (CensusCatalog.bundled reads peers.json beside the executable),
     -- fetched by scripts/import-census (scripts/build-ios runs it when the list is missing)
     "../../build/census/peers.json"]
-  uses := ["auth", "keychain.*", "build", "clipboard.*", "paths", "exclude-from-backup", "http.get", "open",
+  uses := ["auth", "keychain.*", "build", "clipboard.*", "paths", "exclude-from-backup", "http.get", "open", "appearance",
            "ble.*", "bgtask.*", "cloudkit.*"]
   usage := [
     ("NSFaceIDUsageDescription", "Approve payments and reveal your recovery words."),
@@ -53,7 +53,12 @@ def manifest : Manifest where
   -- automatic iCloud backup (WinnowApp/Real/CloudBackup.lean): the private database of upstream's container
   -- (CloudKit/schema.ckdb's WalletBackup records)
   iCloudContainers := ["iCloud.com.btcswift.app"]
-  info := [("ITSAppUsesNonExemptEncryption", false)]
+  -- the shell draws its text in Hiragino Sans (iOS ships it, so nothing is bundled)
+  -- and squarer, as the site's card is: rows on the page under ruled headers, rectangular buttons
+  info := [("ITSAppUsesNonExemptEncryption", false), ("LNFontFamily", "Hiragino Sans"), ("LNShape", "square")]
+  -- the look of winnowwallet.com, light or dark as the system is: its amber and Bitcoin orange
+  -- (Assets.xcassets/AccentColor, site.css's --seed) as the tint every button, link and symbol draws in
+  settings := [("ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME", "AccentColor")]
   -- the UI test target holds only LeanNative's test kit and its journey driver (LNDriver): the journeys are Lean,
   -- on the Mac (Journeys.lean), run by scripts/journeys (CI: LeanNative's ui-tests with scripts/ui-fixture)
   -- against a regtest fixture

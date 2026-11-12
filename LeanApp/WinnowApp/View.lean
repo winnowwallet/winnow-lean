@@ -138,6 +138,7 @@ where routedScreen' (m : Model) : Option H :=
   match m.routes.getLast? with
   | some (.payment t) => some (.screen "Payment" (some (.home .pop)) ([.list (paymentSections m t)] ++ overlays m))
   | some .backup => some (backupScreen m (overlays m))
+  | some .settings => some (.screen "Settings" (some (.home .pop)) ([.list (settingsSections m)] ++ overlays m))
   | some .multisigAdd => some (multisigAddScreen m (overlays m))
   | some .ledgerPair =>
     some (.screen "Pair a Ledger" (some (.signer .pop)) ([.list (ledgerPairSections m)] ++ overlays m))
@@ -167,7 +168,7 @@ def mainScreen (m : Model) : H :=
          , .list (walletSections m) ] ++ overlays m) (onRefresh := some .syncNow)
     else
       .screen "Winnow" none
-        ([ .toolbar [.identified Ids.advancedModeButton (.button "Advanced" .plain (some .askAdvanced))],
+        ([ .toolbar [.identified Ids.settingsButton (.button "Settings" .plain (some (.home .openSettings)))],
            .list (beginnerSections m) ] ++ overlays m)
         (onRefresh := some .syncNow)
 

@@ -65,6 +65,9 @@ def stepSettings (msg : SettingsMsg) (m : Model) : Model × List Cmd :=
   let d := m.settingsDraft
   let save (s : Settings) : Model × List Cmd := ({ m with settings := s }, [.saveSettings s])
   match msg with
+  | .setAppearance i => match Appearance.all[i]? with
+    | some a => ({ m with settings := { m.settings with appearance := a } }, [.saveSettings { m.settings with appearance := a }, .setAppearance a])
+    | none => (m, [])
   | .setManualPeer s => ({ m with settingsDraft := { d with manualPeer := s, error := none } }, [])
   | .addManualPeer =>
     match parsePeer d.manualPeer with
@@ -153,9 +156,14 @@ def settingsSections (m : Model) : List H :=
   let s := m.settings
   let d := m.settingsDraft
   let set (f : String → SettingsMsg) : String → Msg := fun v => .settings (f v)
+  [.section "" "System follows your phone's light and dark setting." [.identified Ids.appearancePicker
+    (.picker "Appearance" (Appearance.all.map (·.label)) (Appearance.all.idxOf s.appearance) (fun i => .settings (.setAppearance i)))]] ++
   (if s.showsNetworkPicker then
     [.section "" (networkFooter m) [networkPicker m]] else []) ++
   [backupSection m] ++
+  (if s.advancedMode then [] else
+    [.section "" "Adds Wallet, Send and Settings tabs, with fee controls, network settings, multisig accounts and technical details."
+      [.identified Ids.advancedModeButton (.button "Turn on Advanced mode" .plain (some .askAdvanced))]]) ++
   (if s.advancedMode then [signersSection m] else []) ++
   (if s.advancedMode then
     [peerGatewaysSection m, .section "Mainnet peer list" "Each release carries the census of its day, the list it starts from. Every selected peer still undergoes Winnow's normal checks."

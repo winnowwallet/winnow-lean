@@ -97,8 +97,10 @@ def waitForBalance (target : Nat) (f : Find := balanceText) : UI Unit :=
 def waitSynced : UI Unit :=
   waitUntil 60 "sync is not Up to date" do return (← text syncSummaryText) == "Up to date"
 
-/-- Advanced mode, through its alert, then the Wallet tab. -/
+/-- Advanced mode, from Settings through its alert, then the Wallet tab. -/
 def turnOnAdvanced : UI Unit := do
+  tap settingsButton
+  waitFor advancedModeButton 10
   tap advancedModeButton
   waitFor (.alert "Turn on") 10
   tap (.alert "Turn on")

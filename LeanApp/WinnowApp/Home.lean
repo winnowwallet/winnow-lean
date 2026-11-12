@@ -54,6 +54,7 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
   match msg with
   | .openPayment txid => { m with routes := m.routes ++ [Route.payment txid], payment := {}, expanded := [] }.loadPayment
   | .openBackup => ({ m with routes := m.routes ++ [Route.backup] }, [])
+  | .openSettings => ({ m with routes := m.routes ++ [Route.settings] }, [])
   | .pop => ({ m with routes := m.routes.dropLast, payment := {}, expanded := [] }, [])
   | .loadPayment => m.loadPayment
   | .editRecipient address pid => m.openPerson { personID := pid } address
@@ -153,6 +154,19 @@ def paymentRow (m : Model) (p : DisplayedPayment) (tappable := true) : H :=
   let amount : H := match p.source with
     | .transfer _ _ moved => body s!"{groupDigits moved} sats"
     | _ => amountText h.net
+  if !advanced then
+    -- Simple: an arrow for the direction, who and the status under each other, the amount alone
+    let arrow := if h.net > 0 then "arrow.down.left" else if h.net < 0 then "arrow.up.right" else "arrow.left.arrow.right"
+    .row [ .col ([.identified rowID (match action with
+                    | some a => navLink title (some a) (symbol := arrow)
+                    | none => Html.symbol arrow (body title))] ++
+                 (match p.source with
+                  | .account name => [.identified (Ids.paymentAccount (h.txid)) (caption name)]
+                  | _ => []) ++
+                 (if labels.isEmpty then [] else [caption labels]) ++ status)
+         , .spacer
+         , amount ]
+  else
   .row [ .col ([.identified rowID (match action with | some a => navLink title (some a) | none => body title)] ++
                (match p.source with
                 | .account name => [.identified (Ids.paymentAccount (h.txid)) (caption name)]
@@ -206,8 +220,8 @@ def activitySection (m : Model) : H :=
 
 def beginnerSections (m : Model) : List H :=
   [ balanceSection m
-  , .section "" "" [.row [.identified Ids.receiveButton (.button "Receive" .plain (some .openReceive)),
-                          .identified Ids.openSendButton (.button "Send" .primary (some .openSend))]]
+  , .section "" "" [.row [.identified Ids.receiveButton (Html.symbol "arrow.down.left" (.button "Receive" .plain (some .openReceive))),
+                          .identified Ids.openSendButton (Html.symbol "arrow.up.right" (.button "Send" .primary (some .openSend)))]]
   , activitySection m
   , beginnerBackupSection m ]
 
