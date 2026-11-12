@@ -1,10 +1,13 @@
 import WinnowApp.Backup
 import WinnowApp.Signers
+import WinnowApp.Protect
 import WinnowApp.Ids
 
-/-! SettingsView.swift: network, backup, the census peer list, manual peers, the external block
-explorer, chain verification, connected peers (with the reset confirmation), about and the design
-papers (Components.swift `DesignPapersView`, bundled HTML), and the danger zone. -/
+/-! SettingsView.swift as one mode's Settings, pushed from the home's toolbar: Appearance; Network (the
+network, then its own screens: Sync, Peers — routing, the census peer list, manual peers, connected peers with
+the reset confirmation —, the external block explorer and chain verification); Security (hardware wallets
+and keys, multisig accounts); Backup; About with the design papers (Components.swift `DesignPapersView`,
+bundled HTML); and the danger zone. -/
 
 namespace WinnowApp
 open LeanNative
@@ -18,9 +21,9 @@ def papers : List (String × String × String) :=
   , ("write-side", "The write side", "Build, price, sign, and get a transaction out.")
   , ("import", "Import", "The bundle is the history. There is no back-scan.") ]
 
-/-- What the Settings tab loads when it appears in Advanced mode (`.task(id: advancedMode)`). -/
+/-- What Settings → Network's peers screen loads when it appears. -/
 def Model.settingsAppear (m : Model) : List Cmd :=
-  if m.settings.advancedMode && m.stage == .ready then [.connectedPeers m.generation, .catalogStatus m.generation] else []
+  if m.stage == .ready then [.connectedPeers m.generation, .catalogStatus m.generation] else []
 
 def gatewayModes : List String := Winnow.IO.PeerGatewaySettings.modes
 
@@ -59,12 +62,15 @@ def Model.applyGateways (m : Model) : Model × List Cmd :=
     ({ m with settings := s, settingsDraft := { d with gatewayError := none, applyingGateways := false } },
      [.saveSettings s, .reconnect m.generation s])
 
-/-- The Settings tab's controls (records-test's `settingsScreen` and `peerGatewayModel`). -/
+/-- Settings' controls (records-test's `settingsScreen` and `peerGatewayModel`). -/
 def stepSettings (msg : SettingsMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   let d := m.settingsDraft
   let save (s : Settings) : Model × List Cmd := ({ m with settings := s }, [.saveSettings s])
   match msg with
+  | .setAppearance i => match Appearance.all[i]? with
+    | some a => ({ m with settings := { m.settings with appearance := a } }, [.saveSettings { m.settings with appearance := a }, .setAppearance a])
+    | none => (m, [])
   | .setManualPeer s => ({ m with settingsDraft := { d with manualPeer := s, error := none } }, [])
   | .addManualPeer =>
     match parsePeer d.manualPeer with
@@ -129,7 +135,7 @@ def peerGatewaysSection (m : Model) : H :=
     .identified (Ids.peerType (n.rawValue))
       (.toggle (match n with | .clearnet => "Clearnet peers" | .tor => "Tor peers" | .i2p => "I2P peers")
         (d.gatewayNetworks.contains n) fun on => .settings (.setGatewayNetwork n on))
-  .section "Peer networks" "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does, in both simple and advanced mode. Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Manual settings stay in effect in simple mode. Tor and I2P peers always use their gateway. The peer list ships with the app, so finding peers downloads nothing. Explorer requests use clearnet when selected, Tor otherwise; with I2P alone they are unavailable. A SOCKS check does not guarantee overlay connectivity."
+  .section "Peer networks" "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does, Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Tor and I2P peers always use their gateway. The peer list ships with the app, so finding peers downloads nothing. Explorer requests use clearnet when selected, Tor otherwise; with I2P alone they are unavailable. A SOCKS check does not guarantee overlay connectivity."
     ([ .identified Ids.gatewayRoutingMode
          (.picker "Gateway routing" ["Automatic", "Direct only", "Manual"] d.gatewayMode fun i => .settings (.setGatewayMode i)) ] ++
      (if d.gatewayMode == 2 then
@@ -149,37 +155,21 @@ def peerGatewaysSection (m : Model) : H :=
      [ .identified Ids.checkPeerGateways (.button "Check gateways and reconnect" .plain
          (if m.status.discoveringGateways || off then none else some (.settings .checkGateways))) ])
 
-def settingsSections (m : Model) : List H :=
+/-- Settings → Network → Peers: routing, the census list, manual peers and the connected peers. -/
+def peersSections (m : Model) : List H :=
   let s := m.settings
   let d := m.settingsDraft
   let set (f : String → SettingsMsg) : String → Msg := fun v => .settings (f v)
-  (if s.showsNetworkPicker then
-    [.section "" (networkFooter m) [networkPicker m]] else []) ++
-  [backupSection m] ++
-  (if s.advancedMode then [signersSection m] else []) ++
-  (if s.advancedMode then
-    [peerGatewaysSection m, .section "Mainnet peer list" "Each release carries the census of its day, the list it starts from. Every selected peer still undergoes Winnow's normal checks."
-      (match d.catalog with | some line => [.identified Ids.censusCatalogText (body line)] | none => [])] else []) ++
-  (if s.showsManualPeers then
-    [.section "Manual peers" "Manual peers are tried first when their network is enabled. Clearnet seeds resolve over HTTPS (Cloudflare 1.1.1.1), with system DNS as the fallback. Overlay names are resolved by their SOCKS gateway. The default port is 8333 (mainnet) / 38333 (signet). Peers must advertise compact filters and pass Winnow's checks."
+  [ peerGatewaysSection m
+  , .section "Mainnet peer list" "Each release carries the census of its day, the list it starts from. Every selected peer still undergoes Winnow's normal checks."
+      (match d.catalog with | some line => [.identified Ids.censusCatalogText (body line)] | none => [])
+  , .section "Manual peers" "Manual peers are tried first when their network is enabled. Clearnet seeds resolve over HTTPS (Cloudflare 1.1.1.1), with system DNS as the fallback. Overlay names are resolved by their SOCKS gateway. The default port is 8333 (mainnet) / 38333 (signet). Peers must advertise compact filters and pass Winnow's checks."
       ((s.manualPeers.zipIdx.map fun (p, i) => .row [literal p, .spacer, .button "Remove" .destructive (some (.settings (.removeManualPeer i)))]) ++
        [.row [.input .plain "" "host:port" d.manualPeer (set .setManualPeer) (some (.settings .addManualPeer)),
               .button "Add" .plain (if d.manualPeer.trimAscii.isEmpty then none else some (.settings .addManualPeer))]] ++
        errorRows d.error ++
-       [.button "Reconnect peers" .plain (some (.settings .reconnect))])] else []) ++
-  (if s.showsExplorerSettings then
-    [.section "External block explorer" "Winnow does not use the explorer for balances, synchronization, fees or broadcasting. Every funding-address lookup asks for consent and explains the transaction-ID disclosure; you must explicitly select any result. External browser links have their own warning: the browser shares its IP address with the site. On signet, the blockstream.info preset uses mempool.space."
-      ([ .picker "Block explorer" ["blockstream.info", "mempool.space", "Custom"] (explorers.idxOf s.scoped.explorer) (fun i => .settings (.setExplorer i)) ] ++
-       (if s.scoped.explorer == .custom then
-         [.input .plain "" "Esplora-compatible website URL" s.scoped.esploraURL (set .setEsploraURL) none] else []) ++
-       [ caption s!"Selected: {s.esploraBaseURL}"
-       , .button "What this trades away" .plain (some (.settings .openReadSide)) ])] else []) ++
-  (if s.showsChainVerification then
-    [.section "Chain verification" "Winnow normally starts from a block header built into the app, then verifies every block after it. That header was produced by syncing this same code from block 0, and anyone can reproduce it — but on your phone it begins as a value you are taking from us rather than one you computed. Turn this on to skip it and re-derive the entire chain from block 0 instead. It downloads and proof-of-work-checks every header ever mined, which takes several minutes and discards the headers already stored."
-      ([.toggle "Verify the chain from genesis" s.verifyFromGenesis (fun b => .settings (.setVerifyFromGenesis b))] ++
-       (if s.verifyFromGenesis then [caption "Turning this off later keeps the chain you already verified."] else []))] else []) ++
-  (if s.advancedMode then
-    [.section "Connected peers" ""
+       [.button "Reconnect peers" .plain (some (.settings .reconnect))])
+  , .section "Connected peers" ""
       ((d.peers.map fun p =>
           .col [.identified Ids.peerNetwork (Html.tone (if p.network == .clearnet then .warning else .secondary) (caption (peerNetworkLabel p.network))),
                 .identified Ids.peerEndpoint (literal p.endpoint),
@@ -187,10 +177,61 @@ def settingsSections (m : Model) : List H :=
        (if d.peers.isEmpty then [caption "No peers connected."] else []) ++
        [ .button "Refresh" .plain (some (.settings .refreshPeers))
        , .button (if d.resettingPeers then "Resetting…" else "Reset and shuffle peers") .plain
-           (if d.resettingPeers then none else some (.settings .askResetPeers)) ])] else []) ++
+           (if d.resettingPeers then none else some (.settings .askResetPeers)) ]) ]
+
+/-- Settings → Network → Block explorer. -/
+def explorerSections (m : Model) : List H :=
+  let s := m.settings
+  let set (f : String → SettingsMsg) : String → Msg := fun v => .settings (f v)
+  [.section "External block explorer" "Winnow does not use the explorer for balances, synchronization, fees or broadcasting. Every funding-address lookup asks for consent and explains the transaction-ID disclosure; you must explicitly select any result. External browser links have their own warning: the browser shares its IP address with the site. On signet, the blockstream.info preset uses mempool.space."
+    ([ .picker "Block explorer" ["blockstream.info", "mempool.space", "Custom"] (explorers.idxOf s.scoped.explorer) (fun i => .settings (.setExplorer i)) ] ++
+     (if s.scoped.explorer == .custom then
+       [.input .plain "" "Esplora-compatible website URL" s.scoped.esploraURL (set .setEsploraURL) none] else []) ++
+     [ caption s!"Selected: {s.esploraBaseURL}"
+     , .button "What this trades away" .plain (some (.settings .openReadSide)) ])]
+
+/-- Settings → Network → Chain verification. -/
+def verificationSections (m : Model) : List H :=
+  let s := m.settings
+  [.section "Chain verification" "Winnow normally starts from a block header built into the app, then verifies every block after it. That header was produced by syncing this same code from block 0, and anyone can reproduce it — but on your phone it begins as a value you are taking from us rather than one you computed. Turn this on to skip it and re-derive the entire chain from block 0 instead. It downloads and proof-of-work-checks every header ever mined, which takes several minutes and discards the headers already stored."
+    ([.toggle "Verify the chain from genesis" s.verifyFromGenesis (fun b => .settings (.setVerifyFromGenesis b))] ++
+     (if s.verifyFromGenesis then [caption "Turning this off later keeps the chain you already verified."] else []))]
+
+/-- A Settings row that pushes a screen, with its state at the trailing end. -/
+def settingsRow (id title symbol detail : String) (msg : Msg) : H :=
+  .row ([.identified id (navLink title (some msg) (symbol := symbol)), .spacer] ++
+        (if detail.isEmpty then [] else [Html.tone .secondary (body detail)]))
+
+/-- Settings → Network: the network, then a row per screen. -/
+def networkSection (m : Model) : H :=
+  let s := m.settings
+  let summary := match m.phase.summary m.status.syncing with
+    | .synced => "Up to date" | .peersUnavailable => "Offline" | .syncing => "Syncing"
+  .section "Network" (networkFooter m)
+    [ networkPicker m
+    , settingsRow Ids.networkSyncButton "Sync" "arrow.triangle.2.circlepath" summary (.home (.openNetwork .sync))
+    , settingsRow Ids.networkPeersButton "Peers and routing" "point.3.connected.trianglepath.dotted" s!"{m.status.peerCount}" (.home (.openNetwork .peers))
+    , settingsRow Ids.networkExplorerButton "Block explorer" "safari" (urlHost s.esploraBaseURL |>.getD "") (.home (.openNetwork .explorer))
+    , settingsRow Ids.chainVerificationButton "Chain verification" "checkmark.shield" (if s.verifyFromGenesis then "From genesis" else "Built-in header")
+        (.home (.openNetwork .verification)) ]
+
+/-- Settings → Security: hardware wallets and keys, multisig accounts. -/
+def securitySection (m : Model) : H :=
+  let count := m.multisig.accounts.length
+  .section "Security" (s!"Pair a Ledger once, and save the keys other people send; multisig accounts are built from them." ++
+      (if totalBalance m < hardwareWalletThresholdSats then "" else
+        if m.multisig.ledgers.isEmpty then " This balance is more than a phone should hold alone." else ""))
+    [ settingsRow Ids.signersButton "Hardware wallets and keys" "person.2" (signersSummary m.multisig) (.signer .openSigners)
+    , settingsRow Ids.multisigAccountsButton "Multisig accounts" "person.3" (if count == 0 then "" else s!"{count}")
+        (.home .openMultisigAccounts) ]
+
+def settingsSections (m : Model) : List H :=
+  let s := m.settings
+  [.section "" "System follows your phone's light and dark setting." [.identified Ids.appearancePicker
+    (.picker "Appearance" (Appearance.all.map (·.label)) (Appearance.all.idxOf s.appearance) (fun i => .settings (.setAppearance i)))]] ++
+  [networkSection m, securitySection m, backupSection m] ++
   [.section "About" ""
-    ([.labeled "Version" appVersionText] ++
-     (if s.advancedMode then [.labeled "Wallet ID" (m.walletID.getD "—")] else []) ++
+    ([.labeled "Version" appVersionText, .labeled "Wallet ID" (m.walletID.getD "—")] ++
      [navLink "Design papers" (some (.settings .openPapers)) (symbol := "doc.text")])] ++
   (if m.walletID.isSome then
     [.section "Danger zone" s!"Removes this {s.network.name} wallet so you can create or import another. The key is deleted from this device; restore it from your iCloud backup or a backup file that includes the recovery phrase, or the money is gone. People you added stay on this phone, and block headers are kept, so the next wallet does not re-sync the chain."

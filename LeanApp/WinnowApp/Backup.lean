@@ -1,8 +1,8 @@
 import WinnowApp.Common
 import WinnowApp.Ids
 
-/-! BackupSection.swift (the backup file and the recovery words, on beginner mode's Back up page and in
-Settings), ExportBundleView, RevealPhraseView, and CloudBackupView.swift (CloudBackupView, Advanced's
+/-! BackupSection.swift (the backup file and the recovery words, on the home's Back up page and in
+Settings → Backup), ExportBundleView, RevealPhraseView, and CloudBackupView.swift (CloudBackupView, the
 automatic-backup controls, and CloudRestoreView, onboarding's restore from iCloud). Both results are sensitive: each request carries a
 fresh epoch, and an answer counts only while that epoch is current and the app is active. -/
 
@@ -61,23 +61,16 @@ def cloudRowStatus (c : CloudStatus) : String :=
     match c.lastSavedAgo with | some ago => s!"Backed up {ago} ago" | none => "Backed up"
   else c.statusTitle
 
-/-- BackupSection: the iCloud controls and the recovery words are Advanced mode's; Simple keeps the file.
-The texts are a deliberate departure from upstream (PORT.md, user 2026-10-28). -/
+/-- Settings → Backup: the iCloud backup, the backup file and the recovery words. The texts are a deliberate
+departure from upstream (PORT.md, user 2026-10-28). -/
 def backupSection (m : Model) : H :=
-  let advanced := m.settings.advancedMode
-  .section "Backup"
-    (if advanced then "iCloud backup keeps this wallet automatically. A backup file is a copy you keep yourself."
-     else "A backup file is a copy of this wallet you keep yourself.")
-    ((if advanced then
-       [.identified Ids.cloudBackupRow
-         (.row [navLink "iCloud backup" (if m.walletID.isNone then none else some (.cloud .openBackup)) (symbol := "icloud"), .spacer,
-                .identified Ids.cloudBackupRowStatus (Html.tone .secondary (body (cloudRowStatus m.cloud)))])]
-      else []) ++
+  .section "Backup" "iCloud backup keeps this wallet automatically. A backup file is a copy you keep yourself."
+    ([.identified Ids.cloudBackupRow
+       (.row [navLink "iCloud backup" (if m.walletID.isNone then none else some (.cloud .openBackup)) (symbol := "icloud"), .spacer,
+              .identified Ids.cloudBackupRowStatus (Html.tone .secondary (body (cloudRowStatus m.cloud)))])] ++
      [ .identified Ids.exportBundleButton (Html.symbol "doc.badge.arrow.up" (.button "Save a backup file" .plain (if m.walletID.isNone then none else some (.backup .openExport)))) ] ++
-     (if advanced then
-       [.identified Ids.revealPhraseButton
-         (Html.symbol "key" (.button "Show recovery phrase" .plain (if m.walletID.isNone || m.reveal.revealing then none else some (.backup .reveal))))]
-      else []) ++
+     [.identified Ids.revealPhraseButton
+       (Html.symbol "key" (.button "Show recovery phrase" .plain (if m.walletID.isNone || m.reveal.revealing then none else some (.backup .reveal))))] ++
      (if m.hasSheet .revealPhrase then [] else errorRows m.reveal.error))
 
 /-- BeginnerHomeView's Backup section: the iCloud backup's state, and the manual file while it is not
@@ -93,7 +86,7 @@ def beginnerBackupSection (m : Model) : H :=
        , .identified Ids.backupButton (navLink "Save a backup file" (some (.home .openBackup)) (symbol := "doc.badge.arrow.up")) ]
       else []))
 
-/-- CloudBackupView (Advanced): the switch and the state; Simple only shows the state. -/
+/-- CloudBackupView (Settings → Backup → iCloud backup): the switch and the state. -/
 def cloudBackupSheet (m : Model) (inner : List H) : H :=
   let c := m.cloud
   formSheet "iCloud backup" (some .closeSheet) [closeBar "Close"]
@@ -126,7 +119,7 @@ def cloudRestoreSheet (m : Model) (inner : List H) : H :=
      (match o.restoreError with | some e => [caption e] | none => []) ++
      (match c.message with | some t => [caption t] | none => [])) inner (largeTitle := true)
 
-/-- Beginner mode's Back up page: the backup file, without the recovery words or the iCloud control
+/-- The home's Back up page (its "Save a backup file" while iCloud has not backed up): the Backup section
 (records-test's `backupScreens`). -/
 def backupScreen (m : Model) (overlays : List H) : H :=
   .screen "Back up" (some (.home .pop)) ([.list [backupSection m]] ++ overlays)

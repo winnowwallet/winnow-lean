@@ -42,7 +42,7 @@ inductive CloudBackupError where
 def CloudBackupError.description : CloudBackupError → String
   | .unavailable => "Sign in to iCloud and enable iCloud Drive and Passwords & Keychain in Settings."
   | .keyUnavailable => "The backup key hasn’t arrived from iCloud Keychain. Check Passwords & Keychain in Settings and try again. Keep your recovery words and a backup file."
-  | .accountChanged => "Your Apple Account changed. Sign back into the original account, or turn automatic backup off and on in Advanced to use this account."
+  | .accountChanged => "Your Apple Account changed. Sign back into the original account, or turn automatic backup off and on in Settings → Backup → iCloud backup to use this account."
   | .unsupportedWallet => "Automatic iCloud recovery requires this wallet’s recovery words. This wallet needs a backup file instead."
   | .invalidBackup => "This iCloud backup could not be read safely. Your existing wallet was not replaced."
   | .missingEntitlement => cloudMissingEntitlementText
@@ -197,7 +197,7 @@ def configure (c : CloudBackupController) (directory : Option System.FilePath) (
       match ← read.toBaseIO with
       | .ok ids => disabled := ids
       | .error _ =>
-        let unreadable := "Backup preferences couldn’t be read. Review automatic backup in Advanced settings."
+        let unreadable := "Backup preferences couldn’t be read. Review automatic backup in Settings → Backup."
         c.modify fun s => { s with automaticEnabled := false, message := some unreadable }
         return
   let automatic := !disabled.contains (walletID.getD "")
@@ -290,7 +290,7 @@ def updateWith (c : CloudBackupController) (token : Nat) (export_ : IO CloudBack
 def update (c : CloudBackupController) (export_ : IO CloudBackupContents) : IO Unit := do
   c.updateWith (← c.get).generation export_
 
-/-- `enable(bundle:appState:walletID:)`: the explicit retry in Advanced settings. -/
+/-- `enable(bundle:appState:walletID:)`: the explicit retry in Settings → Backup. -/
 def enable (c : CloudBackupController) (bundle : ImportBundle) (appState : Option ByteArray := none) (walletID : String) : IO Unit := do
   c.setAutomatic true
   let contents : CloudBackupContents := { bundle, appState }

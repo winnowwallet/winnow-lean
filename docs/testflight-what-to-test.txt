@@ -1,36 +1,34 @@
-Winnow 0.9.11: the same wallet, rewritten in Lean
+Winnow: the same wallet, rewritten in Lean
 
-New in 0.9.11
+New since 0.9.11
 
-Fixes found by new tests; nothing looks different. Please try:
-1. Erase the wallet, or import a backup, while the Wallet tab says it is syncing. The erased wallet must not come back after a restart, and an imported one must stay the one you imported.
-2. Open an old payment's details, then go to the background or import a backup before they load. The new wallet must not show the old payment.
-3. Settings → Connected peers → Reset and shuffle peers (Advanced mode). If it cannot forget the saved peers it now says so and stays online, instead of going offline with a file error. Home's Retry no longer turns networking on after you stopped it.
-4. Leave Winnow in the background for a few hours. When iOS starts two background checks at once they now run one after the other, instead of the second failing.
+One home: Simple and Advanced mode are gone, and the home has everything Advanced had. Please try:
+1. Settings has Network (Sync, Peers and routing, Block explorer, Chain verification), Security (Hardware wallets and keys, Multisig accounts), Backup and Appearance.
+2. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger"; from 0.5 BTC, "Build an account with other people's keys". "Don't show again" hides a card for good.
+3. With Bluetooth on and no Ledger paired, unlock a Ledger nearby: a card pairs it, builds a 2-of-2 of this phone and the Ledger, and shows the first address, which must match the Ledger's.
+4. In Airplane Mode the home shows "Offline" in orange words. Tap it, then Network settings: Sync shows the last error and Retry. "Peers see your IP" leads to Peers and routing the same way.
 
-Also fixed: a payment that loses a coin to another spend shows Replaced, even when it shares only one coin with it; a locked Keychain at Send, and a person card for another network, show what went wrong; a multisig account's recovery text counts its own members; transactions Bitcoin Core refuses are refused too.
+0.9.11 fixed what new tests found (erasing or importing while syncing, Reset and shuffle peers, two background checks at once, Replaced payments); 0.9.10 and 0.9.9 changed only how Winnow is tested; 0.9.8 checked signatures against BIP340's vectors; 0.9.5 generated the Xcode project from Lean; 0.9.3 moved Winnow onto LeanNative (background checks, Keychain, iCloud backup, Face ID, Ledger over Bluetooth).
 
-0.9.10 and 0.9.9 changed only how Winnow is tested; 0.9.8 checked signatures against BIP340's vectors; 0.9.5 generated the Xcode project from Lean; 0.9.3 moved Winnow onto LeanNative (background checks, Keychain, iCloud backup, Face ID, Ledger over Bluetooth).
-
-This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Signers. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
+This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Security → Hardware wallets and keys. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
 
 Install over the current app
 
-1. With the App Store's Winnow holding a wallet, install this build from TestFlight. The same wallet, balance and Transactions must appear, and it must sync to "Up to date".
+1. With the App Store's Winnow holding a wallet, install this build from TestFlight. The same wallet, balance and Activity must appear, and it must sync to "Up to date".
 2. Settings → Backup: iCloud backup should show "Backed up" with a time after it updates. On a second device signed into the same Apple Account, a fresh install should offer "Restore your iCloud wallet" and restore the same wallet.
-3. Settings → Signers → Pair a Ledger works (0.9.0 said "Winnow could not safely read its signers").
+3. Settings → Security → Hardware wallets and keys → Pair a Ledger works (0.9.0 said "Winnow could not safely read its signers").
 
-Everyday use (Simple mode)
+Everyday use
 
-Receive, Send and Activity work as before. Simple mode has no new controls. Tap a payment to see its details; copy its transaction ID.
+Receive, Send and Activity work as before. Tap a payment to see its details; copy its transaction ID.
 
-One Send (Advanced mode)
+One Send
 
-1. Multisig: "Create an account" chooses who signs (this phone, a Ledger paired under Settings → Signers, keys someone sent); "Join an account" pastes one shared with you. The account page has "Share with co-signers" instead of the descriptor text.
+1. Multisig: "Create an account" chooses who signs (this phone, a Ledger paired under Settings → Security → Hardware wallets and keys, keys someone sent); "Join an account" pastes one shared with you. The account page has "Share with co-signers" instead of the descriptor text.
 2. Every payment, from the wallet or from an account, starts in Send: pick the account under From. With a recovery path, Send offers "Signers now / Recovery path".
 3. Sign and continue, then collect signatures (phone, Ledger, a pasted copy) and finalize. The PSBT to share is BIP174 v0, readable by Bitcoin Core.
-4. A payment between the wallet and one of your accounts is one row in Transactions.
+4. A payment between the wallet and one of your accounts is one row in Activity.
 
-Also new: Tor and I2P peers under Settings → Peer networks, background chain checks, and the iPad layout (rotation, sidebar). Mac users with Apple silicon can run the iPad version.
+Also new: Tor and I2P peers under Settings → Network → Peers and routing, background chain checks, and the iPad layout (rotation, sidebar). Mac users with Apple silicon can run the iPad version.
 
 Report bugs at https://github.com/winnowwallet/winnow-lean/issues with app version, device, Ledger model, network and steps. Never include recovery words, private keys or backup files.

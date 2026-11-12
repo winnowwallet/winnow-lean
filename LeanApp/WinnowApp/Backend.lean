@@ -75,7 +75,7 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   removeSenderLabel : (txid : String) → IO Records
   /-- The consented explorer lookup of funding addresses. -/
   lookupSender : (txid baseURL : String) → IO (List String)
-  -- Multisig accounts (Advanced mode; `Real/Multisig.lean`). Accounts are named by their id, PSBTs travel
+  -- Multisig accounts (Settings → Security; `Real/Multisig.lean`). Accounts are named by their id, PSBTs travel
   -- as Base64, and every PSBT operation answers with the PSBT in hand reviewed again.
   /-- `multisigAccounts`, `multisigStorageNotice`, `multisigKeyExpression()`. -/
   multisigOverview : IO MultisigOverview
@@ -83,35 +83,35 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   checkMultisigDescriptor : (text : String) → IO MultisigCheck
   /-- `addMultisigAccount(name:descriptor:)` then `registerPairedLedger`: the new account's id, and the
   paired Ledger's registration (its name, or why it did not register) when one holds a key of it. -/
-  addMultisigAccount : (advanced : Bool) → (name descriptor : String) → IO (String × Option (Except String String))
+  addMultisigAccount : (name descriptor : String) → IO (String × Option (Except String String))
   removeMultisigAccount : (id : String) → IO Unit
   newMultisigReceiveAddress : (id : String) → IO Unit
-  /-- `createMultisigAccount(name:threshold:members:recovery:)` (refused outside Advanced mode) then
+  /-- `createMultisigAccount(name:threshold:members:recovery:)` then
   `registerPairedLedger`: the account's id and descriptor, and the paired Ledger's registration. -/
-  createMultisigAccount : (advanced : Bool) → (name : String) → (threshold : Nat) →
+  createMultisigAccount : (name : String) → (threshold : Nat) →
     (members : List (List String × Option Nat)) → Option MultisigRecovery →
     IO (String × String × Option (Except String String))
   /-- `registerLedger(record:)`: the account registered on the Ledger connected now. -/
-  registerLedger : (advanced : Bool) → (id : String) → IO Unit
+  registerLedger : (id : String) → IO Unit
   /-- `pairLedger(name:)`: the Ledger's signer key read over Bluetooth and filed among the signers; the
   signer's id. Nothing is registered on the Ledger. -/
-  pairLedger : (advanced : Bool) → (name : String) → IO String
+  pairLedger : (name : String) → IO String
   /-- `addSignerKeys(name:text:)`: keys someone sent, as one signer; its id. -/
-  addSignerKeys : (advanced : Bool) → (name text : String) → IO String
+  addSignerKeys : (name text : String) → IO String
   renameSigner : (id name : String) → IO Unit
   removeSigner : (id : String) → IO Unit
   /-- `verifyLedgerAddress(record:index:)`: the address the Ledger showed (the phone's own). -/
-  verifyLedgerAddress : (advanced : Bool) → (id : String) → (index : Nat) → IO String
+  verifyLedgerAddress : (id : String) → (index : Nat) → IO String
   -- An account's spend (#259): reviewed from Send, filed as the account's draft, its signatures collected
   -- (this phone, the Ledger, a pasted copy), then finalized and broadcast. Every operation changes the
   -- record, which the next overview shows.
   /-- `signAndDraftMultisigSpend(preview:)` after device authentication: the reviewed account spend signed
   here and filed as the draft; the account's id. -/
-  signAndDraft : (advanced : Bool) → SendInputs → Preview → IO String
+  signAndDraft : SendInputs → Preview → IO String
   /-- After device authentication: this phone's signature on the draft. -/
   signDraft : (id : String) → IO Unit
   /-- The Ledger's signature on the draft. -/
-  signDraftWithLedger : (advanced : Bool) → (id : String) → IO Unit
+  signDraftWithLedger : (id : String) → IO Unit
   /-- `adoptMultisigDraft(_:record:)`: a pasted PSBT combined into the draft, or adopted as it. -/
   adoptDraft : (id psbt : String) → IO Unit
   /-- `broadcastMultisigDraft(record:)`: finalize, broadcast and record the draft; the txid. -/
@@ -139,7 +139,8 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   /-- `setAutomaticCloudBackup(_:)`. -/
   setAutomaticCloudBackup : Bool → IO Unit
   /-- `restoreCloudBackup(_:)` (it authenticates itself): the wallet's id, the verification
-  (`matchesBundle`, none while no peer answered) and the restored display name and Advanced switch. -/
+  (`matchesBundle`, none while no peer answered) and the restored display name and the backup's Advanced switch (kept for the format; the app applies only
+  the name). -/
   restoreCloudBackup : Network → (dir id : String) → IO (String × Option Bool × Option (String × Bool))
   /-- What `refresh()` asks of the iCloud side (an update, a preparation when due). -/
   cloudTick : IO Unit
@@ -147,8 +148,13 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   cloudScene : Bool → IO Unit
   /-- `cloudBackups.suspend()` (a closed restore presentation). -/
   suspendCloud : IO Unit
-  /-- The settings changed (the backup's context reads the display name and Advanced switch). -/
+  /-- The settings changed (the backup's context reads the display name). -/
   updateSettings : Settings → IO Unit
+  /-- The Ledgers advertising nearby (`ble.scan` for the Ledger services, connecting to none); none when
+  Bluetooth is off, not allowed or absent. -/
+  scanLedgers : IO (List NearbyLedger)
+  /-- Ask for Bluetooth (`ble.state`: iOS asks the person the first time). -/
+  askBluetooth : IO Unit
 
 def notPorted (what : String) : IO α := throw (IO.userError s!"{what}: this part of Winnow is still being ported to Lean.")
 
@@ -196,19 +202,19 @@ def Backend.pending : Backend where
   lookupSender := fun _ _ => notPorted "Explorer lookups"
   multisigOverview := pure {}
   checkMultisigDescriptor := fun _ => notPorted "Multisig accounts"
-  addMultisigAccount := fun _ _ _ => notPorted "Multisig accounts"
+  addMultisigAccount := fun _ _ => notPorted "Multisig accounts"
   removeMultisigAccount := fun _ => notPorted "Multisig accounts"
   newMultisigReceiveAddress := fun _ => notPorted "Multisig accounts"
-  createMultisigAccount := fun _ _ _ _ _ => notPorted "Multisig accounts"
-  registerLedger := fun _ _ => notPorted "Ledger signing"
-  pairLedger := fun _ _ => notPorted "Ledger signing"
-  addSignerKeys := fun _ _ _ => notPorted "Signers"
+  createMultisigAccount := fun _ _ _ _ => notPorted "Multisig accounts"
+  registerLedger := fun _ => notPorted "Ledger signing"
+  pairLedger := fun _ => notPorted "Ledger signing"
+  addSignerKeys := fun _ _ => notPorted "Signers"
   renameSigner := fun _ _ => notPorted "Signers"
   removeSigner := fun _ => notPorted "Signers"
-  verifyLedgerAddress := fun _ _ _ => notPorted "Ledger signing"
-  signAndDraft := fun _ _ _ => notPorted "Multisig accounts"
+  verifyLedgerAddress := fun _ _ => notPorted "Ledger signing"
+  signAndDraft := fun _ _ => notPorted "Multisig accounts"
   signDraft := fun _ => notPorted "Multisig accounts"
-  signDraftWithLedger := fun _ _ => notPorted "Ledger signing"
+  signDraftWithLedger := fun _ => notPorted "Ledger signing"
   adoptDraft := fun _ _ => notPorted "Multisig accounts"
   broadcastDraft := fun _ => notPorted "Multisig accounts"
   discardDraft := fun _ => notPorted "Multisig accounts"
@@ -226,6 +232,8 @@ def Backend.pending : Backend where
   cloudScene := fun _ => pure ()
   suspendCloud := pure ()
   updateSettings := fun _ => pure ()
+  scanLedgers := pure []
+  askBluetooth := pure ()
 
 instance : Nonempty Backend := ⟨Backend.pending⟩
 

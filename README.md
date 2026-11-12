@@ -21,15 +21,23 @@ shell; the curve arithmetic behind every signature is the proven secp256k1 in
 
 ## Using the wallet
 
-Winnow starts on mainnet in Simple mode. One screen holds your balance,
-Receive, Send, activity and backup status. Open a payment to
-save its recipient; choose saved recipients from the Send form.
+Winnow starts on mainnet with one home: your balance, Receive, Send, your
+multisig accounts, activity and backup status. Open a payment to see its block
+and fee and save its recipient; choose saved recipients from the Send form,
+whose fee controls are folded under Fee. Settings holds the rest: Network
+(sync, peers and routing, the block explorer, chain verification, and signet
+for trying a development build with test funds), Security (hardware wallets
+and keys, multisig accounts) and Backup (iCloud, a backup file, the recovery
+words).
 
-Advanced mode adds Wallet, Send and Settings tabs, with signet, manual peers,
-fee controls and recovery words. Switching modes keeps your wallet and
-settings. Use signet and test funds when trying a development build.
+As the balance grows the home suggests more protection: at 0.1 BTC a Ledger,
+at 0.5 BTC an account with other people's keys (each card can be dismissed).
+With Bluetooth allowed, a Ledger in range while Winnow is open brings a card
+whose Set up pairs it, creates a 2-of-2 of this phone and the Ledger (or a
+2-of-3 with a recovery key), registers it on the Ledger and has you compare the
+first receive address on both screens.
 
-Advanced mode adds raw k-of-n multisig accounts: a
+Multisig accounts are raw k-of-n accounts: a
 `tr(NUMS, sortedmulti_a(k, …))` descriptor in, addresses and PSBTs out, signed
 by any k signers in any order with no rounds between them. "New multisig
 account" builds one from this phone, other Winnows' keys and a Ledger, for

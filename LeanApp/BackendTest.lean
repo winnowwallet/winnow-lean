@@ -115,9 +115,7 @@ def multisigFlow (n : Node) (a : Backend) (msA : Real.MultisigApp) (mineAddr : S
   let (otherMaster, otherKey) ← testSigner 0xB2
   let phoneKey := (← a.multisigOverview).keyExpression.getD ""
   let members := [([phoneKey], none), ([otherKey], none)]
-  let refusedSimple ← attempt (a.createMultisigAccount false "Shared" 2 members none)
-  check "multisig: the builder is Advanced mode only" (refusedSimple matches .error _)
-  let (id, descriptor, _) ← a.createMultisigAccount true "Shared" 2 members none
+  let (id, descriptor, _) ← a.createMultisigAccount "Shared" 2 members none
   let account ← match MultisigAccount.parse descriptor .regtest with
     | .ok acc => pure acc
     | .error e => throw (IO.userError s!"account: {e.name}")
@@ -125,7 +123,7 @@ def multisigFlow (n : Node) (a : Backend) (msA : Real.MultisigApp) (mineAddr : S
   check "multisig: 2 of 2, listed with no coins" (info.policy == some "2 of 2" && info.balance == 0 && info.coins.isEmpty)
   let some address := info.receiveAddress | throw (IO.userError "no receive address")
   check "multisig: the receive address is the descriptor's first" ((account.address 0).toOption == some address && address.startsWith "bcrt1p")
-  let again ← a.createMultisigAccount true "Shared" 2 members none
+  let again ← a.createMultisigAccount "Shared" 2 members none
   check "multisig: building the same account again returns it" (again.1 == id && (← a.multisigOverview).accounts.length == 1)
   let check1 ← attempt (a.checkMultisigDescriptor descriptor)
   check "multisig: the descriptor checks as 2 of 2 for this phone" (match check1 with
@@ -158,7 +156,7 @@ def multisigFlow (n : Node) (a : Backend) (msA : Real.MultisigApp) (mineAddr : S
   check "send tab: no silent payment code from an account" (match silent with
     | .error e => e == Real.silentPaymentUnsupportedText | .ok _ => false)
   -- 3. Sign and continue: this phone's signature, the draft filed (BIP174 v0) and listed on top.
-  discard <| a.signAndDraft true inputs preview
+  discard <| a.signAndDraft inputs preview
   let some drafted ← multisigAccount? a id | throw (IO.userError "account gone")
   let some d := drafted.draft | throw (IO.userError "no draft")
   let some screen := d.screen | throw (IO.userError s!"review: {d.reviewError}")
@@ -246,15 +244,13 @@ Ledger's signatures. The two accounts' ids. -/
 def ledgerFlow (n : Node) (a : Backend) (msA : Real.MultisigApp) (device : IO.Ref Ledger.Simulator) (mineAddr : String) :
     IO (Array String) := do
   let (_, otherKey) ← testSigner 0xB2
-  let refusedSimple ← attempt (a.pairLedger false "Nano X")
-  check "ledger: pairing is Advanced mode only" (refusedSimple matches .error _)
-  let ledgerID ← a.pairLedger true "Nano X"
+  let ledgerID ← a.pairLedger "Nano X"
   let o ← a.multisigOverview
   let ledgerKeys := ((o.signers.find? (·.id == ledgerID)).map (·.keys)).getD []
   check "ledger: paired, nothing registered" ((← device.get).registeredNames.isEmpty && ledgerKeys.length == 1)
   let phoneKey := o.keyExpression.getD ""
-  let (pair, _, _) ← a.createMultisigAccount true "Phone and Ledger" 2 [([phoneKey], none), (ledgerKeys, none)] none
-  let (family, _, _) ← a.createMultisigAccount true "Family 2-of-3" 2
+  let (pair, _, _) ← a.createMultisigAccount "Phone and Ledger" 2 [([phoneKey], none), (ledgerKeys, none)] none
+  let (family, _, _) ← a.createMultisigAccount "Family 2-of-3" 2
     [([phoneKey], none), ([otherKey], none), (ledgerKeys, none)] (some (.fewerSigners 1 4320))
   check "ledger: the Ledger approved both accounts by name"
     ((← device.get).registeredNames == #["Phone and Ledger", "Family 2-of-3"])
@@ -268,7 +264,7 @@ def ledgerFlow (n : Node) (a : Backend) (msA : Real.MultisigApp) (device : IO.Re
     check s!"ledger: {r.name} has its registration" (r.ledger.isSome)
     check s!"ledger: {r.name} is {account.threshold} of {account.signers.size}"
       ((account.threshold, account.signers.size) == (if id == pair then (2, 2) else (2, 3)))
-    let shown ← a.verifyLedgerAddress true id 0
+    let shown ← a.verifyLedgerAddress id 0
     check s!"ledger: the Ledger shows {r.name}'s first address" ((account.address 0).toOption == some shown) shown
     funding := funding.push (id, account)
   check "ledger: both addresses were on the Ledger's screen" ((← device.get).displayedAddresses.size == 2)
@@ -301,7 +297,7 @@ def ledgerFlow (n : Node) (a : Backend) (msA : Real.MultisigApp) (device : IO.Re
     let s0 ← screenOf
     check s!"ledger {id}: the phone and the Ledger both still sign" (s0.progress.phoneUnsigned && s0.progress.ledgerUnsigned &&
       s0.progress.nextStep.startsWith "Add this phone's signature and the Ledger's")
-    a.signDraftWithLedger true id
+    a.signDraftWithLedger id
     let s1 ← screenOf
     check s!"ledger {id}: the Ledger's signature verifies" (s1.signatures == [(false, 1, 2)] && !s1.progress.ledgerUnsigned)
     a.signDraft id

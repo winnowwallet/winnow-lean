@@ -15,12 +15,13 @@ Release with `#if DEBUG`) and the app is launched with `WINNOW_E2E=1`. Then:
   with it); `WINNOW_E2E_RESET=1` wipes both;
 * the wallet's entropy is pinned (`WINNOW_E2E_ENTROPY`, hex) — without it the launch fails closed, because
   capture runs publish their screenshots;
-* a manual peer, a custom signet challenge, the peer count, the sync interval, the network, the first
-  tab, advanced mode and the clipboard can be set (the census URL and keys went with the census download,
-  upstream e5ce950);
+* a manual peer, a custom signet challenge, the peer count, the sync interval, the network and the
+  clipboard can be set (the census URL and keys went with the census download, upstream e5ce950; the first
+  tab and Advanced mode went with the one home);
 * device authentication is skipped unless `WINNOW_E2E_DEVICE_AUTH=1`;
-* (Lean only) `WINNOW_E2E_LEDGER=<entropy hex>` makes a simulated Ledger with that seed the app's Ledger;
-  set but unreadable, the launch fails closed;
+* (Lean only) `WINNOW_E2E_LEDGER=<entropy hex>` makes a simulated Ledger with that seed the app's Ledger,
+  advertising nearby to the home's scan (and onboarding then shows its Bluetooth card); set but unreadable,
+  the launch fails closed;
 * events are appended to `story-events.jsonl` in the run's storage directory, refusing any field that
   looks like a secret.
 
@@ -39,9 +40,7 @@ structure Mode where
   reset : Bool
   clipboard : Option String
   forcedNetwork : Option Network
-  initialTab : Option String
   requireDeviceAuthentication : Bool
-  advancedMode : Bool
   controlFile : Option String
   peerCount : Option Nat
   syncIntervalSeconds : Option Float
@@ -95,9 +94,7 @@ def resolve (env : String → Option String) : Resolution :=
         reset := env "WINNOW_E2E_RESET" == some "1"
         clipboard := env "WINNOW_E2E_CLIPBOARD"
         forcedNetwork := (env "WINNOW_E2E_NETWORK").bind networkOfRaw
-        initialTab := env "WINNOW_E2E_TAB"
         requireDeviceAuthentication := env "WINNOW_E2E_DEVICE_AUTH" == some "1"
-        advancedMode := env "WINNOW_E2E_ADVANCED" == some "1"
         controlFile := env "WINNOW_E2E_CONTROL_FILE"
         peerCount := (env "WINNOW_E2E_PEER_COUNT").bind swiftInt? |>.bind fun n => if n > 0 then some n.toNat else none
         syncIntervalSeconds := (env "WINNOW_E2E_SYNC_INTERVAL").bind parseDouble |>.bind fun d => if d > 0 then some d else none

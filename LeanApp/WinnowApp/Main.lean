@@ -51,8 +51,8 @@ def journal (name : String) (fields : List (String × String) := []) : IO Unit :
 /-- The launch-environment names test mode reads. -/
 def e2eVariables : List String :=
   ["WINNOW_E2E", "WINNOW_E2E_ENTROPY", "WINNOW_E2E_RUN", "WINNOW_E2E_PEER",
-   "WINNOW_E2E_CHALLENGE", "WINNOW_E2E_RESET", "WINNOW_E2E_CLIPBOARD", "WINNOW_E2E_NETWORK", "WINNOW_E2E_TAB",
-   "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_ADVANCED", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
+   "WINNOW_E2E_CHALLENGE", "WINNOW_E2E_RESET", "WINNOW_E2E_CLIPBOARD", "WINNOW_E2E_NETWORK",
+   "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
    "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS"]
 
 /-- `E2EMode.current` in a Debug build: inactive, active, or — without pinned entropy — a stop, because a
@@ -137,7 +137,10 @@ def clipPolicyArgs (text : String) : ClipPolicy → Json
 capabilities. `WINNOW_LEAN_SAMPLE=1` (passed with `SIMCTL_CHILD_` by `simctl launch`) runs the screens
 on sample data instead — a UI harness like Winnow's E2EMode (Debug builds only). -/
 def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit := do
-  if (← debugBuild.get) && (← IO.getEnv "WINNOW_LEAN_SAMPLE") == some "1" then backendRef.set Backend.sample
+  if (← debugBuild.get) && (← IO.getEnv "WINNOW_LEAN_SAMPLE") == some "1" then
+    -- `WINNOW_LEAN_SAMPLE_LEDGER=1` also has a Nano X advertising nearby, for the nearby card
+    let ledger := (← IO.getEnv "WINNOW_LEAN_SAMPLE_LEDGER") == some "1"
+    backendRef.set { Backend.sample with scanLedgers := pure (if ledger then [sampleNearbyLedger] else []) }
   else
     let service := (mode.map (·.keychainService)).getD Real.walletService
     let deps : Real.Deps := { keyStore := Real.shellKeyStore fx.ask service, fetch := Real.shellFetch fx.ask,
@@ -170,6 +173,11 @@ def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit
     -- automatic iCloud backup through the shell's CloudKit and iCloud Keychain; never in test mode
     let (b, _, _) ← Backend.realWithCloud deps ledger (Real.shellCloudStore fx.ask) (Real.shellCloudKeys fx.ask)
       (allows := mode.isNone) (authenticate := authenticateNow fx)
+    -- nearby Ledgers: the radio through the shell; under test mode the simulated Ledger advertises when there
+    -- is one, and nothing touches Bluetooth either way
+    let b := match mode with
+      | none => { b with scanLedgers := Real.scanLedgers fx.ask, askBluetooth := Real.askBluetooth fx.ask }
+      | some m => { b with scanLedgers := pure (if (m.ledgerEntropy.join).isSome then [Real.simulatedAdvertisement] else []) }
     b.observeCloud fun st => fx.post (.cloud st)
     backendRef.set b
 
@@ -215,17 +223,17 @@ def bootApp (fx : Effects Host) : IO Unit := discard <| IO.asTask do
     | none => loadSettings
     | some m => do
       let (s, hadNetwork) ← loadSettingsNoting
-      -- the fixture is a signet (or a forced network); advanced mode and the local node as the only peer
+      -- the fixture is a signet (or a forced network), with the local node as the only peer; a run without
+      -- the simulated Ledger has no Bluetooth to ask for, so onboarding's Bluetooth card is not shown
       let network := m.forcedNetwork.getD (if hadNetwork then s.network else .signet)
-      let s := { s with network, advancedMode := s.advancedMode || m.advancedMode }
+      let s := { s with network, bluetoothIntroShown := s.bluetoothIntroShown || m.ledgerEntropy.isNone }
       let s := match m.peer with
         | some p => if s.scoped.manualPeers.contains p then s else s.withScoped fun n => { n with manualPeers := [p] }
         | none => s
       IO.FS.writeFile (← settingsPath) (toJson s).pretty
       if let some text := m.clipboard then
         discard <| IO.wait (← fx.ask "clipboard.set" (Json.mkObj [("text", Json.str text)]))
-      let tab := match m.initialTab with | some "send" => 1 | some "settings" => 2 | _ => 0
-      fx.post (.launched m.forcedNetwork tab)
+      fx.post (.launched m.forcedNetwork)
       journal "app.initialized" [("network", s.network.name)]
       pure s
   fx.post (.settingsLoaded settings)
@@ -415,8 +423,8 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .checkMultisigDescriptor g text => discard <| IO.asTask do
       try fx.post (.multisigChecked g text (.ok (← b.checkMultisigDescriptor text)))
       catch e => fx.post (.multisigChecked g text (.error (toString e)))
-  | .addMultisigAccount g adv name d => background fx g "multisigAdd" do
-      let (id, registration) ← b.addMultisigAccount adv name d
+  | .addMultisigAccount g name d => background fx g "multisigAdd" do
+      let (id, registration) ← b.addMultisigAccount name d
       return .multisigAdded g id registration
   | .removeMultisigAccount g id => background fx g "multisigAccount" do
       b.removeMultisigAccount id
@@ -424,36 +432,36 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .newMultisigAddress g id => background fx g "multisigAccount" do
       b.newMultisigReceiveAddress id
       return .multisig g (← b.multisigOverview)
-  | .createMultisigAccount g adv name k members rec => background fx g "multisigBuild" do
-      let (id, d, registration) ← b.createMultisigAccount adv name k members rec
+  | .createMultisigAccount g name k members rec => background fx g "multisigBuild" do
+      let (id, d, registration) ← b.createMultisigAccount name k members rec
       return .multisigCreated g id d registration
-  | .registerLedger g adv id => discard <| IO.asTask do
+  | .registerLedger g id => discard <| IO.asTask do
       try
-        b.registerLedger adv id
+        b.registerLedger id
         fx.post (.ledgerRegistered g id (.ok ()))
       catch e => fx.post (.ledgerRegistered g id (.error (toString e)))
-  | .pairLedger g adv name => background fx g "ledgerPair" do return .ledgerPaired g (← b.pairLedger adv name)
-  | .addSignerKeys g adv name text => background fx g "signerKeys" do
-      return .signerSaved g (← b.addSignerKeys adv name text)
+  | .pairLedger g name => background fx g "ledgerPair" do return .ledgerPaired g (← b.pairLedger name)
+  | .addSignerKeys g name text => background fx g "signerKeys" do
+      return .signerSaved g (← b.addSignerKeys name text)
   | .renameSigner g id name => background fx g "signer" do
       b.renameSigner id name
       return .signerRenamed g id
   | .removeSigner g id => background fx g "signer" do
       b.removeSigner id
       return .signerRemoved g id
-  | .verifyLedgerAddress g adv id index => discard <| IO.asTask do
-      try fx.post (.ledgerAddressShown g id index (.ok (← b.verifyLedgerAddress adv id index)))
+  | .verifyLedgerAddress g id index => discard <| IO.asTask do
+      try fx.post (.ledgerAddressShown g id index (.ok (← b.verifyLedgerAddress id index)))
       catch e => fx.post (.ledgerAddressShown g id index (.error (toString e)))
-  | .signAndDraft g adv inputs p =>
+  | .signAndDraft g inputs p =>
       -- "Sign and continue": one device authentication, this phone's signature, the draft filed
       authenticated fx g "send" "Sign this multisig payment" do
-        return .drafted g (← b.signAndDraft adv inputs p)
+        return .drafted g (← b.signAndDraft inputs p)
   | .signDraft g e id =>
       authenticated fx g s!"collect.{e}" "Sign this multisig payment" do
         b.signDraft id
         return .collected g e id
-  | .signDraftWithLedger g e adv id => background fx g s!"collect.{e}" do
-      b.signDraftWithLedger adv id
+  | .signDraftWithLedger g e id => background fx g s!"collect.{e}" do
+      b.signDraftWithLedger id
       return .collected g e id
   | .adoptDraft g e id psbt => background fx g s!"collect.{e}" do
       b.adoptDraft id psbt
@@ -469,6 +477,11 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .abandonSpend g id txid => background fx g "accountSpend" do
       b.abandonSpend id txid
       return .spendHandled g id txid
+  | .scanLedgers g => discard <| IO.asTask do
+      -- Bluetooth off, not allowed or absent sees nothing: the card simply does not come
+      let seen ← try b.scanLedgers catch _ => pure []
+      fx.post (.ledgersNearby g seen)
+  | .askBluetooth => discard <| IO.asTask do try b.askBluetooth catch _ => pure ()
   | _ => pure ()
 
 /-- `bgtask.complete`: task `id` is over, naming its launch's `tag` when the shell gave one, so that the shell
@@ -486,6 +499,7 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       IO.sleep ms.toUInt32
       fx.post h
   | .openURL url => fx.cap "open" (Json.mkObj [("url", Json.str url)]) fun _ => .copiedExpired ""
+  | .setAppearance a => discard <| IO.asTask (discard <| fx.ask "appearance" (Json.mkObj [("style", Json.str a.style)]))
   | .journal name fields => journal name fields
   | .discoverCloud => discard <| IO.asTask (try b.discoverCloudBackups catch _ => pure ())
   | .setAutomaticCloud enabled => discard <| IO.asTask (try b.setAutomaticCloudBackup enabled catch _ => pure ())
@@ -574,9 +588,9 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .newMultisigAddress .. | .createMultisigAccount .. | .registerLedger .. | .pairLedger .. | .addSignerKeys ..
   | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft ..
   | .signDraftWithLedger .. | .adoptDraft .. | .broadcastDraft .. | .discardDraft .. | .rebroadcastSpend ..
-  | .abandonSpend .. =>
+  | .abandonSpend .. | .scanLedgers .. | .askBluetooth =>
     performMultisig b fx c
-  | .copy .. | .timer .. | .openURL .. | .journal .. | .discoverCloud | .setAutomaticCloud .. | .restoreCloud ..
+  | .copy .. | .timer .. | .openURL .. | .setAppearance .. | .journal .. | .discoverCloud | .setAutomaticCloud .. | .restoreCloud ..
   | .suspendCloud | .cloudScene .. | .scheduleBackgroundTasks | .runBackgroundTask .. | .expireBackgroundTask ..
   | .completeBackgroundTask ..
   | .backgroundRefreshStatus | .paste .. =>

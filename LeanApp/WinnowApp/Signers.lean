@@ -1,8 +1,8 @@
 import WinnowApp.Multisig
 import WinnowApp.Ids
 
-/-! SignerViews.swift (upstream d2ca878): Settings → Signers (Advanced mode only): this phone's key, the
-Ledgers it paired and the keys other people sent, which Wallet → Multisig builds accounts from; one
+/-! SignerViews.swift (upstream d2ca878): Settings → Security → Hardware wallets and keys: this phone's key, the
+Ledgers it paired and the keys other people sent, which multisig accounts are built from; one
 signer's detail (rename, keys, remove); LedgerPairView (moved here from the Multisig section: it files
 the Ledger's key and registers nothing); SignerKeysAddView ("Save keys someone sent"). -/
 
@@ -70,7 +70,7 @@ def stepSigner (msg : SignerMsg) (m : Model) : Model × List Cmd :=
   | .saveKeys =>
     if !keys.canSave m.settings.network then (m, []) else
     ({ m with signerKeys := { keys with saving := true, error := none } },
-     [.addSignerKeys g m.settings.advancedMode keys.name keys.text])
+     [.addSignerKeys g keys.name keys.text])
   | .setSignerName s => ({ m with signerDetail := { m.signerDetail with name := s } }, [])
   | .renameSigner => (m, m.renameSignerCmds)
   | .removeSigner =>
@@ -97,19 +97,10 @@ def Model.onSignerHost (m : Model) (h : Host) : Model × List Cmd :=
 
 /-! ## View -/
 
-/-- `SignersSection`'s summary: "1 Ledger, 2 saved", or "This phone". -/
+/-- Settings → Security's "Hardware wallets and keys" row: how many signers are saved, none for this phone alone
+(the row's title is long, so its detail stays a number). -/
 def signersSummary (o : MultisigOverview) : String :=
-  let ledgers := o.ledgers.length
-  let saved := o.signers.length - ledgers
-  let parts := (if ledgers == 0 then [] else [s!"{ledgers} Ledger{if ledgers == 1 then "" else "s"}"]) ++
-    (if saved == 0 then [] else [s!"{saved} saved"])
-  if parts.isEmpty then "This phone" else ", ".intercalate parts
-
-/-- Settings → "Signers" (Advanced mode only, after Backup). -/
-def signersSection (m : Model) : H :=
-  .section "" "Pair a Ledger once, and save the keys other people send; multisig accounts under Wallet are built from them."
-    [.row [.identified Ids.signersButton (navLink "Signers" (some (.signer .openSigners)) (symbol := "person.2")), .spacer,
-           Html.tone .secondary (body (signersSummary m.multisig))]]
+  if o.signers.isEmpty then "" else s!"{o.signers.length}"
 
 /-- `SignerRow`. -/
 def signerRow (s : SignerInfo) (action : Option Msg) (id : String := (Ids.signerRow (s.id))) : H :=
@@ -122,7 +113,7 @@ def signersSections (m : Model) : List H :=
   (match o.signerNotice with
    | some n => [.section "" "" [.identified Ids.signerStorageNotice (body n)]]
    | none => []) ++
-  [ .section "This phone" "Send this key to whoever builds an account you join. To count this phone and its Ledger as one signer of their account, send both keys together from Wallet → Multisig → Join an account."
+  [ .section "This phone" "Send this key to whoever builds an account you join. To count this phone and its Ledger as one signer of their account, send both keys together from Settings → Security → Multisig accounts → Join an account."
       (match o.keyExpression with
        | some key =>
          [ .identified Ids.signersOwnFingerprint (.labeled "Fingerprint" (o.ownFingerprint.getD "?"))

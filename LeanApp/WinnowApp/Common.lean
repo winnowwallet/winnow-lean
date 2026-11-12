@@ -20,8 +20,12 @@ def Model.discardExport (m : Model) : List Cmd :=
 
 def caption (s : String) : H := .text s .caption
 def body (s : String) : H := .text s .body
+/-- A warning, wherever the app shows one: a filled symbol in the warning colour beside its text at body
+size in the label colour. Small grey text beside an untinted symbol read as a footnote. -/
+def warningRow (text : String) (icon : String := "exclamationmark.triangle.fill") (tone : LeanNative.Tone := .warning) : H :=
+  .row [Html.tone tone (.icon icon), body text]
 def errorRows : Option String → List H
-  | some e => [.row [Html.tone .warning (.icon "exclamationmark.triangle"), body e]]
+  | some e => [warningRow e]
   | none => []
 /-- An address, a txid, a key: monospaced small text, wrapped at any character. -/
 def literal (s : String) : H := Html.mono (caption s)
@@ -81,7 +85,7 @@ def Model.fail (m : Model) (context message : String) : Model :=
 /-- Forget what a sheet held when it goes away (the SwiftUI view's @State dies with it). -/
 def Model.forgetSheet (m : Model) : Sheet → Model × List Cmd
   | .receive => ({ m with receive := {}, labelEditor := {} }, [.stopWatchingAddress])
-  | .send => ({ m with send := {}, expanded := m.expanded.erase "send.details" }, [])
+  | .send => ({ m with send := {}, expanded := ((m.expanded.erase "send.details").erase "send.fee").erase "send.review" }, [])
   | .feeBump => ({ m with feeBump := {} }, [])
   | .addPerson => ({ m with person := {} }, [])
   | .labelEditor => ({ m with labelEditor := {} }, [])
@@ -94,7 +98,9 @@ def Model.forgetSheet (m : Model) : Sheet → Model × List Cmd
   | .signerPicker => ({ m with multisigBuild := { m.multisigBuild with pickInto := none, pasteError := none } }, [])
   -- CloudRestoreView's `onDisappear`: `cancel()` (the controller's operations end)
   | .cloudRestore => ({ m with onboarding := { m.onboarding with restoring := false, restoreError := none } }, [.suspendCloud])
-  | .cloudBackup | .readSide => (m, [])
+  | .cloudBackup | .readSide | .bluetoothIntro => (m, [])
+  -- the nearby card: a setup left (Not now, or after a failure) starts again from its first step
+  | .ledgerNearby => ({ m with ledgerSetup := none }, [])
 
 /-- Close the sheets from index `i` up (an outer sheet takes the ones it presented with it). -/
 def Model.closeFrom (m : Model) (i : Nat) : Model × List Cmd :=
@@ -139,10 +145,9 @@ def copyableBlock (m : Model) (key text : String) (id := "") : H :=
 def explorerButton (title url exposedItem : String) : H :=
   Html.symbol "safari" (.button title .plain (some (.openExplorer url exposedItem)))
 
-/-- A raw address or id: in full for Advanced mode, folded behind a title for a beginner. -/
+/-- A raw address or id, folded behind a title. -/
 def technical (m : Model) (key title : String) (content : List H) : List H :=
-  if m.settings.advancedMode then content
-  else [.disclosure title (m.isExpanded key) (Msg.setExpanded key) content]
+  [.disclosure title (m.isExpanded key) (Msg.setExpanded key) content]
 
 /-- A sheet's own close control (SwiftUI's cancellation toolbar item): the system Close button at the
 navigation bar's leading end, `label` what VoiceOver says, `id` its UI-test identifier. -/

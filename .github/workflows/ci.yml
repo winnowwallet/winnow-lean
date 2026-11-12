@@ -6,7 +6,7 @@ name: CI
 # `release` (the Release builds and the test-mode check).
 # It runs on pull
 # requests that are ready for review and change more than the docs, on every push to main, and by hand. Every
-# run is the same full run: every test, all eight journeys, the Release builds and the website's media.
+# run is the same full run: every test, all nine journeys, the Release builds and the website's media.
 # release.yml looks for one on the tag's tree that is not a pull request's instead of testing again: main's
 # commit has one once its push run passes; after a push run that failed, or a force-push (which starts no push
 # run), run this by hand before tagging.
@@ -31,9 +31,9 @@ jobs:
   app:
     # a draft pull request runs nothing until it is ready for review
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@eb8428cf555d9e7b4e71dbe20a495545859d341e
+    uses: LeanNative/leannative/.github/workflows/ios-app.yml@59180b0c95c0bb94289ac2febffdaa6316917748
     with:
-      leannative: eb8428cf555d9e7b4e71dbe20a495545859d341e
+      leannative: 59180b0c95c0bb94289ac2febffdaa6316917748
       # GitHub's hosted macOS runner (macos-26: Xcode 26, iOS 26 simulators), the reusable workflow's default; or,
       # when the repository variable MACOS_RUNNER is set, that label (a self-hosted Mac while GitHub's are backed
       # up: delete the variable before it goes away, or the jobs wait for it). A fork's pull request always runs
@@ -83,12 +83,12 @@ jobs:
       ui-device-type: iPhone 17 Pro
       ui-before: scripts/ui-fixture start
       ui-after: scripts/ui-fixture stop
-      # the journeys are Lean on the Mac (LeanApp/Journeys.lean), all eight with XCTest's real touches
+      # the journeys are Lean on the Mac (LeanApp/Journeys.lean), all nine with XCTest's real touches
       # (LeanNative's LNDriver, one snapshot per step) on one simulator: a hosted runner has the cores for one
       ui-journey: journeys
-      # two runners at once, four journeys each (five took about 3.5 minutes each; one runner: 6.6); the media
+      # two runners at once, four or five journeys each (five took about 3.5 minutes each; one runner: 6.6); the media
       # job joins their recordings into the website's one video, the journeys in Journeys.lean's order
-      ui-journey-shards: '["createReceiveSendConfirm multisigTwoOfThreeWithRecovery feeBumpReplaceConfirm retryAfterNoPeers", "ledgerPairVerifySpend shippedCensus silentPaymentSend spentElsewhere"]'
+      ui-journey-shards: '["createReceiveSendConfirm multisigTwoOfThreeWithRecovery feeBumpReplaceConfirm retryAfterNoPeers", "ledgerPairVerifySpend ledgerCardTwoOfTwo shippedCensus silentPaymentSend spentElsewhere"]'
       # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run:
       # LeanNative's journey-media, in the layout and names the website reads
       journey-media: build/journey-media

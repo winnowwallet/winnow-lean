@@ -525,7 +525,7 @@ def automaticCloudTests (root : System.FilePath) : TM Unit := do
   let p ← cloudPhone root "optout" (← newKeys) false
   p.bootExisting
   p.backend.setAutomaticCloudBackup false
-  p.backend.updateSettings { p.settings with advancedMode := true }
+  p.backend.updateSettings { p.settings with ownDisplayName := "Me" }
   p.backend.updateSettings p.settings
   p.activate
   IO.sleep 100
@@ -549,7 +549,7 @@ def automaticCloudTests (root : System.FilePath) : TM Unit := do
   let r ← rebooted.backend.openWallet .signet p.dir
   check "a legacy unfinished checklist opens ready, its flag cleared" ((r matches .opened _) && !(← flag.pathExists))
   let model := (onHost (.created 0 id) ({ stage := .onboarding, active := true } : Model)).1
-  check "creation lands on the wallet, with no checklist" (model.stage == .ready && model.walletID == some id && model.sheets.isEmpty)
+  check "creation lands on the wallet, with no checklist, only the Bluetooth card" (model.stage == .ready && model.walletID == some id && model.sheets == [.bluetoothIntro])
 
 /-- Restore from iCloud end to end: phone A's backup (people included) restores on phone B, which then keeps
 its own record bound to the same account. -/
@@ -564,7 +564,7 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
   let card ← match ← (RecordsReal.ownPersonCard bob "Bob").run with
     | .ok c => pure c.serialized | .error _ => throw "card"
   discard <| a.backend.addPerson "Bob" (some card) none none none
-  a.backend.updateSettings { a.settings with ownDisplayName := "Alice", advancedMode := true }
+  a.backend.updateSettings { a.settings with ownDisplayName := "Alice" }
   a.app.controller.update do
     let bundle ← a.app.exportedBundle
     return { bundle, appState := some (← a.app.cloudAppState bundle).encoded }
@@ -581,7 +581,8 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
   check "restore: the same wallet" (restoredID == id)
   check "restore: one authentication" ((← b.authAttempts.get) == 1)
   check "restore: no peer yet, verification waits" verified.isNone
-  check "restore: the display name and Advanced switch come back" (context == some ("Alice", true))
+  -- the format keeps its Advanced switch (the Swift app reads it): this app's one mode writes it on
+  check "restore: the display name comes back, and the format's Advanced switch with it" (context == some ("Alice", true))
   check "restore: saved people come back" ((← b.backend.records).people.any (·.name == "Bob"))
   let st ← b.app.controller.get
   check "restore: this phone keeps its own backup, bound to the account" (st.enabled && st.lastSaved.isNone &&
@@ -589,7 +590,7 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
   check "restore: a second restore is refused" (← fails (b.backend.restoreCloudBackup .signet b.dir backup.id))
   b.backend.stopNetworking
 
-/-! ## The screens: onboarding without a checklist, Simple's backup line, Advanced's iCloud controls -/
+/-! ## The screens: onboarding without a checklist, the home's backup line, Settings → Backup -/
 
 def rendered (h : H) : String := (LeanNative.Html.toWire h).toJson.compress
 
@@ -601,7 +602,8 @@ def onboardingScreens : TM Unit := do
     contains plain "Restore from a file")
   check "onboarding: iCloud said up front" (contains plain "automatically backs up your wallet with iCloud when available")
   check "onboarding: no iCloud restore without a backup" (!contains plain "restoreCloudBackupButton")
-  check "onboarding: no network picker in Simple mode on mainnet" (!contains plain "onboardingNetworkPicker")
+  check "onboarding: on mainnet the network is folded behind Use a test network" (contains plain "onboardingTestNetwork" &&
+    contains plain "Use a test network")
   let found := rendered (view { m with cloud := { available := [{ id := "A", savedAtText := "10/27/2026, 7:28 PM" }] } })
   check "onboarding: a saved backup offers the iCloud restore" (contains found "restoreCloudBackupButton" && contains found "1 saved backup(s) found.")
   let (m2, cs) := step (.cloud .openRestore) { m with cloud := { available := [{ id := "A", savedAtText := "10/27/2026, 7:28 PM" }] } }
@@ -611,36 +613,35 @@ def onboardingScreens : TM Unit := do
   let (m3, cs) := step (.cloud (.restore "A")) m2
   check "restore sheet: restoring" (m3.onboarding.restoring && cs.any (· matches .restoreCloud ..))
   let (m4, cs) := onHost (.cloudRestored m3.generation "W" none (some ("Alice", true))) m3
-  check "restore sheet: restored, with the context's settings saved" (m4.onboarding.restored && m4.settings.ownDisplayName == "Alice" &&
-    m4.settings.advancedMode && cs.any (· matches .saveSettings _))
+  check "restore sheet: restored, with the context's display name saved" (m4.onboarding.restored && m4.settings.ownDisplayName == "Alice" &&
+    cs.any (· matches .saveSettings _))
+  -- the backup's Advanced switch flips no mode: the settings are the same with it off
+  let (m4off, _) := onHost (.cloudRestored m3.generation "W" none (some ("Alice", false))) m3
+  check "restore sheet: the backup's Advanced switch changes nothing" ((Lean.toJson m4off.settings).compress == (Lean.toJson m4.settings).compress)
   check "restore sheet: says verification waits for peers"
     (contains (rendered (view m4)) "Restored. Network verification will resume when peers are reachable.")
   let (m5, _) := step .finishOnboarding m4
-  check "restore sheet: Continue lands on the wallet" (m5.stage == .ready && m5.sheets.isEmpty)
+  check "restore sheet: Continue lands on the wallet, then the Bluetooth card" (m5.stage == .ready && m5.sheets == [.bluetoothIntro])
   let signet := rendered (view { m with settings := { network := .signet } })
   check "onboarding: a signet wallet keeps the network picker" (contains signet "onboardingNetworkPicker")
-  -- Simple mode's backup line
-  let home (c : CloudStatus) := rendered (.list (beginnerSections { stage := .ready, cloud := c, walletID := some "w" }) : H)
+  -- the home's backup line
+  let home (c : CloudStatus) := rendered (.list (homeSections { stage := .ready, cloud := c, walletID := some "w" }) : H)
   let notYet := home {}
-  check "Simple: not backed up offers the backup file" (contains notYet "Not backed up" && contains notYet "backupButton" &&
+  check "home: not backed up offers the backup file" (contains notYet "Not backed up" && contains notYet "backupButton" &&
     contains notYet "Your wallet still works. Until iCloud backup works, keep a backup file yourself." &&
     contains notYet "Save a backup file")
   let noEntitlement := home { message := some cloudMissingEntitlementText }
-  check "Simple: a build without iCloud says so once" (contains noEntitlement "iCloud backup isn't available in this build of Winnow." &&
+  check "home: a build without iCloud says so once" (contains noEntitlement "iCloud backup isn't available in this build of Winnow." &&
     (noEntitlement.splitOn "Not backed up").length == 2 && !contains noEntitlement "Sign in to iCloud")
   let done := home { statusTitle := "Backed up", lastSavedText := some "10/27/2026, 7:28 PM", enabled := true }
-  check "Simple: backed up, with its date, and no manual nag" (contains done "Last saved 10/27/2026, 7:28 PM" && !contains done "backupButton")
-  -- the backup section: the iCloud controls and the words are Advanced's
-  let simpleBackup := rendered (backupSection { walletID := some "w" })
-  check "Simple's Back up page: only the file" (contains simpleBackup "exportBundleButton" && !contains simpleBackup "revealPhraseButton" &&
-    !contains simpleBackup "iCloud backup")
-  let advanced : Model := { walletID := some "w", settings := { advancedMode := true } }
+  check "home: backed up, with its date, and no manual nag" (contains done "Last saved 10/27/2026, 7:28 PM" && !contains done "backupButton")
+  -- Settings → Backup: always the iCloud backup, the file and the recovery words
+  let advanced : Model := { walletID := some "w" }
   let advBackup := rendered (backupSection advanced)
-  check "Advanced: iCloud backup and the recovery phrase" (contains advBackup "iCloud backup" && contains advBackup "revealPhraseButton")
+  check "Settings → Backup: iCloud backup, the file and the recovery phrase" (contains advBackup "iCloud backup" &&
+    contains advBackup "exportBundleButton" && contains advBackup "revealPhraseButton")
   check "Settings: the plain footer and button" (contains advBackup "iCloud backup keeps this wallet automatically. A backup file is a copy you keep yourself." &&
     contains advBackup "Save a backup file" && !contains advBackup "Back up wallet")
-  check "Simple's Back up page: the file, in plain words" (contains simpleBackup "A backup file is a copy of this wallet you keep yourself." &&
-    contains simpleBackup "Save a backup file")
   let row (c : CloudStatus) := rendered (backupSection { advanced with cloud := c })
   check "Settings row: backed up, how long ago" (contains (row { statusTitle := "Backed up", lastSavedAgo := some "5 min" }) "Backed up 5 min ago")
   check "Settings row: not available in this build" (contains (row { message := some cloudMissingEntitlementText }) "Not available")
@@ -654,8 +655,8 @@ def onboardingScreens : TM Unit := do
   check "Backup file sheet: the phrase still asks first" (asking.confirm == some .exportWithPhrase)
   let (m6, _) := step (.cloud .openBackup) advanced
   let controls := rendered (cloudBackupSheet m6 [])
-  check "Advanced: the automatic switch" (contains controls "automaticCloudBackupToggle" && contains controls "Automatic iCloud backup")
-  check "Advanced: the switch asks the backend" ((step (.cloud (.setAutomatic false)) m6).2.any (· matches .setAutomaticCloud false))
+  check "iCloud backup: the automatic switch" (contains controls "automaticCloudBackupToggle" && contains controls "Automatic iCloud backup")
+  check "iCloud backup: the switch asks the backend" ((step (.cloud (.setAutomatic false)) m6).2.any (· matches .setAutomaticCloud false))
 
 /-- The shell's CloudKit answers as the screens' texts: a build without the entitlement is not a sign-in
 problem (PORT.md, deliberate departures, user 2026-10-28). -/
