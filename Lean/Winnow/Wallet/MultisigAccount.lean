@@ -980,6 +980,12 @@ def thresholdOn (a : MultisigAccount) (path : SpendPath) : Int :=
   | none, some leaf => (a.recoveryLeaves[leaf]?.map (·.threshold)).getD 0
   | none, none => 0
 
+/-- Whether this account public key is among the signers (a signers' leaf), not on a recovery leaf alone. -/
+def signs (a : MultisigAccount) (accountKey : HDKey) : Bool :=
+  (a.signersLeaves.flatMap (·.keys)).any fun k => match extendedKey? k with
+    | some (base, _) => base.publicKey == accountKey.publicKey
+    | none => false
+
 /-- Whether one key of the account is this account public key, whatever origin label it carries. -/
 def includes (a : MultisigAccount) (accountKey : HDKey) : Bool :=
   a.allKeys.any fun k => match extendedKey? k with

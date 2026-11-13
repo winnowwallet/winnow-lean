@@ -47,7 +47,10 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     let m := { m with settings := s }.loadGatewayDraft
     (m, [.setAppearance s.appearance, .openWallet m.generation s.network true])
   | .booted g r =>
-    if !m.current g then (m, []) else
+    -- the wallet opens whether or not the scene left the front meanwhile: its answer counts for this wallet
+    -- (`sameWallet`), or the app would show "Opening wallet…" for good
+    if !m.sameWallet g then (m, []) else
+    let g := m.generation
     -- networking runs only while the scene is active (a cold background launch has no scene); a background
     -- task iOS launched during boot runs now
     let start : List Cmd := if m.active then [.startNetworking g m.settings] else []
@@ -88,7 +91,8 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
       ({ m with settings := s }, [.saveSettings s])
     | none => (m, [])
   | .deleted g =>
-    if !m.current g then (m, []) else
+    -- the wallet is gone whether or not the scene left the front meanwhile
+    if !m.sameWallet g then (m, []) else
     let m' := m.nextWallet
     let m' := { m' with stage := Stage.onboarding, walletID := none, status := ({} : Status), records := ({} : Records),
                         multisig := ({} : MultisigOverview), collect := m'.collect.cleared }

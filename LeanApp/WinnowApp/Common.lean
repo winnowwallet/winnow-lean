@@ -44,6 +44,8 @@ def Model.fail (m : Model) (context message : String) : Model :=
     let shown := if message == "Winnow.CancellationError" then none else some message
     { m with onboarding := { m.onboarding with restoring := false, restoreError := shown } } else
   if context == "reveal.cancelled" then { m with reveal := { m.reveal with revealing := false, error := none } } else
+  -- and so does an export that would have carried it: the sheet is as it was before the button
+  if context == "export.cancelled" then { m with exportState := { m.exportState with busy := false, error := none } } else
   let cancelled := context.endsWith ".cancelled"
   let context := if cancelled then (context.dropEnd 10).copy else context
   if context.startsWith "collect." then
@@ -60,6 +62,9 @@ def Model.fail (m : Model) (context message : String) : Model :=
   | "rate" => { m with send := { m.send with resolvedRateMilli := none } }
   | "settings" | "peers" => { m with settingsDraft := { m.settingsDraft with error := some message, resettingPeers := false } }
   | "delete" => { m with confirm := some (.deleteFailed message) }
+  -- the wallet could not be opened at all: the screen that says so has Retry, where "Opening wallet…" has none
+  | "open" => if m.stage == .loading then { m with stage := .storageDamaged message }
+              else { m with status := { m.status with lastSyncError := some message } }
   -- the census line is read from the shipped list; a failure leaves it unset
   | "catalog" => m
   | "payment" => { m with payment := { loading := false, error := some message } }

@@ -521,6 +521,12 @@ def multisigAddSections (m : Model) : List H :=
        (match f.validation with
         | some (.ok c) =>
           [.identified Ids.multisigAddPolicy (.labeled "Policy" c.policy)] ++
+          (match c.recovery with
+           | some r => [.identified Ids.multisigAddRecovery (.labeled "Recovery" r)]
+           | none => []) ++
+          (match c.warning with
+           | some w => [.identified Ids.multisigAddWarning (warningRow w)]
+           | none => []) ++
           (match c.firstAddress with
            | some a => [.col [caption "First address", .identified Ids.multisigFirstAddress (caption a)]]
            | none => []) ++

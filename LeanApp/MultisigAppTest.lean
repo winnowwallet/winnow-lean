@@ -1204,6 +1204,38 @@ def testAThresholdAccountAsOneMember : IO Unit := do
   let screen ← screenOf (← Real.reviewMultisigPSBT phone.env phone.multisig estateID o.base64)
   check "Carol completes the family" (screen.progress.complete && (completePaths screen).length == 1)
 
+/-- #92's finding 4: what Join an account says of a pasted descriptor before Save. The policy line is the
+signers' alone, so the recovery path is said beside it, and a phone that is on that path only is told so. -/
+def testTheJoinCheckSaysTheRecoveryPathAndThisPhonesPart : IO Unit := do
+  let phone ← phoneWith 0xA4
+  let ms ← masters
+  let phoneKey ← phone.keyExpression
+  let bob ← keyExpression ms[1]!
+  let carol ← keyExpression ms[2]!
+  let stranger ← keyExpression (← master 0xD9)
+  let text (plan : Option MultisigAccount.RecoveryPlan) (signers : Array String) : IO String := do
+    return (← need "descriptor" (MultisigAccount.makeDescriptor 2 signers plan signet)).serialized
+  -- no recovery path: the policy, and nothing else to say
+  let plain ← phone.backend.checkMultisigDescriptor (← text none #[phoneKey, bob, carol])
+  check "join check: no recovery path, no recovery line and no warning"
+    (plain.policy == "2 of 3" && plain.recovery.isNone && plain.warning.isNone) s!"{repr plain}"
+  -- someone else's key alone after one block: "2 of 3" is not the whole of it
+  let swept ← phone.backend.checkMultisigDescriptor (← text (some (.separateKeys 1 #[stranger] 1)) #[phoneKey, bob, carol])
+  check "join check: a recovery key after one block is said beside the policy"
+    (swept.policy == "2 of 3" && swept.recovery == some "after 1 blocks: the recovery key" && swept.warning.isNone)
+    s!"{repr swept}"
+  -- this phone on the recovery path only
+  let aside ← phone.backend.checkMultisigDescriptor (← text (some (.separateKeys 1 #[phoneKey] 144)) #[bob, carol])
+  check "join check: a phone that is only the recovery key is told it does not sign"
+    (aside.policy == "2 of 2" && aside.recovery == some "after 144 blocks: the recovery key" &&
+     aside.warning == some Real.recoveryOnlyText) s!"{repr aside}"
+  -- and the screen shows both
+  let form : MultisigAddForm := { descriptor := "d", check := some ("d", .ok aside) }
+  let screen := (LeanNative.Html.toWire (LeanNative.Html.list (multisigAddSections { ({} : Model) with multisigAdd := form }))).toJson.compress
+  let shows (text : String) : Bool := (screen.splitOn text).length > 1
+  check "join check: the screen shows the recovery path and the warning"
+    (shows "after 144 blocks: the recovery key" && shows "not one of the signers") screen
+
 /-- What an account's page says of a recovery path of fewer members. The recovery leaves alone can read as
 more members than the account has, and it is the members of the policy line above that the page counts. -/
 def testRecoveryTextCountsTheAccountsMembers : IO Unit := do
@@ -1269,7 +1301,8 @@ def testRecoveryTextCountsTheAccountsMembers : IO Unit := do
 def nestedTests : List (String × IO Unit) :=
   [ ("testTwoPhonesWithLedgersAndAThirdMember", testTwoPhonesWithLedgersAndAThirdMember)
   , ("testAThresholdAccountAsOneMember", testAThresholdAccountAsOneMember)
-  , ("testRecoveryTextCountsTheAccountsMembers", testRecoveryTextCountsTheAccountsMembers) ]
+  , ("testRecoveryTextCountsTheAccountsMembers", testRecoveryTextCountsTheAccountsMembers)
+  , ("testTheJoinCheckSaysTheRecoveryPathAndThisPhonesPart", testTheJoinCheckSaysTheRecoveryPathAndThisPhonesPart) ]
 
 /-- The signer list is not a wallet's: deleting the wallet keeps `signers.json`, and the list reads back. -/
 def testTheSignerListSurvivesDeletingTheWallet : IO Unit := do

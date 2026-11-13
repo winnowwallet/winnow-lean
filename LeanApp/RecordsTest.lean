@@ -627,6 +627,30 @@ def backgroundRuns : IO Unit := do
   check "Model: backgrounding asks for the next checks" (cs.any (· matches .scheduleBackgroundTasks) && cs.any (· matches .stopNetworking))
   let (_, cs) := onHost (.bgtaskExpired Real.backgroundRefreshID "refresh" (some 3)) m
   check "Model: an expired task is cancelled" (cs.any (· matches .expireBackgroundTask _ (some 3)))
+  -- #92's findings 6 and 14: the wallet opens, or is deleted, whether or not the scene left the front meanwhile
+  let (away, _) := onHost (.scene false) ({} : Model)
+  let (opened, _) := onHost (.booted 0 (.opened "w")) away
+  check "Model: a wallet that opened while the app was away is open" (opened.stage == .ready && opened.walletID == some "w")
+    s!"{repr opened.stage}"
+  let (back, cs) := onHost (.scene true) opened
+  check "Model: and coming back starts its networking" (back.stage == .ready && cs.any (· matches .startNetworking ..))
+  let (switched, _) := (away.switchNetwork (if away.settings.network == .mainnet then .signet else .mainnet))
+  let (stale, _) := onHost (.booted 0 (.opened "w")) switched
+  check "Model: another network's wallet opening is still dropped" (stale.stage == .loading && stale.walletID.isNone)
+  let (failed, _) := onHost (.failed 0 "open" "The wallet's folder could not be made.") away
+  check "Model: a wallet that could not be opened says so, with Retry"
+    (failed.stage == .storageDamaged "The wallet's folder could not be made." && contains (LeanNative.Html.toWire (view failed)).toJson.compress "Retry")
+  let ready : Model := { stage := .ready, active := true, walletID := some "w" }
+  let (leaving, _) := onHost (.scene false) ready
+  let (deleted, _) := onHost (.deleted 0) leaving
+  check "Model: a wallet deleted while the app was away is gone" (deleted.stage == .onboarding && deleted.walletID.isNone)
+  -- #92's finding 15: an amount there cannot be is refused, not wrapped into another one
+  check "amount: every satoshi there is, is an amount"
+    ((← (Real.satsOf Real.maximumMoney).toBaseIO).toOption == some (Int64.ofNat Real.maximumMoney))
+  check "amount: one more is refused" (match ← (Real.satsOf (Real.maximumMoney + 1)).toBaseIO with
+    | .error e => toString e == Real.amountTooLargeText | .ok _ => false)
+  check "amount: 2⁶⁴ + 10,000 is refused, where it once read as 10,000" (match ← (Real.satsOf (2 ^ 64 + 10_000)).toBaseIO with
+    | .error _ => true | .ok _ => false)
   check "system events: a launched task" ((system (Lean.Json.mkObj [("bgtask", Lean.Json.mkObj [("id", "x"), ("kind", "processing")])])) matches some (.bgtask "x" "processing" none))
   check "system events: an expired task" ((system (Lean.Json.mkObj [("bgtaskExpired", Lean.Json.mkObj [("id", "x"), ("kind", "refresh")])])) matches some (.bgtaskExpired "x" "refresh" none))
   check "system events: a launch's tag" ((system (Lean.Json.mkObj [("bgtask", Lean.Json.mkObj [("id", "x"), ("kind", "processing"), ("tag", Lean.toJson (7 : Nat))])])) matches some (.bgtask "x" "processing" (some 7)))
@@ -646,14 +670,22 @@ structure Shell where
   posted : IO.Ref (Array Host)
   clipboard : IO.Ref String
   caps : IO.Ref (Array (String × Lean.Json))
+  /-- What was asked of the shell and waited for (`ask`), with its arguments. -/
+  asks : IO.Ref (Array (String × Lean.Json))
+  /-- What `auth` answers; yes unless a case says otherwise. -/
+  auth : IO.Ref Lean.Json
 
-def Shell.new : IO Shell := do return { posted := ← IO.mkRef #[], clipboard := ← IO.mkRef "", caps := ← IO.mkRef #[] }
+def Shell.new : IO Shell := do
+  return { posted := ← IO.mkRef #[], clipboard := ← IO.mkRef "", caps := ← IO.mkRef #[], asks := ← IO.mkRef #[],
+           auth := ← IO.mkRef (Lean.Json.mkObj [("ok", Lean.Json.bool true)]) }
 
 def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
   post h := s.posted.modify (·.push h)
   cap name args _ := s.caps.modify (·.push (name, args))
-  ask name _ := do
+  ask name args := do
+    s.asks.modify (·.push (name, args))
     if name == "clipboard.get" then return Task.pure (Lean.Json.mkObj [("text", Lean.Json.str (← s.clipboard.get))])
+    if name == "auth" then return Task.pure (← s.auth.get)
     return Task.pure (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
 
 /-- How many answers `perform` posts for the commands these flows run; none for the ones they leave out
@@ -1446,6 +1478,31 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
   let some file := e.exportState.file | check "background: the backup file is made" false; return
   check "background: the backup file is made, with the phrase" (e.topSheet == some .exportBundle &&
     contains (← IO.FS.readFile file) (expected.headD "?"))
+  -- #92's finding 3: a file that carries the phrase is asked for as showing the phrase is
+  let authReasons : IO (Array String) := do
+    return (← sh.asks.get).filterMap fun (n, a) => if n == "auth" then (a.getObjValAs? String "reason").toOption else none
+  check "export: a backup file with the phrase asks the device's owner"
+    ((← authReasons).contains "Export your recovery phrase") s!"{← authReasons}"
+  let exportWith (withPhrase : Bool) (answer : Lean.Json) : IO Model := do
+    sh.asks.set #[]
+    sh.auth.set answer
+    let (x, _) ← sh.tap (.backup .openExport) again
+    let (x, _) ← sh.tap (.backup (.setIncludeMnemonic withPhrase)) x
+    let (x, _) ← sh.tap (.backup .createExport) x
+    let (x, _) ← if withPhrase then sh.tap (.backup .confirmExport) x else pure (x, [])
+    sh.auth.set (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
+    return x
+  let declined ← exportWith true (Lean.Json.mkObj [("ok", Lean.Json.bool false), ("error", Lean.Json.str "Biometry is locked out.")])
+  check "export: declined, no file is made and the sheet says why"
+    (declined.exportState.file.isNone && !declined.exportState.busy && declined.exportState.error == some "Biometry is locked out.")
+    s!"{repr declined.exportState.error}"
+  let cancelled ← exportWith true (Lean.Json.mkObj [("ok", Lean.Json.bool false), ("error", Lean.Json.str "Authentication was cancelled.")])
+  check "export: a cancelled prompt makes no file and says nothing"
+    (cancelled.exportState.file.isNone && !cancelled.exportState.busy && cancelled.exportState.error.isNone)
+    s!"{repr cancelled.exportState.error}"
+  let watchOnly ← exportWith false (Lean.Json.mkObj [("ok", Lean.Json.bool false), ("error", Lean.Json.str "no")])
+  check "export: a file without the phrase asks nothing"
+    (watchOnly.exportState.file.isSome && (← authReasons).isEmpty) s!"{← authReasons}"
   let (eGone, cs) := onHost (.scene false) e
   let (eGone, _) ← sh.run eGone cs
   check "background: the backup file sheet closes and forgets the file"
