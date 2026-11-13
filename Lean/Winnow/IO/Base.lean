@@ -85,6 +85,9 @@ def HeaderChainError.description : HeaderChainError → String
   | .storageCorrupt r => s!"The saved block-header data is damaged ({r})."
   | .storageUnavailable r => s!"Winnow could not read or save its local block-header data ({r})."
   | .badPeerResponse r => s!"A peer returned an invalid block-header response ({r})."
+  | .checkpointMismatch h => s!"A peer sent a Bitcoin chain that does not pass through the known block at height {h}."
+  | .forkBelowCheckpoint h => s!"A peer offered a Bitcoin chain that rewrites settled blocks, from block {h}."
+  | .timestampNotAfterMedianTime h => s!"A peer sent a block header dated before the blocks under it at block {h}."
 
 def FilterSyncError.description : FilterSyncError → String
   | .busy => "Finishing sync. Try loading the payment again in a moment."

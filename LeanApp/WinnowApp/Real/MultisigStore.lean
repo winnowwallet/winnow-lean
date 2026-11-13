@@ -58,6 +58,9 @@ structure MultisigStore where
   path : Option System.FilePath := none
   network : BitcoinNetwork := .signet
   isDamaged : Bool := false
+  /-- The file could not be read because its key could not be (`OpenResult.unavailable`): the store is empty
+  only for want of the key, and is configured again before it is used (`MultisigHost.readAgainIfUnavailable`). -/
+  unavailable : Bool := false
   /-- Each record's owner map, kept until its descriptor or watch count changes: (id, descriptor,
   watch count, map). -/
   ownerMaps : Array OwnerCache := #[]
@@ -210,6 +213,8 @@ def configure (keys : StoreKeyVault) (path : Option System.FilePath) (network : 
     return decoded
   match ← attempt.run with
   | .ok records => return ({ empty with records }, .loaded)
+  -- the key's Keychain refused (a background launch while the phone is locked): not damage, and not "no accounts"
+  | .error (.keyVault (.keychain _)) => return ({ empty with unavailable := true }, .unavailable)
   | .error e =>
     return ({ empty with isDamaged := true },
             .damaged (if isSealFailure e then unverifiedStorageMessage else damagedStorageMessage))
@@ -217,6 +222,7 @@ def configure (keys : StoreKeyVault) (path : Option System.FilePath) (network : 
 def record? (s : MultisigStore) (id : String) : Option MultisigAccountRecord := s.records.find? (·.id == id)
 
 def requireReadable (s : MultisigStore) : RM Unit := do
+  if s.unavailable then throw (.multisig .unavailable)
   if s.isDamaged then throw (.multisig .damaged)
 
 /-- The records for a wallet bundle, pending state included: coins no block has taken, spends in flight
@@ -282,6 +288,9 @@ def ownerCaches (s : MultisigStore) (records : Array MultisigAccountRecord) : RM
 
 /-- Receive and change scripts of every account below its watch count, for the combined scan. -/
 def watchScripts (s : MultisigStore) (network : BitcoinNetwork) : RM (Array ByteArray × MultisigStore) := do
+  -- a store that could not be read is not a store with no accounts: a scan on the wallet's scripts alone would
+  -- move the scan height past the accounts' payments, and nothing goes back for them
+  if s.unavailable then throw (.multisig .unavailable)
   unless network == s.network do invalid "the account network does not match the open wallet"
   let (caches, store) ← s.ownerCaches s.records
   return (caches.foldl (fun acc c => acc ++ c.scripts.extract 0 (2 * (watchCountOf c s.records).toNat)) #[], store)
@@ -628,6 +637,15 @@ def modify {α} (h : MultisigHost) (f : MultisigStore → RM (MultisigStore × �
 /-- `configureMultisig()`: reads the file of `dir` (none: unreachable storage, nothing persisted). -/
 def configure (h : MultisigHost) (network : BitcoinNetwork) (dir : Option System.FilePath) : IO Unit := do
   let (store, result) ← MultisigStore.configure h.keys (dir.map (· / MultisigStore.fileName)) network
+  h.state.atomically (set store)
+  h.notice.set (match result with | .damaged m => some m | _ => none)
+
+/-- The store configured again when its file could not be read for want of its key: the phone has likely been
+unlocked since. Nothing happens for a store that was read, or found missing or damaged. -/
+def readAgainIfUnavailable (h : MultisigHost) : IO Unit := do
+  let s ← h.read
+  if !s.unavailable then return
+  let (store, result) ← MultisigStore.configure h.keys s.path s.network
   h.state.atomically (set store)
   h.notice.set (match result with | .damaged m => some m | _ => none)
 

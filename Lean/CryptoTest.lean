@@ -769,6 +769,135 @@ def fundingSources : IO Unit := do
   let (keyHash, scriptHash) ← FundingVectors.mainnet
   FundingVectors.handMade keyHash scriptHash
 
+section HeaderBranches
+open Winnow.Net Winnow.Net.NetworkParams
+
+/-! Fork choice over a whole branch, the checkpoint a chain from genesis passes through, and median time past
+(#92's first finding). On regtest every header carries the same work, so a branch's work is its length. -/
+
+/-- `count` regtest headers on `previous`, the first at `firstTime`, ten minutes apart; `seed` in the merkle
+root makes one branch's headers different from another's. -/
+def regtestHeaders (previous : BlockHeader) (count : Nat) (seed : UInt8) (firstTime : UInt32) : Array BlockHeader := Id.run do
+  let mut previous := previous
+  let mut out := #[]
+  for i in [0:count] do
+    let time := firstTime + i.toUInt32 * 600
+    let mut nonce : UInt32 := 0
+    let merkle := ByteArray.mk (Array.replicate 32 seed)
+    let mut h := BlockHeader.mk' 1 previous.hash merkle time regtest.genesisBits nonce
+    while !(HeaderChain.checkedWork h regtest 1).isOk do
+      nonce := nonce + 1
+      h := BlockHeader.mk' 1 previous.hash merkle time regtest.genesisBits nonce
+    out := out.push h
+    previous := h
+  return out
+
+/-- A peer holding `chain` (genesis first) answering `getheaders`: the up-to-2,000 headers after the first
+locator hash it holds. -/
+def answer (chain : Array BlockHeader) (locator : Array ByteArray) : Array BlockHeader :=
+  match locator.findSome? (fun hash => chain.findIdx? (·.hash == hash)) with
+  | some k => chain.extract (k + 1) (k + 1 + HeaderChain.maxHeadersPerRequest)
+  | none => #[]
+
+/-- `HeaderStore.sync` with the peer above, purely: `branching` is today's loop (`syncBranchStep`), and without
+it the loop before #92 (`syncStep`, one batch at a time). -/
+def syncWith (c0 : HeaderChain) (peer : Array BlockHeader) (now : UInt32) (branching : Bool := true) :
+    Except HeaderChainError HeaderChain := Id.run do
+  let mut c := c0
+  let mut pending : Option HeaderChain.Branch := none
+  let mut outcome : SyncOutcome := {}
+  let mut replays := 0
+  for _ in [0:50] do
+    let locator := match pending with
+      | some b => #[b.tip.hash] ++ c.blockLocator
+      | none => c.blockLocator
+    let batch := answer peer locator
+    if branching then
+      match c.syncBranchStep pending batch replays outcome now with
+      | .error e => return .error e
+      | .ok (.pending b) => pending := some b
+      | .ok (.stepped c' o r done _) =>
+        c := c'; pending := none; outcome := o; replays := r
+        if done then return .ok c
+    else
+      match c.syncStep batch replays outcome now with
+      | .error e => return .error e
+      | .ok (c', o, r, done, _) =>
+        c := c'; outcome := o; replays := r
+        if done then return .ok c
+  return .ok c
+
+def tipOf (r : Except HeaderChainError HeaderChain) : String :=
+  match r with | .ok c => s!"height {c.height}" | .error e => e.name
+
+def refusedWith (kind : String) (r : Except HeaderChainError HeaderChain) : Bool :=
+  match r with | .error e => e.name == kind | .ok _ => false
+
+def headerBranches : IO Unit := do
+  let genesis := HeaderChain.genesisHeader regtest
+  let t0 := regtest.genesisTime + 600
+  let now := t0 + 10_000 * 600
+  let fake := #[genesis] ++ regtestHeaders genesis 2_100 1 t0
+  let real := #[genesis] ++ regtestHeaders genesis 2_500 2 t0
+  let fresh := (HeaderChain.create regtest none).toOption.get!
+  let onFake := syncWith fresh fake now
+  check "branch: a chain of 2,100 from the first peer" (tipOf onFake == "height 2100") (tipOf onFake)
+  let some onFake := onFake.toOption | return
+  -- the finding: a batch at a time, the real chain's first 2,000 headers are weaker than the 2,100 held
+  let before := syncWith onFake real now (branching := false)
+  check "branch: compared a batch at a time, a longer chain sent in full batches is refused (the defect)"
+    (refusedWith "reorgWithoutMoreWork" before) (tipOf before)
+  let after := syncWith onFake real now
+  check "branch: compared whole, the 2,500 replace the 2,100"
+    (match after with | .ok c => c.height == 2_500 && c.tipHash == real.back!.hash | _ => false) (tipOf after)
+  let weaker := #[genesis] ++ regtestHeaders genesis 2_050 3 t0
+  let r := syncWith onFake weaker now
+  check "branch: a whole branch with less work is still refused" (refusedWith "reorgWithoutMoreWork" r) (tipOf r)
+  -- an ordinary reorg at the tip
+  let onReal := (syncWith fresh real now).toOption.get!
+  let fork := real[2_498]!
+  let tipFork := real.extract 0 2_499 ++ regtestHeaders fork 3 4 (fork.time + 600)
+  let r := syncWith onReal tipFork now
+  check "branch: a reorg of two at the tip by a branch of three"
+    (match r with | .ok c => c.height == 2_501 && c.tipHash == tipFork.back!.hash | _ => false) (tipOf r)
+  -- the checkpoint
+  let cpHeight : UInt32 := 1_000
+  let withCheckpoint : NetworkParams := { regtest with
+    checkpoint := some { height := cpHeight, header := real[cpHeight.toNat]!.serialized,
+                         chainwork := ByteArray.mk (Array.replicate 32 0) } }
+  let fromGenesis := (HeaderChain.create withCheckpoint none).toOption.get!
+  check "checkpoint: a chain from genesis is not proven before it" (!fromGenesis.proven)
+  let r := syncWith fromGenesis fake now
+  check "checkpoint: a chain that does not pass through it is refused at its height"
+    (match r with | .error (.checkpointMismatch h) => h == cpHeight | _ => false) (tipOf r)
+  let short := (syncWith fromGenesis (real.extract 0 cpHeight.toNat) now).toOption.get!
+  check "checkpoint: just under it, still not proven" (short.height == cpHeight - 1 && !short.proven)
+  let onReal := (syncWith fromGenesis real now).toOption.get!
+  check "checkpoint: through it, proven" (onReal.height == 2_500 && onReal.proven)
+  let low := real[499]!
+  let lowFork := real.extract 0 500 ++ regtestHeaders low 2_500 5 (low.time + 600)
+  let r := syncWith onReal lowFork now
+  check "checkpoint: a heavier branch forking under a held checkpoint is refused"
+    (match r with | .error (.forkBelowCheckpoint h) => h == 500 | _ => false) (tipOf r)
+  let keptFake := ((syncWith fresh fake now).toOption.get!).fileBytes
+  check "checkpoint: a kept chain past its height on another header is refused when read"
+    (match HeaderChain.create withCheckpoint (some keptFake) with | .error (.checkpointMismatch _) => true | _ => false)
+  let keptReal := onReal.fileBytes
+  check "checkpoint: a kept chain through it reads"
+    (match HeaderChain.create withCheckpoint (some keptReal) with | .ok c => c.height == 2_500 && c.proven | _ => false)
+  -- median time past
+  let twelve := regtestHeaders genesis 12 6 t0
+  let chain12 := (fresh.connect twelve now).toOption.get!.1
+  let median := t0 + 6 * 600
+  let late := (regtestHeaders twelve.back! 1 7 median).back!
+  check "median time: a header dated at the median of the eleven under it is refused"
+    (match chain12.connect #[late] now with | .error (.timestampNotAfterMedianTime h) => h == 13 | _ => false)
+  let ok := (regtestHeaders twelve.back! 1 7 (median + 1)).back!
+  check "median time: one second later is taken" (chain12.connect #[ok] now).isOk
+  IO.println s!"  header branches: fork choice over whole branches, the checkpoint at {cpHeight}, median time past"
+
+end HeaderBranches
+
 def main : IO UInt32 := runMain "crypto-test" do
   fips197
   wycheproof
@@ -781,6 +910,7 @@ def main : IO UInt32 := runMain "crypto-test" do
   jsonExponents
   retargetRules
   mainnetRetargets
+  headerBranches
   errorNames
   formattedTwoPlaces
   fundingSources

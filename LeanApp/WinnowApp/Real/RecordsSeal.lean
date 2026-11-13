@@ -64,6 +64,9 @@ inductive MultisigStorageError where
   | damaged
   | duplicate
   | tooMany
+  /-- The accounts' file could not be read just now (its key is in a Keychain that refused, as one does while
+  the phone is locked), so nothing that needs them may go ahead. -/
+  | unavailable
   deriving Repr, BEq, Inhabited
 
 /-- `ReceiveAddressLabelStore.StorageError`. -/
@@ -105,7 +108,7 @@ def name : RecordsError → String
   | .labels .unavailable => "unavailable" | .labels .damaged => "damaged" | .labels .invalidLabel => "invalidLabel"
   | .labels .full => "full"
   | .multisig (.invalidState _) => "invalidState" | .multisig .damaged => "damaged"
-  | .multisig .duplicate => "duplicate" | .multisig .tooMany => "tooMany"
+  | .multisig .duplicate => "duplicate" | .multisig .tooMany => "tooMany" | .multisig .unavailable => "unavailable"
   | .app .noWallet => "noWallet"
   | .app .sendReviewChanged => "sendReviewChanged" | .app .personCannotBePaid => "personCannotBePaid"
   | .lookup _ => "unavailable"
@@ -137,6 +140,8 @@ def description : RecordsError → String
     "Winnow could not safely read its multisig accounts, so they cannot be changed until the file is readable again."
   | .multisig .duplicate => "This multisig account is already on this phone."
   | .multisig .tooMany => s!"Winnow keeps at most {maximumMultisigAccounts} multisig accounts."
+  | .multisig .unavailable =>
+    "Winnow could not read its multisig accounts while this device is locked. They are read again once it is unlocked."
   | .app .noWallet => "No wallet is open."
   | .app .sendReviewChanged => "The available coins, fee, or change changed. Review the payment again before signing."
   | .app .personCannotBePaid => "This person has no pay-to key or address yet. Ask them for their Winnow card."

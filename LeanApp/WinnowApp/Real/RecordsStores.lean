@@ -25,6 +25,9 @@ inductive OpenResult where
   | missing
   | loaded
   | damaged (message : String)
+  /-- The file is there, but its key could not be read just now (a Keychain refused while the phone is
+  locked): nothing is known about it, and it is read again later. -/
+  | unavailable
   deriving Repr, BEq, Inhabited
 
 def isSealFailure : RecordsError → Bool

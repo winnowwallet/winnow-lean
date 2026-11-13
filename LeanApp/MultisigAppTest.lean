@@ -498,6 +498,51 @@ def testTamperedUnsealedAndOversizedFilesAreRefusedAndKept : IO Unit := do
   let (_, r3) ← S.open keys (some oversized)
   check "an oversized account file is not read" (r3 == .damaged MultisigStore.damagedStorageMessage)
 
+/-- A vault over `inner` whose Keychain refuses every read while `locked` holds, as one does for an item kept
+while the phone is unlocked, during a background launch with the phone locked. -/
+def lockableKeys (inner : StoreKeyVault) (locked : IO.Ref Bool) : StoreKeyVault :=
+  { inner with key := fun a => do
+      if ← RM.io locked.get then throw (.keyVault (.keychain Keys.errSecInteractionNotAllowed))
+      inner.key a }
+
+/-- #92's second finding: an account file whose key cannot be read now is not an empty store, a scan never runs
+without the accounts' scripts, and the file is read again once the key can be. -/
+def testAnAccountFileWhoseKeyIsLockedIsReadAgainAndNeverScannedWithout : IO Unit := do
+  let inner ← memoryKeys
+  let locked ← IO.mkRef false
+  let keys := lockableKeys inner locked
+  let url ← tempFile "multisig.json"
+  let a ← twoOfTwo
+  let (store, _) ← S.open keys (some url)
+  discard <| need "add" (store.add "Shared" a 100)
+  let (open_, _) ← S.open keys (some url)
+  let (wanted, _) ← need "watch scripts" ((← open_.ref.get).watchScripts signet)
+  check "the account has scripts to watch" (!wanted.isEmpty)
+  locked.set true
+  let (opened, r) ← S.open keys (some url)
+  check "a locked key opens as unavailable, not damaged" (r == .unavailable && !(← opened.ref.get).isDamaged)
+  refused "a scan's scripts are refused while the file cannot be read" ((← opened.ref.get).watchScripts signet |>.map (·.1))
+    "unavailable"
+  refused "and so is a change" (opened.add "Other" a 1) "unavailable"
+  -- the host reads it again on its next use, once the phone is unlocked
+  let host ← MultisigHost.new keys
+  host.configure signet (some url.parent.get!)
+  check "the host's store is unavailable while locked, with no damage notice"
+    ((← host.read).unavailable && (← host.notice.get).isNone)
+  host.readAgainIfUnavailable
+  check "read again while still locked: still unavailable" (← host.read).unavailable
+  locked.set false
+  host.readAgainIfUnavailable
+  let again ← host.read
+  check "read again once unlocked: the account is back" (!again.unavailable && again.records.size == 1)
+  let (scripts, _) ← need "watch scripts after unlock" (again.watchScripts signet)
+  check "and its scripts are the ones it had" (scripts == wanted)
+  -- real damage is still damage
+  let bytes ← IO.FS.readBinFile url
+  IO.FS.writeBinFile url (bytes.set! (bytes.size - 1) (bytes[bytes.size - 1]! ^^^ 1))
+  let (_, damaged) ← S.open keys (some url)
+  check "a tampered file still reads as damage" (match damaged with | .damaged _ => true | _ => false)
+
 def testDuplicateWrongNetworkAndBadNamesAreRefused : IO Unit := do
   let a ← twoOfTwo
   let (store, _) ← S.open (← memoryKeys) (some (← tempFile "multisig.json"))
@@ -2294,6 +2339,7 @@ def storeTests : List (String × IO Unit) :=
   , ("testALosingInFlightSpendReleasesItsCoinsAndDropsItsChange", testALosingInFlightSpendReleasesItsCoinsAndDropsItsChange)
   , ("testLookaheadFindsPaymentsUpToTheGapLimitAhead", testLookaheadFindsPaymentsUpToTheGapLimitAhead)
   , ("testTamperedUnsealedAndOversizedFilesAreRefusedAndKept", testTamperedUnsealedAndOversizedFilesAreRefusedAndKept)
+  , ("testAnAccountFileWhoseKeyIsLockedIsReadAgainAndNeverScannedWithout", testAnAccountFileWhoseKeyIsLockedIsReadAgainAndNeverScannedWithout)
   , ("testDuplicateWrongNetworkAndBadNamesAreRefused", testDuplicateWrongNetworkAndBadNamesAreRefused)
   , ("testDraftsFollowTheirCoinsAndAnAbandonedSpendFreesThem", testDraftsFollowTheirCoinsAndAnAbandonedSpendFreesThem)
   , ("testADraftConfirmedByACoSignerPaysItsPerson", testADraftConfirmedByACoSignerPaysItsPerson) ]

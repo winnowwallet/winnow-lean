@@ -120,25 +120,36 @@ def connect (s : HeaderStore) (batch : Array BlockHeader) : NetM ConnectOutcome 
   | .inl e => throw (.headers e)
   | .inr (c, c', o, w) => s.commit c c' w; return o
 
-/-- Syncs from the current tip to the peer's best tip via getheaders. -/
+/-- Whether the chain is known to be the real one (`HeaderChain.proven`): a filter scan waits until it is. -/
+def proven (s : HeaderStore) : BaseIO Bool := return (← s.snapshot).proven
+
+/-- Syncs from the current tip to the peer's best tip via getheaders. A branch the peer is still sending is
+held between requests (`HeaderChain.syncBranchStep`) and asked for from its own tip, and the chain takes it,
+or refuses it, once the peer has no more of it. -/
 def sync (s : HeaderStore) (peer : PeerConnection) (timeoutMs : Nat := 30_000) : NetM SyncOutcome := do
   let mut outcome : SyncOutcome := {}
   let mut replays := 0
+  let mut pending : Option HeaderChain.Branch := none
   while true do
-    let locator ← s.blockLocator
+    let locator ← match pending with
+      | some b => pure (#[b.tip.hash] ++ (← s.blockLocator))
+      | none => s.blockLocator
     let message ← peer.request (.getheaders { version := PeerConnection.protocolVersion, locatorHashes := locator })
       #["headers"] timeoutMs
     let .headers batch := message | throw (.headers (.badPeerResponse "expected headers"))
     let now ← s.now
+    let held := pending
     let stepped ← s.chain.atomically (m := BaseIO) (do
       let c ← get
-      match c.syncStep batch replays outcome now with
+      match c.syncBranchStep held batch replays outcome now with
       | .error e => return Sum.inl e
       | .ok r => return .inr (c, r))
     match stepped with
     | .inl e => throw (.headers e)
-    | .inr (old, (c', o, r, done, writes)) =>
+    | .inr (_, .pending b) => pending := some b
+    | .inr (old, .stepped c' o r done writes) =>
       s.commit old c' writes
+      pending := none
       outcome := o
       replays := r
       if done then return outcome
