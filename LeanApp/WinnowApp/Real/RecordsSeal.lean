@@ -140,8 +140,7 @@ def description : RecordsError → String
     "Winnow could not safely read its multisig accounts, so they cannot be changed until the file is readable again."
   | .multisig .duplicate => "This multisig account is already on this phone."
   | .multisig .tooMany => s!"Winnow keeps at most {maximumMultisigAccounts} multisig accounts."
-  | .multisig .unavailable =>
-    "Winnow could not read its multisig accounts while this device is locked. They are read again once it is unlocked."
+  | .multisig .unavailable => multisigUnavailableText
   | .app .noWallet => "No wallet is open."
   | .app .sendReviewChanged => "The available coins, fee, or change changed. Review the payment again before signing."
   | .app .personCannotBePaid => "This person has no pay-to key or address yet. Ask them for their Winnow card."

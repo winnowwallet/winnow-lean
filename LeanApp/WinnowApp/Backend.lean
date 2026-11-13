@@ -85,6 +85,8 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   paired Ledger's registration (its name, or why it did not register) when one holds a key of it. -/
   addMultisigAccount : (name descriptor : String) → IO (String × Option (Except String String))
   removeMultisigAccount : (id : String) → IO Unit
+  /-- The damaged multisig account file renamed and kept, and the accounts begun again from none. -/
+  setAsideDamagedMultisig : IO Unit
   newMultisigReceiveAddress : (id : String) → IO Unit
   /-- `createMultisigAccount(name:threshold:members:recovery:)` then
   `registerPairedLedger`: the account's id and descriptor, and the paired Ledger's registration. -/
@@ -204,6 +206,7 @@ def Backend.pending : Backend where
   checkMultisigDescriptor := fun _ => notPorted "Multisig accounts"
   addMultisigAccount := fun _ _ => notPorted "Multisig accounts"
   removeMultisigAccount := fun _ => notPorted "Multisig accounts"
+  setAsideDamagedMultisig := notPorted "Multisig accounts"
   newMultisigReceiveAddress := fun _ => notPorted "Multisig accounts"
   createMultisigAccount := fun _ _ _ _ => notPorted "Multisig accounts"
   registerLedger := fun _ => notPorted "Ledger signing"

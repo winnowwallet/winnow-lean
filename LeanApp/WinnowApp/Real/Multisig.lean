@@ -237,6 +237,10 @@ def removeMultisigAccount (a : MultisigApp) (id : String) : IO Unit := do
   unless r.allUtxos.all (fun u => u.spent.any (·.height.isSome)) do failText accountHoldsCoinsText
   a.withStore fun s => do return (← s.remove a.host.keys a.host.writeData id, ())
 
+/-- The damaged account file set aside, so the wallet syncs again (`MultisigHost.setAsideDamaged`). -/
+def setAsideDamagedMultisig (a : MultisigApp) : IO Unit := do
+  a.host.setAsideDamaged (← unixNow)
+
 def newMultisigReceiveAddress (a : MultisigApp) (id : String) : IO Unit :=
   a.withStore fun s => do return (← s.advanceReceiveIndex a.host.keys a.host.writeData id, ())
 

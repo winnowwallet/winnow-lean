@@ -86,6 +86,10 @@ def confirms (m : Model) : List H :=
   | some (.abandonSpend _ _) =>
     [.alert "Give up on this payment?" "Its coins become the account's again. If the network confirms it after all, it shows up here again as a spend."
        [.identified Ids.abandonConfirmButton (.button "Give up" .destructive (some (.multisig .abandon))), cancel] .actionSheet]
+  | some .setAsideMultisig =>
+    [.alert "Set the damaged file aside?"
+       "The file is kept on this phone under another name and Winnow starts again with no multisig accounts, so the wallet can sync. Join each account again from its descriptor: Winnow finds its coins from then on, not ones it already held. The other signers keep theirs."
+       [.identified Ids.multisigSetAsideConfirmButton (.button "Set aside" .destructive (some (.multisig .setAside))), cancel] .actionSheet]
   | some (.removeMultisig _) =>
     [.alert "Remove this account from this phone?" "Only an empty account can be removed. The other signers keep theirs."
        [.button "Remove" .destructive (some (.multisig .remove)), cancel] .actionSheet]

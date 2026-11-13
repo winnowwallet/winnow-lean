@@ -470,6 +470,11 @@ structure MultisigOverview where
 def MultisigOverview.ledgers (o : MultisigOverview) : List SignerInfo := o.signers.filter (·.isLedger)
 def MultisigOverview.savedKeys (o : MultisigOverview) : List SignerInfo := o.signers.filter (!·.isLedger)
 
+/-- What a use of the multisig accounts says while their file's key cannot be read (a locked phone). The sync
+tells this refusal, which passes by itself, from a damaged file's, which waits for the person. -/
+def multisigUnavailableText : String :=
+  "Winnow could not read its multisig accounts while this device is locked. They are read again once it is unlocked."
+
 /-- What a pasted descriptor reads as (MultisigAddView's `validation`). -/
 structure MultisigCheck where
   policy : String

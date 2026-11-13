@@ -313,8 +313,13 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
     let multisigScripts ← match multisigScripts? with
       | .inr scripts => pure scripts
       | .inl e =>
+        -- a file whose key is locked comes back by itself; a damaged one waits for the person (the notice
+        -- under Settings → Security → Multisig accounts sets it aside), and says so where sync errors are said
+        let waiting := toString e == multisigUnavailableText
         env.modify fun c => if c.generation == gen && c.walletSerial == serial then
-            { c with transientSyncFailures := c.transientSyncFailures + 1, transientSyncError := some (toString e) }
+            if waiting then
+              { c with transientSyncFailures := c.transientSyncFailures + 1, transientSyncError := some (toString e) }
+            else { c with lastSyncError := some (toString e), transientSyncFailures := 0, transientSyncError := none }
           else c
         return false
     let pass : NetM Unit := do
