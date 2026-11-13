@@ -476,6 +476,10 @@ structure MultisigCheck where
   firstAddress : Option String
   /-- A paired Ledger holding a key of the account, which approves it after Save. -/
   ledgerName : Option String := none
+  /-- The recovery path in words ("after 4320 blocks: the recovery key"), when the account has one. -/
+  recovery : Option String := none
+  /-- What the person must know before saving: this phone is on the recovery path only. -/
+  warning : Option String := none
   deriving Repr, Inhabited, BEq
 
 /-- `MultisigBuildView.recoveryPlan`. -/

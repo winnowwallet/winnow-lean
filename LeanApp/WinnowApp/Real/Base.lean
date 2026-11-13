@@ -225,6 +225,17 @@ def milliOf (rate : Float) : Nat :=
 def rateOfMilli (milli : Nat) : Float := milli.toFloat / 1000
 
 def i64 (n : Nat) : Int64 := Int64.ofInt n
+
+/-- Every satoshi there can be: 21,000,000 BTC. -/
+def maximumMoney : Nat := 2_100_000_000_000_000
+
+def amountTooLargeText : String := "The amount is more than 21,000,000 BTC."
+
+/-- A typed amount as satoshis. More than there is cannot be a payment, and past 2⁶³ `Int64.ofInt` wraps: the
+payment built would be for another amount than the one reviewed. -/
+def satsOf (amount : Nat) : IO Int64 := do
+  if amount > maximumMoney then throw (IO.userError amountTooLargeText)
+  return i64 amount
 def natOf (v : Int64) : Nat := v.toInt.toNat
 
 /-! ## The state -/

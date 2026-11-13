@@ -95,14 +95,15 @@ def previewSend (env : Env) (inputs : SendInputs) : IO Preview := do
       pure (address, some (id, index, r))
     | none => pure (inputs.destination.trimAscii.copy, none)
   let amount := inputs.amount.trimAscii.copy.toNat?.getD 0
+  let sats ← satsOf amount
   let c ← env.get
   let some n := c.network | failWith .noWallet
   -- `parseDestination`: a silent payment code (its HRP checked against this network), else an address
   let (payments, silent) ← if SilentPaymentAddress.looksLikeCode destination then
-      match Keys.SilentPayment.ofCode (i64 amount) destination (Network.tx n) with
+      match Keys.SilentPayment.ofCode sats destination (Network.tx n) with
       | .ok p => pure (#[], #[p])
       | .error e => failText (silentPaymentErrorText e)
-    else match Payment.ofAddress (i64 amount) destination (Network.tx n) with
+    else match Payment.ofAddress sats destination (Network.tx n) with
       | .ok p => pure (#[p], #[])
       | .error e => failText (addressErrorText e)
   let some w := c.wallet | failWith .noWallet

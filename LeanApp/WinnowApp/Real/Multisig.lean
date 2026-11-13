@@ -341,6 +341,7 @@ def createMultisigSpend (env : Env) (a : MultisigApp) (id address : String) (amo
     (recovery : Bool) : IO MultisigPSBT := do
   let r ← record a id
   let network ← currentNetwork env
+  if amount > maximumMoney then failText amountTooLargeText
   let payment ← match Payment.ofAddress (Int64.ofInt amount) (Wire.trimWhitespace address) network with
     | .ok p => pure p
     | .error e => failText (addressErrorText e)
@@ -616,11 +617,34 @@ def signMultisigSpendWithLedger (env : Env) (a : MultisigApp) (id text : String)
   journalPSBT env "multisig-ledger-signed" signed
   present env r signed
 
-/-- MultisigAddView's `validation`: the pasted text read as an account for this phone. -/
+/-- `MultisigAccountView.recoveryText`: "after 4320 blocks: any 1 of the signers", or "… the recovery key";
+"… any 2 of the members" in the count of the policy line above it, or, for several leaves that are not a
+group of those members, "… any of 2 recovery groups", the groups the signing screen shows. -/
+def recoveryText (r : MultisigAccount.Recovery) (account : MultisigAccount) : String :=
+  if let some count := account.recoveryMemberCount then s!"after {r.blocks} blocks: any {count} of the members" else
+  if account.recoveryLeaves.size > 1 then s!"after {r.blocks} blocks: any of {account.recoveryLeaves.size} recovery groups" else
+  let signerKeys := account.signers.filterMap fun s => (MultisigAccount.extendedKey? s).map (·.1.publicKey)
+  let reused := r.keys.all fun k => match MultisigAccount.extendedKey? k with
+    | some (x, _) => signerKeys.contains x.publicKey
+    | none => false
+  let who := if reused then s!"any {r.threshold} of the signers"
+    else if r.keys.size == 1 then "the recovery key" else s!"{r.threshold} of {r.keys.size} recovery keys"
+  s!"after {r.blocks} blocks: {who}"
+
+def recoveryOnlyText : String :=
+  "This phone is not one of the signers. Its key is only on the recovery path, so it cannot spend until the delay has passed."
+
+/-- MultisigAddView's `validation`: the pasted text read as an account for this phone. The policy line is the
+signers' alone, so the recovery path is said beside it (who can spend after how long: a key of someone else's
+after one block is not "2 of 3"), and so is a phone that is on that path only. -/
 def checkMultisigDescriptor (env : Env) (a : MultisigApp) (text : String) : IO MultisigCheck := do
-  let account ← multisigAccountValidating (← needWallet env) text
+  let w ← needWallet env
+  let account ← multisigAccountValidating w text
+  let signs := (walletAccountKey? w).any account.signs
   return { policy := account.policySummary, firstAddress := (account.address 0).toOption,
-           ledgerName := (pairedLedgers (← a.signers.all) account)[0]?.map (·.name) }
+           ledgerName := (pairedLedgers (← a.signers.all) account)[0]?.map (·.name),
+           recovery := account.recovery.map (recoveryText · account),
+           warning := if signs then none else some recoveryOnlyText }
 
 /-! ## Drafts: a spend collecting signatures (AppModel.swift d2ca878, "Drafts") -/
 
@@ -670,6 +694,7 @@ def newSpendPSBT (env : Env) (r : MultisigAccountRecord) (address : String) (amo
     (recovery : Bool) : IO PSBT := do
   if r.draft.isSome then failText draftInProgressText
   let network ← currentNetwork env
+  if amount > maximumMoney then failText amountTooLargeText
   let payment ← match Payment.ofAddress (Int64.ofInt amount) (Wire.trimWhitespace address) network with
     | .ok p => pure p
     | .error e => failText (addressErrorText e)
@@ -703,7 +728,7 @@ def previewAccountSend (env : Env) (a : MultisigApp) (inputs : SendInputs) : IO 
   if SilentPaymentAddress.looksLikeCode destination then failText silentPaymentUnsupportedText
   let network ← currentNetwork env
   let amount := inputs.amount.trimAscii.copy.toNat?.getD 0
-  let payment ← match Payment.ofAddress (i64 amount) destination network with
+  let payment ← match Payment.ofAddress (← satsOf amount) destination network with
     | .ok p => pure p
     | .error e => failText (addressErrorText e)
   let psbt ← newSpendPSBT env r destination amount resolution.rate inputs.recovery
@@ -906,20 +931,6 @@ def MultisigApp.allHooks (a : MultisigApp) (base : Hooks) : Hooks :=
   { a.hooks base with multisigSnapshot := snapshotPayments a }
 
 /-! ## What the screens show -/
-
-/-- `MultisigAccountView.recoveryText`: "after 4320 blocks: any 1 of the signers", or "… the recovery key";
-"… any 2 of the members" in the count of the policy line above it, or, for several leaves that are not a
-group of those members, "… any of 2 recovery groups", the groups the signing screen shows. -/
-def recoveryText (r : MultisigAccount.Recovery) (account : MultisigAccount) : String :=
-  if let some count := account.recoveryMemberCount then s!"after {r.blocks} blocks: any {count} of the members" else
-  if account.recoveryLeaves.size > 1 then s!"after {r.blocks} blocks: any of {account.recoveryLeaves.size} recovery groups" else
-  let signerKeys := account.signers.filterMap fun s => (MultisigAccount.extendedKey? s).map (·.1.publicKey)
-  let reused := r.keys.all fun k => match MultisigAccount.extendedKey? k with
-    | some (x, _) => signerKeys.contains x.publicKey
-    | none => false
-  let who := if reused then s!"any {r.threshold} of the signers"
-    else if r.keys.size == 1 then "the recovery key" else s!"{r.threshold} of {r.keys.size} recovery keys"
-  s!"after {r.blocks} blocks: {who}"
 
 def coinLine (u : WalletUTXO) : String :=
   let txid := String.ofList ((Winnow.displayHex u.txid).toList.take 16)

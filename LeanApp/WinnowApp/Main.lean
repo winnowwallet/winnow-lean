@@ -373,17 +373,21 @@ def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .resetPeers g => background fx g "peers" do
       b.resetPeers
       return .peersReset g
-  | .exportBundle g e withPhrase name => background fx g "export" do
-      let text ← b.exportBundle withPhrase
-      let staging ← Winnow.ExportStagingFile.new (← tmpDir.get)
-      let file ← staging.write text name
-      -- `protect`: the file and its directory are excluded from backup and readable only while unlocked
-      for p in [file, file.parent.getD file] do
-        let r ← IO.wait (← fx.ask "exclude-from-backup" (Json.mkObj [("path", Json.str p.toString), ("complete", Json.bool true)]))
-        unless (r.getObjValAs? Bool "ok").toOption.getD false do
-          staging.remove
-          throw (IO.userError "The backup file could not be protected on this device.")
-      return .exported g e file.toString
+  | .exportBundle g e withPhrase name =>
+      let act : IO Host := do
+        let text ← b.exportBundle withPhrase
+        let staging ← Winnow.ExportStagingFile.new (← tmpDir.get)
+        let file ← staging.write text name
+        -- `protect`: the file and its directory are excluded from backup and readable only while unlocked
+        for p in [file, file.parent.getD file] do
+          let r ← IO.wait (← fx.ask "exclude-from-backup" (Json.mkObj [("path", Json.str p.toString), ("complete", Json.bool true)]))
+          unless (r.getObjValAs? Bool "ok").toOption.getD false do
+            staging.remove
+            throw (IO.userError "The backup file could not be protected on this device.")
+        return .exported g e file.toString
+      -- a file that carries the recovery phrase is the phrase: it is asked for as showing the phrase is
+      if withPhrase then authenticated fx g "export" "Export your recovery phrase" act
+      else background fx g "export" act
   | .removeExport file => discard <| IO.asTask do
       -- only a staging directory, never anything else a stale path could name
       let some dir := (System.FilePath.mk file).parent | return
