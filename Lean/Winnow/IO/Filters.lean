@@ -346,6 +346,9 @@ def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option
     if let some fork := headerOutcome.minForkHeight then
       if let some cb := onReorg then cb fork
       f.rollBack fork
+    -- a chain held from genesis that has not reached the checkpoint may be a peer's invention: nothing is
+    -- scanned on it, and the pass ends as one that did not reach the tip
+    if !(← f.chain.proven) then return
     let peers ← f.pool.connectedPeers
     if peers.isEmpty then throw (.filters .noPeers)
     let tip ← f.chain.height

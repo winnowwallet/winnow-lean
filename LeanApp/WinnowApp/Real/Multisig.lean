@@ -123,7 +123,8 @@ def mergeSigners (a : MultisigApp) (restored : Array SignerRecord) : IO Unit := 
   | .ok () => pure ()
   | .error e => if e.name == "damaged" then pure () else throw (IO.userError e.description)
 
-def watchScripts (a : MultisigApp) (network : Tx.BitcoinNetwork) : IO (Array ByteArray) :=
+def watchScripts (a : MultisigApp) (network : Tx.BitcoinNetwork) : IO (Array ByteArray) := do
+  a.host.readAgainIfUnavailable
   a.withStore fun s => do
     let (scripts, s') ← s.watchScripts network
     return (s', scripts)

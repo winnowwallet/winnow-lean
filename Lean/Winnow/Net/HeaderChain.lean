@@ -10,9 +10,13 @@ what the batch did, and the storage writes the I/O layer must apply in order (`S
 clock (`now`) is an argument.
 
 Validated per header, as in Swift: linkage, compact bits → target ≤ powLimit, SHA256d(header) ≤ target,
-the timestamp at most two hours past `now`, and the required difficulty (every
-`difficultyAdjustmentInterval` blocks; bounded to ≤ 4× easier when a checkpoint hides the period start).
-Fork choice is cumulative work; a replacement branch must carry strictly more.
+the timestamp at most two hours past `now` and later than the median time of the eleven headers under it,
+and the required difficulty (every `difficultyAdjustmentInterval` blocks; bounded to ≤ 4× easier when a
+checkpoint hides the period start). A chain held from below the network's checkpoint must pass through it:
+the header at its height is the checkpoint, so everything under it is the real chain, and a filter scan waits
+(`proven`) until the chain has reached it. Fork choice is cumulative work over a whole branch: a replacement
+must carry strictly more, and a branch a peer is still sending is held (`Branch`, `syncBranchStep`) and
+compared when the peer has no more, never one batch of it at a time.
 
 Left for the I/O layer (`sync(using:)`): the getheaders loop against a peer (described at `syncStep`),
 reading the file (size-capped at `maximumHeaderFileBytes` before and after reading) and writing it
@@ -32,6 +36,12 @@ inductive HeaderChainError where
   | storageUnavailable (reason : String)
   | badPeerResponse (reason : String)
   | startMismatch (stored wanted : UInt32)
+  /-- A header at the checkpoint's height that is not the checkpoint. -/
+  | checkpointMismatch (height : UInt32)
+  /-- A branch that would replace headers below a checkpoint the chain already holds. -/
+  | forkBelowCheckpoint (height : UInt32)
+  /-- A header dated at or before the median time of the eleven under it. -/
+  | timestampNotAfterMedianTime (height : UInt32)
   deriving Repr, BEq, Inhabited
 
 def HeaderChainError.name : HeaderChainError → String
@@ -46,6 +56,9 @@ def HeaderChainError.name : HeaderChainError → String
   | .storageUnavailable _ => "storageUnavailable"
   | .badPeerResponse _ => "badPeerResponse"
   | .startMismatch .. => "startMismatch"
+  | .checkpointMismatch _ => "checkpointMismatch"
+  | .forkBelowCheckpoint _ => "forkBelowCheckpoint"
+  | .timestampNotAfterMedianTime _ => "timestampNotAfterMedianTime"
 
 /-- Where a fresh chain begins. -/
 inductive ChainStart where
@@ -137,6 +150,32 @@ def blockLocator (c : HeaderChain) : Array ByteArray := Id.run do
     index := if index ≥ step then index - step else 0
   return locator.push c.headers[0]!.hash
 
+/-! ## The checkpoint -/
+
+/-- The checkpoint this chain must pass through: the network's, for a chain held from below it. A chain held
+from the checkpoint starts on it, and a network without one has nothing to pass. -/
+def pinnedCheckpoint? (c : HeaderChain) : Option Checkpoint :=
+  match c.params.checkpoint with
+  | some cp => if c.baseHeight < cp.height then some cp else none
+  | none => none
+
+/-- The header at the checkpoint's height must be the checkpoint. Every header commits to its parent, so a
+chain that passes through it is the real chain everywhere under it, whatever work another claims. -/
+def requireCheckpoint (c : HeaderChain) (h : BlockHeader) (height : UInt32) : Except HeaderChainError Unit :=
+  match c.pinnedCheckpoint? with
+  | some cp => if height == cp.height && h.serialized != cp.header then .error (.checkpointMismatch height) else .ok ()
+  | none => .ok ()
+
+/-- Whether the chain is known to be the real one: it starts on the checkpoint, or holds it, or the network has
+none. A chain held from genesis that has not yet reached the checkpoint is not, and no filter is scanned on it:
+a peer can make such a chain cheaply, and the wallet's history is never read from one. -/
+def proven (c : HeaderChain) : Bool :=
+  match c.pinnedCheckpoint? with
+  | none => true
+  | some cp => match c.header? cp.height with
+    | some h => h.serialized == cp.header
+    | none => false
+
 /-! ## Proof-of-work rules -/
 
 /-- Target and block work for `bits` (they depend on nothing else). -/
@@ -188,6 +227,25 @@ def requireDifficulty (h : BlockHeader) (height baseHeight : UInt32) (p : Networ
 /-- Core's future-drift rule (the limit wraps like Swift's `&+`). -/
 def requireTimestamp (h : BlockHeader) (height now : UInt32) : Except HeaderChainError Unit :=
   if h.time > now + maximumFutureDrift then .error (.timestampTooFarInFuture height) else .ok ()
+
+/-- How many headers under one Core's median time past reads. -/
+def medianTimeSpan : Nat := 11
+
+/-- Core's median time past for the header at index `i` of a branch held from index 0: the median of the times
+of the (at most) eleven headers under it; `none` for index 0, which has none held. -/
+def medianTimePast (preceding : Nat → BlockHeader) (i : Nat) : Option UInt32 :=
+  if i == 0 then none else
+  let n := min medianTimeSpan i
+  let times := ((List.range n).map fun k => (preceding (i - 1 - k)).time).toArray.qsort (· < ·)
+  times[n / 2]?
+
+/-- Core's `time-too-old`: a header must be later than the median time of those under it. Without it a chain
+can date the start of every period back and the end forward, and so make each period's difficulty 4× easier. -/
+def requireMedianTime (h : BlockHeader) (height : UInt32) (preceding : Nat → BlockHeader) (i : Nat) :
+    Except HeaderChainError Unit :=
+  match medianTimePast preceding i with
+  | some median => if h.time ≤ median then .error (.timestampNotAfterMedianTime height) else .ok ()
+  | none => .ok ()
 
 /-! ## Persistence (file layout) -/
 
@@ -278,7 +336,12 @@ def create (p : NetworkParams) (stored : Option ByteArray) (start : ChainStart :
     let (headers, chainwork, baseHeight) ← load data p
     checkStoredStart baseHeight headers checkpoint
     if headers.isEmpty then throw (.storageCorrupt "empty header file")
-    return { params := p, headers, chainwork, baseHeight, storage, persistedCount := headers.size }
+    let c : HeaderChain := { params := p, headers, chainwork, baseHeight, storage, persistedCount := headers.size }
+    -- a chain kept by a build that did not check the checkpoint, and that went past it on another header
+    if let some cp := c.pinnedCheckpoint? then
+      if let some h := c.header? cp.height then
+        if h.serialized != cp.header then throw (.checkpointMismatch cp.height)
+    return c
   | none =>
     match checkpoint with
     | some c =>
@@ -305,6 +368,17 @@ def indexOf? (c : HeaderChain) (hash : ByteArray) : Option Nat := Id.run do
       return if i > 0 then some (i - 1) else none
   return none
 
+/-- The checks every new header passes, at `height`, as the header at index `i` of the branch `preceding` reads
+(index 0 is the chain's `baseHeight`). -/
+def requireHeader (c : HeaderChain) (h : BlockHeader) (height : UInt32) (now : UInt32) (preceding : Nat → BlockHeader)
+    (i : Nat) : Except HeaderChainError UInt256 := do
+  let work ← checkedWork h c.params height
+  requireTimestamp h height now
+  requireMedianTime h height preceding i
+  requireDifficulty h height c.baseHeight c.params preceding
+  c.requireCheckpoint h height
+  return work
+
 def appendToTip (c : HeaderChain) (newHeaders : Array BlockHeader) (now : UInt32) :
     Except HeaderChainError (HeaderChain × ConnectOutcome × Array StorageWrite) := do
   let mut previous := c.tip
@@ -312,13 +386,12 @@ def appendToTip (c : HeaderChain) (newHeaders : Array BlockHeader) (now : UInt32
   let mut appended : Array BlockHeader := #[]
   let mut appendedWork : Array UInt256 := #[]
   for h in newHeaders do
-    let height := c.baseHeight + (c.headers.size + appended.size).toUInt32
+    let i := c.headers.size + appended.size
+    let height := c.baseHeight + i.toUInt32
     if !(h.previousHash == previous.hash) then throw .doesNotConnect
-    work := work + (← checkedWork h c.params height)
-    requireTimestamp h height now
     let soFar := appended
-    requireDifficulty h height c.baseHeight c.params fun i =>
-      if i < c.headers.size then c.headers[i]! else soFar[i - c.headers.size]!
+    work := work + (← c.requireHeader h height now
+      (fun j => if j < c.headers.size then c.headers[j]! else soFar[j - c.headers.size]!) i)
     appended := appended.push h
     appendedWork := appendedWork.push work
     previous := h
@@ -326,40 +399,73 @@ def appendToTip (c : HeaderChain) (newHeaders : Array BlockHeader) (now : UInt32
   let (c'', writes) := c'.persistAppended (c'.headers.size - appended.size)
   return (c'', { appended := newHeaders.size }, writes)
 
-def replaceBranch (c : HeaderChain) (newHeaders : Array BlockHeader) (forkHeight now : UInt32) :
-    Except HeaderChainError (HeaderChain × ConnectOutcome × Array StorageWrite) := do
-  let forkIndex := (forkHeight - c.baseHeight).toNat
-  let mut staged := c.headers.extract 0 (forkIndex + 1)
-  let mut stagedWork := c.chainwork.extract 0 (forkIndex + 1)
+/-- A branch being put together: the chain's own headers through the one it forks from (`forkIndex`), then the
+branch's, with their cumulative work. `over` is the tip it was begun against: a chain that has moved since
+makes it stale. -/
+structure Branch where
+  forkIndex : Nat
+  headers : Array BlockHeader
+  chainwork : Array UInt256
+  over : ByteArray
+  deriving Inhabited
+
+def Branch.tip (b : Branch) : BlockHeader := b.headers.back!
+
+/-- A branch forking after the header at `forkIndex`. One that would replace a header at or below a checkpoint
+the chain already holds is refused: that part of the chain is proven. -/
+def startBranch (c : HeaderChain) (forkIndex : Nat) : Except HeaderChainError Branch := do
+  let firstReplaced := c.baseHeight + (forkIndex + 1).toUInt32
+  if let some cp := c.pinnedCheckpoint? then
+    if c.proven && firstReplaced ≤ cp.height then throw (.forkBelowCheckpoint firstReplaced)
+  return { forkIndex, headers := c.headers.extract 0 (forkIndex + 1), chainwork := c.chainwork.extract 0 (forkIndex + 1),
+           over := c.tipHash }
+
+/-- `newHeaders` added to the branch, each checked as on the chain itself. -/
+def stage (c : HeaderChain) (b : Branch) (newHeaders : Array BlockHeader) (now : UInt32) : Except HeaderChainError Branch := do
+  let mut staged := b.headers
+  let mut stagedWork := b.chainwork
   for h in newHeaders do
-    let height := c.baseHeight + staged.size.toUInt32
-    let previous := staged.back!
-    if !(h.previousHash == previous.hash) then throw .doesNotConnect
-    let work ← checkedWork h c.params height
-    requireTimestamp h height now
+    let i := staged.size
+    let height := c.baseHeight + i.toUInt32
+    if !(h.previousHash == staged.back!.hash) then throw .doesNotConnect
     let soFar := staged
-    requireDifficulty h height c.baseHeight c.params fun i => soFar[i]!
+    let work ← c.requireHeader h height now (fun j => soFar[j]!) i
     staged := staged.push h
     stagedWork := stagedWork.push (stagedWork.back! + work)
-  if forkIndex < c.headers.size - 1 && stagedWork.back! ≤ c.chainwork.back! then throw .reorgWithoutMoreWork
-  let disconnected := c.headers.size - 1 - forkIndex
-  let (c', writes) := { c with headers := staged, chainwork := stagedWork }.persist
-  return (c', { appended := newHeaders.size, forkHeight := if disconnected > 0 then some forkHeight else none,
+  return { b with headers := staged, chainwork := stagedWork }
+
+/-- The branch in place of the chain's headers after its fork, when it carries strictly more work. -/
+def adopt (c : HeaderChain) (b : Branch) : Except HeaderChainError (HeaderChain × ConnectOutcome × Array StorageWrite) := do
+  if b.forkIndex < c.headers.size - 1 && b.chainwork.back! ≤ c.chainwork.back! then throw .reorgWithoutMoreWork
+  let disconnected := c.headers.size - 1 - b.forkIndex
+  let (c', writes) := { c with headers := b.headers, chainwork := b.chainwork }.persist
+  return (c', { appended := b.headers.size - 1 - b.forkIndex,
+                forkHeight := if disconnected > 0 then some (c.baseHeight + b.forkIndex.toUInt32) else none,
                 disconnectedHeaders := disconnected }, writes)
 
-/-- Connects a batch from a peer: it must build on a header already held (an earlier one means a
-reorg, accepted only with strictly more work). Known headers at the front are skipped. -/
-def connect (c : HeaderChain) (newHeaders : Array BlockHeader) (now : UInt32) :
+def replaceBranch (c : HeaderChain) (newHeaders : Array BlockHeader) (forkHeight now : UInt32) :
     Except HeaderChainError (HeaderChain × ConnectOutcome × Array StorageWrite) := do
-  let some first := newHeaders[0]? | return (c, { appended := 0 }, #[])
+  let b ← c.stage (← c.startBranch (forkHeight - c.baseHeight).toNat) newHeaders now
+  c.adopt b
+
+/-- Where a batch goes on the chain: the index after the header it builds on, and the batch without the
+headers already held at its front. `none`: every header of it is held. -/
+def locate (c : HeaderChain) (newHeaders : Array BlockHeader) : Except HeaderChainError (Option (Nat × Array BlockHeader)) := do
+  let some first := newHeaders[0]? | return none
   let some parent := c.indexOf? first.previousHash | throw .doesNotConnect
   let mut nextIndex := parent + 1
   let mut skip := 0
   while skip < newHeaders.size && nextIndex < c.headers.size && newHeaders[skip]! == c.headers[nextIndex]! do
     skip := skip + 1
     nextIndex := nextIndex + 1
-  if skip == newHeaders.size then return (c, { appended := 0 }, #[])
-  let rest := newHeaders.extract skip newHeaders.size
+  if skip == newHeaders.size then return none
+  return some (nextIndex, newHeaders.extract skip newHeaders.size)
+
+/-- Connects a batch from a peer: it must build on a header already held (an earlier one means a
+reorg, accepted only with strictly more work). Known headers at the front are skipped. -/
+def connect (c : HeaderChain) (newHeaders : Array BlockHeader) (now : UInt32) :
+    Except HeaderChainError (HeaderChain × ConnectOutcome × Array StorageWrite) := do
+  let some (nextIndex, rest) ← c.locate newHeaders | return (c, { appended := 0 }, #[])
   if nextIndex == c.headers.size then c.appendToTip rest now
   else c.replaceBranch rest (c.baseHeight + (nextIndex - 1).toUInt32) now
 
@@ -392,6 +498,45 @@ def syncStep (c : HeaderChain) (batch : Array BlockHeader) (replays : Nat) (outc
     let r := replays + 1
     return (c', o, r, r > maxReplayedBatches, writes)
   return (c', o, replays, batch.size < maxHeadersPerRequest, writes)
+
+/-- What a reply did in a sync that may be putting a branch together. -/
+inductive BranchStep where
+  /-- A branch with no more work than the chain yet, of which the peer has more: ask from its tip. -/
+  | pending (b : Branch)
+  /-- `syncStep`'s answer: the chain, the outcome, the replays, whether the sync is over, the writes. -/
+  | stepped (c : HeaderChain) (outcome : SyncOutcome) (replays : Nat) (finished : Bool) (writes : Array StorageWrite)
+  deriving Inhabited
+
+/-- The most headers a branch may run past the chain's own before it is compared as it stands. A branch with
+more work never needs to be longer than the chain by more than this: work only grows with height. -/
+def branchSlack : Nat := maxHeadersPerRequest
+
+/-- `syncStep`, with fork choice over a whole branch. A full batch that forks onto a branch with no more work
+than the chain *so far* is not refused: the peer has more of it (`pending`), and the loop asks from the
+branch's tip. The branch is compared once, by its total work (`adopt`), when the peer's answer is short or
+empty, or when the branch has run `branchSlack` headers past the chain and is still not heavier. Comparing a
+batch at a time let a cheap fork from genesis stand for good: the real chain's first 2,000 headers carry less
+work than a long fake chain, so the peer that offered them was refused, and so was every honest peer after it.
+A branch begun against a tip that has moved since is dropped, and the next request starts again. -/
+def syncBranchStep (c : HeaderChain) (pending : Option Branch) (batch : Array BlockHeader) (replays : Nat)
+    (outcome : SyncOutcome) (now : UInt32) : Except HeaderChainError BranchStep := do
+  let full := batch.size == maxHeadersPerRequest
+  match pending with
+  | none =>
+    match c.syncStep batch replays outcome now with
+    | .ok (c', o, r, finished, writes) => return .stepped c' o r finished writes
+    | .error .reorgWithoutMoreWork =>
+      if !full then throw .reorgWithoutMoreWork
+      let some (nextIndex, rest) ← c.locate batch | throw .reorgWithoutMoreWork
+      return .pending (← c.stage (← c.startBranch (nextIndex - 1)) rest now)
+    | .error e => throw e
+  | some b =>
+    if b.over != c.tipHash then return .stepped c outcome replays false #[]
+    let b' ← if batch.isEmpty then pure b else c.stage b batch now
+    if full && b'.chainwork.back! ≤ c.chainwork.back! && b'.headers.size ≤ c.headers.size + branchSlack then
+      return .pending b'
+    let (c', connected, writes) ← c.adopt b'
+    return .stepped c' (outcome.absorb connected) replays (!full) writes
 
 end HeaderChain
 end Winnow.Net

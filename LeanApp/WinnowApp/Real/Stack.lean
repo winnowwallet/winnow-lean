@@ -29,11 +29,12 @@ def chainStart (w : Option Wallet) (params : NetworkParams) (verifyFromGenesis :
     | none => pure none
   return ChainStart.forWallet birthday params.checkpoint verifyFromGenesis
 
-/-- `openOrRebuildChain`: a start mismatch (the setting changed) rebuilds; any other error is fatal. -/
+/-- `openOrRebuildChain`: a start mismatch (the setting changed) rebuilds, and so does a kept chain that went
+past the checkpoint on another header (an earlier build did not check it); any other error is fatal. -/
 def openOrRebuildChain (params : NetworkParams) (path : System.FilePath) (start : ChainStart) : NetM HeaderStore := do
   match ← (HeaderStore.open params (some path) start).attempt with
   | .ok s => pure s
-  | .error (.headers (.startMismatch ..)) =>
+  | .error (.headers (.startMismatch ..)) | .error (.headers (.checkpointMismatch _)) =>
     removeQuietly path
     HeaderStore.open params (some path) start
   | .error e => throw e
@@ -305,8 +306,19 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
     | _, _ => (none, c)
   let some (w, s, f, gen, serial, dir) := claim | return false
   try
+    -- the accounts' scripts first, outside the pass: an account file that cannot be read now (a locked phone in
+    -- a background launch) stops the pass before anything is scanned, so the scan height stays where the
+    -- accounts' payments are, and the next pass reads the file again; it is a transient failure, not the wallet's
+    let multisigScripts? ← try pure (Sum.inr (← env.hooks.multisigWatchScripts w.network)) catch e => pure (Sum.inl e)
+    let multisigScripts ← match multisigScripts? with
+      | .inr scripts => pure scripts
+      | .inl e =>
+        env.modify fun c => if c.generation == gen && c.walletSerial == serial then
+            { c with transientSyncFailures := c.transientSyncFailures + 1, transientSyncError := some (toString e) }
+          else c
+        return false
     let pass : NetM Unit := do
-      let scripts := (← WM.toNet w.watchScripts) ++ (← (env.hooks.multisigWatchScripts w.network : IO _))
+      let scripts := (← WM.toNet w.watchScripts) ++ multisigScripts
       let b := s.broadcaster
       f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w serial b fork : IO Unit)) (onMatch := fun m => do
         let effect ← env.walletWriteNet serial "sync.apply" (w.apply m)
