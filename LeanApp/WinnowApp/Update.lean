@@ -42,10 +42,10 @@ def Model.sensitive (m : Model) (g e : Nat) : Bool := g == m.generation && e == 
 /-- The wallet opened, created, imported, restored or deleted, and the settings it opened with. -/
 def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
-  | .launched forced tab => ({ m with forcedNetwork := forced, tab := tab }, [])
+  | .launched forced => ({ m with forcedNetwork := forced }, [])
   | .settingsLoaded s =>
     let m := { m with settings := s }.loadGatewayDraft
-    (m, [.openWallet m.generation s.network true])
+    (m, [.setAppearance s.appearance, .openWallet m.generation s.network true])
   | .booted g r =>
     if !m.current g then (m, []) else
     -- networking runs only while the scene is active (a cold background launch has no scene); a background
@@ -54,7 +54,9 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     let pending : List Cmd := m.pendingBackgroundTasks.map fun (id, kind, tag) => .runBackgroundTask id kind tag m.settings
     let m := { m with pendingBackgroundTasks := [] }
     match r with
-    | .opened id => ({ m with stage := .ready, walletID := some id }, [.refresh g] ++ start ++ pending)
+    | .opened id =>
+      let (m, scan) := { m with stage := .ready, walletID := some id }.startLedgerScan
+      (m, [.refresh g] ++ start ++ pending ++ scan)
     -- activation builds the stack whatever the stage, so a new wallet is dated at a synced tip; onboarding
     -- looks for this network's iCloud backups (`.task(id: model.network)`)
     | .missing => ({ m with stage := .onboarding, walletID := none }, start ++ [.discoverCloud] ++ pending)
@@ -64,8 +66,8 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     -- decides whether the wallet can be used
     if !m.sameWallet g then (m, []) else
     let g := m.generation
-    ({ m with stage := .ready, walletID := some id, sheets := [], onboarding := ({} : Onboarding) },
-     [.refresh g] ++ (if m.active then [.startNetworking g m.settings] else []))
+    let (m, intro) := { m with stage := .ready, walletID := some id, sheets := [], onboarding := ({} : Onboarding) }.endOnboarding
+    (m, [.refresh g] ++ (if m.active then [.startNetworking g m.settings] else []) ++ intro)
   | .imported g id report =>
     if !m.sameWallet g then (m, []) else
     ({ m with walletID := some id, onboarding := { m.onboarding with busy := false, importReport := some report, error := none } }, [])
@@ -79,9 +81,10 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     let m := { m with walletID := some id,
                       onboarding := { m.onboarding with restoring := false, restored := true, restoreError := note } }
     match context with
-    | some (name, advanced) =>
-      -- `setOwnDisplayName`, `setAdvancedMode`: the restored context's two settings
-      let s := { m.settings with ownDisplayName := name, advancedMode := advanced }
+    | some (name, _) =>
+      -- `setOwnDisplayName`: the restored display name; the backup's Advanced switch names a mode this app no
+      -- longer has, and changes nothing
+      let s := { m.settings with ownDisplayName := name }
       ({ m with settings := s }, [.saveSettings s])
     | none => (m, [])
   | .deleted g =>
@@ -89,7 +92,7 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     let m' := m.nextWallet
     let m' := { m' with stage := Stage.onboarding, walletID := none, status := ({} : Status), records := ({} : Records),
                         multisig := ({} : MultisigOverview), collect := m'.collect.cleared }
-    let m' := { m' with phase := SyncPhase.idle, confirm := none, sheets := [], routes := [], tabRoutes := [], tab := 0 }
+    let m' := { m' with phase := SyncPhase.idle, confirm := none, sheets := [], routes := [], nearbyLedger := none, ledgerSetup := none }
     (m', [.stopNetworking])
   | _ => (m, [])
 
@@ -131,7 +134,7 @@ def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
   | .failed g ctx msg => if m.sameWallet g then (m.fail ctx msg, []) else (m, [])
   | _ => (m, [])
 
-/-- The Send tab, its payment and a fee bump. -/
+/-- The Send sheet, its payment and a fee bump. -/
 def Model.onSendHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
   | .resolvedRate g forInputs milli =>
@@ -231,9 +234,11 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
     let phase : Cmd := .journal "app.scenePhase" [("phase", if active then "active" else "background")]
     if active then
       let m := { m with active := true }
-      -- the Send tab's rate in flight was dropped with the old generation
-      let rate := if m.settings.advancedMode && m.tab == 1 then [.resolveRate m.generation m.sendInputs m.status.feeFloorMilli] else []
-      let resume := if m.stage == .ready then [.startNetworking m.generation m.settings, .refresh m.generation] ++ rate
+      -- the Send sheet's rate in flight was dropped with the old generation
+      let rate := if m.hasSheet .send then [.resolveRate m.generation m.sendInputs m.status.feeFloorMilli] else []
+      let (m, scan) := if m.stage == .ready then m.startLedgerScan else (m, [])
+      let resume := if m.stage == .ready then [.startNetworking m.generation m.settings, .refresh m.generation] ++ rate ++ scan ++
+          m.resumeLedgerSetup
         else if m.stage == .onboarding && m.walletID.isNone then [.startNetworking m.generation m.settings, .discoverCloud]
         else if m.stage == .onboarding then [.startNetworking m.generation m.settings] else []
       let window := if m.hasSheet .receive && !m.receive.address.isEmpty then [.watchAddress m.generation m.receive.address] else []
@@ -242,6 +247,8 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
       let (m, cs) := m.background
       (m, phase :: cs)
   | .sceneInactive => (m, [.journal "app.scenePhase" [("phase", "inactive")]])
+  | .ledgerScanDue g again => m.onLedgerScanDue g again
+  | .ledgersNearby g seen => m.onLedgersNearby g seen
   | _ => (m, [])
 
 /-- The clipboard's text, read for `target`. -/
@@ -273,9 +280,17 @@ def Model.onPasted (m : Model) (target : PasteTarget) (text : String) : Model ×
     let (m', e) := m.runCollect
     (m', [.adoptDraft m.generation e id text])
   | .signerKeys => ({ m with signerKeys := { m.signerKeys with text := text, error := none } }, [])
+  | .setupRecoveryKey =>
+    match m.ledgerSetup with
+    | some s => ({ m with ledgerSetup := some { s with recoveryKey := Winnow.Keys.Unicode.trimWhitespace text, error := none } }, [])
+    | none => (m, [])
 
-/-- A host answer goes to its area's handler. -/
+/-- A host answer goes to its area's handler; the nearby card's Set up then moves on from what it said. -/
 def onHost (h : Host) (m : Model) : Model × List Cmd :=
+  let (m, cs) := onArea h m
+  let (m, cs2) := m.advanceSetup h
+  (m, cs ++ cs2)
+where onArea (h : Host) (m : Model) : Model × List Cmd :=
   match h with
   | .launched .. | .settingsLoaded .. | .booted .. | .created .. | .imported .. | .cloud .. | .cloudRestored ..
   | .deleted .. =>
@@ -290,7 +305,7 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
   | .pasteParsed .. | .senderLookup .. =>
     m.onPeopleHost h
   | .copiedExpired .. | .captured .. | .backgroundRefresh .. | .bgtask .. | .bgtaskExpired .. | .scene ..
-  | .sceneInactive =>
+  | .sceneInactive | .ledgerScanDue .. | .ledgersNearby .. =>
     m.onSystemHost h
   | .pasted target text => m.onPasted target text
   | .multisig .. | .multisigChecked .. | .multisigAdded .. | .multisigCreated .. | .multisigRemoved ..
@@ -308,8 +323,8 @@ def Model.switchNetwork (m : Model) (net : Network) : Model × List Cmd :=
   let m0 := m.nextWallet
   let m' := { m0 with settings := s, stage := Stage.loading, status := ({} : Status), records := ({} : Records),
                       multisig := ({} : MultisigOverview), collect := m0.collect.cleared,
-                      phase := SyncPhase.idle, walletID := none, routes := [], tabRoutes := [], sheets := [], confirm := none,
-                      send := ({} : SendState), tab := 0 }
+                      phase := SyncPhase.idle, walletID := none, routes := [], sheets := [], confirm := none,
+                      send := ({} : SendState), nearbyLedger := none, ledgerSetup := none }
   (m', [.stopNetworking, .stopWatchingAddress, .saveSettings s, .openWallet m'.generation net false])
 
 def step (msg : Msg) (m : Model) : Model × List Cmd :=
@@ -325,27 +340,15 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
      [.importWallet g m.settings.network m.onboarding.importText])
   | .finishOnboarding =>
     if m.walletID.isNone then (m, []) else
-    ({ m with stage := .ready, sheets := [], onboarding := ({} : Onboarding) },
-     [.finishOnboarding g, .refresh g, .startNetworking g m.settings])
+    let (m, intro) := { m with stage := .ready, sheets := [], onboarding := ({} : Onboarding) }.endOnboarding
+    (m, [.finishOnboarding g, .refresh g, .startNetworking g m.settings] ++ intro)
   | .closeSheet => m.closeTop
   | .setNetwork i =>
     match networks[i]? with
     | some net => m.switchNetwork net
     | none => (m, [])
   | .switchNetwork net => m.switchNetwork net
-  | .askAdvanced => ({ m with confirm := some .advancedMode }, [])
-  | .setAdvanced b =>
-    if b == m.settings.advancedMode then ({ m with confirm := none }, []) else
-    let s := { m.settings with advancedMode := b }
-    -- the Settings tab is a new view: its staged gateway edits start again from the saved settings
-    let m := { m with settingsDraft := { m.settingsDraft with gatewaysLoaded := false, gatewayError := none } }
-    ({ m with settings := s, confirm := none, tab := 0, routes := [], tabRoutes := [] }.loadGatewayDraft,
-     [.saveSettings s, .journal "setting.advancedMode" [("enabled", toString b)]])
   | .dismissConfirm => ({ m with confirm := none }, [])
-  | .selectTab i =>
-    -- each tab keeps its own navigation stack
-    let m' := m.switchTab i
-    (m', if i == 2 then m'.settingsAppear else if i == 1 then [.resolveRate g m.sendInputs m.status.feeFloorMilli] else [])
   | .openReceive => ({ m with receive := ({} : Receive) }.present .receive, [.receiveAddress g false])
   | .openSend =>
     let m := { m with send := { inputs := { network := m.settings.network } } }.present .send
@@ -367,6 +370,7 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
   | .multisig mm => stepMultisig mm m
   | .signer sm => stepSigner sm m
   | .cloud cm => stepCloud cm m
+  | .ledgerCard lm => stepLedgerCard lm m
   | .host h => onHost h m
 
 /-- The shell's system events: background tasks launched and expired, scene phase as `scenePhaseChanged` reads it (`active` activates,

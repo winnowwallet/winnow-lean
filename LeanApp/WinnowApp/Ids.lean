@@ -11,7 +11,8 @@ def abandonConfirmButton : String := "abandonConfirmButton"
 def abandonSpendButton : String := "abandonSpendButton"
 def accountsBalanceText : String := "accountsBalanceText"
 def addPSBTButton : String := "addPSBTButton"
-def advancedModeButton : String := "advancedModeButton"
+def settingsButton : String := "settingsButton"
+def appearancePicker : String := "appearancePicker"
 def amountField : String := "amountField"
 def applyPeerRouting : String := "applyPeerRouting"
 def automaticCloudBackupToggle : String := "automaticCloudBackupToggle"
@@ -124,8 +125,15 @@ def resolvedRateText : String := "resolvedRateText"
 def restoreCloudBackupButton : String := "restoreCloudBackupButton"
 def resumeImportedWalletButton : String := "resumeImportedWalletButton"
 def retryPeersButton : String := "retryPeersButton"
+/-- The home's short network warning ("Offline", "Sync problem"); tapped, it explains itself. -/
+def homeNetworkWarning : String := "homeNetworkWarning"
+/-- The home warning alert's button to its Settings page. -/
+def warningSettingsButton : String := "warningSettingsButton"
+/-- Settings → Network → Sync's last error. -/
+def syncLastError : String := "syncLastError"
 def revealPhraseButton : String := "revealPhraseButton"
 def reviewAmount : String := "reviewAmount"
+def reviewBalance : String := "reviewBalance"
 def reviewButton : String := "reviewButton"
 def reviewDestination : String := "reviewDestination"
 def reviewFee : String := "reviewFee"
@@ -150,7 +158,6 @@ def signersButton : String := "signersButton"
 def signersOwnFingerprint : String := "signersOwnFingerprint"
 def signersPairLedgerButton : String := "signersPairLedgerButton"
 def silentPaymentNote : String := "silentPaymentNote"
-def simpleModeButton : String := "simpleModeButton"
 def skipReceiveAddressLabelButton : String := "skipReceiveAddressLabelButton"
 def syncStatus : String := "syncStatus"
 def syncSummaryText : String := "syncSummaryText"
@@ -158,17 +165,15 @@ def torGatewayAddress : String := "torGatewayAddress"
 
 /-- A payment's row in Activity or Transactions. -/
 def historyPayment (txid : String) : String := s!"historyPayment-{txid}"
-/-- A payment row's status line (its block, awaiting confirmation, or what replaced it) and, in Advanced mode,
-its fee. -/
+/-- A payment row's status line: Confirmed, Pending or Replaced (the block and fee are on its screen). -/
 def historyStatus (txid : String) : String := s!"historyStatus-{txid}"
-def historyFee (txid : String) : String := s!"historyFee-{txid}"
 /-- A draft's row, by its account. -/
 def historyDraft (accountID : String) : String := s!"historyDraft-{accountID}"
 /-- The account's name on a payment's row. -/
 def paymentAccount (txid : String) : String := s!"paymentAccount-{txid}"
 /-- A draft's signature count on its row. -/
 def transactionDraft (txid : String) : String := s!"transactionDraft-{txid}"
-/-- An account on the Wallet tab's list. -/
+/-- An account on the home's Accounts and Settings → Security → Multisig accounts. -/
 def multisigAccount (id : String) : String := s!"multisigAccount-{id}"
 /-- A member row of an account, and of the builder, by index. -/
 def multisigMember (i : Nat) : String := s!"multisigMember-{i}"
@@ -186,5 +191,36 @@ def sendFrom (accountID : String) : String := s!"sendFrom-{accountID}"
 def peerType (raw : String) : String := s!"peerType_{raw}"
 /-- A stepper's halves, as XCTest names them. -/
 def decrement (stepper : String) : String := stepper ++ "-Decrement"
+
+/-! ## One mode: Settings' Network and Security, the balance cards, the nearby Ledger -/
+
+def hardwareWalletCard : String := "hardwareWalletCard"
+def dismissHardwareCard : String := "dismissHardwareCard"
+def multipartyCard : String := "multipartyCard"
+def dismissMultipartyCard : String := "dismissMultipartyCard"
+def ledgerNearbyCard : String := "ledgerNearbyCard"
+def ledgerSetUpButton : String := "ledgerSetUpButton"
+def ledgerNotNowButton : String := "ledgerNotNowButton"
+def ledgerSetupRetryButton : String := "ledgerSetupRetryButton"
+def ledgerSetupRecoveryToggle : String := "ledgerSetupRecoveryToggle"
+def ledgerSetupStartButton : String := "ledgerSetupStartButton"
+def ledgerSetupDone : String := "ledgerSetupDone"
+def ledgerSetupAddress : String := "ledgerSetupAddress"
+def ledgerAddressesMatchButton : String := "ledgerAddressesMatchButton"
+def bluetoothIntroCard : String := "bluetoothIntroCard"
+def allowBluetoothButton : String := "allowBluetoothButton"
+def skipBluetoothButton : String := "skipBluetoothButton"
+def networkSyncButton : String := "networkSyncButton"
+def networkPeersButton : String := "networkPeersButton"
+def networkExplorerButton : String := "networkExplorerButton"
+def chainVerificationButton : String := "chainVerificationButton"
+def multisigAccountsButton : String := "multisigAccountsButton"
+def homeAccountsSection : String := "homeAccountsSection"
+def sendFeeDisclosure : String := "sendFeeDisclosure"
+def reviewDetailsDisclosure : String := "reviewDetailsDisclosure"
+def onboardingTestNetwork : String := "onboardingTestNetwork"
+def paymentBlock : String := "paymentBlock"
+def paymentFee : String := "paymentFee"
+def paymentReplacedBy : String := "paymentReplacedBy"
 
 end WinnowApp.Ids

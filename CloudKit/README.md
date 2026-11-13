@@ -1,10 +1,10 @@
 # iCloud wallet backup
 
 Winnow automatically uploads an encrypted wallet backup when iCloud is
-available. It is enabled by default in Simple and Advanced modes. Simple shows
-**Backing up**, **Backed up** or **Not backed up**; Advanced holds the persistent
-backup switch, manual export and recovery words. The wallet remains usable
-without an Apple Account, and changing interface mode preserves the preference.
+available. It is on by default. Settings → Backup shows **Backing up**,
+**Backed up** or **Not backed up** and holds the backup switch, the backup file
+and the recovery words; while nothing is backed up, the home offers a backup
+file instead. The wallet remains usable without an Apple Account.
 
 Keep a current manual file and recovery words. A successful save date confirms
 that CloudKit accepted ciphertext. It does not establish that the wrapping key

@@ -27,7 +27,7 @@ inductive Sheet where
   | importWallet
   /-- CloudRestoreView (onboarding's "Restore your iCloud wallet"). -/
   | cloudRestore
-  /-- CloudBackupView (Advanced: Backup → iCloud backup). -/
+  /-- CloudBackupView (Settings → Backup → iCloud backup). -/
   | cloudBackup
   | feeBump
   | addPerson
@@ -41,14 +41,37 @@ inductive Sheet where
   | readSide
   /-- SignerPickerSheet ("Add a member"). -/
   | signerPicker
+  /-- The medium card a Ledger in range presents, like AirPods pairing (its advertisement's id and name). -/
+  | ledgerNearby
+  /-- Onboarding's last card: why Winnow asks for Bluetooth, then the system's question. -/
+  | bluetoothIntro
+  deriving Repr, BEq, Inhabited
+
+/-- Settings → Network's pushed screens. -/
+inductive NetworkPage where
+  /-- Sync status, filter scan, peers, the chain check and Sync now. -/
+  | sync
+  /-- Peer routing, the census list, manual peers and the connected peers. -/
+  | peers
+  /-- The external block explorer. -/
+  | explorer
+  /-- Chain verification from genesis. -/
+  | verification
   deriving Repr, BEq, Inhabited
 
 /-- A pushed screen (NavigationLink destinations). -/
 inductive Route where
   | payment (txid : String)
-  /-- Beginner mode's Back up page. -/
+  /-- The home's Back up page. -/
   | backup
-  /-- MultisigRoute (Advanced mode's Wallet tab): join with a descriptor, build, an account, its PSBT screen. -/
+  /-- Settings, from the home's toolbar. -/
+  | settings
+  /-- Settings → Network → one of its screens. -/
+  | network (page : NetworkPage)
+  /-- Settings → Security → Multisig accounts. -/
+  | multisigAccounts
+  /-- MultisigRoute (Settings → Security → Multisig accounts, or the home's Accounts): join with a descriptor,
+  build, an account, its PSBT screen. -/
   | multisigAdd
   | multisigBuild
   /-- LedgerPairView (Settings → Signers → "Pair a Ledger"). -/
@@ -61,9 +84,19 @@ inductive Route where
   | multisigPSBT (id : String)
   deriving Repr, BEq, Inhabited
 
+/-- A warning the home shows as one short line, explained in an alert when tapped. -/
+inductive HomeWarning where
+  /-- No peer can be reached, or syncing keeps failing: Settings → Network → Sync has the details and Retry. -/
+  | network
+  /-- Peers can see the phone's IP address, or the routing settings are invalid: Settings → Network → Peers
+  and routing. -/
+  | routing
+  deriving Repr, BEq, Inhabited
+
 /-- A confirmation the user must answer (alerts and confirmation dialogs). -/
 inductive Confirm where
-  | advancedMode
+  /-- The home's short warning, tapped: the whole message and a way to its Settings page. -/
+  | homeWarning (kind : HomeWarning)
   | deleteWallet
   | deleteFailed (message : String)
   | resetPeers
@@ -101,6 +134,8 @@ inductive PasteTarget where
   | accountPSBT (id : String)
   /-- SignerKeysAddView's "Paste keys". -/
   | signerKeys
+  /-- The nearby card's 2-of-3 recovery key. -/
+  | setupRecoveryKey
   deriving Repr, BEq, Inhabited
 
 /-! ## Area state -/
@@ -146,9 +181,9 @@ structure SendInputs where
   personID : Option String := none
   paymentIndex : Option Nat := none
   walletID : Option String := none
-  /-- The multisig account the payment comes from (Advanced mode's From); none for the wallet. -/
+  /-- The multisig account the payment comes from (the Send sheet's From); none for the wallet. -/
   accountID : Option String := none
-  /-- The account's timelocked recovery path instead of its signers (Advanced, an account with one): only
+  /-- The account's timelocked recovery path instead of its signers (an account with one): only
   coins whose delay has passed are spent. -/
   recovery : Bool := false
   deriving Repr, Inhabited, BEq
@@ -415,6 +450,36 @@ structure CollectForm where
   epoch : Nat := 0
   deriving Repr, Inhabited
 
+/-- A Ledger a Bluetooth scan saw advertising (`ble.scan`): its identifier, name and signal. -/
+structure NearbyLedger where
+  id : String
+  name : String
+  rssi : Option Int := none
+  deriving Repr, Inhabited, BEq
+
+/-- Where the nearby card's Set up is (`pairLedger` → `createMultisigAccount` → `registerLedger` →
+`verifyLedgerAddress`): each answer moves it on, a failure stops it where it is. -/
+inductive LedgerSetupStep where
+  /-- Choosing the account: 2-of-2 (this phone + the Ledger) or 2-of-3 with a recovery key. -/
+  | choose
+  | pairing
+  | creating (signer : String)
+  | registering (account : String)
+  | verifying (account : String)
+  /-- The Ledger showed the address: the person compares it with the phone's. -/
+  | done (account : String)
+  deriving Repr, Inhabited, BEq
+
+structure LedgerSetup where
+  step : LedgerSetupStep := .choose
+  /-- 2-of-3: this phone, the Ledger and a recovery key pasted in. -/
+  withRecoveryKey : Bool := false
+  recoveryKey : String := ""
+  /-- The address the Ledger showed (the phone's own), once verified. -/
+  address : Option String := none
+  error : Option String := none
+  deriving Repr, Inhabited
+
 /-- The wallet's answer at boot. -/
 inductive BootResult where
   | opened (walletID : String)
@@ -431,15 +496,10 @@ structure Model where
   phase : SyncPhase := .idle
   walletID : Option String := none
   records : Records := {}
-  /-- Advanced mode's tab: 0 wallet, 1 send, 2 settings. -/
-  tab : Nat := 0
   /-- Test mode's `WINNOW_E2E_NETWORK`: the network cannot be switched away from it. -/
   forcedNetwork : Option Network := none
-  /-- Pushed screens of the main navigation (beginner home, or the current tab), innermost last. -/
+  /-- Pushed screens of the main navigation (over the home), innermost last. -/
   routes : List Route := []
-  /-- Each Advanced-mode tab's own navigation stack while another tab shows (by tab index; the current
-  tab's stack is `routes`). -/
-  tabRoutes : List (List Route) := []
   /-- Presented sheets, innermost last (a sheet presents the next one over itself). -/
   sheets : List Sheet := []
   confirm : Option Confirm := none
@@ -459,7 +519,7 @@ structure Model where
   person : PersonForm := {}
   shareCard : ShareCard := {}
   recipientsError : Option String := none
-  /-- Multisig accounts (Advanced mode), as the backend last reported them. -/
+  /-- Multisig accounts, as the backend last reported them. -/
   multisig : MultisigOverview := {}
   multisigAdd : MultisigAddForm := {}
   multisigBuild : MultisigBuildForm := {}
@@ -495,6 +555,12 @@ structure Model where
   /-- The background tasks iOS launched before the wallet was open (id, kind, the launch's tag), in launch
   order, one per identifier: each runs once boot lands (records-test's `backgroundTaskCommands`). -/
   pendingBackgroundTasks : List (String × String × Option Nat) := []
+  /-- The generation whose 30 s Ledger scan is ticking (one chain per generation). -/
+  ledgerScanGen : Option Nat := none
+  /-- The Ledger the nearby card offers. -/
+  nearbyLedger : Option NearbyLedger := none
+  /-- The nearby card's Set up is running its chain: pair, create the account, register, verify. -/
+  ledgerSetup : Option LedgerSetup := none
   deriving Repr, Inhabited
 
 /-- An expiry's tag names this launch: the two tags are the same, or either is unknown (a shell that sends
@@ -517,8 +583,8 @@ inductive Done where
 
 /-- What the backend (Lean wallet + network, and iOS capabilities) reports. -/
 inductive Host where
-  /-- Test mode at launch (E2EMode): the forced network and the first tab; sent before `settingsLoaded`. -/
-  | launched (forcedNetwork : Option Network) (tab : Nat)
+  /-- Test mode at launch (E2EMode): the forced network; sent before `settingsLoaded`. -/
+  | launched (forcedNetwork : Option Network)
   | settingsLoaded (s : Settings)
   | booted (gen : Nat) (r : BootResult)
   /-- The wallet is created and onboarding finished (its iCloud backup prepared when iCloud allows). -/
@@ -527,7 +593,7 @@ inductive Host where
   /-- The iCloud backup's status changed. -/
   | cloud (s : CloudStatus)
   /-- A restore from iCloud is done: the wallet, the verification (none: no peer yet), the restored display
-  name and Advanced switch. -/
+  name and the backup's Advanced switch (kept for the format, not applied). -/
   | cloudRestored (gen : Nat) (walletID : String) (matchesBundle : Option Bool) (context : Option (String × Bool))
   | snapshot (gen : Nat) (s : Status) (p : SyncPhase)
   | records (gen : Nat) (r : Records)
@@ -586,6 +652,10 @@ inductive Host where
   | bgtask (id kind : String) (tag : Option Nat)
   /-- iOS expired the launch `tag` of `id`. -/
   | bgtaskExpired (id kind : String) (tag : Option Nat)
+  /-- Time for the next nearby-Ledger scan of generation `gen` (every 30 s while the app is open). -/
+  | ledgerScanDue (gen : Nat) (again : Bool)
+  /-- The Ledgers a scan saw (none: Bluetooth off, not allowed, or nothing in range). -/
+  | ledgersNearby (gen : Nat) (seen : List NearbyLedger)
   deriving Inhabited
 
 inductive SendMsg where
@@ -597,9 +667,9 @@ inductive SendMsg where
   | openRecipients
   | choosePerson (id : String)
   | clearPerson
-  /-- From: the wallet (none) or a multisig account (Advanced mode). -/
+  /-- From: the wallet (none) or a multisig account. -/
   | setSource (account : Option String)
-  /-- "Spend with": the signers now, or the account's recovery path (Advanced, an account with one). -/
+  /-- "Spend with": the signers now, or the account's recovery path (an account with one). -/
   | setRecovery (b : Bool)
   | review
   | sendPayment
@@ -621,6 +691,21 @@ inductive ReceiveMsg where
 inductive HomeMsg where
   | openPayment (txid : String)
   | openBackup
+  | openSettings
+  /-- Settings → Network → `page` (the peers page loads the connected peers and the census line). -/
+  | openNetwork (page : NetworkPage)
+  /-- Settings → Security → Multisig accounts. -/
+  | openMultisigAccounts
+  /-- The home's short warning, tapped: its alert (`Confirm.homeWarning`). -/
+  | explainWarning (kind : HomeWarning)
+  /-- The alert's settings button: Settings → Network → Sync, or Peers and routing. -/
+  | warningSettings (kind : HomeWarning)
+  /-- A balance card's ×: dismissed for good (`hardware` or the multi-party one). -/
+  | dismissCard (hardware : Bool)
+  /-- The hardware card's "Protect with a Ledger": the nearby card's setup, or pairing when none is near. -/
+  | protectWithLedger
+  /-- The multi-party card: the builder, for other people's keys. -/
+  | buildWithOthers
   | pop
   | loadPayment
   | editRecipient (address : String) (personID : Option String)
@@ -637,6 +722,8 @@ inductive HomeMsg where
   deriving Inhabited
 
 inductive SettingsMsg where
+  /-- An index of `Appearance.all`. -/
+  | setAppearance (i : Nat)
   | setManualPeer (s : String)
   | addManualPeer
   | removeManualPeer (i : Nat)
@@ -734,7 +821,7 @@ inductive MultisigMsg where
   | newAddress
   | askRemove
   | remove
-  /-- "Send from this account": the Send tab, From this account. -/
+  /-- "Send from this account": the Send sheet, From this account. -/
   | sendFrom (id : String)
   /-- "Paste a PSBT from a co-signer" (the account page). -/
   | pasteForAccount (id : String)
@@ -759,6 +846,22 @@ inductive MultisigMsg where
   | verifyAddress
   deriving Inhabited
 
+/-- The nearby-Ledger card and its Set up, and onboarding's Bluetooth card. -/
+inductive LedgerCardMsg where
+  /-- Set up: this phone and the Ledger, 2-of-2 or 2-of-3 with a recovery key. -/
+  | setUp
+  | notNow
+  | setWithRecoveryKey (b : Bool)
+  | pasteRecoveryKey
+  /-- Create the account (after the choice). -/
+  | start
+  /-- The Ledger and the phone show the same address. -/
+  | addressesMatch
+  /-- Onboarding's Bluetooth card: ask now (the system's prompt), or not. -/
+  | allowBluetooth
+  | skipBluetooth
+  deriving Inhabited
+
 /-- CloudBackupView and CloudRestoreView. -/
 inductive CloudMsg where
   | openBackup
@@ -778,10 +881,7 @@ inductive Msg where
   | closeSheet
   | setNetwork (i : Nat)
   | switchNetwork (net : Network)
-  | askAdvanced
-  | setAdvanced (b : Bool)
   | dismissConfirm
-  | selectTab (i : Nat)
   | openReceive
   | openSend
   | copy (key text : String)
@@ -800,6 +900,7 @@ inductive Msg where
   | multisig (m : MultisigMsg)
   | signer (m : SignerMsg)
   | cloud (m : CloudMsg)
+  | ledgerCard (m : LedgerCardMsg)
   | host (h : Host)
   deriving Inhabited
 
@@ -826,6 +927,8 @@ inductive Cmd where
   | copy (text : String) (policy : ClipPolicy)
   | timer (ms : Nat) (h : Host)
   | openURL (url : String)
+  /-- The shell draws the app light, dark or as the system is (`appearance`). -/
+  | setAppearance (a : Appearance)
   | deleteWallet (gen : Nat)
   | startNetworking (gen : Nat) (settings : Settings)
   | stopNetworking
@@ -860,22 +963,22 @@ inductive Cmd where
   /-- Multisig accounts (`Backend.multisig*`). -/
   | multisigOverview (gen : Nat)
   | checkMultisigDescriptor (gen : Nat) (text : String)
-  | addMultisigAccount (gen : Nat) (advanced : Bool) (name descriptor : String)
+  | addMultisigAccount (gen : Nat) (name descriptor : String)
   | removeMultisigAccount (gen : Nat) (id : String)
   | newMultisigAddress (gen : Nat) (id : String)
-  | createMultisigAccount (gen : Nat) (advanced : Bool) (name : String) (threshold : Nat)
+  | createMultisigAccount (gen : Nat) (name : String) (threshold : Nat)
       (members : List (List String × Option Nat)) (recovery : Option MultisigRecovery)
-  | registerLedger (gen : Nat) (advanced : Bool) (id : String)
-  | pairLedger (gen : Nat) (advanced : Bool) (name : String)
-  | addSignerKeys (gen : Nat) (advanced : Bool) (name text : String)
+  | registerLedger (gen : Nat) (id : String)
+  | pairLedger (gen : Nat) (name : String)
+  | addSignerKeys (gen : Nat) (name text : String)
   | renameSigner (gen : Nat) (id name : String)
   | removeSigner (gen : Nat) (id : String)
-  | verifyLedgerAddress (gen : Nat) (advanced : Bool) (id : String) (index : Nat)
+  | verifyLedgerAddress (gen : Nat) (id : String) (index : Nat)
   /-- "Sign and continue", after device authentication ("Sign this multisig payment"). -/
-  | signAndDraft (gen : Nat) (advanced : Bool) (inputs : SendInputs) (p : Preview)
+  | signAndDraft (gen : Nat) (inputs : SendInputs) (p : Preview)
   /-- After device authentication ("Sign this multisig payment"). -/
   | signDraft (gen epoch : Nat) (id : String)
-  | signDraftWithLedger (gen epoch : Nat) (advanced : Bool) (id : String)
+  | signDraftWithLedger (gen epoch : Nat) (id : String)
   | adoptDraft (gen epoch : Nat) (id psbt : String)
   | broadcastDraft (gen epoch : Nat) (id : String)
   | discardDraft (gen epoch : Nat) (id : String)
@@ -907,6 +1010,10 @@ inductive Cmd where
   /-- Answer the shell that launch `tag` of task `id` is over without running it: iOS expired it while the app
   was still booting, so no run was ever made for it (records-test's `backgroundTaskCommands`). -/
   | completeBackgroundTask (id : String) (success : Bool) (tag : Option Nat)
+  /-- Look for Ledgers advertising nearby, without connecting (`ble.scan`). -/
+  | scanLedgers (gen : Nat)
+  /-- Ask for Bluetooth (`ble.state`, which makes iOS ask the person the first time). -/
+  | askBluetooth
   deriving Inhabited
 
 instance : Lean.ToJson Cmd := ⟨fun _ => Lean.Json.null⟩
@@ -938,16 +1045,6 @@ def Model.payment? (m : Model) (txid : String) : Option DisplayedPayment :=
   match m.status.payments.find? (·.item.txid == txid) with
   | some row => some row
   | none => (m.status.history.find? (·.txid == txid)).map fun e => { item := e, source := .wallet }
-
-/-- The saved stack of `tab` (empty when none was saved). -/
-def Model.savedRoutes (m : Model) (tab : Nat) : List Route := (m.tabRoutes[tab]?).getD []
-
-/-- Show tab `i`: the leaving tab keeps its stack, the entering tab gets its own back. -/
-def Model.switchTab (m : Model) (i : Nat) : Model :=
-  if i == m.tab then m else
-  let saved := (List.range (max (m.tabRoutes.length) (max m.tab i + 1))).map fun t =>
-    if t == m.tab then m.routes else m.savedRoutes t
-  { m with tab := i, routes := m.savedRoutes i, tabRoutes := saved.set i [] }
 
 /-- Leave the current wallet/network generation: every answer still in flight is dropped. -/
 def Model.nextGeneration (m : Model) : Model :=

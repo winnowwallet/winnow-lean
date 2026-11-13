@@ -1,6 +1,6 @@
 # Tor and I2P through Tailscale gateways
 
-Fresh installations use **Automatic** routing in both simple and advanced mode.
+Fresh installations use **Automatic** routing.
 Winnow checks `winnow-tor-gateway:9050` and `winnow-i2p-gateway:4447` when
 networking starts in the foreground and when the user reconnects or retries.
 Connect the Tailscale app to the intended tailnet first, with MagicDNS enabled.
@@ -25,8 +25,8 @@ extension. Manual gateways support DNS names and bracketed IPv6 addresses.
 When either gateway answers, Automatic uses only Tor and I2P: no peer
 connection or explorer lookup goes direct, and peers never
 see the phone's IP address. When neither answers, it falls back to clearnet
-so the wallet keeps syncing, and simple mode's banner says peers can see the
-IP address. Existing peer provenance and address diversity checks remain in
+so the wallet keeps syncing, and the home shows a short warning, "Peers see
+your IP", whose alert has the whole message and leads to Peers and routing. Existing peer provenance and address diversity checks remain in
 force. Onion and I2P names have no address block to limit, so while clearnet
 is selected automatic Tor and I2P peers together may not take every slot, and
 with Tor and I2P both selected and clearnet off neither overlay may; a round
@@ -34,14 +34,14 @@ that cannot fill the pool with a mix relaxes that rule for the next one. Gateway
 the destinations clients ask them to reach; Bitcoin peers still undergo the
 normal version, compact-filter, header and chain checks.
 
-Advanced Settings → Peer networks offers:
+Settings → Network → Peers and routing → Peer networks offers:
 
 - **Automatic**: discover the conventional gateways; use only them when
   either answers, clearnet when neither does.
 - **Direct only**: skip discovery and use clearnet peers.
 - **Manual**: choose any nonempty combination of clearnet, Tor and I2P and
   supply each selected overlay's SOCKS address. Edits take effect on **Apply
-  routing**; these preferences remain active when returning to simple mode.
+  routing**.
 
 Tor and I2P destinations are sent by name to their respective SOCKS gateway;
 failed overlay connections never dial those destinations directly. Manual,

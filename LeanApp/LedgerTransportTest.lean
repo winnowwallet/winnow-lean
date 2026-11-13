@@ -109,3 +109,18 @@ def main : IO UInt32 := runMain "ledger-transport-test" do
   let _ ← (try (some <$> withLedger (openLedger (fakeAsk state sim 153 .silentAfterSubscribe)) Client.masterFingerprint)
     catch _ => pure none)
   check "a failed open closes the connection" ((← state.get).closed == 1)
+  -- the nearby scan: the Ledger services for 4 s, each advertisement as the card reads it; nothing on a refusal
+  let asked ← IO.mkRef (none : Option Json)
+  let scanAsk (answer : Json) : Ask := fun name args => do
+    if name == "ble.scan" then asked.set (some args)
+    pure (Task.pure answer)
+  let seen ← scanLedgers (scanAsk (Json.mkObj [("ok", .bool true), ("devices", Json.arr #[
+    Json.mkObj [("id", .str "a1"), ("name", .str "Nano X 1A2B"), ("rssi", toJson (-61 : Int))],
+    Json.mkObj [("id", .str "b2"), ("name", Json.null), ("rssi", Json.null)]])]))
+  let args := (← asked.get).getD Json.null
+  check "scan: asks for the Ledger services" ((args.getObjValAs? (Array String) "services").toOption ==
+    some Bluetooth.serviceIdentifiers)
+  check "scan: for 4 s" ((args.getObjValAs? Nat "seconds").toOption == some 4)
+  check "scan: each Ledger seen, a nameless one as Nano" (seen.map (fun l => (l.id, l.name, l.rssi)) ==
+    [("a1", "Nano X 1A2B", some (-61)), ("b2", "Nano", none)])
+  check "scan: Bluetooth off sees nothing" ((← scanLedgers (scanAsk (Json.mkObj [("ok", .bool false), ("error", .str "poweredOff")]))).isEmpty)

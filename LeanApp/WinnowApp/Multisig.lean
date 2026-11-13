@@ -5,8 +5,8 @@ import Winnow.Ledger.WalletPolicy
 import Winnow.Ledger.Multisig
 import WinnowApp.Ids
 
-/-! MultisigViews.swift and MultisigBuildView.swift (upstream 1cf93fb): raw k-of-n multisig accounts in
-Advanced mode's Wallet tab only — the Multisig section, MultisigAddView ("Join an account"),
+/-! MultisigViews.swift and MultisigBuildView.swift (upstream 1cf93fb): raw k-of-n multisig accounts under
+Settings → Security → Multisig accounts (and the home's Accounts once one exists) — the Multisig section, MultisigAddView ("Join an account"),
 MultisigBuildView ("Create an account"), MultisigAccountView and the collection step (a payment from Send or
 a co-signer's pasted PSBT, reviewed against the account's own coins, signed here, combined with the other
 signers' copies, finalized and broadcast), and MultisigLiteralRow / MultisigValueRow.
@@ -180,7 +180,7 @@ def Model.runCollect (m : Model) (ledger := false) : Model × Nat :=
   let e := m.collect.epoch + 1
   ({ m with collect := { m.collect with epoch := e, busy := true, ledgerSigning := ledger, error := none } }, e)
 
-/-- The account whose draft the collection step works on: the Send tab's, the account's collection page,
+/-- The account whose draft the collection step works on: the Send sheet's, the account's collection page,
 or the account page itself (its "Paste a PSBT from a co-signer"). -/
 def Model.collectingOn? (m : Model) (id : String) : Bool :=
   m.send.collecting == some id || m.multisigPSBTRoute? == some id || m.routes.getLast? == some (.multisigAccount id)
@@ -219,7 +219,7 @@ def stepMultisigAdd (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .pasteDescriptor => (m, [.paste .multisigDescriptor])
   | .save =>
     if !add.canSave then (m, []) else
-    (withAdd { add with saving := true, error := none }, [.addMultisigAccount g m.settings.advancedMode add.name add.descriptor])
+    (withAdd { add with saving := true, error := none }, [.addMultisigAccount g add.name add.descriptor])
   | _ => (m, [])
 
 /-- MultisigBuildView ("Create an account") and its Ledger registration. -/
@@ -264,11 +264,11 @@ def stepMultisigBuild (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .create =>
     if !build.canCreate then (m, []) else
     (withBuild { build with creating := true, error := none, registration := none },
-     [.createMultisigAccount g m.settings.advancedMode build.name build.threshold (build.members.map (·.plan))
+     [.createMultisigAccount g build.name build.threshold (build.members.map (·.plan))
         build.recoveryPlan])
   | .registerLedger id =>
     if m.ledgerRegistering.isSome then (m, []) else
-    ({ m with ledgerRegistering := some id, ledgerRegisterError := none }, [.registerLedger g m.settings.advancedMode id])
+    ({ m with ledgerRegistering := some id, ledgerRegisterError := none }, [.registerLedger g id])
   | _ => (m, [])
 
 /-- MultisigAccountView, and PaymentDetailView's Account section. -/
@@ -290,8 +290,8 @@ def stepMultisigAccount (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
     | some (.removeMultisig id) => ({ m with confirm := none, multisigAccountError := none }, [.removeMultisigAccount g id])
     | _ => (m, [])
   | .sendFrom id =>
-    -- the Send tab with this account under From; a payment being signed and broadcast stays as it is
-    let m' := m.switchTab 1
+    -- the Send sheet with this account under From; a payment being signed and broadcast stays as it is
+    let m' := if m.hasSheet .send then m else m.present .send
     if m.send.sending then (m', []) else
     let inputs : SendInputs := { network := m.settings.network, accountID := some id }
     ({ m' with send := { inputs } }, [.resolveRate g inputs m.status.feeFloorMilli])
@@ -304,7 +304,7 @@ def stepMultisigAccount (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
       | some a =>
         if m.ledgerVerify.checking then (m, []) else
         ({ m with ledgerVerify := { id, index := a.nextReceiveIndex, checking := true } },
-         [.verifyLedgerAddress g m.settings.advancedMode id a.nextReceiveIndex])
+         [.verifyLedgerAddress g id a.nextReceiveIndex])
       | none => (m, [])
     | _ => (m, [])
   | .rebroadcast id txid => ({ m with payment := { m.payment with error := none } }, [.rebroadcastSpend g id txid])
@@ -336,7 +336,7 @@ def stepMultisigCollect (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
     let ok := ((m.multisigInfo? id).bind (·.draft)).bind (·.screen) |>.any fun s => s.progress.ledgerUnsigned && !s.progress.complete
     if spend.busy || !ok then (m, []) else
     let (m', e) := m.runCollect (ledger := true)
-    (m', [.signDraftWithLedger g e m.settings.advancedMode id])
+    (m', [.signDraftWithLedger g e id])
   | .broadcast id =>
     let ok := ((m.multisigInfo? id).bind (·.draft)).bind (·.screen) |>.any (·.progress.complete)
     if spend.busy || !ok then (m, []) else
@@ -363,7 +363,7 @@ def stepLedgerPair (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .pairLedger =>
     let f := m.ledgerPair
     if f.pairing || !f.nameIsUsable then (m, []) else
-    ({ m with ledgerPair := { f with pairing := true, error := none } }, [.pairLedger g m.settings.advancedMode f.name])
+    ({ m with ledgerPair := { f with pairing := true, error := none } }, [.pairLedger g f.name])
   | _ => (m, [])
 
 /-- A multisig message goes to its screen's handler. -/
@@ -431,7 +431,7 @@ def Model.onMultisigHost (m : Model) (h : Host) : Model × List Cmd :=
   | .drafted g id =>
     if !m.sameWallet g then ({ m with spendingInFlight := false }, []) else
     let g := m.generation
-    -- "Sign and continue" filed the draft: the Send tab goes on to collect its signatures
+    -- "Sign and continue" filed the draft: the Send sheet goes on to collect its signatures
     ({ m with send := { m.send with sending := false, collecting := some id, error := none }, spendingInFlight := false,
               collect := { epoch := spend.epoch + 1, loadingDraft := true } },
      [.multisigOverview g, .refresh g])
@@ -457,7 +457,7 @@ def Model.onMultisigHost (m : Model) (h : Host) : Model × List Cmd :=
     let m := { m with spendingInFlight := false }
     if !accepts g e id then (m, [.refresh m.generation, .multisigOverview m.generation]) else
     if m.send.collecting == some id then
-      -- the Send tab's receipt, with the main path's relay watch
+      -- the Send sheet's receipt, with the main path's relay watch
       ({ m with send := { m.send with sentTxid := some txid, collecting := none }, collect := { spend with busy := false } },
        [.multisigOverview g, .refresh g, .rawTransaction g txid, .watchRelay g txid])
     else
@@ -472,9 +472,9 @@ literal this long the renderer's row leaves the button no room). -/
 def literalRow (m : Model) (key text : String) (id := "") : H :=
   .col [withId id (literal text), .button (if m.copied == some key then "Copied" else "Copy") .plain (some (.copy key text))]
 
-/-- The Wallet tab's multisig section. -/
+/-- Settings → Security → Multisig accounts. -/
 def multisigSection (m : Model) : H :=
-  .section "Multisig" "Accounts that need more than one signature to spend. Pair a Ledger or save other people's keys in Settings → Signers."
+  .section "Multisig" "Accounts that need more than one signature to spend. Pair a Ledger or save other people's keys in Settings → Security → Hardware wallets and keys."
     ((match m.multisig.notice with | some n => [body n] | none => []) ++
      (m.multisig.accounts.map fun a =>
         .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
@@ -697,7 +697,7 @@ def collectSections (m : Model) (id : String) : List H :=
                 (if recovery then ("Recovery signatures", Ids.multisigRecoverySignatureCount) else ("Signatures", Ids.multisigSignatureCount))
               .identified rowID (.labeled title s!"{approved} of {threshold}"))
          | none =>
-           [ .row [.icon "exclamationmark.triangle.fill", body "Winnow cannot safely review this PSBT"]
+           [ warningRow "Winnow cannot safely review this PSBT"
            , body (d.reviewError.getD "The account or PSBT is unavailable.") ])
     let actions : List H := match d.screen with
       | some s =>

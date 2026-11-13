@@ -4,7 +4,7 @@ Winnow's app owns the user interaction and device integration. WalletCore
 provides its Bitcoin rules, on top of the pinned
 [swift-secp256k1](https://github.com/21-DOT-DEV/swift-secp256k1) package
 (Bitcoin Core's libsecp256k1). Shared control is limited to raw k-of-n
-script-path multisig accounts in Advanced mode, optionally with a Ledger as one
+script-path multisig accounts, optionally with a Ledger as one
 signer over Bluetooth, or counted with its phone as one member of a nested
 account; there is no MuSig2. The app and
 development tools use the root [Package.swift](../Package.swift) and its

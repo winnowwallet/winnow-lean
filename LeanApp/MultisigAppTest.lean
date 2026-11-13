@@ -15,7 +15,7 @@ import TestKit.Fixtures
   the combined filter scan drives (payments, spends, conflicts, reorgs), against `MultisigStore`;
 * `AppTests/MultisigAccountFlowTests.swift` without the Ledger: the builder (with another Winnow's key and a
   recovery path), a co-signer's spend signed on two phones with BIP326 sequences, the recovery path's age
-  check and the Advanced-mode gate, through `Backend.realWithMultisig` (`Real/Multisig.lean`) on wallets opened from
+  check, through `Backend.realWithMultisig` (`Real/Multisig.lean`) on wallets opened from
   disk with no network;
 * Settings → Signers as a person uses it: a signer saved from pasted keys, opened, renamed and removed (one an
   account still uses among them), through the app's own `perform` on that backend;
@@ -586,19 +586,19 @@ def Phone.keyExpression (p : Phone) : IO String := Real.multisigKeyExpression p.
 def Phone.record (p : Phone) (id : String) : IO MultisigAccountRecord := Real.record p.multisig id
 def Phone.accounts (p : Phone) : IO (List MultisigInfo) := do return (← p.backend.multisigOverview).accounts
 
-/-- `createMultisigAccount(name:threshold:members:recovery:)` (Advanced mode): id and descriptor. -/
+/-- `createMultisigAccount(name:threshold:members:recovery:)`: id and descriptor. -/
 def Phone.build (p : Phone) (name : String) (threshold : Nat) (members : List (List String))
-    (recovery : Option MultisigRecovery := none) (advanced := true) : IO (String × String) := do
-  let (id, d, _) ← p.backend.createMultisigAccount advanced name threshold (members.map (·, none)) recovery
+    (recovery : Option MultisigRecovery := none) : IO (String × String) := do
+  let (id, d, _) ← p.backend.createMultisigAccount name threshold (members.map (·, none)) recovery
   return (id, d)
 
 /-- This phone and the other keys, each a member of its own. -/
 def Phone.buildWith (p : Phone) (name : String) (threshold : Nat) (others : List String)
-    (recovery : Option MultisigRecovery := none) (advanced := true) : IO (String × String) := do
-  p.build name threshold ([← p.keyExpression] :: others.map ([·])) recovery advanced
+    (recovery : Option MultisigRecovery := none) : IO (String × String) := do
+  p.build name threshold ([← p.keyExpression] :: others.map ([·])) recovery
 
 def Phone.join (p : Phone) (name descriptor : String) : IO String := do
-  return (← p.backend.addMultisigAccount true name descriptor).1
+  return (← p.backend.addMultisigAccount name descriptor).1
 
 def testBuilderMakesAccountWithAnotherWinnowAndRecovery : IO Unit := do
   let phone ← phoneWith 0xA1
@@ -708,16 +708,10 @@ def testRecoveryPathRefusesCoinsThatAreTooYoung : IO Unit := do
   | .ok p => check "the signers' path spends it at once" p.screen.isSome
   | .error e => check "the signers' path spends it at once" false (toString e)
 
-def testBuilderIsAdvancedModeOnly : IO Unit := do
-  let phone ← phoneWith 0xA1
-  failsWith "the builder refuses Simple mode"
-    (phone.buildWith "Two phones" 2 [← keyExpression (← masters)[2]!] (advanced := false)) Real.advancedModeOnlyText
-
 def flowTests : List (String × IO Unit) :=
   [ ("testBuilderMakesAccountWithAnotherWinnowAndRecovery", testBuilderMakesAccountWithAnotherWinnowAndRecovery)
   , ("testTwoPhonesSignACoSignersSpendWithBIP326Sequences", testTwoPhonesSignACoSignersSpendWithBIP326Sequences)
-  , ("testRecoveryPathRefusesCoinsThatAreTooYoung", testRecoveryPathRefusesCoinsThatAreTooYoung)
-  , ("testBuilderIsAdvancedModeOnly", testBuilderIsAdvancedModeOnly) ]
+  , ("testRecoveryPathRefusesCoinsThatAreTooYoung", testRecoveryPathRefusesCoinsThatAreTooYoung) ]
 
 
 /-! ## LedgerPairingTests and LedgerBluetoothTests -/
@@ -742,17 +736,10 @@ def simulator (entropyByte : UInt8) : IO (IO.Ref Ledger.Simulator) := do
 the Ledger, which then registers the account (the builder's registration step). -/
 def Phone.buildWithLedger (p : Phone) (name : String) (otherKeys : List String := []) (threshold := 2)
     (recovery : Option MultisigRecovery := none) : IO (String × String × Option (Except String String)) := do
-  let ledgerID ← p.backend.pairLedger true "Nano X"
+  let ledgerID ← p.backend.pairLedger "Nano X"
   let some ledger := (← p.backend.multisigOverview).signers.find? (·.id == ledgerID) | throw (IO.userError "no Ledger")
-  p.backend.createMultisigAccount true name threshold
+  p.backend.createMultisigAccount name threshold
     (([← p.keyExpression] :: otherKeys.map ([·]) ++ [ledger.keys]).map (·, none)) recovery
-
-def testLedgerSigningIsAdvancedModeOnly : IO Unit := do
-  let phone ← phoneWith 0xA1
-  phone.useLedger (← simulator 0xB2)
-  failsWith "pairing refuses Simple mode" (phone.backend.pairLedger false "Nano X") Real.advancedModeOnlyText
-  check "no signer" (← phone.backend.multisigOverview).signers.isEmpty
-  check "no account" (← phone.accounts).isEmpty
 
 def screenOf (p : MultisigPSBT) : IO MultisigScreen := do
   let some s := p.screen | throw (IO.userError s!"no review: {p.reviewError}")
@@ -763,16 +750,16 @@ def testPairVerifyAndSpendWithBothSigners : IO Unit := do
   let device ← simulator 0xB2
   phone.useLedger device
   -- Pairing files the Ledger among the signers; nothing is registered yet.
-  let ledgerID ← phone.backend.pairLedger true "Nano X"
+  let ledgerID ← phone.backend.pairLedger "Nano X"
   let some ledger := (← phone.backend.multisigOverview).signers.find? (·.id == ledgerID) | throw (IO.userError "no Ledger")
   check "paired: a Ledger signer" (ledger.isLedger && ledger.keysText == Descriptor.hex8 (← master 0xB2).fingerprint)
   check "nothing registered by pairing" (← device.get).registeredNames.isEmpty
-  let againID ← phone.backend.pairLedger true "Nano X, renamed"
+  let againID ← phone.backend.pairLedger "Nano X, renamed"
   check "pairing again renames it" (againID == ledgerID &&
     (← phone.backend.multisigOverview).signers.map (·.name) == ["Nano X, renamed"])
   -- The 2-of-2 of this phone and the Ledger, which the Ledger then approves.
   let members := [[← phone.keyExpression], ledger.keys]
-  let (id, _, registration) ← phone.backend.createMultisigAccount true "Phone and Ledger" 2 (members.map (·, none)) none
+  let (id, _, registration) ← phone.backend.createMultisigAccount "Phone and Ledger" 2 (members.map (·, none)) none
   check "the paired Ledger approved it" (registration matches some (.ok "Nano X, renamed"))
   let record ← phone.record id
   let account ← need "account" (MultisigAccount.parse record.descriptor signet)
@@ -785,10 +772,10 @@ def testPairVerifyAndSpendWithBothSigners : IO Unit := do
   check "the account names the Ledger" ((((← phone.accounts).find? (·.id == id)).bind (·.ledgerName)) ==
     some s!"Nano X, renamed · {Descriptor.hex8 (← master 0xB2).fingerprint}")
   -- Building the same account again yields it rather than a copy, and registers no further.
-  let (same, _, again) ← phone.backend.createMultisigAccount true "Phone and Ledger" 2 (members.map (·, none)) none
+  let (same, _, again) ← phone.backend.createMultisigAccount "Phone and Ledger" 2 (members.map (·, none)) none
   check "building again yields the same account" (same == id && (← phone.accounts).length == 1)
   check "a registered account registers no further" (again.isNone && (← device.get).registeredNames.size == 1)
-  let shown ← phone.backend.verifyLedgerAddress true id 0
+  let shown ← phone.backend.verifyLedgerAddress id 0
   check "the Ledger shows the phone's first address" ((account.address 0).toOption == some shown)
   check "on its screen" ((← device.get).displayedAddresses == #[shown])
   check "the account screen shows the Ledger" (((← phone.accounts).find? (·.id == id)).bind (·.ledgerFingerprint) ==
@@ -806,14 +793,14 @@ def testPairVerifyAndSpendWithBothSigners : IO Unit := do
   check "before signing: the signers' path, nothing signed" (screen.signatures == [(false, 0, 2)])
   check "both still to sign" (screen.progress == { phoneHolds := true, phoneUnsigned := true, ledgerHolds := true, ledgerUnsigned := true })
   check "the footer asks for both" (screen.progress.nextStep.startsWith "Add this phone's signature and the Ledger's")
-  let byLedger ← Real.signMultisigSpendWithLedger phone.env phone.multisig true id created.psbt
+  let byLedger ← Real.signMultisigSpendWithLedger phone.env phone.multisig id created.psbt
   let screen ← screenOf byLedger
   check "the Ledger's signature verifies" (screen.signatures == [(false, 1, 2)] && !screen.progress.ledgerUnsigned && !screen.progress.complete)
   check "then the footer asks for the phone" (screen.progress.nextStep ==
     "Check the payment, then add this phone's signature. Signers can sign in any order.")
   -- A device whose signatures name a leaf they were not made for is refused (SEC-036), nothing added.
   phone.useLedger device (relabelsLeaves := true)
-  failsWith "a relabelled Ledger signature is refused" (Real.signMultisigSpendWithLedger phone.env phone.multisig true id byLedger.psbt)
+  failsWith "a relabelled Ledger signature is refused" (Real.signMultisigSpendWithLedger phone.env phone.multisig id byLedger.psbt)
     (LedgerError.mismatch "a Ledger signature does not verify").description
   phone.useLedger device
   let both ← Real.signMultisigSpend phone.env phone.multisig id byLedger.psbt
@@ -826,10 +813,8 @@ def testPairVerifyAndSpendWithBothSigners : IO Unit := do
   -- A refusal on the Ledger reaches the user as that, and signs nothing.
   device.modify (·.setDecision .reject)
   let unsigned ← Real.createMultisigSpend phone.env phone.multisig id destination 40_000 2.0 false
-  failsWith "a refusal on the Ledger" (Real.signMultisigSpendWithLedger phone.env phone.multisig true id unsigned.psbt)
+  failsWith "a refusal on the Ledger" (Real.signMultisigSpendWithLedger phone.env phone.multisig id unsigned.psbt)
     LedgerError.rejectedOnDevice.description
-  failsWith "Ledger signing refuses Simple mode" (Real.signMultisigSpendWithLedger phone.env phone.multisig false id unsigned.psbt)
-    Real.advancedModeOnlyText
 
 def testBuilderMakesTwoOfThreeWithAnotherWinnowALedgerAndRecovery : IO Unit := do
   let phone ← phoneWith 0xA1
@@ -895,8 +880,7 @@ def testNotificationsReachOnlyTheStepInFlight : IO Unit := do
     (ByteArray.mk #[0x07, 0, 0]) (some .reply)).2) with | some (.error _) => true | _ => false)
 
 def ledgerTests : List (String × IO Unit) :=
-  [ ("testLedgerSigningIsAdvancedModeOnly", testLedgerSigningIsAdvancedModeOnly)
-  , ("testPairVerifyAndSpendWithBothSigners", testPairVerifyAndSpendWithBothSigners)
+  [ ("testPairVerifyAndSpendWithBothSigners", testPairVerifyAndSpendWithBothSigners)
   , ("testBuilderMakesTwoOfThreeWithAnotherWinnowALedgerAndRecovery", testBuilderMakesTwoOfThreeWithAnotherWinnowALedgerAndRecovery)
   , ("testStoreRefusesARegistrationForAnotherAccount", testStoreRefusesARegistrationForAnotherAccount)
   , ("testBluetoothStatesStartFailOrWait", testBluetoothStatesStartFailOrWait)
@@ -932,22 +916,22 @@ def testPairedLedgerAndSavedKeysPersistAndRefuseDuplicates : IO Unit := do
   let phone ← phoneWith 0xA1
   let ms ← masters
   phone.useLedger (← simulator 0xB2)
-  let ledgerID ← phone.backend.pairLedger true "Nano X"
+  let ledgerID ← phone.backend.pairLedger "Nano X"
   let some ledger := (← phone.signers).find? (·.id == ledgerID) | throw (IO.userError "no Ledger signer")
   check "paired: a Ledger with one key" (ledger.isLedger && ledger.keys.length == 1)
   check "its keys text is its fingerprint" (ledger.keysText == Descriptor.hex8 ms[1]!.fingerprint) ledger.keysText
   -- Bob's phone and Ledger, sent together, are one signer.
   let bobPhone ← keyExpression ms[2]!
   let bobLedger ← keyExpression (← master 0xD4)
-  let bobID ← phone.backend.addSignerKeys true "Bob" s!" {bobPhone}\n{bobLedger} "
+  let bobID ← phone.backend.addSignerKeys "Bob" s!" {bobPhone}\n{bobLedger} "
   let some bob := (← phone.signers).find? (·.id == bobID) | throw (IO.userError "no Bob")
   check "Bob's two keys" (bob.keys == [bobPhone, bobLedger] && !bob.isLedger)
   check "the list" ((← phone.signers).map (·.name) == ["Nano X", "Bob"])
   -- A key already held is refused, the Ledger's too; so are text that is no key and a mainnet key.
-  failsWith "a key saved twice" (phone.backend.addSignerKeys true "Bob again" bobLedger) "That key is already saved as Bob."
-  failsWith "the Ledger's key again" (phone.backend.addSignerKeys true "Me" ledger.keys[0]!) "That key is already saved as Nano X."
+  failsWith "a key saved twice" (phone.backend.addSignerKeys "Bob again" bobLedger) "That key is already saved as Bob."
+  failsWith "the Ledger's key again" (phone.backend.addSignerKeys "Me" ledger.keys[0]!) "That key is already saved as Nano X."
   for text in ["tpubnonsense", bobPhone.replace "tpub" "xpub", s!"sortedmulti_a(2,{bobPhone})"] do
-    failsStarting s!"not a signer: {(text.take 20).toString}" (phone.backend.addSignerKeys true "Nobody" text)
+    failsStarting s!"not a signer: {(text.take 20).toString}" (phone.backend.addSignerKeys "Nobody" text)
       "The multisig descriptor is invalid:"
   check "still two" ((← phone.signers).length == 2)
   -- Renamed, written sealed, and read back from disk.
@@ -965,22 +949,22 @@ def testPairedLedgerAndSavedKeysPersistAndRefuseDuplicates : IO Unit := do
   let o ← phone.backend.multisigOverview
   check "planted: a notice" o.signerNotice.isSome
   check "planted: nothing trusted" o.signers.isEmpty
-  failsWith "a damaged list is not changed" (phone.backend.addSignerKeys true "Carol" bobPhone)
+  failsWith "a damaged list is not changed" (phone.backend.addSignerKeys "Carol" bobPhone)
     "Winnow could not safely read its signers, so they cannot be changed until the file is readable again."
 
 def testEveryBackupCarriesTheListAndAnImportMergesIt : IO Unit := do
   let phone ← phoneWith 0xA1
   let ms ← masters
   phone.useLedger (← simulator 0xB2)
-  let ledgerID ← phone.backend.pairLedger true "Nano X"
-  let bobID ← phone.backend.addSignerKeys true "Bob" (← keyExpression ms[2]!)
+  let ledgerID ← phone.backend.pairLedger "Nano X"
+  let bobID ← phone.backend.addSignerKeys "Bob" (← keyExpression ms[2]!)
   let json ← phone.backend.exportBundle true
   let bundle ← needE "bundle" unnamed (ImportBundle.decode json)
   check "the export carries both" ((bundle.signers.map (·.toList.map (·.name))) == some ["Nano X", "Bob"])
   check "with the Ledger's fingerprint" ((bundle.signers.bind (·[0]?)).bind (·.masterFingerprint) == some ms[1]!.fingerprint)
   -- Restored on a phone that lost Bob and saved Carol since: Bob is back, Carol and the Ledger stay.
   phone.backend.removeSigner bobID
-  let carolID ← phone.backend.addSignerKeys true "Carol" (← keyExpression (← master 0xE5))
+  let carolID ← phone.backend.addSignerKeys "Carol" (← keyExpression (← master 0xE5))
   discard <| phone.importOffline json
   let signers ← phone.signers
   check "merged: the phone's own first, the bundle's added" (signers.map (·.id) == [ledgerID, carolID, bobID])
@@ -1017,25 +1001,25 @@ def testBuilderTakesMembersFromTheListAndAWholeAccountAsOne : IO Unit := do
   let ms ← masters
   let nanoX ← simulator 0xB2
   phone.useLedger nanoX
-  let ledgerID ← phone.backend.pairLedger true "Nano X"
+  let ledgerID ← phone.backend.pairLedger "Nano X"
   let o ← phone.backend.multisigOverview
   let some ledger := o.signers.find? (·.id == ledgerID) | throw (IO.userError "no Ledger")
   let phoneKey ← phone.keyExpression
-  let bobID ← phone.backend.addSignerKeys true "Bob" s!"{← keyExpression ms[2]!} {← keyExpression (← master 0xD4)}"
+  let bobID ← phone.backend.addSignerKeys "Bob" s!"{← keyExpression ms[2]!} {← keyExpression (← master 0xD4)}"
   let carolMaster ← master 0xE5
-  let carolID ← phone.backend.addSignerKeys true "Carol" (← keyExpression carolMaster)
+  let carolID ← phone.backend.addSignerKeys "Carol" (← keyExpression carolMaster)
   let signers ← phone.signers
   let some bob := signers.find? (·.id == bobID) | throw (IO.userError "no Bob")
   let some carol := signers.find? (·.id == carolID) | throw (IO.userError "no Carol")
   -- The household: this phone and its Ledger, 2-of-2, which the Ledger approves.
-  let (householdID, householdD, reg) ← phone.backend.createMultisigAccount true "Household" 2
+  let (householdID, householdD, reg) ← phone.backend.createMultisigAccount "Household" 2
     [([phoneKey], none), (ledger.keys, none)] none
   check "the household is approved on the Ledger" (reg matches some (.ok "Nano X"))
   let household ← need "household" (MultisigAccount.parse householdD signet)
   check "the household's preview" (previewText household == "2 of 2: any 2 of the 2 keys sign a spend.") (previewText household)
   check "the household's keys" (household.signerExpressions.toList.mergeSort (· ≤ ·) == ([phoneKey] ++ ledger.keys).mergeSort (· ≤ ·))
   -- The household's keys as one member of a 2-of-3 with Bob and Carol.
-  let (nestedID, nestedD, reg) ← phone.backend.createMultisigAccount true "Three households" 2
+  let (nestedID, nestedD, reg) ← phone.backend.createMultisigAccount "Three households" 2
     [(household.signerExpressions.toList, none), (bob.keys, none), (carol.keys, none)] none
   let account ← need "nested" (MultisigAccount.parse nestedD signet)
   check "2 of 3 members" (account.policySummary == "2 of 3 members") account.policySummary
@@ -1053,7 +1037,7 @@ def testBuilderTakesMembersFromTheListAndAWholeAccountAsOne : IO Unit := do
   check "names: Carol" (names.lookup carolMaster.fingerprint == some "Carol")
   -- A second Ledger of this phone in the same account is refused.
   phone.useLedger (← simulator 0xE6)
-  let nanoSID ← phone.backend.pairLedger true "Nano S"
+  let nanoSID ← phone.backend.pairLedger "Nano S"
   let some nanoS := (← phone.signers).find? (·.id == nanoSID) | throw (IO.userError "no Nano S")
   check "two Ledgers listed" ((← phone.backend.multisigOverview).ledgers.map (·.name) == ["Nano X", "Nano S"])
   failsWith "two of this phone's Ledgers" (phone.build "Two Ledgers" 2 [[phoneKey], ledger.keys, nanoS.keys])
@@ -1079,17 +1063,17 @@ def testTwoPhonesWithLedgersAndAThirdMember : IO Unit := do
   phoneA.useLedger ledgerA
   phoneB.useLedger ledgerB
   let third ← master 0xD4
-  let pairedA ← phoneA.backend.pairLedger true "Ledger A"
-  let pairedB ← phoneB.backend.pairLedger true "Ledger B"
+  let pairedA ← phoneA.backend.pairLedger "Ledger A"
+  let pairedB ← phoneB.backend.pairLedger "Ledger B"
   let some ledgerAInfo := (← phoneA.signers).find? (·.id == pairedA) | throw (IO.userError "no Ledger A")
   let some ledgerBInfo := (← phoneB.signers).find? (·.id == pairedB) | throw (IO.userError "no Ledger B")
   let shareB := (← phoneB.keyExpression) ++ "\n" ++ ledgerBInfo.keys.headD ""
-  let savedB ← phoneA.backend.addSignerKeys true "Household B" shareB
+  let savedB ← phoneA.backend.addSignerKeys "Household B" shareB
   let some savedBInfo := (← phoneA.signers).find? (·.id == savedB) | throw (IO.userError "no B")
   check "B's share is two keys" (savedBInfo.keys.length == 2)
-  let savedThird ← phoneA.backend.addSignerKeys true "Carol" (← keyExpression third)
+  let savedThird ← phoneA.backend.addSignerKeys "Carol" (← keyExpression third)
   let some thirdInfo := (← phoneA.signers).find? (·.id == savedThird) | throw (IO.userError "no Carol")
-  let (id, descriptor, reg) ← phoneA.backend.createMultisigAccount true "Three households" 2
+  let (id, descriptor, reg) ← phoneA.backend.createMultisigAccount "Three households" 2
     [((← phoneA.keyExpression) :: ledgerAInfo.keys, none), (savedBInfo.keys, none), (thirdInfo.keys, none)] none
   let account ← need "account" (MultisigAccount.parse descriptor signet)
   check "nested" account.isNested
@@ -1105,7 +1089,7 @@ def testTwoPhonesWithLedgersAndAThirdMember : IO Unit := do
   check "names: Carol" (lines.any (has "(Carol)")) s!"{lines}"
   check "the members header" (infoA.membersHeader == some "Members · any 2 of 3")
   -- Phone B joins with the descriptor; its own paired Ledger registers it.
-  let (joined, regB) ← phoneB.backend.addMultisigAccount true "Three households" descriptor
+  let (joined, regB) ← phoneB.backend.addMultisigAccount "Three households" descriptor
   check "B joined the same account" (joined == id)
   check "Ledger B registered it" (regB matches some (.ok "Ledger B"))
   check "Ledger B saw the name" ((← ledgerB.get).registeredNames == #["Three households"])
@@ -1125,13 +1109,13 @@ def testTwoPhonesWithLedgersAndAThirdMember : IO Unit := do
   check "both devices wanted" (screen.progress == { phoneHolds := true, phoneUnsigned := true, ledgerHolds := true, ledgerUnsigned := true })
   -- Household A signs with both devices: one member, nothing finishes.
   let signed ← Real.signMultisigSpend phoneA.env phoneA.multisig id created.psbt
-  let signed ← Real.signMultisigSpendWithLedger phoneA.env phoneA.multisig true id signed.psbt
+  let signed ← Real.signMultisigSpendWithLedger phoneA.env phoneA.multisig id signed.psbt
   let screen ← screenOf signed
   check "one member is not enough" (!(screen.progress.complete || screen.progress.phoneUnsigned || screen.progress.ledgerUnsigned))
   check "share it" (screen.progress.nextStep.startsWith "Share the PSBT")
   -- Household B signs its copy with both devices; A combines it.
   let copy ← Real.signMultisigSpend phoneB.env phoneB.multisig id signed.psbt
-  let copy ← Real.signMultisigSpendWithLedger phoneB.env phoneB.multisig true id copy.psbt
+  let copy ← Real.signMultisigSpendWithLedger phoneB.env phoneB.multisig id copy.psbt
   let combined ← Real.addPastedPSBT phoneA.env phoneA.multisig id (some signed.psbt) copy.psbt
   let screen ← screenOf combined
   check "two whole members: complete" screen.progress.complete
@@ -1146,11 +1130,11 @@ def testAThresholdAccountAsOneMember : IO Unit := do
   let ms ← masters
   let ledger ← simulator 0xD5
   phone.useLedger ledger
-  let nanoXID ← phone.backend.pairLedger true "Nano X"
-  let bobID ← phone.backend.addSignerKeys true "Bob" (← keyExpression ms[1]!)
-  let carolID ← phone.backend.addSignerKeys true "Carol" (← keyExpression ms[2]!)
+  let nanoXID ← phone.backend.pairLedger "Nano X"
+  let bobID ← phone.backend.addSignerKeys "Bob" (← keyExpression ms[1]!)
+  let carolID ← phone.backend.addSignerKeys "Carol" (← keyExpression ms[2]!)
   let daveMaster ← master 0xE5
-  let daveID ← phone.backend.addSignerKeys true "Dave" (← keyExpression daveMaster)
+  let daveID ← phone.backend.addSignerKeys "Dave" (← keyExpression daveMaster)
   let signers ← phone.signers
   let keysOf (id : String) : List String := ((signers.find? (·.id == id)).map (·.keys)).getD []
   let phoneKey ← phone.keyExpression
@@ -1167,7 +1151,7 @@ def testAThresholdAccountAsOneMember : IO Unit := do
   check "member caption" (member.caption == some "any 2 of its 3 keys")
   check "a threshold member" member.isThreshold
   -- The estate: the family, the Ledger and Dave, any two members.
-  let (estateID, estateD, reg) ← phone.backend.createMultisigAccount true "Estate" 2
+  let (estateID, estateD, reg) ← phone.backend.createMultisigAccount "Estate" 2
     [member.plan, (keysOf nanoXID, none), (keysOf daveID, none)] none
   let account ← need "estate" (MultisigAccount.parse estateD signet)
   check "nested, seven leaves" (account.isNested && account.signersLeaves.size == 7)
@@ -1198,7 +1182,7 @@ def testAThresholdAccountAsOneMember : IO Unit := do
   let created ← Real.createMultisigSpend phone.env phone.multisig estateID destination 50_000 2.0 false
   check "seven paths" ((← screenOf created).signatures.length == 7)
   let signed ← Real.signMultisigSpend phone.env phone.multisig estateID created.psbt
-  let signed ← Real.signMultisigSpendWithLedger phone.env phone.multisig true estateID signed.psbt
+  let signed ← Real.signMultisigSpendWithLedger phone.env phone.multisig estateID signed.psbt
   let screen ← screenOf signed
   check "not yet" (!(screen.progress.complete || screen.progress.phoneUnsigned || screen.progress.ledgerUnsigned))
   let psbt ← needE "psbt" unnamed (PSBT.ofBase64 signed.psbt)
@@ -1235,7 +1219,7 @@ def testRecoveryTextCountsTheAccountsMembers : IO Unit := do
     let info := (← phone.accounts).find? (·.id == id)
     return (info.bind (·.policy), info.bind (·.recovery))
   -- Recovery by all three members: every leaf holds Carol, Dave, Erin and Frank, so they read as one key each.
-  let (everyID, everyD, _) ← phone.backend.createMultisigAccount true "Everyone" 2
+  let (everyID, everyD, _) ← phone.backend.createMultisigAccount "Everyone" 2
     [([phoneKey, bob], some 1), ([carol, dave, erin], none), ([frank], none)] (some (.fewerSigners 3 144))
   let every ← need "everyone" (MultisigAccount.parse everyD signet)
   check "every member: two recovery leaves" (every.recoveryLeaves.size == 2)
@@ -1245,7 +1229,7 @@ def testRecoveryTextCountsTheAccountsMembers : IO Unit := do
   check "every member: the policy" (policy == some "2 of 3 members, one of them 1 of 2") s!"{policy}"
   check "every member: the recovery text" (recovery == some "after 144 blocks: any 3 of the members") s!"{recovery}"
   -- Recovery by any one member: the 1-of-2 member's keys read as two members.
-  let (anyID, anyD, _) ← phone.backend.createMultisigAccount true "Anyone" 2
+  let (anyID, anyD, _) ← phone.backend.createMultisigAccount "Anyone" 2
     [([phoneKey, bob], some 1), ([carol], none), ([dave], none)] (some (.fewerSigners 1 144))
   let any ← need "anyone" (MultisigAccount.parse anyD signet)
   check "any member: four recovery leaves" (any.recoveryLeaves.size == 4)
@@ -1255,14 +1239,14 @@ def testRecoveryTextCountsTheAccountsMembers : IO Unit := do
   check "any member: the policy" (policy == some "2 of 3 members, one of them 1 of 2") s!"{policy}"
   check "any member: the recovery text" (recovery == some "after 144 blocks: any 1 of the members") s!"{recovery}"
   -- Every member signs, so the policy reads Erin and Frank as two members, where recovery can tell them one.
-  let (allID, allD, _) ← phone.backend.createMultisigAccount true "All of us" 3
+  let (allID, allD, _) ← phone.backend.createMultisigAccount "All of us" 3
     [([phoneKey, bob, carol], some 2), ([dave, erin], none), ([frank], none)] (some (.fewerSigners 2 144))
   check "all members: seven recovery leaves" ((← need "all of us" (MultisigAccount.parse allD signet)).recoveryLeaves.size == 7)
   let (policy, recovery) ← textOf allID
   check "all members: the policy" (policy == some "4 of 4 members, one of them 2 of 3") s!"{policy}"
   check "all members: the recovery text" (recovery == some "after 144 blocks: any 2 of the members") s!"{recovery}"
   -- Two members whose every leaf would hold both are an ordinary account, with members only in recovery.
-  let (flatID, flatD, _) ← phone.backend.createMultisigAccount true "Ordinary" 2
+  let (flatID, flatD, _) ← phone.backend.createMultisigAccount "Ordinary" 2
     [([phoneKey, bob], none), ([carol], none)] (some (.fewerSigners 1 144))
   check "ordinary: not nested, two recovery leaves" ((← need "ordinary" (MultisigAccount.parse flatD signet)).recoveryLeaves.size == 2)
   let (policy, recovery) ← textOf flatID
@@ -1282,26 +1266,16 @@ def testRecoveryTextCountsTheAccountsMembers : IO Unit := do
   check "crossed leaves: the policy" (policy == some "1 of 2 members") s!"{policy}"
   check "crossed leaves: the recovery text" (recovery == some "after 144 blocks: any of 2 recovery groups") s!"{recovery}"
 
-def testPairingSavingAndRegisteringAreAdvancedModeOnly : IO Unit := do
-  let phone ← phoneWith 0xA1
-  phone.useLedger (← simulator 0xB2)
-  failsWith "pairing in Simple mode" (phone.backend.pairLedger false "Nano X") Real.advancedModeOnlyText
-  failsWith "saving keys in Simple mode" (phone.backend.addSignerKeys false "Bob" (← keyExpression (← masters)[2]!))
-    Real.advancedModeOnlyText
-  failsWith "registering in Simple mode" (phone.backend.registerLedger false "x") Real.advancedModeOnlyText
-  check "no signers" (← phone.signers).isEmpty
-
 def nestedTests : List (String × IO Unit) :=
   [ ("testTwoPhonesWithLedgersAndAThirdMember", testTwoPhonesWithLedgersAndAThirdMember)
   , ("testAThresholdAccountAsOneMember", testAThresholdAccountAsOneMember)
-  , ("testRecoveryTextCountsTheAccountsMembers", testRecoveryTextCountsTheAccountsMembers)
-  , ("testPairingSavingAndRegisteringAreAdvancedModeOnly", testPairingSavingAndRegisteringAreAdvancedModeOnly) ]
+  , ("testRecoveryTextCountsTheAccountsMembers", testRecoveryTextCountsTheAccountsMembers) ]
 
 /-- The signer list is not a wallet's: deleting the wallet keeps `signers.json`, and the list reads back. -/
 def testTheSignerListSurvivesDeletingTheWallet : IO Unit := do
   let phone ← phoneWith 0xA1
   let dir ← phone.dir
-  discard <| phone.backend.addSignerKeys true "Bob" (← keyExpression (← masters)[2]!)
+  discard <| phone.backend.addSignerKeys "Bob" (← keyExpression (← masters)[2]!)
   phone.backend.deleteWallet
   check "signers.json stays" (← (dir / "signers.json").pathExists)
   let o ← phone.backend.multisigOverview
@@ -1385,10 +1359,9 @@ def testSendTabSpendsFromAnAccountAcrossTwoPhones : IO Unit := do
   check "the review's amounts" (preview.amount == 25_000 && preview.inputCount == 1 && preview.change == some (60_000 - 25_000 - preview.fee))
   failsWith "no silent payment code from an account" (phone.backend.previewSend (accountInputs t.id "tsp1qqnonsense" 1_000))
     Real.silentPaymentUnsupportedText
-  failsWith "Sign and continue is Advanced mode's" (phone.backend.signAndDraft false inputs preview) Real.advancedModeOnlyText
-  failsWith "a review for other inputs does not sign" (phone.backend.signAndDraft true { inputs with amount := "25001" } preview)
+  failsWith "a review for other inputs does not sign" (phone.backend.signAndDraft { inputs with amount := "25001" } preview)
     (Real.AppError.sendReviewChanged).text
-  discard <| phone.backend.signAndDraft true inputs preview
+  discard <| phone.backend.signAndDraft inputs preview
   let record ← phone.record t.id
   let some d := record.draft | throw (IO.userError "no draft")
   check "the draft is BIP174 v0 (fixed upstream bug 1)" (isV0 d.psbtBase64)
@@ -1469,7 +1442,7 @@ def testAnInFlightAccountSpendSurvivesABackupAndCanBeRebroadcastOrGivenUp : IO U
   let phone := t.phone
   let inputs := accountInputs t.id (← accountDestination) 25_000
   let preview ← phone.backend.previewSend inputs
-  discard <| phone.backend.signAndDraft true inputs preview
+  discard <| phone.backend.signAndDraft inputs preview
   collectOtherSignature t
   let txid ← phone.backend.broadcastDraft t.id
   let json ← phone.backend.exportBundle false
@@ -1493,7 +1466,7 @@ def testACoSignersBroadcastAdvancesThePaidPersonsIndex : IO Unit := do
   let phone := t.phone
   let inputs := accountInputs t.id (← accountDestination) 25_000
   let preview ← phone.backend.previewSend inputs
-  discard <| phone.backend.signAndDraft true inputs preview
+  discard <| phone.backend.signAndDraft inputs preview
   -- the draft pays a person at index 4 (as a Send to a saved person files it)
   let some d := (← phone.record t.id).draft | throw (IO.userError "no draft")
   Real.fileDraft phone.multisig t.id (some { d with personID := some "bob", paymentIndex := some 4 })
@@ -1564,7 +1537,7 @@ def testTheDraftRowShowsTheLeafClosestToFinishing : IO Unit := do
   check "no path" (bestLeafSignatures [] == none)
 
 
-/-! ## Simple mode, by taking away -/
+/-! ## One mode: the accounts on the home, the rest in Settings -/
 
 def contains (hay needle : String) : Bool := (hay.splitOn needle).length > 1
 
@@ -1572,7 +1545,7 @@ def contains (hay needle : String) : Bool := (hay.splitOn needle).length > 1
 def rendered (m : Model) : String := (LeanNative.Html.toWire (view m)).toJson.compress
 
 /-- A phone with a multisig account holding a draft, its rows in the one list, a paired Ledger and saved keys. -/
-def modelWithAccounts (advanced : Bool) : Model :=
+def modelWithAccounts : Model :=
   let draftItem : HistoryItem := { txid := "dd", height := 0, received := 30_000, spent := 60_000, fee := some 500 }
   let accountItem : HistoryItem := { txid := "aa", height := 120, received := 60_000, spent := 0, fee := none }
   let walletItem : HistoryItem := { txid := "ww", height := 110, received := 10_000, spent := 0, fee := none }
@@ -1580,7 +1553,7 @@ def modelWithAccounts (advanced : Bool) : Model :=
     { id := "acct", name := "Household", descriptor := "tr(…)", balance := 60_000, policy := some "2 of 2",
       threshold := 2, signerCount := 2, needsLedgerRegistration := true,
       draft := some { psbt := "cHNidP8BAA", txid := "dd", signatures := "1 of 2" } }
-  { stage := .ready, settings := { network := .signet, advancedMode := advanced }, walletID := some "w",
+  { stage := .ready, settings := { network := .signet }, walletID := some "w",
     status := { balance := 10_000, accountsBalance := 60_000, history := [walletItem],
                 payments := [{ item := draftItem, source := .draft "Household" "1 of 2", accountID := some "acct" },
                              { item := accountItem, source := .account "Household", accountID := some "acct" },
@@ -1589,50 +1562,46 @@ def modelWithAccounts (advanced : Bool) : Model :=
                   signers := [{ id := "l", isLedger := true, name := "Nano X", keys := ["k"], keysText := "5992698d" },
                               { id := "b", isLedger := false, name := "Bob", keys := ["k2"], keysText := "1a2b3c4d" }] } }
 
-/-- The user's rule for Simple mode: Ledger, Signers, multisig accounts, the From picker and drafts' signing are
-Advanced only; where accounts exist, Simple shows them only in the one balance with its "of which…" line and
-as action-free Activity rows, a draft saying its signatures are collected in Advanced mode. -/
-def testSimpleModeShowsAccountsOnlyInTheBalanceAndActivity : IO Unit := do
-  let simple := modelWithAccounts false
-  let home := rendered simple
-  check "Simple home: the one balance" (contains home (satsText 70_000))
-  check "Simple home: the of-which line" (contains home "of which" && contains home "accountsBalanceText")
-  check "Simple home: the account's rows" (contains home "Household" && contains home "paymentAccount-aa")
-  check "Simple home: a draft says where signatures are collected" (contains home "collected in Advanced mode")
-  -- (the of-which line names "multisig account" and co-signers: that is the line the rule keeps)
-  for needle in ["Ledger", "ledger", "Signers", "signersButton", "sendFrom", "\"From\"", "Sign and continue", "PSBT",
-                 "Collect signatures", "Multisig", "multisigAccount-", "multisigBuildButton", "Register on"] do
-    check s!"Simple home has no {needle}" (!contains home needle) (match home.splitOn needle with
-      | a :: _ => (a.drop (a.length - 120)).toString | [] => "")
-  -- account rows are there to read: no action on the draft or the account's row, the wallet's opens
-  let draftRow := paymentRow simple simple.status.payments[0]!
-  let accountRow := paymentRow simple simple.status.payments[1]!
-  let walletRow := paymentRow simple simple.status.payments[2]!
+/-- One home (issue 97): the one balance with its "of which…" line, an Accounts section once an account
+exists, and the Activity rows that act: a draft opens its collection step, an account's payment its screen.
+Signers, the Ledger and building accounts are in Settings → Security; the Send sheet offers From. -/
+def testTheOneHomeShowsAccountsAndActs : IO Unit := do
+  let m := modelWithAccounts
+  let home := rendered m
+  check "home: the one balance" (contains home (satsText 70_000))
+  check "home: the of-which line" (contains home "of which" && contains home "accountsBalanceText")
+  check "home: the Accounts section" (contains home "homeAccountsSection" && contains home "multisigAccount-acct")
+  check "home: the draft's step" (contains home "historyDraft-acct" && contains home "1 of 2 signed · tap to continue")
+  check "home: no tabs, no mode switch" (!contains home "\"tabs\"" && !contains home "Advanced" && !contains home "simpleModeButton")
+  let draftRow := paymentRow m m.status.payments[0]!
+  let accountRow := paymentRow m m.status.payments[1]!
+  let walletRow := paymentRow m m.status.payments[2]!
   let actions (h : H) := (LeanNative.Html.toWire h).toJson.compress
-  check "the draft row has no action" (!contains (actions draftRow) "\"button\"")
-  check "the account row has no action" (!contains (actions accountRow) "\"button\"")
+  check "the draft row opens its collection step" (contains (actions draftRow) "\"button\"")
+  check "the account row opens its payment" (contains (actions accountRow) "\"button\"")
   check "the wallet's row opens its payment" (contains (actions walletRow) "\"button\"")
-  -- the Send sheet itself (the home behind it was checked above)
-  let sendModel := { simple with send := { inputs := { network := .signet, accountID := some "acct" } } }.present .send
+  -- Settings: Security's rows
+  let settings := rendered { m with routes := [.settings] }
+  for needle in ["Security", "signersButton", "Hardware wallets and keys", "multisigAccountsButton", "Network", "networkPeersButton",
+                 "networkSyncButton", "revealPhraseButton", "cloudBackupRow", "Wallet ID"] do
+    check s!"Settings has {needle}" (contains settings needle)
+  check "Settings has no Advanced row" (!contains settings "advancedModeButton" && !contains settings "Turn on Advanced mode")
+  let accounts := rendered (stepHome .openMultisigAccounts { m with routes := [.settings] }).1
+  check "Settings → Security → Multisig accounts" (contains accounts "multisigBuildButton" && contains accounts "multisigAddButton" &&
+    contains accounts "multisigAccount-acct")
+  -- the Send sheet: From, the account's
+  let sendModel := { m with send := { inputs := { network := .signet, accountID := some "acct" } } }.present .send
   let send := (LeanNative.Html.toWire (sendSheet sendModel [])).toJson.compress
-  for needle in ["Ledger", "Signers", "sendFrom", "\"From\"", "Sign and continue", "Household"] do
-    check s!"Simple Send has no {needle}" (!contains send needle) (match send.splitOn needle with
-      | a :: _ => (a.drop (a.length - 120)).toString | [] => "")
-  check "a Simple review is always the wallet's" ((({ simple with send := { inputs := { accountID := some "acct" } } }).sendInputs.accountID).isNone)
-  -- the same phone in Advanced mode shows them, so the checks above are not vacuous
-  let advanced := modelWithAccounts true
-  let wallet := rendered advanced
-  check "Advanced Wallet tab: the Multisig section, the draft's step" (contains wallet "Multisig" && contains wallet "historyDraft-acct" &&
-    contains wallet "1 of 2 signed")
-  let sendTab := rendered (advanced.switchTab 1)
-  check "Advanced Send tab: From" (contains sendTab "sendFromWallet" && contains sendTab "sendFrom-acct")
-  let settings := rendered (advanced.switchTab 2)
-  check "Advanced Settings: Signers" (contains settings "signersButton")
+  check "Send: From" (contains send "sendFromWallet" && contains send "sendFrom-acct")
+  check "a review from the account" (sendModel.sendInputs.accountID == some "acct")
+  -- without an account, From is not shown
+  let none := { sendModel with multisig := { sendModel.multisig with accounts := [] } }
+  check "Send without accounts: no From" (!contains (LeanNative.Html.toWire (sendSheet none [])).toJson.compress "sendFromWallet")
 
 /-- The builder starts with this phone as its first member and any 2 of the members (upstream's builder
 falls to any 1 when it seeds this phone). -/
 def testTheBuilderStartsAtAnyTwoMembers : IO Unit := do
-  let (m, _) := stepMultisig .openBuild (modelWithAccounts true)
+  let (m, _) := stepMultisig .openBuild (modelWithAccounts)
   check "seeded with this phone" (m.multisigBuild.members.map (·.title) == ["This phone"])
   check "any 2 by default" (m.multisigBuild.threshold == 2 && m.multisigBuild.shownThreshold == 1)
   let f := (m.multisigBuild.addPick [{ key := "k2", label := "Bob" }] none none none).clamp .signet
@@ -1640,26 +1609,30 @@ def testTheBuilderStartsAtAnyTwoMembers : IO Unit := do
   let f := (f.addPick [{ key := "k3", label := "Carol" }] none none none).clamp .signet
   check "three members: still any 2" (f.threshold == 2 && f.members.length == 3)
 
-/-- Each Advanced-mode tab keeps its own navigation stack. -/
-def testEachTabKeepsItsOwnStack : IO Unit := do
-  let m := modelWithAccounts true
-  let (m, _) := stepSigner .openSigners (m.switchTab 2)
-  check "Settings pushed Signers" (m.routes == [.signers])
-  let m := m.switchTab 0
-  check "the Wallet tab has its own (empty) stack" m.routes.isEmpty
+/-- One navigation stack over the home: Settings, then Security's screens, each popped in turn. -/
+def testSettingsPushesOnTheOneStack : IO Unit := do
+  let m := modelWithAccounts
+  let (m, _) := stepHome .openSettings m
+  let (m, _) := stepSigner .openSigners m
+  check "Settings pushed Hardware wallets and keys" (m.routes == [.settings, .signers])
+  check "and it renders there" (contains (rendered m) "signersPairLedgerButton")
+  let (m, _) := stepSigner .pop m
+  let (m, cs) := stepHome .openMultisigAccounts m
+  check "Multisig accounts, with a fresh overview" (m.routes == [.settings, .multisigAccounts] &&
+    cs.any (· matches .multisigOverview _))
   let (m, _) := stepMultisig (.openAccount "acct") m
-  let m := m.switchTab 2
-  check "Settings got its stack back" (m.routes == [.signers])
-  check "and Signers renders there" (contains (rendered m) "signersPairLedgerButton")
-  let m := m.switchTab 0
-  check "the Wallet tab its own" (m.routes == [.multisigAccount "acct"])
+  check "an account over it" (m.routes == [.settings, .multisigAccounts, .multisigAccount "acct"])
+  let (m, _) := stepMultisig .pop m
+  let (m, _) := stepHome .pop m
+  let (m, _) := stepHome .pop m
+  check "back to the home" m.routes.isEmpty
 
 /-- One Send (PORT.md, deliberate departures, user 2026-10-28): the account page has no payment form; its
-"Send from this account" opens the Send tab with the account under From, where an account with a recovery
-path offers "Spend with" (Advanced only); a co-signer's PSBT is pasted from the page, and the descriptor is
+"Send from this account" opens the Send sheet with the account under From, where an account with a recovery
+path offers "Spend with"; a co-signer's PSBT is pasted from the page, and the descriptor is
 shared with one button. -/
 def testOneSendForAccounts : IO Unit := do
-  let base := modelWithAccounts true
+  let base := modelWithAccounts
   let plain : MultisigInfo := { base.multisig.accounts[0]! with draft := none, recovery := some "after 144 blocks: any 1 of the signers" }
   let other : MultisigInfo := { plain with id := "solo", name := "Solo", recovery := none }
   -- in the foreground: the collection step takes answers only then
@@ -1672,10 +1645,10 @@ def testOneSendForAccounts : IO Unit := do
   for needle in ["multisigAddressField", "multisigAmountField", "multisigFeeRateField", "multisigCreateButton", "Create PSBT",
                  "multisigPathPicker", "psbtPasteField", "\"multisigDescriptor\"", "multisigPSBTButton"] do
     check s!"the account page has no {needle}" (!contains shown needle)
-  -- Send from this account: the Send tab, From the account; the account page stays on the Wallet tab's stack
+  -- Send from this account: the Send sheet, From the account, over the account page
   let (send, cs) := stepMultisig (.sendFrom "acct") page
-  check "Send from this account: the Send tab" (send.tab == 1 && send.send.inputs.accountID == some "acct" && cs.length == 1)
-  check "the Wallet tab keeps the account page" (send.savedRoutes 0 == [.multisigAccount "acct"])
+  check "Send from this account: the Send sheet" (send.hasSheet .send && send.send.inputs.accountID == some "acct" && cs.length == 1)
+  check "the account page stays under it" (send.routes == [.multisigAccount "acct"])
   let tab := rendered send
   check "Send: Spend with, for an account with a recovery path" (contains tab "multisigPathPicker" && contains tab "Recovery path")
   check "Send: no recovery caption on the signers' path" (!contains tab "sendRecoveryNote")
@@ -1686,8 +1659,6 @@ def testOneSendForAccounts : IO Unit := do
   check "another account: the signers again, no picker" (!solo.sendInputs.recovery && !contains (rendered solo) "multisigPathPicker")
   let (wallet, _) := stepSend (.setSource none) rec
   check "the wallet: no picker" (!wallet.sendInputs.recovery && !contains (rendered wallet) "multisigPathPicker")
-  let simple := { rec with settings := { rec.settings with advancedMode := false } }
-  check "Simple: never the recovery path" (!simple.sendInputs.recovery && simple.sendInputs.accountID.isNone)
   -- a pasted co-signer's PSBT is filed at once, then the collection step opens
   let (pasting, cs) := onHost (.pasted (.accountPSBT "acct") "cHNidP8BAA") page
   check "the paste files the draft" (pasting.collect.busy && cs.any fun c => c matches .adoptDraft _ _ "acct" "cHNidP8BAA")
@@ -1701,13 +1672,13 @@ def testOneSendForAccounts : IO Unit := do
 
 /-- Plain wording for creating and joining (PORT.md, deliberate departures, user 2026-10-28). -/
 def testPlainCreateAndJoinWording : IO Unit := do
-  let m := modelWithAccounts true
-  let wallet := rendered m
+  let m := modelWithAccounts
+  let wallet := rendered { m with routes := [.settings, .multisigAccounts] }
   for needle in ["Accounts that need more than one signature to spend.", "Create an account", "Join an account",
                  "You choose who signs, then share the account with them.", "Paste the account someone shared with you.",
                  "multisigBuildButton", "multisigAddButton"] do
-    check s!"Wallet tab: {needle}" (contains wallet needle)
-  check "Wallet tab: no jargon" (!contains wallet "k-of-n" && !contains wallet "Join with a descriptor")
+    check s!"Multisig accounts: {needle}" (contains wallet needle)
+  check "Multisig accounts: no jargon" (!contains wallet "k-of-n" && !contains wallet "Join with a descriptor")
   let (join, _) := stepMultisig .openAdd m
   let shown := rendered join
   for needle in ["Join an account", "Send this to whoever is creating the account.", "Paste the account (tr(…))",
@@ -1722,7 +1693,7 @@ def testPlainCreateAndJoinWording : IO Unit := do
 the background, which starts a new generation, and the answer comes back from the old one. It still lands
 (0.9.1 left "Creating…" and "Sending…" up for good, with the payment sent); a network switch still drops it. -/
 def testAnswersFinishAcrossTheBackground : IO Unit := do
-  let m := modelWithAccounts true
+  let m := modelWithAccounts
   let building := { m with multisigBuild := { m.multisigBuild with name := "Pair", creating := true } }
   let g := building.generation
   let (away, _) := onHost (.scene false) building
@@ -1741,7 +1712,7 @@ def testAnswersFinishAcrossTheBackground : IO Unit := do
   let (pairing, _) := stepMultisig .openLedgerPair m
   let (pairing, _) := stepMultisig (.setLedgerName "nnn") pairing
   let (pairing, cs) := stepMultisig .pairLedger pairing
-  let some pg := cs.findSome? fun | .pairLedger g' _ _ => some g' | _ => none
+  let some pg := cs.findSome? fun | .pairLedger g' _ => some g' | _ => none
     | check "Pair a Ledger asks the backend" false
   let (paired, _) := onHost (.ledgerPaired pg "sig1") (onHost (.scene true) (onHost (.scene false) pairing).1).1
   check "pairing finished across the background" (!paired.ledgerPair.pairing && paired.routes.getLast? != some .ledgerPair)
@@ -1768,15 +1739,8 @@ other capability says yes. -/
 structure Shell where
   posted : IO.Ref (Array Host)
   clipboard : IO.Ref String
-
-def Shell.new : IO Shell := do return { posted := ← IO.mkRef #[], clipboard := ← IO.mkRef "" }
-
-def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
-  post h := s.posted.modify (·.push h)
-  cap _ _ _ := pure ()
-  ask name _ := do
-    if name == "clipboard.get" then return Task.pure (Lean.Json.mkObj [("text", Lean.Json.str (← s.clipboard.get))])
-    return Task.pure (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
+  /-- How many answers `perform` posts for each command the flow runs (`answersTo`, or more). -/
+  answers : Cmd → Option Nat
 
 /-- How many answers `perform` posts for the commands this flow runs; none for the ones it leaves out. -/
 def answersTo : Cmd → Option Nat
@@ -1785,13 +1749,23 @@ def answersTo : Cmd → Option Nat
   | .discardDraft .. => some 1
   | _ => none
 
+def Shell.new (answers : Cmd → Option Nat := answersTo) : IO Shell := do
+  return { posted := ← IO.mkRef #[], clipboard := ← IO.mkRef "", answers }
+
+def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
+  post h := s.posted.modify (·.push h)
+  cap _ _ _ := pure ()
+  ask name _ := do
+    if name == "clipboard.get" then return Task.pure (Lean.Json.mkObj [("text", Lean.Json.str (← s.clipboard.get))])
+    return Task.pure (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
+
 /-- Runs `cs` through `perform`, each answer back through `onHost` and what that asks for in turn; the model
 after, and the commands left out. -/
 partial def Shell.run (s : Shell) (m : Model) (cs : List Cmd) : IO (Model × List Cmd) := do
   let mut m := m
   let mut left : List Cmd := []
   for c in cs do
-    match answersTo c with
+    match s.answers c with
     | none => left := left ++ [c]
     | some n =>
       let before := (← s.posted.get).size
@@ -1821,9 +1795,10 @@ def testSignersAddOpenRenameRemove : IO Unit := do
   let bobLedger ← keyExpression (← master 0xD4)
   let carolKey ← keyExpression (← master 0xE5)
   let fp (k : String) := keyFingerprint k .signet
-  let m : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .signet, advancedMode := true } }
-  let (m, _) ← sh.tap (.selectTab 2) m
-  check "Settings: the Signers row" (contains (rendered m) "signersButton" && contains (rendered m) "This phone")
+  let m : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .signet } }
+  let shown := rendered { m with routes := [.settings] }
+  check "Settings: the Signers row, no count for this phone alone" (contains shown "signersButton" &&
+    contains shown "Hardware wallets and keys" && signersSummary m.multisig == "")
   let (m, _) ← sh.tap (.signer .openSigners) m
   check "Signers: opens with the overview" (m.routes == [.signers] && m.multisig.keyExpression.isSome && m.multisig.signers.isEmpty)
   let list := rendered m
@@ -1917,10 +1892,10 @@ def testSignersAddOpenRenameRemove : IO Unit := do
 
 /-! ## An account's own screens, as a person uses them (#65) -/
 
-/-- The Wallet tab of a phone with the overview loaded, `phone` the backend the app's `perform` runs on. -/
+/-- The home of a phone with the overview loaded, `phone` the backend the app's `perform` runs on. -/
 def Phone.openApp (p : Phone) (sh : Shell) : IO Model := do
   backendRef.set p.backend
-  let m : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .signet, advancedMode := true } }
+  let m : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .signet } }
   return (← sh.run m [.multisigOverview m.generation]).1
 
 /-- A spend or a payment in a block, as the filter scan hands it to the account store. -/
@@ -2119,8 +2094,8 @@ def testTheBuilderRemovesMembersAndKeys : IO Unit := do
   let bobLedger ← keyExpression (← master 0xD4)
   let carolKey ← keyExpression (← master 0xE5)
   let danKey ← keyExpression (← master 0xD5)
-  let bob ← phone.backend.addSignerKeys true "Bob" s!"{bobPhone}\n{bobLedger}"
-  let carol ← phone.backend.addSignerKeys true "Carol" carolKey
+  let bob ← phone.backend.addSignerKeys "Bob" s!"{bobPhone}\n{bobLedger}"
+  let carol ← phone.backend.addSignerKeys "Carol" carolKey
   let (pair, _) ← phone.buildWith "Pair" 2 [danKey]
   let m ← phone.openApp sh
   let phoneKey ← phone.keyExpression
@@ -2213,12 +2188,188 @@ def pureTests : List (String × IO Unit) :=
   [ ("testPaymentsMergeWalletAndAccountRowsAndFoldTransfers", testPaymentsMergeWalletAndAccountRowsAndFoldTransfers)
   , ("testAReviewForTheWalletNeverSignsForAnAccount", testAReviewForTheWalletNeverSignsForAnAccount)
   , ("testTheDraftRowShowsTheLeafClosestToFinishing", testTheDraftRowShowsTheLeafClosestToFinishing)
-  , ("testSimpleModeShowsAccountsOnlyInTheBalanceAndActivity", testSimpleModeShowsAccountsOnlyInTheBalanceAndActivity)
-  , ("testEachTabKeepsItsOwnStack", testEachTabKeepsItsOwnStack)
+  , ("testTheOneHomeShowsAccountsAndActs", testTheOneHomeShowsAccountsAndActs)
+  , ("testSettingsPushesOnTheOneStack", testSettingsPushesOnTheOneStack)
   , ("testOneSendForAccounts", testOneSendForAccounts)
   , ("testPlainCreateAndJoinWording", testPlainCreateAndJoinWording)
   , ("testTheBuilderStartsAtAnyTwoMembers", testTheBuilderStartsAtAnyTwoMembers)
   , ("testAnswersFinishAcrossTheBackground", testAnswersFinishAcrossTheBackground) ]
+
+/-! ## More protection as the balance grows, and a Ledger nearby (#97) -/
+
+/-- A ready signet home holding `balance` in the wallet and `accounts` in its accounts. -/
+def protectModel (balance : Int) (accounts : Int := 0) : Model :=
+  { stage := .ready, active := true, walletID := some "w", settings := { network := .signet },
+    status := { balance, accountsBalance := accounts } }
+
+def pairedNano : SignerInfo :=
+  { id := "ledger-1", isLedger := true, name := "Nano X", keys := ["[aabbccdd/48'/1'/0'/2']tpubLedger/<0;1>/*"], keysText := "aabbccdd" }
+
+/-- B4: the hardware wallet card at 0.1 BTC and the multi-party card at 0.5 BTC, neither a sat below; each
+gone once its protection exists or it is dismissed (saved, so a relaunch keeps it), and each action opening
+its flow. -/
+def testBalanceCardsAtAndBelowTheirThresholds : IO Unit := do
+  check "the thresholds: 0.1 and 0.5 BTC" (hardwareWalletThresholdSats == 10_000_000 && multipartyThresholdSats == 50_000_000)
+  let below := protectModel (hardwareWalletThresholdSats - 1)
+  check "a sat below 0.1 BTC: no card" (!below.showsHardwareCard && !contains (rendered below) Ids.hardwareWalletCard &&
+    !contains (rendered below) Ids.multipartyCard)
+  let atHardware := protectModel hardwareWalletThresholdSats
+  check "at 0.1 BTC: the hardware wallet card" (atHardware.showsHardwareCard && contains (rendered atHardware) Ids.hardwareWalletCard &&
+    contains (rendered atHardware) "This is more than a phone should hold alone" && contains (rendered atHardware) Ids.dismissHardwareCard)
+  check "at 0.1 BTC: not the multi-party one" (!atHardware.showsMultipartyCard && !contains (rendered atHardware) Ids.multipartyCard)
+  check "the accounts' coins count toward it" (protectModel (hardwareWalletThresholdSats - 5) 5).showsHardwareCard
+  check "not before the wallet is open" (!{ atHardware with stage := .onboarding }.showsHardwareCard)
+  let belowBig := protectModel (multipartyThresholdSats - 1)
+  check "a sat below 0.5 BTC: no multi-party card" (!belowBig.showsMultipartyCard && !contains (rendered belowBig) Ids.multipartyCard)
+  let big := protectModel multipartyThresholdSats
+  check "at 0.5 BTC: both cards" (contains (rendered big) Ids.multipartyCard && contains (rendered big) Ids.hardwareWalletCard &&
+    contains (rendered big) "Large amounts invite wrench attacks" && contains (rendered big) Ids.dismissMultipartyCard)
+  -- a paired Ledger ends the first card; an account someone else holds a key of ends the second
+  let withLedger := { big with multisig := { keyExpression := some "phoneKey", signers := [pairedNano] } }
+  check "a paired Ledger: no hardware wallet card" (!withLedger.showsHardwareCard && withLedger.showsMultipartyCard)
+  let mine : MultisigInfo := { id := "a", name := "Mine", descriptor := "", balance := 0,
+                               signerExpressions := ["phoneKey", pairedNano.keys.head!] }
+  let ownOnly := { withLedger with multisig := { withLedger.multisig with accounts := [mine] } }
+  check "an account of this phone and its Ledger is not multi-party" ownOnly.showsMultipartyCard
+  let shared := { withLedger with multisig := { withLedger.multisig with accounts := [{ mine with signerExpressions := ["phoneKey", "bobKey"] }] } }
+  check "an account with someone else's key: no multi-party card" (!shared.showsMultipartyCard && !contains (rendered shared) Ids.multipartyCard)
+  -- dismissed for good
+  let (d, cs) := step (.home (.dismissCard true)) big
+  check "dismiss: the hardware wallet card goes, saved and journaled"
+    (d.settings.hardwareCardDismissed && !contains (rendered d) Ids.hardwareWalletCard && contains (rendered d) Ids.multipartyCard &&
+     cs.any (· matches .saveSettings _) && cs.any (· matches .journal "card.dismissed" _))
+  let (d, _) := step (.home (.dismissCard false)) d
+  check "dismiss: then the multi-party one" (d.settings.multipartyCardDismissed && !contains (rendered d) Ids.multipartyCard)
+  let relaunched : Except String Settings := Lean.fromJson? (Lean.toJson d.settings)
+  check "dismissed: remembered across a relaunch" (match relaunched with
+    | .ok s => s.hardwareCardDismissed && s.multipartyCardDismissed | .error _ => false)
+  let older : Except String Settings := Lean.fromJson? (Lean.Json.mkObj [("network", Lean.toJson Network.signet)])
+  check "an older settings file: neither dismissed" (match older with
+    | .ok s => !s.hardwareCardDismissed && !s.multipartyCardDismissed && s.ledgersNotNow.isEmpty && !s.bluetoothIntroShown | .error _ => false)
+  -- the actions
+  let (p, _) := step (.home .protectWithLedger) big
+  check "Protect it with a Ledger: the Ledger card" (p.topSheet == some .ledgerNearby && contains (rendered p) "Protect with a Ledger" &&
+    contains (rendered p) Ids.ledgerSetUpButton)
+  let (b, _) := step (.home .buildWithOthers) big
+  check "Build an account with other people's keys: the builder" (b.routes == [.multisigBuild])
+
+def nano : NearbyLedger := { id := "nano-1", name := "Nano X 1A2B", rssi := some (-60) }
+
+/-- B3: the home scans once it appears and every 30 s while no Ledger is paired, and only with nothing over
+it; a Nano in range presents the medium card, and Not now is remembered for that device only. -/
+def testLedgerCardScansPresentsAndRemembersNotNow : IO Unit := do
+  check "the card's title: the model, not the id suffix" (ledgerTitle "Nano X 1A2B" == "Ledger Nano X" &&
+    ledgerTitle "Nano S Plus" == "Ledger Nano S Plus" && ledgerTitle "Ledger Stax" == "Ledger Stax")
+  let (m, cs) := (protectModel 0).startLedgerScan
+  let g := m.generation
+  check "the home starts the scan, its first tick 2 s in" (cs matches [.timer 2000 (.ledgerScanDue _ true)])
+  check "once per generation" m.startLedgerScan.2.isEmpty
+  check "a tick: a scan, and the next tick in 30 s" ((onHost (.ledgerScanDue g true) m).2 matches [.scanLedgers _, .timer 30000 (.ledgerScanDue _ true)])
+  check "over another screen: no scan, still ticking" ((onHost (.ledgerScanDue g true) { m with routes := [.settings] }).2 matches [.timer 30000 _])
+  check "in the background: no scan" ((onHost (.ledgerScanDue g false) { m with active := false }).2.isEmpty)
+  check "a stale tick: nothing" (onHost (.ledgerScanDue (g + 1) true) m).2.isEmpty
+  let paired := { m with multisig := { signers := [pairedNano] } }
+  check "a paired Ledger: no scan" (onHost (.ledgerScanDue g false) paired).2.isEmpty
+  check "a paired Ledger: a late answer shows nothing" (onHost (.ledgersNearby g [nano]) paired).1.sheets.isEmpty
+  check "nothing in range: nothing" ((onHost (.ledgersNearby g []) m).1.sheets.isEmpty)
+  let (n, cs) := onHost (.ledgersNearby g [nano]) m
+  check "a Nano in range: the card, journaled" (n.topSheet == some .ledgerNearby && (n.nearbyLedger.map (·.id)) == some nano.id &&
+    cs.any (· matches .journal "ledger.nearby" _))
+  let shown := rendered n
+  check "the card: Ledger Nano X nearby, use it to protect this wallet, Set up and Not now"
+    (contains shown "Ledger Nano X nearby." && contains shown "Use it to protect this wallet" &&
+     contains shown Ids.ledgerSetUpButton && contains shown Ids.ledgerNotNowButton && contains shown Ids.ledgerNearbyCard)
+  check "the card: a medium sheet" (contains shown "\"medium\"")
+  check "a tick while it shows: no second scan" ((onHost (.ledgerScanDue g true) n).2 matches [.timer 30000 _])
+  let (x, cs) := step (.ledgerCard .notNow) n
+  check "Not now: closed, that Nano remembered and saved"
+    (x.sheets.isEmpty && x.settings.ledgersNotNow == [nano.id] && x.nearbyLedger.isNone && cs.any (· matches .saveSettings _))
+  check "Not now: that Nano does not ask again" (onHost (.ledgersNearby g [nano]) x).1.sheets.isEmpty
+  let other : NearbyLedger := { id := "nano-2", name := "Nano X 9F00", rssi := none }
+  check "another Nano still asks" (((onHost (.ledgersNearby g [nano, other]) x).1.nearbyLedger.map (·.id)) == some other.id)
+  -- going to the background ends this generation's chain; coming back starts the next
+  let (bg, _) := onHost (.scene false) m
+  check "the background: the old chain's next tick does nothing" (onHost (.ledgerScanDue g true) bg).2.isEmpty
+  let (back, cs) := onHost (.scene true) bg
+  check "coming back: a new chain" (back.generation != g && cs.any (· matches .timer 2000 (.ledgerScanDue _ true)))
+  -- a setup that went to the background mid-way still hears the overview it asked for
+  let creating := { n with ledgerSetup := some { step := .creating pairedNano.id }, multisig := { keyExpression := some "phoneKey" } }
+  let (creating, _) := onHost (.scene false) creating
+  check "across the background: the overview in flight is dropped"
+    ((onHost (.multisig g { keyExpression := some "phoneKey", signers := [pairedNano] }) creating).2.isEmpty)
+  let (creating, cs) := onHost (.scene true) creating
+  check "coming back: asked again" (cs.any (· matches .multisigOverview _))
+  let (after, cs) := onHost (.multisig creating.generation { keyExpression := some "phoneKey", signers := [pairedNano] }) creating
+  check "across the background: the account is still created" (after.multisigBuild.creating && cs.any (· matches .createMultisigAccount ..))
+
+/-- Onboarding ends with the Bluetooth card, once: Continue asks iOS (`ble.state`) and then scans; Not now asks
+nothing. -/
+def testOnboardingEndsWithTheBluetoothCard : IO Unit := do
+  let (m, cs) := (protectModel 0).endOnboarding
+  check "the Bluetooth card, remembered as shown" (m.topSheet == some .bluetoothIntro && m.settings.bluetoothIntroShown &&
+    cs.any (· matches .saveSettings _))
+  check "it says why" (contains (rendered m) Ids.bluetoothIntroCard && contains (rendered m) Ids.allowBluetoothButton &&
+    contains (rendered m) Ids.skipBluetoothButton && contains (rendered m) "\"medium\"")
+  check "no scan while it shows" ((onHost (.ledgerScanDue m.generation true) m).2 matches [.timer 30000 _])
+  let (a, cs) := step (.ledgerCard .allowBluetooth) m
+  check "Continue: closes, asks iOS, then scans" (a.sheets.isEmpty && cs.any (· matches .askBluetooth) &&
+    cs.any (· matches .timer 1500 (.ledgerScanDue _ false)))
+  let (s, cs) := step (.ledgerCard .skipBluetooth) m
+  check "Not now: closes, asks nothing" (s.sheets.isEmpty && !cs.any (· matches .askBluetooth))
+  check "the next onboarding end: no card" ((a.endOnboarding).1.sheets.isEmpty)
+
+/-- The commands the Ledger setup runs, each one answer (`answersTo` and the Ledger's). -/
+def setupAnswers : Cmd → Option Nat
+  | .scanLedgers .. | .pairLedger .. | .createMultisigAccount .. | .registerLedger .. | .verifyLedgerAddress .. => some 1
+  | c => answersTo c
+
+/-- B3/B5: from the card to a verified 2-of-2, through the app's own `perform` on a phone whose Ledger is the
+simulator, advertising: Set up pairs it, creates this phone + the Ledger, registers the account on the
+Ledger and shows its first receive address on both screens; They match opens the account, and the scan stops. -/
+def testLedgerCardSetsUpAVerifiedTwoOfTwo : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let device ← simulator 0xB2
+  phone.useLedger device
+  let phone := { phone with backend := { phone.backend with scanLedgers := pure [Real.simulatedAdvertisement] } }
+  let sh ← Shell.new setupAnswers
+  let m ← phone.openApp sh
+  let (m, _) := m.startLedgerScan
+  let (m, cs) := onHost (.ledgerScanDue m.generation true) m
+  let (m, _) ← sh.run m cs
+  check "the simulated Ledger advertising: the card" (m.topSheet == some .ledgerNearby && contains (rendered m) "Ledger Nano X nearby.")
+  let (m, _) ← sh.tap (.ledgerCard .setUp) m
+  check "Set up: this phone and the Ledger, or a recovery key too" (contains (rendered m) Ids.ledgerSetupRecoveryToggle &&
+    contains (rendered m) "Every payment needs this phone and the Ledger." && contains (rendered m) Ids.ledgerSetupStartButton)
+  let (bad, _) ← sh.tap (.ledgerCard (.setWithRecoveryKey true)) m
+  let (bad, _) ← sh.tap (.ledgerCard .start) bad
+  check "a recovery key asked for but not pasted: says so, nothing runs" (((bad.ledgerSetup.bind (·.error)) == some "Paste the recovery key first.") &&
+    (← phone.backend.multisigOverview).signers.isEmpty)
+  let (m, _) ← sh.tap (.ledgerCard .start) m
+  let some s := m.ledgerSetup | check "set up: still on the card" false; return
+  let id := match s.step with | .done id => id | _ => ""
+  check "set up: paired, created, registered, the address shown" (!id.isEmpty && s.error.isNone) s!"{s.error}"
+  let record ← phone.record id
+  let account ← need "account" (MultisigAccount.parse record.descriptor signet)
+  check "a 2-of-2 of this phone and the Ledger" (account.threshold == 2 && account.signers.size == 2 && !account.isNested &&
+    (← phone.backend.multisigOverview).ledgers.length == 1)
+  check "registered on the Ledger" ((← device.get).registeredNames == #[ledgerSetupAccountName] && record.ledger.isSome)
+  let first := (account.address 0).toOption.getD "?"
+  check "the Ledger showed the first receive address" ((← device.get).displayedAddresses == #[first] && s.address == some first)
+  let shown := rendered m
+  check "the phone shows the same one, and They match" (contains shown Ids.ledgerSetupAddress && contains shown first &&
+    contains shown Ids.ledgerAddressesMatchButton)
+  let (m, cs) := step (.ledgerCard .addressesMatch) m
+  check "They match: the card closes on the account, journaled" (m.sheets.isEmpty && m.routes == [.multisigAccount id] &&
+    m.ledgerSetup.isNone && cs.any (· matches .journal "ledger.setup" _))
+  let (m, _) ← sh.run m cs
+  check "a Ledger paired: no more scanning" (!{ m with routes := [] }.wantsLedgerScan)
+  backendRef.set Backend.pending
+
+def protectTests : List (String × IO Unit) :=
+  [ ("testBalanceCardsAtAndBelowTheirThresholds", testBalanceCardsAtAndBelowTheirThresholds)
+  , ("testLedgerCardScansPresentsAndRemembersNotNow", testLedgerCardScansPresentsAndRemembersNotNow)
+  , ("testOnboardingEndsWithTheBluetoothCard", testOnboardingEndsWithTheBluetoothCard)
+  , ("testLedgerCardSetsUpAVerifiedTwoOfTwo", testLedgerCardSetsUpAVerifiedTwoOfTwo) ]
 
 /-! ## Stores the Swift app left (`StoreSeal.setAsideSwiftEra`) -/
 
@@ -2366,4 +2517,6 @@ def main : IO UInt32 := runMain "multisig-app-test" do
   for (name, t) in screenTests do runTest name t
   IO.println "MultisigAccountView, MultisigAddView, MultisigPSBTView, MultisigBuildView"
   for (name, t) in accountTests do runTest name t
+  IO.println "Balance cards, the Ledger nearby card and its setup (#97)"
+  for (name, t) in protectTests do runTest name t
   try IO.FS.removeDirAll root catch _ => pure ()

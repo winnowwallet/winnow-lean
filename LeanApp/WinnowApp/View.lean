@@ -1,7 +1,7 @@
 import WinnowApp.Update
 import WinnowApp.Ids
 
-/-! The root view (WinnowApp.swift: loading, onboarding, ready as beginner home or the three tabs,
+/-! The root view (WinnowApp.swift: loading, onboarding, ready as the one home,
 StorageDamagedView, the Tor alert), the onboarding screen and sheets, and the presentation stack: each
 sheet presents the next one inside itself, and the one alert in the tree goes on the innermost sheet
 (an alert behind a sheet never shows). Each area's screens are in its own module. -/
@@ -45,14 +45,23 @@ def sheetView (m : Model) (s : Sheet) (inner : List H) : H :=
   | .papers => papersSheet m inner
   | .readSide => readSideSheet inner
   | .signerPicker => signerPickerSheet m inner
+  | .ledgerNearby => ledgerNearbySheet m inner
+  | .bluetoothIntro => bluetoothIntroSheet inner
 
 def cancel : H := .button "Cancel" .cancel (some .dismissConfirm)
 
 def confirms (m : Model) : List H :=
   match m.confirm with
-  | some .advancedMode =>
-    [.alert "Turn on Advanced mode?" "The app changes to three tabs — Wallet, Send and Settings — with fee controls, network settings and technical details. Simple, on the Wallet tab, brings this screen back and keeps every setting you changed."
-       [.button "Turn on" .primary (some (.setAdvanced true)), cancel]]
+  | some (.homeWarning .network) =>
+    [.alert (if m.phase.summary m.status.syncing == .peersUnavailable then "Couldn't reach the Bitcoin network" else "Sync problem")
+       (networkWarningMessage m)
+       [.identified Ids.warningSettingsButton (.button "Network settings" .primary (some (.home (.warningSettings .network)))),
+        .button "OK" .cancel (some .dismissConfirm)]]
+  | some (.homeWarning .routing) =>
+    let state := PeerRoutingState.current m.settings.peerGatewaySettings.mode m.status.activeGateways m.status.discoveringGateways
+    [.alert state.alertTitle state.message
+       [.identified Ids.warningSettingsButton (.button "Peers and routing" .primary (some (.home (.warningSettings .routing)))),
+        .button "OK" .cancel (some .dismissConfirm)]]
   | some .deleteWallet =>
     [.alert "Delete this wallet?" "This deletes the key from this device. Winnow can restore it from your iCloud backup or from a backup file that includes the recovery phrase. Without one of those or the phrase itself, any money in this wallet is unrecoverable. Check you have one before continuing."
        [.button "Delete wallet" .destructive (some (.settings .deleteWallet)), cancel]]
@@ -87,7 +96,7 @@ def confirms (m : Model) : List H :=
        [.button s!"Open {host.getD "explorer"}" .plain (some (.openURL url)), cancel]]
   | none =>
     if m.settings.torRemovedNotice then
-      [.alert "Built-in Tor was removed" "Your old built-in Tor setting no longer applies. Automatic routing uses your Tor and I2P gateways on Tailscale when they answer, and connects directly when none do. To require Tor, open Advanced Settings, choose Manual gateway routing, and select only Tor peers with your gateway address."
+      [.alert "Built-in Tor was removed" "Your old built-in Tor setting no longer applies. Automatic routing uses your Tor and I2P gateways on Tailscale when they answer, and connects directly when none do. To require Tor, open Settings → Network → Peers and routing, choose Manual gateway routing, and select only Tor peers with your gateway address."
          [.button "OK" .plain (some (.settings .dismissTor))]]
     else []
 
@@ -109,7 +118,7 @@ def onboardingView (m : Model) : H :=
   .screen "Winnow" none
     ([ .list
         ([ .section "" "" [Html.tone .secondary (body "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available.")]
-         , .section "" "No iCloud? Your wallet still works. You can save a backup file instead. Recovery words and backup controls are in Advanced."
+         , .section "" "No iCloud? Your wallet still works. You can save a backup file instead. Recovery words and backup controls are in Settings → Backup."
              (match m.walletID with
               | some _ =>
                 [ .identified Ids.resumeImportedWalletButton (Html.symbol "arrow.right.circle" (.button "Continue with your wallet" .primary (act .finishOnboarding))) ]
@@ -121,15 +130,16 @@ def onboardingView (m : Model) : H :=
                 , .identified Ids.importWalletButton (Html.symbol "square.and.arrow.down" (.button "Restore from a file" .plain (act .openImport))) ]) ] ++
          (if c.busy then [.section "" "" [.progress "Checking iCloud…"]] else []) ++
          (match c.message with | some t => [.section "" "" [caption t]] | none => []) ++
-         (if m.settings.showsNetworkPicker then
-           [.section "" "Each network has its own wallet. Signet uses test coins with no value."
-             [.identified Ids.onboardingNetworkPicker
-               (if o.busy then .labeled "Network" m.settings.network.label else networkPicker m)]]
-          else []) ++
+         -- mainnet unless asked: the picker is folded behind "Use a test network" (open on a test network)
+         [.section "" (if m.settings.network == .mainnet && !m.isExpanded "onboarding.network" then "" else "Each network has its own wallet. Signet uses test coins with no value.")
+           [.identified Ids.onboardingTestNetwork
+             (.disclosure "Use a test network" (m.settings.network != .mainnet || m.isExpanded "onboarding.network") (Msg.setExpanded "onboarding.network")
+               [.identified Ids.onboardingNetworkPicker
+                 (if o.busy then .labeled "Network" m.settings.network.label else networkPicker m)])]] ++
          (if o.busy then [.section "" "" [.progress "Creating your wallet…"]] else []) ++
          (match o.error with | some e => [.section "" "" (errorRows (some e))] | none => [])) ] ++ overlays m)
 
-/-- The screen pushed on top of the current stack (any tab's), if any. -/
+/-- The screen pushed on top of the home, if any. -/
 def routedScreen (m : Model) : Option H :=
   (routedScreen' m).map fun
     | .screen t b cs r lt _ => .screen t b cs r lt m.routes.length
@@ -138,6 +148,14 @@ where routedScreen' (m : Model) : Option H :=
   match m.routes.getLast? with
   | some (.payment t) => some (.screen "Payment" (some (.home .pop)) ([.list (paymentSections m t)] ++ overlays m))
   | some .backup => some (backupScreen m (overlays m))
+  | some .settings => some (.screen "Settings" (some (.home .pop)) ([.list (settingsSections m)] ++ overlays m))
+  | some (.network .sync) =>
+    some (.screen "Sync" (some (.home .pop)) ([.list (syncSections m)] ++ overlays m) (onRefresh := some .syncNow))
+  | some (.network .peers) => some (.screen "Peers and routing" (some (.home .pop)) ([.list (peersSections m)] ++ overlays m))
+  | some (.network .explorer) => some (.screen "Block explorer" (some (.home .pop)) ([.list (explorerSections m)] ++ overlays m))
+  | some (.network .verification) =>
+    some (.screen "Chain verification" (some (.home .pop)) ([.list (verificationSections m)] ++ overlays m))
+  | some .multisigAccounts => some (.screen "Multisig accounts" (some (.home .pop)) ([.list [multisigSection m]] ++ overlays m))
   | some .multisigAdd => some (multisigAddScreen m (overlays m))
   | some .ledgerPair =>
     some (.screen "Pair a Ledger" (some (.signer .pop)) ([.list (ledgerPairSections m)] ++ overlays m))
@@ -155,21 +173,15 @@ where routedScreen' (m : Model) : Option H :=
   | some .signerKeysAdd => some (signerKeysScreen m (overlays m))
   | none => none
 
-/-- Beginner home or the Wallet tab (both pull to refresh: `syncNow`), or the screen pushed on top of it. -/
+/-- The home (pull to refresh: `syncNow`), or the screen pushed on top of it. -/
 def mainScreen (m : Model) : H :=
   match routedScreen m with
   | some screen => screen
   | none =>
-    if m.settings.advancedMode then
-      .screen "Winnow" none
-        ([ .toolbar [.identified Ids.simpleModeButton (.button "Simple" .plain (some (.setAdvanced false)))] .leading
-         , .toolbar [.identified Ids.receiveButton (.button "Receive" .plain (some .openReceive))]
-         , .list (walletSections m) ] ++ overlays m) (onRefresh := some .syncNow)
-    else
-      .screen "Winnow" none
-        ([ .toolbar [.identified Ids.advancedModeButton (.button "Advanced" .plain (some .askAdvanced))],
-           .list (beginnerSections m) ] ++ overlays m)
-        (onRefresh := some .syncNow)
+    .screen "Winnow" none
+      ([ .toolbar [.identified Ids.settingsButton (.button "Settings" .plain (some (.home .openSettings)))],
+         .list (homeSections m) ] ++ overlays m)
+      (onRefresh := some .syncNow)
 
 def otherNetwork (n : Network) : Network := if n == .mainnet then .signet else .mainnet
 
@@ -183,12 +195,6 @@ def view (m : Model) : H :=
         [ .button "Retry without changing anything" .primary (some .retryOpen)
         , .button s!"Open the {other.name} wallet instead" .plain (some (.switchNetwork other)) ]] ++ confirms m)
   | .onboarding => onboardingView m
-  | .ready =>
-    if m.settings.advancedMode then
-      .tabs ["Wallet", "Send", "Settings"] ["bitcoinsign.circle", "arrow.up.circle", "gear"] m.tab Msg.selectTab
-        [if m.tab == 1 then (routedScreen m).getD (.screen (sendTitle m) none ([.list (sendContent m)] ++ overlays m) (largeTitle := false))
-         else if m.tab == 2 then (routedScreen m).getD (.screen "Settings" none ([.list (settingsSections m)] ++ overlays m))
-         else mainScreen m]
-    else mainScreen m
+  | .ready => mainScreen m
 
 end WinnowApp

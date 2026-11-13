@@ -5,7 +5,7 @@ import Journeys.Screens
 
 /-! # The UI journeys
 
-Eight journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Nine journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -74,9 +74,9 @@ def multisigTwoOfThreeWithRecovery : Journey := ⟨"multisigTwoOfThreeWithRecove
   let second ← h.coreSigner s!"ui-core-second-{run}"
   r.launch "multisig"
   createWallet
-  turnOnAdvanced
 
   let descriptor ← step "build a 2-of-3 of this phone and two Core keys, any 1 after a day" do
+    openMultisigAccounts
     Builder.start
     Builder.name "Phone and two Cores"
     for signer in [core, second] do Builder.addPastedMember r signer.keyExpression
@@ -132,16 +132,14 @@ def multisigTwoOfThreeWithRecovery : Journey := ⟨"multisigTwoOfThreeWithRecove
     waitFor broadcastConfirmed 90
     pure (txid, spentAt)
 
-  step "one Transactions row for the spend, named with the account" do
-    tap (.tab "Wallet")
-    waitForBalance (funding - payment - fee) multisigBalance
+  step "one Activity row for the spend, named with the account" do
     backToWalletList
     waitFor (historyPayment txid) 30
     scrolled (historyPayment txid)
     here (paymentAccount txid)
     shot "13b-multisig-transactions"
-    scrolled (multisigAccount account)
-    tap (multisigAccount account)
+    openAccountRow account
+    waitForBalance (funding - payment - fee) multisigBalance
 
   step "past the delay, with the Core signers gone, the app syncs to the new tip in one go" do
     -- the app is in the background while the node mines
@@ -197,18 +195,18 @@ def multisigTwoOfThreeWithRecovery : Journey := ⟨"multisigTwoOfThreeWithRecove
     expect ((← h.tipTransactions).contains recovered) "the recovery spend was not mined"⟩
 
 /-- A 2-of-2 between the phone and a Ledger, with test mode's simulated Ledger (`WINNOW_E2E_LEDGER`, the Lean
-device behind the app's real APDU program): pair it under Settings → Signers (its key filed, nothing
-registered), build the account with it as a member (the Ledger registers it), have it derive the receive
+device behind the app's real APDU program): pair it under Settings → Security → Hardware wallets and keys
+(its key filed, nothing registered), build the account with it as a member (the Ledger registers it), have it derive the receive
 address, which must also be Core's, fund the account from the wallet (one Transactions row, a transfer), pay
-from it on the Send tab (Sign and continue, then the Ledger in the collection step), and Core must accept a
-witness carrying both signatures; the receipt sees it confirm and Transactions shows it once, named with the
-account. -/
+from it in Send (Sign and continue, then the Ledger in the collection step), and Core must accept a
+witness carrying both signatures; the receipt sees it confirm and Activity shows it once, named with the
+account. The nearby card the simulated Ledger brings is answered Not now: this journey pairs by hand. -/
 def ledgerPairVerifySpend : Journey := ⟨"ledgerPairVerifySpend", do
   let r ← Run.new "ledger"
   let h := r.host
-  -- Advanced mode from launch: the multisig journey turns it on through its alert
-  r.launch "ledger" [("WINNOW_E2E_LEDGER", ← randomHex 16), ("WINNOW_E2E_ADVANCED", "1")]
-  createWallet
+  r.launch "ledger" [("WINNOW_E2E_LEDGER", ← randomHex 16)]
+  createWallet (bluetooth := true)
+  step "Bluetooth, then Not now on the Ledger nearby" Ledger.notNow
 
   step "the node funds the wallet" do
     let walletAddress ← Receive.address
@@ -216,12 +214,13 @@ def ledgerPairVerifySpend : Journey := ⟨"ledgerPairVerifySpend", do
     discard <| h.fund walletAddress (2 * funding)
     waitForBalance (2 * funding)
 
-  step "Settings → Signers → Pair a Ledger" do
+  step "Settings → Security → Hardware wallets and keys → Pair a Ledger" do
     Ledger.pair "Nano X"
     shot "19-signers-paired"
 
   let descriptor ← step "build a 2-of-2 of this phone and the Ledger, which registers it" do
-    tap (.tab "Wallet")
+    backToWalletList
+    openMultisigAccounts
     Builder.start
     Builder.name "Ledger savings"
     Builder.addLedgerMember "Nano X"
@@ -245,21 +244,22 @@ def ledgerPairVerifySpend : Journey := ⟨"ledgerPairVerifySpend", do
     shot "20-ledger-verified"
     pure address
 
-  let fundingTx ← step "the wallet pays the account: one Transactions row, a transfer" do
-    tap (.tab "Send")
+  let fundingTx ← step "the wallet pays the account: one Activity row, a transfer" do
+    backToWalletList
+    tap openSendButton
     tap sendFromWallet
     Send.fill r address funding
     let fundingTx ← Send.send h
     h.mine 1
     waitFor broadcastConfirmed 90
-    tap newPaymentButton
-    tap (.tab "Wallet")
-    waitForBalance funding multisigBalance
     backToWalletList
     waitFor (historyPayment fundingTx) 30
     scrolled (historyPayment fundingTx)
-    expectEq "the transfer's row (one row)" (← text (historyPayment fundingTx)) "Moved to Ledger savings"
+    waitUntil 30 "the transfer's row (one row)" do
+      return (← text (historyPayment fundingTx)) == "Moved to Ledger savings"
     shot "20b-ledger-transfer-row"
+    openAccountRow account
+    waitForBalance funding multisigBalance
     pure fundingTx
 
   let destination ← h.bankAddress
@@ -282,25 +282,69 @@ def ledgerPairVerifySpend : Journey := ⟨"ledgerPairVerifySpend", do
     shot "22-ledger-confirmed"
     pure txid
 
-  step "one confirmed Transactions row, named with the account" do
-    tap (.tab "Wallet")
+  step "one confirmed Activity row, named with the account" do
+    backToWalletList
     waitFor (historyPayment txid) 60
     scrolled (historyPayment txid)
     here (paymentAccount txid)
     shot "23-ledger-transactions"⟩
 
-/-- The census list the build ships (the app's manifest bundles build/census/peers.json): Advanced mode's
-Settings on mainnet show its date and count, not the sentence for a build without one; then the plain texts
-(PORT.md, deliberate departures): Settings' Backup section, the backup file sheet, the iCloud sheet, the Wallet
-tab's multisig section and Join. -/
+/-- From the Ledger nearby card to a verified 2-of-2 (#97): onboarding ends with the Bluetooth card, and test
+mode's simulated Ledger (`WINNOW_E2E_LEDGER`) advertising brings the card over the home. Set up pairs it,
+creates the 2-of-2 of this phone and the Ledger, registers it on the Ledger and has the Ledger show the
+account's first receive address, which the phone shows to compare; They match opens the account, whose receive
+address it is: the node pays it and the account sees the coin. With a Ledger paired, no card comes again. -/
+def ledgerCardTwoOfTwo : Journey := ⟨"ledgerCardTwoOfTwo", do
+  let r ← Run.new "ledgercard"
+  let h := r.host
+  r.launch "ledgercard" [("WINNOW_E2E_LEDGER", ← randomHex 16)]
+  createWallet (bluetooth := true)
+
+  step "onboarding's Bluetooth card, then the Ledger in range: the card over the home" do
+    shot "24-bluetooth-card"
+    tap allowBluetoothButton
+    waitFor ledgerNearbyCard 30
+    here (.text "^Ledger Nano X nearby\\.$")
+    here ledgerNotNowButton
+    shot "25-ledger-nearby"
+
+  let address ← step "Set up: paired, created, registered, and the first address on both screens" do
+    tap ledgerSetUpButton
+    waitFor ledgerSetupStartButton 10
+    tap ledgerSetupStartButton
+    waitFor ledgerSetupDone 90
+    let address ← text ledgerSetupAddress
+    expect (address.startsWith "bcrt1p") s!"not a regtest Taproot address: {address}"
+    shot "26-ledger-compare"
+    pure address
+
+  step "They match: the account, 2 of 2, whose first address that is" do
+    tap ledgerAddressesMatchButton
+    waitFor multisigPolicy 20
+    expectEq "the account's policy" (← text multisigPolicy) "2 of 2"
+    expectEq "the account's receive address" (← Account.receiveAddress) address
+    discard <| h.fund address funding
+    waitForBalance funding multisigBalance
+    shot "27-ledger-account"
+
+  step "a Ledger paired: the home shows no card again" do
+    backToWalletList
+    pause 3
+    expect (!(← exists? ledgerNearbyCard)) "the nearby card came back with a Ledger paired"⟩
+
+/-- The census list the build ships (the app's manifest bundles build/census/peers.json): Settings → Network →
+Peers and routing on mainnet shows its date and count, not the sentence for a build without one; then the plain
+texts (PORT.md, deliberate departures): Settings' Backup section, the backup file sheet, the iCloud sheet,
+Settings → Security → Multisig accounts and Join. -/
 def shippedCensus : Journey := ⟨"shippedCensus", do
   let r ← Run.new "census"
-  r.launch "census" [("WINNOW_E2E_NETWORK", "mainnet"), ("WINNOW_E2E_ADVANCED", "1")]
+  r.launch "census" [("WINNOW_E2E_NETWORK", "mainnet")]
   createWallet
 
-  step "Settings on mainnet show the shipped census list's date and count" do
-    waitFor (.tab "Settings") 15
-    tap (.tab "Settings")
+  step "Peers and routing on mainnet show the shipped census list's date and count" do
+    openSettings
+    scrolled networkPeersButton
+    tap networkPeersButton
     waitFor censusCatalogText 20
     scrolled censusCatalogText
     let line ← text censusCatalogText
@@ -308,6 +352,7 @@ def shippedCensus : Journey := ⟨"shippedCensus", do
     let count := ((line.splitOn ": ")[1]?).bind digits
     expect (count.getD 0 > 100) s!"census line: {line}"
     shot "30-settings-census"
+    tap .back
 
   step "the Backup section, the backup file sheet and the iCloud sheet" do
     waitFor exportBundleButton 10
@@ -327,8 +372,9 @@ def shippedCensus : Journey := ⟨"shippedCensus", do
     shot "33-icloud-sheet"
     tap (.button "Close")
 
-  step "the Wallet tab's multisig section, and Join" do
-    tap (.tab "Wallet")
+  step "Settings → Security → Multisig accounts, and Join" do
+    scrolled multisigAccountsButton
+    tap multisigAccountsButton
     waitFor multisigAddButton 10
     scrolled multisigAddButton
     expectEq "the Join button" (← text multisigAddButton) "Join an account"
@@ -375,12 +421,12 @@ def silentPaymentSend : Journey := ⟨"silentPaymentSend", do
     waitFor broadcastConfirmed 90
     shot "41-silent-confirmed"⟩
 
-/-- A payment sent at a low rate, then replaced with a higher fee from its payment screen (Advanced mode's Bump
-fee). Before it, Send's fee controls against the node: the Network floor is the node's BIP133 feefilter, and an
-override under it resolves to the floor. Core checks the replacement: it spends exactly the original's coins,
-pays the same amount to the same address with a higher fee, takes the original's place in the mempool, and is
-the one that confirms. The Transactions list then shows the replacement confirmed with its fee, and the
-original's row marked replaced by it. -/
+/-- A payment sent at a low rate, then replaced with a higher fee from its payment screen (Bump fee). Before it,
+Send's folded Fee against the node: the Network floor is the node's BIP133 feefilter, and an override under it
+resolves to the floor. Core checks the replacement: it spends exactly the original's coins, pays the same amount
+to the same address with a higher fee, takes the original's place in the mempool, and is the one that confirms.
+Activity then shows the replacement confirmed and the original replaced, and their payment screens the block,
+each one's fee and what replaced the original. -/
 def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
   let r ← Run.new "feebump"
   let h := r.host
@@ -392,11 +438,10 @@ def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
     Receive.close
     discard <| h.fund address funding
     waitForBalance funding
-  turnOnAdvanced
 
   let destination ← h.bankAddress
   let low ← step "Send's fee: the node's relay floor, and an override under it resolved to the floor" do
-    tap (.tab "Send")
+    tap openSendButton
     r.paste destination pasteDestinationButton
     type amountField (toString payment)
     let floor ← Send.floorMilli
@@ -421,10 +466,10 @@ def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
     pure (txid, fee, coins)
 
   let (replacement, newFee) ← step "open the unconfirmed payment and replace it at a higher rate" do
-    tap (.tab "Wallet")
+    backToWalletList
     waitFor (historyPayment txid) 30
     scrolled (historyPayment txid)
-    expectEq "the payment's row" (← text (historyStatus txid)) "awaiting confirmation"
+    expectEq "the payment's row" (← text (historyStatus txid)) "Pending"
     tap (historyPayment txid)
     Bump.start
     let newFee ← Bump.review (toString (low + 4))
@@ -439,7 +484,7 @@ def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
     expectEq "the replacement's fee, as the node computes it" (← h.mempoolFee replacement) newFee
     expect (!(← h.mempool).contains txid) "the original is still in the node's mempool"
 
-  step "the replacement confirms, not the original; the Transactions rows say so, with the new fee" do
+  step "the replacement confirms, not the original; Activity and the payment screens say so, with each fee" do
     tap (.button "Done")
     h.mine 1
     let tip ← h.tipTransactions
@@ -450,11 +495,19 @@ def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
     waitForBalance (funding - payment - newFee)
     scrolled (historyPayment replacement)
     waitUntil 60 "the replacement's row is not confirmed" do
-      return (← text (historyStatus replacement)) == s!"block {height}"
-    expectEq "the replacement's fee on its row" (← amount (historyFee replacement)) (some newFee)
-    expectEq "the original's row" (← text (historyStatus txid)) s!"replaced by {String.ofList (replacement.toList.take 8)}…"
-    expectEq "the original's fee on its row" (← amount (historyFee txid)) (some fee)
-    shot "51-fee-bump-confirmed"⟩
+      return (← text (historyStatus replacement)) == "Confirmed"
+    expectEq "the original's row" (← text (historyStatus txid)) "Replaced"
+    shot "51-fee-bump-confirmed"
+    tap (historyPayment replacement)
+    scrolled paymentBlock
+    expectEq "the replacement's block" (← text paymentBlock) s!"{height}"
+    expectEq "the replacement's fee" (← amount paymentFee) (some newFee)
+    backToWalletList
+    scrolled (historyPayment txid)
+    tap (historyPayment txid)
+    scrolled paymentReplacedBy
+    expectEq "what replaced the original" (← text paymentReplacedBy) s!"{String.ofList (replacement.toList.take 8)}…"
+    expectEq "the original's fee" (← amount paymentFee) (some fee)⟩
 
 /-- The same recovery phrase on another device spends the phone's coins, twice. A review whose coin has gone
 fails when the owner signs, on the Send screen, which can then be used again. A payment whose coin the node has
@@ -477,11 +530,10 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     discard <| h.fund address funding
     waitForBalance funding
     pure address
-  turnOnAdvanced
 
   let destination ← h.bankAddress
   step "the reviewed coin is spent elsewhere and confirmed: signing fails on the Send screen" do
-    tap (.tab "Send")
+    tap openSendButton
     r.paste destination pasteDestinationButton
     type amountField (toString payment)
     scrolled reviewButton
@@ -492,9 +544,7 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     discard <| h.sweep other destination 2
     h.mine 1
     discard <| h.fund address (2 * funding)
-    tap (.tab "Wallet")
-    waitForBalance (2 * funding)
-    tap (.tab "Send")
+    Send.waitForReviewBalance (2 * funding)
     scrolled sendButton
     tap sendButton
     waitFor (.text "^The available coins, fee, or change changed") 30
@@ -527,12 +577,14 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     expect (!tip.contains txid) "the block has the refused payment"
     waitFor broadcastReplaced 60
     expect (!(← exists? broadcastPending)) "Send still waits for a confirmation that cannot come"
-    tap (.tab "Wallet")
+    backToWalletList
     waitForBalance 0
     scrolled (historyPayment txid)
     waitUntil 60 "the payment's row is not marked replaced" do
-      return (← text (historyStatus txid)) == s!"replaced by {String.ofList (winner.toList.take 8)}…"
+      return (← text (historyStatus txid)) == "Replaced"
     tap (historyPayment txid)
+    scrolled paymentReplacedBy
+    expectEq "what replaced it" (← text paymentReplacedBy) s!"{String.ofList (winner.toList.take 8)}…"
     pause 1
     expect (!(← exists? bumpFeeButton)) "the payment still offers a fee bump"
 
@@ -541,9 +593,7 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     discard <| h.fund address smallCoin
     discard <| h.fund address smallCoin
     waitForBalance (2 * smallCoin)
-    tap (.tab "Send")
-    scrolled newPaymentButton
-    tap newPaymentButton
+    tap openSendButton
     r.paste destination pasteDestinationButton
     type amountField (toString (smallCoin + payment))
     scrolled reviewButton
@@ -564,14 +614,16 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     h.mine 1
     expect ((← h.tipTransactions).contains other3) "the block does not have the other spend"
     waitFor broadcastReplaced 60
-    tap (.tab "Wallet")
+    backToWalletList
     waitForBalance smallCoin
     scrolled (historyPayment twoCoins)
     waitUntil 60 "the payment's row is not marked replaced" do
-      return (← text (historyStatus twoCoins)) == s!"replaced by {String.ofList (other3.toList.take 8)}…"
-    tap (.tab "Send")
-    scrolled newPaymentButton
-    tap newPaymentButton
+      return (← text (historyStatus twoCoins)) == "Replaced"
+    tap (historyPayment twoCoins)
+    scrolled paymentReplacedBy
+    expectEq "what replaced it" (← text paymentReplacedBy) s!"{String.ofList (other3.toList.take 8)}…"
+    backToWalletList
+    tap openSendButton
     r.paste destination pasteDestinationButton
     type amountField (toString payment)
     scrolled reviewButton
@@ -582,14 +634,15 @@ def spentElsewhere : Journey := ⟨"spentElsewhere", do
     let txid ← Send.send h
     h.expectPays txid destination payment
     h.mine 1
-    tap (.tab "Wallet")
+    backToWalletList
     waitForBalance (smallCoin - payment - fee)
     discard <| h.cli #["unloadwallet", other]⟩
 
 /-- The phone cannot reach the Bitcoin network. The fixture's node goes off the network (`setnetworkactive
-false`) while Winnow is in the background; back in the foreground, Home says it couldn't reach the network and
-offers Retry. With the node back, Retry reconnects at once, well before the pool would try again by itself
-(30 seconds after it started), and the wallet finds a payment the node sends it. The node serves every journey
+false`) while Winnow is in the background; back in the foreground, Home says Offline in one short line, which
+explains itself in an alert and leads to Settings → Network → Sync. With the node back, that page's Retry
+reconnects at once, well before the pool would try again by itself (30 seconds after it started), and the
+wallet finds a payment the node sends it. The node serves every journey
 of the run, so it goes back on the network however this one ends. -/
 def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
   let r ← Run.new "retry"
@@ -602,31 +655,46 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
     waitSynced
     pure address
   try
-    let failedAt ← step "the node goes off the network: back in the foreground, Home offers Retry" do
+    let start ← step "the node goes off the network: back in the foreground, Home says Offline" do
       home
       discard <| h.cli #["setnetworkactive", "false"]
       let start ← IO.monoMsNow
       activate
-      waitFor retryPeersButton 30
-      here (.text "^Couldn't reach the Bitcoin network")
-      shot "60-home-retry"
-      pure ((← IO.monoMsNow) - start)
-    step "the node is back: Retry reconnects at once, and the wallet finds a payment" do
+      waitFor homeNetworkWarning 30
+      expect ((← text homeNetworkWarning) == "Offline") "the home's warning is not Offline"
+      expectGone retryPeersButton
+      shot "60-home-offline"
+      pure start
+    step "the node is back: the warning leads to Retry in Settings, which reconnects at once, and the wallet finds a payment" do
       discard <| h.cli #["setnetworkactive", "true"]
+      tap homeNetworkWarning
+      waitFor (.alert "Network settings") 10
+      here (.text "^Couldn't reach the Bitcoin network")
+      tap (.alert "Network settings")
+      waitFor retryPeersButton 10
       tap retryPeersButton
       -- the pool's own redial comes 30 s after the foreground started it; Retry must beat it
-      let within := 25 - Float.ofNat failedAt / 1000
-      expect (within ≥ 10) s!"Home took {failedAt} ms to offer Retry, too long to tell Retry from the pool's redial"
-      waitUntil within "Retry did not reconnect" do return (← text syncSummaryText) == "Up to date"
+      let elapsed := (← IO.monoMsNow) - start
+      let within := 25 - Float.ofNat elapsed / 1000
+      expect (within ≥ 10) s!"Retry came {elapsed} ms after the foreground, too late to tell it from the pool's redial"
+      waitUntil within "Retry did not reconnect" do return (← text syncStatus) == "Up to date"
       expectGone retryPeersButton
+      -- back through Settings to the home (the Sync page shows the balance too, so not backToWalletList)
+      for _ in [0:4] do
+        if ← exists? settingsButton then break
+        tap .back
+        pause 0.5
+      waitFor settingsButton 10
+      waitUntil 10 "the home is not Up to date" do return (← text syncSummaryText) == "Up to date"
+      expectGone homeNetworkWarning
       discard <| h.fund address funding
       waitForBalance funding
   finally
     discard <| h.cli #["setnetworkactive", "true"]⟩
 
 def all : List Journey :=
-  [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, shippedCensus, silentPaymentSend,
-   feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers]
+  [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
+   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers]
 
 end WinnowJourneys
 

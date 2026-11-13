@@ -4,7 +4,7 @@ import WinnowApp.Real.MultisigStore
 import WinnowApp.Real.SignerStore
 import WinnowApp.Real.LedgerTransport
 
-/-! # Multisig accounts in the app (AppModel.swift at upstream 1cf93fb, "Multisig accounts (Advanced mode)")
+/-! # Multisig accounts in the app (AppModel.swift at upstream 1cf93fb, "Multisig accounts (Advanced mode)", here Settings → Security → Multisig accounts)
 
 AppModel's multisig operations over the core (`Env`: the wallet, the chain tip, the broadcaster and the
 spending gate) and the account store (`MultisigHost`): `multisigKeyExpression`,
@@ -35,8 +35,6 @@ def spendNotRecordedText (txid reason : String) : String :=
   s!"Sent as {txid}, but the account could not be updated: {reason} Do not spend from it again until it syncs."
 
 /-- `LedgerActionError` (the cases the account builder throws without a Ledger). -/
-def advancedModeOnlyText : String :=
-  "Multisig accounts and Ledger signing are part of Advanced mode. Turn on Advanced mode to use them."
 def invalidNameText : String :=
   "Use a name of 1 to 64 plain letters, digits and punctuation: the Ledger shows it on its screen."
 
@@ -480,8 +478,7 @@ def splitKeys (text : String) : List String :=
 /-- `pairLedger(name:)`: reads the Ledger's signer key over Bluetooth and files it under `name` among this
 phone's signers, for the account builder and the Join screen's member share. Nothing is registered on
 the Ledger until an account uses it. Pairing the same Ledger again renames it. -/
-def pairLedger (env : Env) (a : MultisigApp) (advanced : Bool) (name : String) : IO SignerRecord := do
-  unless advanced do failText advancedModeOnlyText
+def pairLedger (env : Env) (a : MultisigApp) (name : String) : IO SignerRecord := do
   unless (DisplayName.normalized name).isSome do
     failText (SignerStorageError.invalidState "a signer needs a short, single-line name").description
   let network ← currentNetwork env
@@ -494,8 +491,7 @@ def pairLedger (env : Env) (a : MultisigApp) (advanced : Bool) (name : String) :
 
 /-- `addSignerKeys(name:text:)`: keys someone sent as one signer: a single key, or a phone's pasted
 together with its Ledger's, which then count as one member. -/
-def addSignerKeys (env : Env) (a : MultisigApp) (advanced : Bool) (name text : String) : IO SignerRecord := do
-  unless advanced do failText advancedModeOnlyText
+def addSignerKeys (env : Env) (a : MultisigApp) (name text : String) : IO SignerRecord := do
   let keys := splitKeys text
   if keys.isEmpty then failText (SignerStorageError.invalidState "paste at least one key").description
   let network ← currentNetwork env
@@ -543,9 +539,8 @@ signer's keys (this phone's own wherever the user put it, a Ledger's, a key some
 that sign together); a member of more than one key makes the account nested. An account naming a Ledger
 key must fit a Ledger's policy and carry a name a Ledger can show; at most one of this phone's paired
 Ledgers per account. The paired Ledger registers it afterwards (`registerPairedLedger`). -/
-def createMultisigAccount (env : Env) (a : MultisigApp) (advanced : Bool) (name : String) (threshold : Nat)
+def createMultisigAccount (env : Env) (a : MultisigApp) (name : String) (threshold : Nat)
     (members : List (List String × Option Nat)) (recovery : Option MultisigRecovery) : IO MultisigAccountRecord := do
-  unless advanced do failText advancedModeOnlyText
   let some name := DisplayName.normalized name | failText invalidNameText
   let w ← needWallet env
   let descriptor ← runMAM (MultisigAccount.makeNestedDescriptor (builderMembers members) threshold
@@ -561,8 +556,7 @@ def createMultisigAccount (env : Env) (a : MultisigApp) (advanced : Bool) (name 
 /-- `registerLedger(record:)`: registers the account on the Ledger connected now, which must hold one of
 its keys: the Ledger shows the policy, the user approves it there, and it must derive the phone's first
 address. -/
-def registerLedger (env : Env) (a : MultisigApp) (advanced : Bool) (id : String) : IO MultisigAccountRecord := do
-  unless advanced do failText advancedModeOnlyText
+def registerLedger (env : Env) (a : MultisigApp) (id : String) : IO MultisigAccountRecord := do
   let r ← record a id
   unless Ledger.WalletPolicy.isValidName r.name do failText invalidNameText
   let account ← accountOf r (← currentNetwork env)
@@ -575,28 +569,27 @@ def registerLedger (env : Env) (a : MultisigApp) (advanced : Bool) (id : String)
 
 /-- `registerPairedLedger(record:)`: an account just built or joined, registered on this phone's paired
 Ledger when one holds a key of it; none when no paired Ledger is in the account (or it is registered). -/
-def registerPairedLedger (env : Env) (a : MultisigApp) (advanced : Bool) (id : String) : IO (Option MultisigAccountRecord) := do
+def registerPairedLedger (env : Env) (a : MultisigApp) (id : String) : IO (Option MultisigAccountRecord) := do
   let r ← record a id
   let account ← accountOf r (← currentNetwork env)
   if r.ledger.isSome || (pairedLedgers (← a.signers.all) account).isEmpty then return none
-  return some (← registerLedger env a advanced id)
+  return some (← registerLedger env a id)
 
 /-- The builder's and Join's Ledger step: the paired Ledger's name and the registration's outcome (its
 failure as the text the screen shows); none when no paired Ledger holds a key of the account. -/
-def registerAfterSaving (env : Env) (a : MultisigApp) (advanced : Bool) (r : MultisigAccountRecord) :
+def registerAfterSaving (env : Env) (a : MultisigApp) (r : MultisigAccountRecord) :
     IO (Option (Except String String)) := do
   let account ← accountOf r (← currentNetwork env)
   let some ledger := (pairedLedgers (← a.signers.all) account)[0]? | return none
   if r.ledger.isSome then return none
   try
-    discard <| registerPairedLedger env a advanced r.id
+    discard <| registerPairedLedger env a r.id
     return some (.ok ledger.name)
   catch e => return some (.error (toString e))
 
 /-- `verifyLedgerAddress(record:index:)`: shows the address at `index` on the Ledger, which must be the
 one this phone derives. -/
-def verifyLedgerAddress (env : Env) (a : MultisigApp) (advanced : Bool) (id : String) (index : Nat) : IO String := do
-  unless advanced do failText advancedModeOnlyText
+def verifyLedgerAddress (env : Env) (a : MultisigApp) (id : String) (index : Nat) : IO String := do
   let r ← record a id
   let some registration := r.ledger | failText notPairedText
   let account ← accountOf r (← currentNetwork env)
@@ -609,8 +602,7 @@ def signErrorText : Ledger.SignError → String
 
 /-- `signMultisigSpendWithLedger(_:record:)`: the phone reviews the spend first; the Ledger then shows it
 on its own screen and adds a signature this phone keeps only once it verifies. -/
-def signMultisigSpendWithLedger (env : Env) (a : MultisigApp) (advanced : Bool) (id text : String) : IO MultisigPSBT := do
-  unless advanced do failText advancedModeOnlyText
+def signMultisigSpendWithLedger (env : Env) (a : MultisigApp) (id text : String) : IO MultisigPSBT := do
   let r ← record a id
   let some registration := r.ledger | failText notPairedText
   let account ← accountOf r (← currentNetwork env)
@@ -751,8 +743,7 @@ def signWithPhone (env : Env) (r : MultisigAccountRecord) (psbt : PSBT) : IO PSB
 must be the one reviewed (same inputs, outputs and fee: the `authorizes` gate on the unsigned
 transaction); this phone signs it and files it as the account's draft, where the other signatures are
 collected. The account's id. -/
-def signAndDraft (env : Env) (a : MultisigApp) (advanced : Bool) (inputs : SendInputs) (p : Preview) : IO String := do
-  unless advanced do failText advancedModeOnlyText
+def signAndDraft (env : Env) (a : MultisigApp) (inputs : SendInputs) (p : Preview) : IO String := do
   let some source := p.account | failWith .sendReviewChanged
   let c ← env.get
   let some review := c.reviews.find? (fun rv => rv.inputs == inputs && sameSummary rv.summary p) | failWith .sendReviewChanged
@@ -777,10 +768,10 @@ def signDraft (env : Env) (a : MultisigApp) (id : String) : IO Unit := do
   updateDraft env a r (← signWithPhone env r psbt)
 
 /-- The draft signed by the Ledger (`signMultisigSpendWithLedger` then `updateMultisigDraft`). -/
-def signDraftWithLedger (env : Env) (a : MultisigApp) (advanced : Bool) (id : String) : IO Unit := do
+def signDraftWithLedger (env : Env) (a : MultisigApp) (id : String) : IO Unit := do
   let r ← record a id
   let (_, psbt) ← draftPSBT r
-  let signed ← signMultisigSpendWithLedger env a advanced id psbt.base64
+  let signed ← signMultisigSpendWithLedger env a id psbt.base64
   updateDraft env a r (← parsePSBT signed.psbt)
 
 /-- `adoptMultisigDraft(_:record:)`: a pasted co-signer's PSBT, combined into the draft when the account has

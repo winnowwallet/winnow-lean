@@ -332,7 +332,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
       if let some d := dir then (finishRollback d : IO Unit)
     match ← pass.attempt with
     | .ok () =>
-      -- the scan reached the tip: when it did is what Advanced's Sync section shows
+      -- the scan reached the tip: when it did is what Settings → Network → Sync shows
       let complete := (← f.nextScanHeight) > (← s.chain.height)
       let now ← unixNow
       let current ← env.modifyGet fun c =>
