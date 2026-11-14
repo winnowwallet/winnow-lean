@@ -41,6 +41,12 @@ def setReceiveLabel (c : RecordsCtx) (address label : String) : IO Records :=
 def ownCard (c : RecordsCtx) (name : String) : IO String :=
   c.runW fun _ w => do return (← ownPersonCard w name).serialized
 
+def personCard (c : RecordsCtx) (personID : Option String) (personName ownName : String) : IO (String × Records) :=
+  c.runW fun s w => RecordsReal.personCard s w personID personName ownName
+
+def hasPersonCard (c : RecordsCtx) (personID : Option String) (personName : String) : IO Bool := do
+  RecordsReal.hasPersonCard (← c.store) personID personName
+
 def parsePaste (c : RecordsCtx) (text : String) : IO PastePreview :=
   c.run fun s _ => RecordsReal.parsePaste s.network text
 
@@ -69,7 +75,7 @@ def lookupSender (c : RecordsCtx) (txid baseURL : String) : IO (List String) := 
 /-- The records fields of `base` replaced by these. -/
 def install (c : RecordsCtx) (base : Backend) : Backend :=
   { base with
-    records := c.records, setReceiveLabel := c.setReceiveLabel, ownCard := c.ownCard, parsePaste := c.parsePaste,
+    records := c.records, setReceiveLabel := c.setReceiveLabel, ownCard := c.ownCard, personCard := c.personCard, hasPersonCard := c.hasPersonCard, parsePaste := c.parsePaste,
     addPerson := c.addPerson, attachDestination := c.attachDestination, updateRecipient := c.updateRecipient,
     labelSender := c.labelSender, removeSenderLabel := c.removeSenderLabel, lookupSender := c.lookupSender }
 

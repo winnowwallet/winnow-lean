@@ -65,6 +65,7 @@ def hooks (h : RecordsHost) : Hooks where
   configure := h.configure
   personPayment := h.personPayment
   advancePersonIndex := fun id index => h.withStore () fun s => discard <| advancePersonPaymentIndex s none id index
+  cardPayment := fun card txid => h.withStore () fun s => labelCardPayment s card txid
 
 end RecordsHost
 

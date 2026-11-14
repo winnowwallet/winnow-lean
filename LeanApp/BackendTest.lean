@@ -473,6 +473,94 @@ def personNamed (b : Backend) (name : String) : IO Person := do
   | some p => return p
   | none => throw (IO.userError s!"no person {name}")
 
+/-- A card per person between two phones (issue #94). Bob makes a card for Alice alone; Alice saves it and
+pays it twice. Bob's wallet finds both payments through the node's filters, names them as Alice's without
+being told, and spends them. The addresses she paid are none the shared card's account key derives, and
+Bob's backup carries the card. -/
+def cardFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let phone (name : String) : IO Backend := do
+    let (b, _) ← Backend.realWithEnv (deps (← IO.mkRef ({} : Keys.InMemorySecrets)) name)
+    let home := s!"{dir}/{name}/BTCSwift/regtest"
+    IO.FS.createDirAll home
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    discard <| b.createWallet .regtest home
+    return b
+  let bob ← phone "CardBob"
+  let alice ← phone "CardAlice"
+  discard <| n.wallet #["sendtoaddress", ← alice.receiveAddress false, "1.0"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (funded, _) ← syncUntil alice 60_000 fun s p => s.balance == 100_000_000 && p == .synced
+  check "card: Alice is funded" (funded.balance == 100_000_000) s!"{funded.balance}"
+  -- Bob's card for Alice
+  check "card: before it is made, Alice has none" !(← bob.hasPersonCard none "Alice")
+  let (card, records) ← bob.personCard none "Alice" "Bob"
+  let has (text part : String) := (text.splitOn part).length > 1
+  check "card: a card code under Bob's name, with no account key in it"
+    (has card "\"payTo\":\"rwnc1" && has card "\"name\":\"Bob\"" && has card "\"version\":2" && !has card "tpub") card
+  check "card: Alice is Bob's contact, with a card" ((records.people.any fun p => p.name == "Alice" && p.hasCard) &&
+    (← bob.hasPersonCard none "Alice"))
+  check "card: asked again, the same card" ((← bob.personCard none "Alice" "Bob").1 == card)
+  checkJournal "card.issued" ["card", "personID"] (fun f => field f "card" == "0")
+  -- Alice saves it and pays it twice
+  let read ← alice.parsePaste card
+  check "card: Alice's phone reads Bob and a fresh address each payment" (read.name == some "Bob" && read.payTo == some true)
+  discard <| alice.addPerson "Bob" (some card) none none none
+  let bobID := (← personNamed alice "Bob").id
+  let payBob : SendInputs := { personID := some bobID, amount := "300000", network := .regtest }
+  let first ← alice.previewSend payBob
+  check "card: the review names Bob, and has no warning" ((first.recipient.map (·.name)) == some "Bob" && reviewWarnings first == [])
+    s!"{reviewWarnings first}"
+  let paidOnce := (← alice.sendPayment payBob first).txid
+  let second ← alice.previewSend payBob
+  check "card: the next payment goes to another address" (second.destination != first.destination &&
+    (← personNamed alice "Bob").nextPaymentIndex == 1)
+  let paidTwice := (← alice.sendPayment payBob second).txid
+  -- neither address is one the card everybody gets could derive
+  let sharedScripts : Array ByteArray := match PersonCard.decode (← bob.ownCard "Bob") with
+    | .ok shared => ((shared.payTo.bind fun t => (PersonPayTo.ofDescriptor t .regtest).toOption).bind
+        fun payTo => (payTo.scripts 200 .regtest).toOption).getD #[]
+    | .error _ => #[]
+  let paidScripts := [first.destination, second.destination].filterMap fun a => (AddressDecoder.scriptPubKey a .regtest).toOption
+  check "card: Bob's shared card derives neither address Alice paid"
+    (sharedScripts.size == 200 && paidScripts.length == 2 && paidScripts.all fun script => !sharedScripts.contains script)
+  let mined ← waitUntil 20_000 (do let mp ← n.mempool; return mp.contains paidOnce && mp.contains paidTwice)
+  check "card: both payments reach the node" mined
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  check "card: the chain shows the two addresses"
+    ((← paidAddresses n paidOnce).contains first.destination && (← paidAddresses n paidTwice).contains second.destination)
+  -- Bob's wallet finds them, and knows whose they are
+  let (atBob, _) ← syncUntil bob 60_000 fun s _ => s.balance == 600_000
+  check "card: Bob's wallet finds both payments, as two coins" (atBob.balance == 600_000 && atBob.utxoCount == 2)
+    s!"{atBob.balance} sat, {atBob.utxoCount} coin(s)"
+  let aliceAtBob := (← personNamed bob "Alice").id
+  let senders := (← bob.records).senderByTxid
+  check "card: both are named as Alice's, without Bob labelling either"
+    (senders.lookup paidOnce == some aliceAtBob && senders.lookup paidTwice == some aliceAtBob) s!"{senders}"
+  -- and spends them
+  let toNode : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "550000", network := .regtest }
+  let review ← bob.previewSend toNode
+  let spent := (← bob.sendPayment toNode review).txid
+  check "card: the node takes Bob's spend of the card's coins" (← waitUntil 20_000 (do return (← n.mempool).contains spent))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (after, _) ← syncUntil bob 60_000 fun s p => (history? s spent).any (·.height > 0) && p == .synced
+  check "card: confirmed, Bob holds what the payment and its fee left"
+    (after.balance == 600_000 - 550_000 - review.fee && (history? after spent).any (·.height > 0)) s!"{after.balance}"
+  -- the backup carries the card
+  check "card: Bob's backup is version 3, with the card" (match ImportBundle.decode (← bob.exportBundle true) with
+    | .ok bundle => bundle.version == 3 && bundle.cards.size == 1
+    | .error _ => false)
+  check "card: Alice, who issued none, still writes version 2" (match ImportBundle.decode (← alice.exportBundle false) with
+    | .ok bundle => bundle.version == 2 && bundle.cards.isEmpty
+    | .error _ => false)
+  bob.stopNetworking
+  alice.stopNetworking
+
 /-- Alice saves Bob from the card his phone made, pays him twice and he finds both payments, at two addresses;
 someone inferred from a payment's funding is paid with the warning that it is unverified, from the wallet's own
 record and from a fake explorer's answer; a saved address warns of reuse and is reused; a large fee warns; a
@@ -1734,6 +1822,15 @@ def main (args : List String) : IO UInt32 := do
   if let ["--fixture", dir] := args then IO.Process.exit (← fixture dir).toUInt8
   -- for the UI journey: the test receiver's code, and the output it finds in a transaction on a fixture
   if let ["--sp-code"] := args then IO.println (← testReceiverCode); return 0
+  -- the address a person card's code derives for payment `index` (the journeys' payer, who holds only the card)
+  if let ["--card-address", card, index] := args then
+    let address := do
+      let decoded ← (PersonCard.decode card).toOption
+      let payTo ← (PersonPayTo.ofCard (← decoded.payTo) .regtest).toOption
+      (payTo.addressAt index.toNat!.toUInt32 .regtest).toOption
+    match address with
+    | some a => IO.println a; return 0
+    | none => IO.eprintln "not a person card that pays a regtest card code"; return 1
   if let ["--sp-expected", datadir, rpc, txid] := args then
     let n ← Node.attach datadir rpc.toNat!.toUInt16
     IO.println (hex (← testReceiverScript n (← n.json #["getrawtransaction", txid, "true"])))
@@ -1742,5 +1839,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; peopleFlow dir n; cardFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

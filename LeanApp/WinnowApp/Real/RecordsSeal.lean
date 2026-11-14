@@ -179,6 +179,9 @@ def describe (name : String) (network : Tx.BitcoinNetwork) : String :=
   else if name == "empty" then PersonPasteError.empty.description
   else if name == "unrecognised" then PersonPasteError.unrecognised.description
   else if name == "invalidAddress" then "That isn't a valid Bitcoin address."
+  else if name == "wrongHRP" then s!"That code is for a different Bitcoin network. This wallet is on {Wallet.networkName network}."
+  else if name == "tooManyCards" then s!"This wallet has made as many cards as it can ({Wallet.maximumCards})."
+  else if name == "notFound" then "This wallet has no signing key on this device, so it cannot make a card."
   else s!"The operation could not be completed ({name})."
 
 def namedError (name : String) (network : Tx.BitcoinNetwork) : RecordsError := .named name (describe name network)

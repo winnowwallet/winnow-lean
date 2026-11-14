@@ -64,6 +64,13 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   revealMnemonic : IO (List String)
   /-- `ownPersonCard(name:).serialized()`. -/
   ownCard : (name : String) → IO String
+  /-- A card for one person only (issue #94): the saved person `personID`, or else the first person named
+  `personName` (saved as a contact if there is none), a card code issued for them alone, on a card under
+  `ownName`. The first call issues the card and reads the wallet's private key; later calls read it back.
+  The card and the records it changed. -/
+  personCard : (personID : Option String) → (personName ownName : String) → IO (String × Records)
+  /-- Whether that person has a card already, so reading it needs no key and no device authentication. -/
+  hasPersonCard : (personID : Option String) → (personName : String) → IO Bool
   /-- `PersonPaste.parse`. -/
   parsePaste : (text : String) → IO PastePreview
   /-- `addPerson` (+ `labelReceivedSender` when labelling a payment). -/
@@ -195,6 +202,8 @@ def Backend.pending : Backend where
   exportBundle := fun _ => notPorted "Backing up the wallet"
   revealMnemonic := notPorted "Showing the recovery phrase"
   ownCard := fun _ => notPorted "Your card"
+  personCard := fun _ _ _ => notPorted "A card for one person"
+  hasPersonCard := fun _ _ => pure false
   parsePaste := fun _ => notPorted "Reading addresses and cards"
   addPerson := fun _ _ _ _ _ => notPorted "Saving people"
   attachDestination := fun _ _ _ _ => notPorted "Saving people"

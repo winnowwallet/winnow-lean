@@ -46,6 +46,8 @@ def Model.fail (m : Model) (context message : String) : Model :=
   if context == "reveal.cancelled" then { m with reveal := { m.reveal with revealing := false, error := none } } else
   -- and so does an export that would have carried it: the sheet is as it was before the button
   if context == "export.cancelled" then { m with exportState := { m.exportState with busy := false, error := none } } else
+  -- nor does a card for one person the device's owner declined to make
+  if context == "personCard.cancelled" then { m with shareCard := { m.shareCard with making := false } } else
   let cancelled := context.endsWith ".cancelled"
   let context := if cancelled then (context.dropEnd 10).copy else context
   if context.startsWith "collect." then
@@ -71,7 +73,8 @@ def Model.fail (m : Model) (context message : String) : Model :=
   | "feeBump" => { m with feeBump := { m.feeBump with error := some message, bumping := false }, spendingInFlight := false }
   | "export" => { m with exportState := { m.exportState with busy := false, error := some message, file := none } }
   | "reveal" => { m with reveal := { m.reveal with revealing := false, error := some message } }
-  | "card" => { m with shareCard := { card := none, error := some message } }
+  | "card" => { m with shareCard := { m.shareCard with card := none, error := some message } }
+  | "personCard" => { m with shareCard := { m.shareCard with making := false, error := some message } }
   | "person" => { m with person := { m.person with saving := false, inferring := false, error := some message } }
   | "recipients" => { m with recipientsError := some message }
   | "multisigAdd" => { m with multisigAdd := { m.multisigAdd with saving := false, error := some message } }

@@ -88,9 +88,9 @@ jobs:
       # the journeys are Lean on the Mac (LeanApp/Journeys.lean), all nine with XCTest's real touches
       # (LeanNative's LNDriver, one snapshot per step) on one simulator: a hosted runner has the cores for one
       ui-journey: journeys
-      # two runners at once, four or five journeys each (five took about 3.5 minutes each; one runner: 6.6); the media
+      # two runners at once, five journeys each (five took about 3.5 minutes each; one runner: 6.6); the media
       # job joins their recordings into the website's one video, the journeys in Journeys.lean's order
-      ui-journey-shards: '["createReceiveSendConfirm multisigTwoOfThreeWithRecovery feeBumpReplaceConfirm retryAfterNoPeers", "ledgerPairVerifySpend ledgerCardTwoOfTwo shippedCensus silentPaymentSend spentElsewhere"]'
+      ui-journey-shards: '["createReceiveSendConfirm multisigTwoOfThreeWithRecovery feeBumpReplaceConfirm retryAfterNoPeers cardForOnePerson", "ledgerPairVerifySpend ledgerCardTwoOfTwo shippedCensus silentPaymentSend spentElsewhere"]'
       # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run:
       # LeanNative's journey-media, in the layout and names the website reads
       journey-media: build/journey-media

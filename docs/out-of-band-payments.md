@@ -2,11 +2,12 @@
 
 Proposal for [issue #94](https://github.com/winnowwallet/winnow-lean/issues/94), written 2026-11-14.
 
-> Status at this revision: the card code and its derivation exist (`Lean/Winnow/Keys/CardKeys.lean`), and
-> the wallet library issues cards, finds what is paid to them, spends it and restores it
-> (`Lean/Winnow/Wallet/Wallet.lean`), tested without a node and against a regtest Bitcoin Core. The app does
-> not call any of it yet: no screen shows a card and a person cannot be paid by one. The sections "What the
-> wallet does" and "Results" say which parts are built.
+> Status at this revision: built end to end on regtest. The card code and its derivation
+> (`Lean/Winnow/Keys/CardKeys.lean`); a wallet that issues cards, finds what is paid to them, spends it and
+> restores it (`Lean/Winnow/Wallet/Wallet.lean`); and the app: Receive → Share my card has "A card for one
+> person", a saved person can be paid by the card they sent, and a payment to a card is named as its
+> person's. None of it has run on a device, on signet or on mainnet. The sections "What the wallet does"
+> and "Results" say what was checked and how.
 
 ## The problem
 
@@ -237,7 +238,7 @@ tweak from them, and a backup's card coins are checked by deriving their scripts
   payer's index advances when a send commits. Twenty committed sends in a row that never confirm would
   put a later payment outside the window until a recovery scan widens it.
 - **A card given to two people.** Both pay the same sequence and each can see the other's payments to it.
-  The screen will have to say the card is for one person.
+  The screen says the card is for one person and to send it only to them.
 - **Showing a card again** is safe: card `k` is always the same code.
 
 ## States
@@ -338,8 +339,13 @@ Three pull requests.
    bundle carries cards (version 3) and import checks them; `Wallet.restoreCards` serves a wallet rebuilt
    from the phrase. A wallet that never issues a card writes the same wallet file and the same version 2
    backup as before.
-3. **People and the screen** (not started): a person's pay-to can be a card code; "Card for <name>" issues
-   or shows a person's card with its QR code and Share; a payment to a card is labelled with its person.
+3. **People and the screen** (done): a person's pay-to can be a card code (`PersonPayTo.card`), carried by a
+   version 2 person card or pasted alone. On the card sheet, "A card for one person" takes a name, asks the
+   device's owner, issues the card and shows it with its QR code, Copy and Share; shown again it reads no
+   key and does not ask. Saved recipients have "Make a card" / "Their card". The person is saved as a
+   contact with a link to their card (`PersonRecord.issuedCard`); the card itself stays in the wallet's
+   state. When a block pays a card, the sync labels the payment with the card's person, unless it already
+   has a label, and the screen reads its records again.
 
 ## Results
 
@@ -369,14 +375,31 @@ Three pull requests.
   phrase, with its frontier already past every payment, finds none; after `restoreCards` and two passes of
   `scanRange` over the same filters it holds the same three coins, spends them all in one transaction that
   Core relays and mines, and the first wallet sees its card's coins spent.
-- What these runs do not show: anything in the app; an unconfirmed payment; more than one peer; mainnet
-  or signet; a device.
+- 2026-11-14, pull request 3. `records-test`: 1,513 checks, 0 failed. The store: a card for a person by
+  name and by ID, the same card when asked again, another person's card, the link in the people file and
+  through an iCloud restore plan, two people on one card refused, a card for another network refused in a
+  sentence. The screen, through the app's own `perform` with a fake shell: making a card asks the device's
+  owner once, declining makes none and says nothing, showing it again does not ask.
+  `backend-test`: 346 checks, 0 failed, 18 of them a two-phone flow on Core 31.1: Bob makes a card for
+  Alice, Alice pays it twice from her saved person, the two addresses are none the shared card's key
+  derives in its first 200, Bob's wallet finds both, names both as Alice's and spends them, and his backup
+  is version 3. The journey `cardForOnePerson` passes headless with the other nine.
+- One unexplained failure. `backend-test` ran ten times across these changes: three times on main (328
+  checks), three at pull request 2 (328) and four at pull request 3 (346). One run at pull request 2 failed
+  five checks, all in an existing flow that races a sync against loading a payment's details
+  (`paymentRaceFlow`, the "Another" case: "Finishing sync. Try loading the payment again in a moment.").
+  The other nine passed. The card changes do not touch that flow; whether they make the race likelier was
+  not established.
+- What these runs do not show: a device, the simulator (the journeys ran headless only), an unconfirmed
+  payment, more than one peer, mainnet or signet, or two real phones exchanging a card by QR code, AirDrop
+  or a message. The exchange itself is Share and Paste, which the app already had.
 
 ## Open decisions
 
 1. **C or D on the wire.** The prototype uses the card code. A per-person descriptor would let other
    wallets pay and removes our own derivation; it costs the metadata an extended key carries.
-2. **The shared card.** Keep it beside per-person cards, or retire it.
+2. **The shared card.** It is still there, above the new section, with its own words about what it shows.
+   Keep both, or retire it.
 3. **Issuing a card** reads the wallet's private key, and the app asks for device authentication before
    every read of it. Issuing will therefore ask; showing an issued card again reads no key and will not.
    Say if issuing should not ask.

@@ -291,6 +291,7 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       background fx g "multisigOverview" do return .multisig g (← b.multisigOverview)
       -- `refresh()` ends by scheduling the iCloud backup's update (and a preparation when due)
       discard <| IO.asTask (try b.cloudTick catch _ => pure ())
+  | .records g => background fx g "refresh" do return .records g (← b.records)
   | .syncNow g => background fx g "sync" do
       b.syncNow
       let (s, p) ← b.snapshot
@@ -400,6 +401,15 @@ def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         journal "backup.phraseRevealReady" [("deviceAuthenticationRequired", toString required)]
         return .revealed g e words
   | .ownCard g name => background fx g "card" do return .card g name (← b.ownCard name)
+  | .personCard g personID personName ownName =>
+    let act : IO Host := do
+      let (card, records) ← b.personCard personID personName ownName
+      return .personCard g personName card records
+    -- making a card reads the wallet's private key, so the device's owner is asked, as before every read of
+    -- it; a card already made is read back without a key
+    discard <| IO.asTask do
+      if ← (try b.hasPersonCard personID personName catch _ => pure false) then background fx g "personCard" act
+      else authenticated fx g "personCard" s!"Make a card for {personName}" act
   | _ => pure ()
 
 /-- People and sender labels. -/
@@ -579,14 +589,14 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .saveSettings .. | .openWallet .. | .createWallet .. | .importWallet .. | .finishOnboarding ..
   | .deleteWallet .. =>
     performWallet b fx c
-  | .refresh .. | .syncNow .. | .retryPeers .. | .reconnect .. | .startNetworking .. | .stopNetworking =>
+  | .refresh .. | .records .. | .syncNow .. | .retryPeers .. | .reconnect .. | .startNetworking .. | .stopNetworking =>
     performSync b fx c
   | .receiveAddress .. | .watchAddress .. | .stopWatchingAddress | .setReceiveLabel .. | .resolveRate ..
   | .previewSend .. | .sendPayment .. | .rawTransaction .. | .watchRelay .. | .loadPaymentDetails ..
   | .pendingFeeRate .. | .previewFeeBump .. | .bumpFee .. =>
     performPayments b fx c
   | .catalogStatus .. | .connectedPeers .. | .resetPeers .. | .exportBundle .. | .removeExport ..
-  | .revealPhrase .. | .ownCard .. =>
+  | .revealPhrase .. | .ownCard .. | .personCard .. =>
     performSettings b fx c
   | .parsePaste .. | .addPerson .. | .editPerson .. | .updateRecipient .. | .labelSender ..
   | .removeSenderLabel .. | .lookupSender .. =>

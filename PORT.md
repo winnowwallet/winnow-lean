@@ -149,8 +149,8 @@ derived below the account key at `2'/k'`, and the derivation of the Taproot outp
 `card-keys-test` (257 checks) holds it to `Vectors/card-keys-vectors.json`, which `scripts/card-keys-vectors`
 writes without the wallet's code; `fuzz` has `card-code` and `card-keys`.
 
-The wallet library uses it, and the app does not yet. These are departures from upstream's formats, each
-absent until a card is issued:
+The wallet library and the app use it. These are departures from upstream's formats, each absent until a
+card is issued:
 
 - `wallet.json` gains `cards` (each issued card's index, key, seed and payment cursor), and a coin paid to
   a card gains `card`. A wallet that never issues a card writes the file it always wrote.
@@ -159,6 +159,13 @@ absent until a card is issued:
 - `Wallet.watchMap` answers a `CoinKey` (chain, index, card) where upstream's answers a pair, and
   `Wallet.spendSecret` stands where `tweakedPrivateKey` was called: a card's coin is signed with the card's
   private key plus the payment's tweak, with no BIP86 tweak and no BIP371 origin.
+
+- People: `PersonPayTo.card` (a pay-to that is a card code), person cards of version 2 that carry one, and
+  `PersonRecord.issuedCard` in `people.json`, the link from a person to the card this wallet issued them.
+  Upstream reads a version 2 card as made by a newer Winnow and ignores the link.
+- The app: "A card for one person" on Share my card, "Make a card" / "Their card" on saved recipients, the
+  backend's `personCard`, and the sync's `cardPayment` hook, which labels a payment to a card with its
+  person. `records-test`, `backend-test`'s `cardFlow` and the journey `cardForOnePerson` hold them.
 
 `multisig-test` has the wallet's card tests (issuing, crediting, spending, a reorg, backups and ten refused
 ones, a rebuild from the phrase), and `card-regtest` runs the same against Bitcoin Core as the payer

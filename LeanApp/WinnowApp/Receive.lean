@@ -45,8 +45,19 @@ def stepReceive (msg : ReceiveMsg) (m : Model) : Model × List Cmd :=
   | .setOwnName s =>
     let st := { m.settings with ownDisplayName := s }
     let name := s.trimAscii.copy
-    ({ m with settings := st, shareCard := { m.shareCard with card := if name.isEmpty then none else m.shareCard.card } },
+    -- a card made under the old name is not the card to hand over under the new one
+    ({ m with settings := st, shareCard := { m.shareCard with card := if name.isEmpty then none else m.shareCard.card,
+                                                               personCard := none } },
      [.saveSettings st] ++ (if name.isEmpty then [] else [.ownCard g name]))
+  | .setCardFor s =>
+    let kept := m.shareCard.personCard.filter (·.1 == s.trimAscii.copy)
+    -- typed over, the name is what is meant, not the person the sheet was opened for
+    ({ m with shareCard := { m.shareCard with forName := s, forPerson := none, personCard := kept, error := none } }, [])
+  | .makePersonCard =>
+    let own := m.settings.ownDisplayName.trimAscii.copy
+    let person := m.shareCard.forName.trimAscii.copy
+    if m.shareCard.making || own.isEmpty || person.isEmpty then (m, []) else
+    ({ m with shareCard := { m.shareCard with making := true, error := none } }, [.personCard g m.shareCard.forPerson person own])
 
 /-- The receive address arrived (first one, or a fresh one): the label editor comes first when the
 address has no label yet, or always after New address; the mempool window opens on it. -/
@@ -107,22 +118,44 @@ def receiveSheet (m : Model) (inner : List H) : H :=
     else []
   formSheet "Receive" (some .closeSheet)
     [ closeBar "Done" Ids.closeReceiveButton
-    , .toolbar [.button "Share my card" .plain (some (.receive .openCard))] ]
+    , .toolbar [.identified Ids.shareMyCardButton (.button "Share my card" .plain (some (.receive .openCard)))] ]
     (content ++ errorRows r.error) inner
 
 /-- PaymentDetailView's "Address label" sheet. -/
 def labelSheet (m : Model) (inner : List H) : H :=
   formSheet "Address label" (if m.labelEditor.saving then none else some .closeSheet) [] (labelEditorView m) inner
 
+/-- A card for one person (issue #94): their name, then a card only they are given. -/
+def personCardSections (m : Model) : List H :=
+  let sc := m.shareCard
+  let own := m.settings.ownDisplayName.trimAscii.copy
+  let person := sc.forName.trimAscii.copy
+  let known : Bool := match sc.forPerson with
+    | some id => m.records.people.any fun p => p.id == id && p.hasCard
+    | none => ((m.records.people.find? (·.name == person)).map (·.hasCard)).getD false
+  let label := if sc.making then "Making…" else if known then s!"Show {person}’s card" else if person.isEmpty then "Make a card" else s!"Make a card for {person}"
+  [ .section "A card for one person" "Made for one person and nobody else. They pay you at addresses only the two of you can work out, they cannot see your other addresses, and a payment to this card is named as theirs. Send it only to them: anyone who has it can see what is paid to it."
+      [ .identified Ids.personCardNameField
+          (.input .plain "" "Their name" sc.forName (fun s => .receive (.setCardFor s)) (some (.receive .makePersonCard)))
+      , .identified Ids.makePersonCardButton
+          (.button label .plain (if sc.making || own.isEmpty || person.isEmpty then none else some (.receive .makePersonCard))) ] ] ++
+  (match sc.personCard with
+   | some (name, card) =>
+     [.section s!"Card for {name}" ""
+       [ .qr card, copyableBlock m "card.person" card Ids.personCardText ]]
+   | none => [])
+
 /-- `ShareMyCardView`: public keys only, plus the name others will see. -/
 def shareCardSheet (m : Model) (inner : List H) : H :=
-  formSheet "Share my card" (some .closeSheet) [closeBar "Done"]
-    ([ .section "" "" [.input .plain "" "Your name, as others will see it" m.settings.ownDisplayName (fun s => .receive (.setOwnName s)) none] ] ++
+  formSheet "Share my card" (some .closeSheet) [closeBar "Done" Ids.closeShareCardButton]
+    ([ .section "" "" [.identified Ids.ownNameField
+        (.input .plain "" "Your name, as others will see it" m.settings.ownDisplayName (fun s => .receive (.setOwnName s)) none)] ] ++
      (match m.shareCard.card with
       | some card =>
         [.section "Your card" "This card carries public keys only. Anyone who has it can pay you and can see every address it derives, the same way your wallet does. People who pay you from their address book use the same list of addresses as your Receive screen, so two people paying at once can land on one address — a privacy detail, never a loss."
           [ .qr card, copyableBlock m "card.text" card ]]
       | none => [.section "" "" [caption "Add a name to make your card."]]) ++
+     personCardSections m ++
      errorRows m.shareCard.error) inner
 
 end WinnowApp
