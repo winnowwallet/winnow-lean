@@ -289,6 +289,16 @@ All on 2026-11-14, every test executable rebuilt first.
   `backend-test` failed once in ten runs: five checks in an existing flow that races a sync against
   loading a payment's details (`paymentRaceFlow`, "Another"). It passed three times of three on main and
   three of three at this revision. The cause was not found.
+- **Two simulators, by hand.** The iOS app on an iPhone 17 Pro and an iPhone 17 simulator (iOS 26.5), each
+  with its own wallet, against one regtest node. Alice made a card for Bob on the card sheet and copied
+  its text; the text was moved to the other simulator's pasteboard with `simctl`, since the simulator has
+  no AirDrop. Bob pasted it into a new saved recipient, which read "Fresh address each payment", and paid
+  250,000 sats to the address his app showed for her, which is the output the mined transaction carries.
+  After one block Alice's Home showed 250,000 sats and "Received from Bob · Confirmed". The run found two
+  layout faults, both since fixed and looked at again in the simulator: the shared card's explanation was
+  drawn a second time under the person's card, and the card button pushed Remove off a saved recipient's
+  row. It also found that "Paste from clipboard" reads nothing in this simulator, which cannot show iOS's
+  paste prompt; the text field's own Paste was used. Whether the button works on a device was not checked.
 - **What these runs do not show:** a device, an unconfirmed payment, more than one peer, mainnet or signet,
   or two real phones exchanging a card by QR code, AirDrop or a message.
 
