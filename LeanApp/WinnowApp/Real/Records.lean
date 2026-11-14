@@ -130,7 +130,7 @@ def recipientByScript (people : Array PersonRecord) (network : BitcoinNetwork) :
 def personSummary (p : PersonRecord) : Person :=
   { id := p.id, name := p.name, payTo := p.payTo.map (·.derivesFreshAddresses),
     nextPaymentIndex := p.nextPaymentIndex.toNat, savedRecipient := p.savedRecipient,
-    provenance := p.destinationProvenance }
+    provenance := p.destinationProvenance, hasCard := p.issuedCard.isSome }
 
 /-- The app's `Records` from the stores and the open wallet (if any). -/
 def summaryOf (s : RecordsStore) (st : RecordsState) (w : Option Wallet) : IO (Records × RecordsState) := do
@@ -196,7 +196,8 @@ def labelSender (s : RecordsStore) (w : Option Wallet) (txid personID : String) 
 /-- `person.added`: the name and what kind of destination. -/
 def notePersonAdded (s : RecordsStore) (record : PersonRecord) : RM Unit :=
   s.note "person.added" [("name", record.name),
-    ("payToKind", (record.payTo.map fun p => if p.derivesFreshAddresses then "descriptor" else "address").getD "none")]
+    ("payToKind", (record.payTo.map fun p =>
+      if p.isCard then "card" else if p.derivesFreshAddresses then "descriptor" else "address").getD "none")]
 
 /-- AddPersonView's save: `addPerson` (+ `labelReceivedSender` when labelling a payment, `labelTxid` in
 display hex). -/
@@ -242,6 +243,59 @@ def removePerson (s : RecordsStore) (w : Option Wallet) (personID : String) : RM
 
 def removeSenderLabel (s : RecordsStore) (w : Option Wallet) (txid : String) : RM Records :=
   withPeople s w fun ps => RM.io (ps.removeSenderLabel s.keys s.writeData txid)
+
+/-! ## A card per person (issue #94) -/
+
+/-- The saved person `personID`; or, with no ID, the first person named `name` (as a display name is
+normalized), or a new contact with that name and no destination. Names are not unique: a screen that knows
+which person it means says so by ID. -/
+def personNamed (s : RecordsStore) (personID : Option String) (name : String) : RM PersonRecord := do
+  if let some id := personID then
+    let some found := (← RM.io s.read).people.record? id | throw (.people .unknownPerson)
+    return found
+  let wanted ← PeopleStore.normalizedName name
+  if let some found := (← RM.io s.read).people.records.find? (·.name == wanted) then return found
+  let id ← RM.io uuidString
+  let record ← s.modify fun st => do
+    let (ps, record) ← st.people.add s.keys s.writeData id wanted none
+    return ({ st with people := ps }, record)
+  s.note "person.added" [("name", record.name), ("payToKind", "none")]
+  return record
+
+/-- The card this wallet issues for one person, as the person card they paste: the wallet's display name
+`ownName`, its silent payment address, and a tweak only they are given. The first call issues the card (which reads the wallet's
+private key; the caller has asked the device's owner) and links it to the person; later calls read the same
+card back and need no key. The card is in the wallet's state before the link is written, so a failed link
+leaves a card nobody was given, never a code the wallet does not watch. -/
+def personCard (s : RecordsStore) (w : Wallet) (personID : Option String) (personName ownName : String) :
+    RM (String × Records) := do
+  let person ← personNamed s personID personName
+  let issued ← match person.issuedCard with
+    | some index => liftWallet s.network (w.card index)
+    | none => do
+      let (index, issued) ← liftWallet s.network w.issueCard
+      discard <| withPeople s (some w) fun ps => ps.linkCard s.keys s.writeData person.id index
+      s.note "card.issued" [("personID", person.id), ("card", toString index)]
+      pure issued
+  let address ← RM.lift (fun (e : Bech32Error) => namedError e.name s.network) issued.address.encoded
+  let card := PersonCard.make s.network ownName (some address) (tweak := some (hex issued.tweak))
+  return (card.serialized, ← RM.io (records s (some w)))
+
+/-- Whether the person `personCard` would pick already has a card, so that reading it needs no key. -/
+def hasPersonCard (s : RecordsStore) (personID : Option String) (personName : String) : IO Bool := do
+  let people := (← s.read).people
+  if let some id := personID then return ((people.record? id).bind (·.issuedCard)).isSome
+  let some wanted := DisplayName.normalized personName | return false
+  return ((people.records.find? (·.name == wanted)).bind (·.issuedCard)).isSome
+
+/-- A payment to an issued card names its sender: the person the card was issued for, unless the payment
+already carries a label. Best effort, as every sender label is. -/
+def labelCardPayment (s : RecordsStore) (card : UInt32) (txid : String) : IO Unit := do
+  let st ← s.read
+  let some person := st.people.records.find? (·.issuedCard == some card) | return
+  if (PeopleStore.lookupLabel st.people.senderByTxid txid).isSome then return
+  discard <| (s.modify fun st => do
+    return ({ st with people := ← st.people.labelSender s.keys s.writeData txid person.id }, ())).run
 
 /-- `advancePersonPaymentIndex(id:past:)`: best effort, as AppModel calls it (backend-test's `peopleFlow`). -/
 def advancePersonPaymentIndex (s : RecordsStore) (w : Option Wallet) (personID : String) (index : UInt32) : IO Records := do

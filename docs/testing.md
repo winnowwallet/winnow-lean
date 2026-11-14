@@ -19,7 +19,7 @@ Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested); and the eight journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s four suites as four lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested) and `card-regtest`; and the ten journeys headless against the app itself (LeanNative's `wire-journey`). |
 | `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump and Retry on one runner; Ledger, census, silent payments and spent-elsewhere on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
@@ -29,7 +29,7 @@ The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
 Debug must start the test run and journal it, Release must ignore it and boot
 into its ordinary storage.
 
-## The eight journeys
+## The ten journeys
 
 The UI journeys are Lean (`LeanApp/Journeys.lean`), run on the Mac. Each step
 is one command to LeanNative's journey driver, the one XCUITest in the app's UI
@@ -71,6 +71,20 @@ against the node.
   says it couldn't reach the network and offers Retry. With the node back,
   Retry reconnects before the pool's own redial would, and the wallet finds
   a payment. The node goes back on the network however the journey ends.
+- `ledgerCardTwoOfTwo`: onboarding ends with the Bluetooth card and test
+  mode's simulated Ledger brings the Ledger card over the home. Set up pairs
+  it, creates the 2-of-2 of this phone and the Ledger, registers it on the
+  Ledger and has the Ledger show the account's first address to compare. The
+  node pays that address and the account sees the coin.
+- `cardForOnePerson`: on the card sheet the wallet makes a card for one
+  person, Dana (issue #94): its silent payment address and a tweak for her.
+  The node is Dana: from the card's text alone it derives her first two
+  addresses and pays each. The wallet finds both
+  and the Transactions list names each "Received from Dana", though nobody
+  labelled them. The card carries no account key, and shown again it is the
+  same card. The headless run answers the device-authentication prompt
+  itself; that making a card asks, and that declining makes none, is
+  `records-test`'s.
 
 What the journeys do not cover: a physical Ledger (CI's is simulated; the
 owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift

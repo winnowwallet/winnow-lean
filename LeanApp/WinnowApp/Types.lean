@@ -287,6 +287,8 @@ structure Person where
   nextPaymentIndex : Nat := 0
   savedRecipient : Option Bool := none
   provenance : Option Provenance := none
+  /-- Whether this wallet has issued the person a card of their own. -/
+  hasCard : Bool := false
   deriving Repr, Inhabited, BEq
 
 def Person.isSavedRecipient (p : Person) : Bool := p.payTo.isSome && p.savedRecipient != some false

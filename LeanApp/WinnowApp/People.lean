@@ -104,6 +104,14 @@ def stepPeople (msg : PeopleMsg) (m : Model) : Model × List Cmd :=
         (m', cs)
     | none => (m, [])
   | .rename pid => m.openPerson { personID := some pid } ""
+  | .card pid =>
+    match m.person? pid with
+    | some p =>
+      let own := m.settings.ownDisplayName.trimAscii.copy
+      let m' := { m with shareCard := { forName := p.name, forPerson := some pid, making := !own.isEmpty } }.present .shareCard
+      -- the shared card too, as the sheet shows both; the person's own is asked for once a name is set
+      (m', if own.isEmpty then [] else [.ownCard g own, .personCard g (some pid) p.name own])
+    | none => (m, [])
   | .remove pid => ({ m with recipientsError := none }, [.updateRecipient g pid none false "recipients"])
 
 /-! ## View -/
@@ -159,10 +167,14 @@ def savedRecipientsSheet (m : Model) (inner : List H) : H :=
     , .toolbar [Html.symbol "plus" (.button "Add" .plain (if locked then none else some (.people (.openAdd {} ""))))] ]
     (errorRows (m.records.peopleStorageNotice <|> m.recipientsError) ++
      (if shown.isEmpty then [caption "Save a recipient from a payment in Wallet, or add an address or card here."] else []) ++
-     (shown.map fun p =>
-        .row [ .button (if p.payTo.isNone then s!"{p.name} — add destination" else p.name) .plain (some (.people (.choose p.id)))
-             , .spacer
-             , .button "Rename" .plain (some (.people (.rename p.id)))
-             , .button "Remove" .destructive (some (.people (.remove p.id))) ])) inner
+     (shown.flatMap fun p =>
+        [ .row [ .button (if p.payTo.isNone then s!"{p.name} — add destination" else p.name) .plain (some (.people (.choose p.id)))
+               , .spacer
+               , .button "Rename" .plain (some (.people (.rename p.id)))
+               , .button "Remove" .destructive (some (.people (.remove p.id))) ]
+        -- on a line of its own: a fourth button in the row above pushed Remove off the screen (seen in the
+        -- simulator, 2026-11-14)
+        , .button (if p.hasCard then s!"Show the card you made for {p.name}" else s!"Make a card for {p.name}") .plain
+            (some (.people (.card p.id))) ])) inner
 
 end WinnowApp

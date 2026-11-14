@@ -26,6 +26,8 @@ structure ImportBundle.UTXO where
   height : UInt32
   silentPaymentTweak : Option String := none
   isCoinbase : Option Bool := none
+  /-- The issued card the coin was paid to (`WalletUTXO.card`); `index` is then the payment's index. -/
+  card : Option UInt32 := none
   deriving Inhabited, BEq
 
 structure ImportBundle.KnownTransaction where
@@ -63,11 +65,18 @@ structure ImportBundle where
   pendingSends : Array PendingSend := #[]
   nextReceiveIndex : Option UInt32 := none
   nextChangeIndex : Option UInt32 := none
+  /-- The cards the wallet issued (issue #94): what finds the coins paid to them. A bundle that has any is
+  version 3, which a Winnow from before cards refuses instead of restoring without them. -/
+  cards : Array IssuedCard := #[]
+  /-- The wallet's silent payment address, which every card pays; present whenever a card is. -/
+  silentPaymentAddress : Option String := none
   deriving Inhabited, BEq
 
 namespace ImportBundle
 
-def currentVersion : Int := 2
+def currentVersion : Int := 3
+/-- The first version that may carry cards. -/
+def cardsVersion : Int := 3
 def supportedVersions (v : Int) : Bool := 1 ≤ v && v ≤ currentVersion
 def maximumSerializedBytes : Nat := 8 * 1024 * 1024
 def maximumEntries : Nat := 50_000
@@ -82,7 +91,7 @@ def toJV (u : UTXO) : JV :=
   obj [("txid", some (.str u.txid)), ("vout", some (ofInt u.vout.toNat)), ("amount", some (ofInt u.amount.toInt)),
     ("scriptPubKey", some (.str u.scriptPubKey)), ("chain", some (ofInt u.chain)), ("index", some (ofInt u.index.toNat)),
     ("height", some (ofInt u.height.toNat)), ("silentPaymentTweak", u.silentPaymentTweak.map .str),
-    ("isCoinbase", u.isCoinbase.map .bool)]
+    ("isCoinbase", u.isCoinbase.map .bool), ("card", u.card.map (ofInt ·.toNat))]
 
 def ofJV (v : JV) : D UTXO := do
   let kvs ← asObject v
@@ -95,7 +104,8 @@ def ofJV (v : JV) : D UTXO := do
   let height ← key kvs "height" asUInt32
   let silentPaymentTweak ← keyIfPresent kvs "silentPaymentTweak" asString
   let isCoinbase ← keyIfPresent kvs "isCoinbase" asBool
-  return { txid, vout, amount, scriptPubKey, chain, index, height, silentPaymentTweak, isCoinbase }
+  let card ← keyIfPresent kvs "card" asUInt32
+  return { txid, vout, amount, scriptPubKey, chain, index, height, silentPaymentTweak, isCoinbase, card }
 end UTXO
 
 namespace KnownTransaction
@@ -127,7 +137,9 @@ def toJV (b : ImportBundle) : JV :=
     ("transactions", some (.arr (b.transactions.map KnownTransaction.toJV))),
     ("nextReceiveIndex", b.nextReceiveIndex.map (ofInt ·.toNat)), ("nextChangeIndex", b.nextChangeIndex.map (ofInt ·.toNat)), ("vaults", b.vaults.map (.arr ∘ Array.map MultisigAccountRecord.toJV)),
     ("signers", b.signers.map (.arr ∘ Array.map SignerRecord.toJV)),
-    ("pendingSends", if b.pendingSends.isEmpty then none else some (.arr (b.pendingSends.map PendingSend.toJV)))]
+    ("pendingSends", if b.pendingSends.isEmpty then none else some (.arr (b.pendingSends.map PendingSend.toJV))),
+    ("cards", if b.cards.isEmpty then none else some (.arr (b.cards.map IssuedCard.toJV))),
+    ("silentPaymentAddress", b.silentPaymentAddress.map .str)]
 
 def ofJV (v : JV) : D ImportBundle := do
   let kvs ← asObject v
@@ -144,8 +156,10 @@ def ofJV (v : JV) : D ImportBundle := do
   let nextReceiveIndex ← keyIfPresent kvs "nextReceiveIndex" asUInt32
   let nextChangeIndex ← keyIfPresent kvs "nextChangeIndex" asUInt32
   let pendingSends := (← keyIfPresent kvs "pendingSends" (asArray PendingSend.ofJV)).getD #[]
+  let cards := (← keyIfPresent kvs "cards" (asArray IssuedCard.ofJV)).getD #[]
+  let silentPaymentAddress ← keyIfPresent kvs "silentPaymentAddress" asString
   return { version, network, descriptor, mnemonic, lastKnownHeight, lastKnownBlockHash, utxos, transactions, vaults,
-           signers, nextReceiveIndex, nextChangeIndex, pendingSends }
+           signers, nextReceiveIndex, nextChangeIndex, pendingSends, cards, silentPaymentAddress }
 
 /-- Decoding failures: a `WalletError` (`invalidBundle`, `unsupportedWalletData`, …) or a
 `DecodingError` case name. -/
@@ -190,6 +204,11 @@ def decodeData (data : ByteArray) : Except Failure ImportBundle := do
   if b.transactions.size > maximumEntries then
     throw (.wallet (.invalidBundle s!"bundle declares {b.transactions.size} transactions, above the {maximumEntries} limit"))
   checkAccountsAndSigners b
+  -- cards came with version 3: an older file that names one was not written by Winnow
+  let namesACard := !b.cards.isEmpty || b.silentPaymentAddress.isSome || b.utxos.any (·.card.isSome) ||
+    b.pendingSends.any (·.selected.any (·.card.isSome))
+  if namesACard && b.version < cardsVersion then
+    throw (.wallet (.invalidBundle s!"a version {b.version} bundle cannot carry cards"))
   return b
 
 /-- `decode(json:)`. -/
@@ -198,16 +217,20 @@ def decode (json : String) : Except Failure ImportBundle := decodeData json.toUT
 /-- Pretty-printed, sorted-key JSON for the share sheet. -/
 def serialized (b : ImportBundle) : String := writePretty "" b.toJV
 
-/-- The v2 writer: display-hex txids, coinbase flag only when set. -/
+/-- The writer: display-hex txids, coinbase flag only when set. Version 2, or 3 once the wallet has issued a
+card, so a wallet without cards writes the file it always wrote. -/
 def «export» (descriptor network : String) (lastKnownHeight : UInt32) (utxos : Array WalletUTXO)
     (history : Array HistoryEntry) (nextReceiveIndex nextChangeIndex : UInt32) (mnemonic : Option String := none)
-    (lastKnownBlockHash : Option ByteArray := none) (pendingSends : Array PendingSend := #[]) : ImportBundle :=
-  { network, descriptor := some descriptor, mnemonic, lastKnownHeight,
+    (lastKnownBlockHash : Option ByteArray := none) (pendingSends : Array PendingSend := #[])
+    (cards : Array IssuedCard := #[]) (silentPaymentAddress : Option String := none) : ImportBundle :=
+  { version := if cards.isEmpty then 2 else cardsVersion, cards,
+    silentPaymentAddress := if cards.isEmpty then none else silentPaymentAddress,
+    network, descriptor := some descriptor, mnemonic, lastKnownHeight,
     lastKnownBlockHash := lastKnownBlockHash.map displayHex,
     utxos := utxos.map fun u =>
       { txid := displayHex u.txid, vout := u.vout, amount := u.amount, scriptPubKey := hex u.scriptPubKey,
         chain := u.chain.rawValue, index := u.index, height := u.height,
-        isCoinbase := if u.isCoinbase then some true else none },
+        isCoinbase := if u.isCoinbase then some true else none, card := u.card },
     transactions := history.map fun e =>
       { txid := displayHex e.txid, height := e.height, received := e.received, spent := e.spent, fee := e.fee,
         replacedBy := e.replacedBy.map displayHex, rawTransaction := e.rawTransaction,
@@ -223,8 +246,9 @@ def parsedClaimedUTXO (u : UTXO) : Except WalletError WalletUTXO := do
     | 1 => pure .change
     | c => throw (.invalidBundle s!"bad chain {c}")
   if u.silentPaymentTweak.isSome then throw .unsupportedWalletData
+  if u.card.isSome && chain != .receive then throw (.invalidBundle s!"a card's coin on chain {u.chain}")
   return { txid := ByteArray.reverse txid, vout := u.vout, amount := u.amount, scriptPubKey, chain, index := u.index,
-           height := u.height, isCoinbase := u.isCoinbase.getD false }
+           height := u.height, isCoinbase := u.isCoinbase.getD false, card := u.card }
 
 /-- The bundle's claimed UTXOs in wallet form, shape- and range-checked. -/
 def claimedUTXOs (b : ImportBundle) : Except WalletError (Array WalletUTXO) := do

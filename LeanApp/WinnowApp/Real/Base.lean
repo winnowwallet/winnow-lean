@@ -45,6 +45,9 @@ structure Hooks where
     fun _ => notPorted "Paying a saved person"
   /-- `advancePersonPaymentIndex(id:past:)` after a send to a person commits. -/
   advancePersonIndex : (personID : String) → UInt32 → IO Unit := fun _ _ => pure ()
+  /-- A block paid an issued card (`IssuedCard.index`) in the transaction `txid` (display hex): the payment
+  is named as the person's the card was issued for. -/
+  cardPayment : (card : UInt32) → (txid : String) → IO Unit := fun _ _ => pure ()
   -- The multisig account store (`MultisigStore`), which the scan, rollbacks, import, export and the
   -- history's ownership read. Without it no account is watched, and a bundle carrying accounts is refused
   -- rather than restored without them.

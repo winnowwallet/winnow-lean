@@ -13,6 +13,8 @@ Developer guides in this repository:
 - [CloudKit backup](../CloudKit/README.md): encryption, Apple setup and
   validation still needed on devices.
 - [Security records](security/README.md): dated reports, claims and evidence.
+- [Out-of-band private payments](out-of-band-payments.md): the proposal for a card per person
+  (issue #94), the constructions it was compared with, and what is built so far.
 
 The architecture and CI guides were written for the Swift app; for the Lean port's layout and
 status see [PORT.md](../PORT.md). The testing guide describes the Lean app's checks.

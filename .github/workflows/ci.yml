@@ -41,7 +41,7 @@ jobs:
       runs-on: ${{ (github.event.pull_request.head.repo.fork && 'macos-26') || vars.MACOS_RUNNER || 'macos-26' }}
       lean-packages: Lean LeanApp
       build-targets: |
-        Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check fuzz
+        Lean multisig-test ledger-test silent-payment-test card-keys-test card-regtest crypto-test io-test multisig-differential census-check fuzz
         LeanApp records-test multisig-app-test ledger-transport-test backend-test cloud-backup-test journeys
       app-dir: LeanApp
       app-root: WinnowApp
@@ -54,6 +54,7 @@ jobs:
         Lean .lake/build/bin/multisig-test
         Lean .lake/build/bin/ledger-test
         Lean .lake/build/bin/silent-payment-test
+        Lean .lake/build/bin/card-keys-test
         Lean .lake/build/bin/crypto-test
         Lean .lake/build/bin/fuzz --iterations 10000 --seed "0x${GITHUB_SHA:0:16}"
         LeanApp .lake/build/bin/records-test
@@ -63,6 +64,7 @@ jobs:
         . scripts/ci-regtest io
         . scripts/ci-regtest backend
         . scripts/ci-regtest differential
+        . scripts/ci-regtest cards
       # the journeys headless against the app itself (LeanNative's wire-journeys), one more line of the tests above,
       # with the simulator run's fixture as its hooks
       wire-journey: journeys
@@ -86,9 +88,9 @@ jobs:
       # the journeys are Lean on the Mac (LeanApp/Journeys.lean), all nine with XCTest's real touches
       # (LeanNative's LNDriver, one snapshot per step) on one simulator: a hosted runner has the cores for one
       ui-journey: journeys
-      # two runners at once, four or five journeys each (five took about 3.5 minutes each; one runner: 6.6); the media
+      # two runners at once, five journeys each (five took about 3.5 minutes each; one runner: 6.6); the media
       # job joins their recordings into the website's one video, the journeys in Journeys.lean's order
-      ui-journey-shards: '["createReceiveSendConfirm multisigTwoOfThreeWithRecovery feeBumpReplaceConfirm retryAfterNoPeers", "ledgerPairVerifySpend ledgerCardTwoOfTwo shippedCensus silentPaymentSend spentElsewhere"]'
+      ui-journey-shards: '["createReceiveSendConfirm multisigTwoOfThreeWithRecovery feeBumpReplaceConfirm retryAfterNoPeers cardForOnePerson", "ledgerPairVerifySpend ledgerCardTwoOfTwo shippedCensus silentPaymentSend spentElsewhere"]'
       # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run:
       # LeanNative's journey-media, in the layout and names the website reads
       journey-media: build/journey-media
