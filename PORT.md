@@ -147,9 +147,23 @@ Upstream has one card, which carries the account key. `Winnow/Keys/CardKeys.lean
 Swift counterpart: a card code (bech32m, `wnc`/`twnc`/`rwnc`) holding a key and a seed for one person, both
 derived below the account key at `2'/k'`, and the derivation of the Taproot outputs that person pays.
 `card-keys-test` (257 checks) holds it to `Vectors/card-keys-vectors.json`, which `scripts/card-keys-vectors`
-writes without the wallet's code; `fuzz` has `card-code` and `card-keys`. The wallet does not use it yet.
-`docs/out-of-band-payments.md` is the proposal: what it was compared with, what is built, and the decisions
-left to the owner.
+writes without the wallet's code; `fuzz` has `card-code` and `card-keys`.
+
+The wallet library uses it, and the app does not yet. These are departures from upstream's formats, each
+absent until a card is issued:
+
+- `wallet.json` gains `cards` (each issued card's index, key, seed and payment cursor), and a coin paid to
+  a card gains `card`. A wallet that never issues a card writes the file it always wrote.
+- The backup bundle gains the same two keys and is then version 3 (`ImportBundle.cardsVersion`); without
+  cards it stays version 2. Upstream reads neither key and refuses version 3.
+- `Wallet.watchMap` answers a `CoinKey` (chain, index, card) where upstream's answers a pair, and
+  `Wallet.spendSecret` stands where `tweakedPrivateKey` was called: a card's coin is signed with the card's
+  private key plus the payment's tweak, with no BIP86 tweak and no BIP371 origin.
+
+`multisig-test` has the wallet's card tests (issuing, crediting, spending, a reorg, backups and ten refused
+ones, a rebuild from the phrase), and `card-regtest` runs the same against Bitcoin Core as the payer
+(`scripts/ci-regtest cards`). `docs/out-of-band-payments.md` is the proposal: what it was compared with, what
+is built, and the decisions left to the owner.
 
 ## Tracking upstream "one wallet" (#259, with #256 nested multisig)
 

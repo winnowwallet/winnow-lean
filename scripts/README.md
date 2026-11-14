@@ -8,8 +8,8 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 
 - [build-ios](build-ios) builds the Lean app from a clean checkout with LeanNative's `build-ios`, after the census
   list (`build-ios <Debug|Release> [iossim|ios]`; `PREPARE_ONLY=1` stops before xcodebuild).
-- [ci-regtest](ci-regtest) runs io-test, backend-test and multisig-differential against a disposable regtest
-  bitcoind (CI's `extra` job).
+- [ci-regtest](ci-regtest) runs io-test, backend-test, multisig-differential and card-regtest against a disposable
+  regtest bitcoind (CI's `lean` job runs each as its own line).
 - [install-bitcoin](install-bitcoin) downloads the pinned Bitcoin Core release (31.1) from bitcoincore.org, checks
   its SHA-256 and prints its bin directory; `ci-regtest` and `ui-fixture` run against it, never a bitcoind
   found on the PATH.

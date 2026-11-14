@@ -116,6 +116,9 @@ structure Wallet where
   stateRef : IO.Ref WalletState
   /-- Derived outputs per index (a pure function of the descriptor, kept because derivation is costly). -/
   derivedCache : IO.Ref (Std.HashMap UInt32 (Array Descriptor.DerivedOutput))
+  /-- A card's payment scripts by (key ‖ seed, payment index): a pure function of the card, kept for the
+  same reason. `none` is an index whose tweak is refused. -/
+  cardCache : IO.Ref (Std.HashMap (ByteArray × UInt32) (Option ByteArray))
   /-- Serialises `advanceCursors` (the Swift actor's guarantee): concurrent reservations keep each chain's
   highest cursor instead of the last writer's. -/
   cursorLock : Std.Mutex Unit
@@ -190,7 +193,7 @@ def make (network : BitcoinNetwork) (descriptor : Descriptor) (accountKey : HDKe
     (storagePath : Option System.FilePath) (random : Randomness) (state : WalletState) : WM Wallet := do
   let o ← WM.wallet (origin descriptor)
   return { id := hex8 o.fingerprint, network, descriptor, accountKey, keyStore, storagePath, random,
-           stateRef := ← IO.mkRef state, derivedCache := ← IO.mkRef {}, cursorLock := ← Std.Mutex.new () }
+           stateRef := ← IO.mkRef state, derivedCache := ← IO.mkRef {}, cardCache := ← IO.mkRef {}, cursorLock := ← Std.Mutex.new () }
 
 /-! ### Persistence -/
 
@@ -341,13 +344,47 @@ def freshReceiveAddress (w : Wallet) : WM String := do
     throw e
   return a
 
-/-- Watched scriptPubKey ↦ owning (chain, index): used indices plus the gap-limit lookahead. -/
-def watchMap (w : Wallet) (s : WalletState) : WM (Std.HashMap ByteArray (AddressChain × UInt32)) := do
-  let mut map : Std.HashMap ByteArray (AddressChain × UInt32) := {}
+/-! ### Cards (issue #94, `Keys/CardKeys.lean`) -/
+
+/-- The HRP of this network's card codes. -/
+def cardHRP : BitcoinNetwork → String
+  | .mainnet => CardCode.mainnetHRP | .signet => CardCode.signetHRP | .regtest => CardCode.regtestHRP
+
+/-- An issued card as the code its person holds. -/
+def cardCodeOf (network : BitcoinNetwork) (c : IssuedCard) : CardCode :=
+  { key := c.key, seed := c.seed, hrp := cardHRP network }
+
+/-- The script of payment `i` to a card, or `none` for the one index in 2^128 whose tweak is refused (the
+payer is refused the same index, so nothing is paid there). -/
+def cardScript (w : Wallet) (c : IssuedCard) (i : UInt32) : WM (Option ByteArray) := do
+  let cacheKey := (c.key ++ c.seed, i)
+  if let some known := (← w.cardCache.get)[cacheKey]? then return known
+  let script ← match CardKeys.scriptPubKey (cardCodeOf w.network c) i with
+    | .ok script => pure (some script)
+    | .error .invalidTweak => pure none
+    | .error e => throw (.named e.name)
+  w.cardCache.modify (·.insert cacheKey script)
+  return script
+
+def cards (w : Wallet) : IO (Array IssuedCard) := return (← w.state).cards
+
+/-- The code of a card this wallet issued (`unknownCard` otherwise). Reads no key. -/
+def cardCode (w : Wallet) (index : UInt32) : WM CardCode := do
+  let some c := (← w.state).cards.find? (·.index == index) | throw (.named "unknownCard")
+  return cardCodeOf w.network c
+
+/-- Watched scriptPubKey ↦ where its key is: used indices plus the gap-limit lookahead on both chains of the
+descriptor, and the same window of every issued card. -/
+def watchMap (w : Wallet) (s : WalletState) : WM (Std.HashMap ByteArray CoinKey) := do
+  let mut map : Std.HashMap ByteArray CoinKey := {}
   for chain in [AddressChain.receive, .change] do
     let next := if chain == .receive then s.nextReceiveIndex else s.nextChangeIndex
     for i in [0:(next + gapLimit).toNat] do
-      map := map.insert (← w.scriptPubKey chain i.toUInt32) (chain, i.toUInt32)
+      map := map.insert (← w.scriptPubKey chain i.toUInt32) { chain, index := i.toUInt32 }
+  for c in s.cards do
+    for i in [0:(c.nextIndex + gapLimit).toNat] do
+      if let some script ← w.cardScript c i.toUInt32 then
+        map := map.insert script { chain := .receive, index := i.toUInt32, card := some c.index }
   return map
 
 /-- Every watched scriptPubKey (the lookahead window and every known coin's script, spent rows
@@ -483,8 +520,8 @@ def applySpends (s : WalletState) (tx : Transaction) (txid : ByteArray) (height 
   return (s, effect, spent, allOurs)
 
 /-- Admits every watched, positive output as a coin (or re-heights a known one) and advances the
-gap-limit bookkeeping. -/
-def applyOutputs (s : WalletState) (tx : Transaction) (txid : ByteArray) (map : Std.HashMap ByteArray (AddressChain × UInt32))
+gap-limit bookkeeping: the descriptor's cursors, or the cursor of the card the output paid. -/
+def applyOutputs (s : WalletState) (tx : Transaction) (txid : ByteArray) (map : Std.HashMap ByteArray CoinKey)
     (height : UInt32) (isCoinbase : Bool) (effect : MatchEffect) : WalletState × MatchEffect × Int64 := Id.run do
   let mut s := s
   let mut effect := effect
@@ -492,7 +529,7 @@ def applyOutputs (s : WalletState) (tx : Transaction) (txid : ByteArray) (map : 
   for h : vout in [0:tx.outputs.size] do
     let output := tx.outputs[vout]
     if !(output.value > 0) then continue
-    let some (chain, index) := map[output.scriptPubKey]? | continue
+    let some coinKey := map[output.scriptPubKey]? | continue
     match s.allUtxos.findIdx? (fun u => u.txid == txid && u.vout == vout.toUInt32) with
     | some k =>
       let refound := s.allUtxos[k]!.height == 0 && !s.history.any (·.txid == txid)
@@ -502,12 +539,20 @@ def applyOutputs (s : WalletState) (tx : Transaction) (txid : ByteArray) (map : 
         effect := { effect with received := effect.received.push s.allUtxos[k]! }
     | none =>
       let u : WalletUTXO := { txid := txid, vout := vout.toUInt32, amount := output.value, scriptPubKey := output.scriptPubKey,
-                              chain := chain, index := index, height := height, isCoinbase := isCoinbase }
+                              chain := coinKey.chain, index := coinKey.index, height := height,
+                              isCoinbase := isCoinbase, card := coinKey.card }
       s := { s with allUtxos := s.allUtxos.push u }
       received := received + output.value
       effect := { effect with received := effect.received.push u }
-      if chain == .receive && index ≥ s.nextReceiveIndex then s := { s with nextReceiveIndex := index + 1 }
-      if chain == .change && index ≥ s.nextChangeIndex then s := { s with nextChangeIndex := index + 1 }
+      let index := coinKey.index
+      match coinKey.card with
+      | some card =>
+        -- a card's own cursor: its window moves, the descriptor's does not
+        s := { s with cards := s.cards.map fun c =>
+          if c.index == card && index ≥ c.nextIndex then { c with nextIndex := index + 1 } else c }
+      | none =>
+        if coinKey.chain == .receive && index ≥ s.nextReceiveIndex then s := { s with nextReceiveIndex := index + 1 }
+        if coinKey.chain == .change && index ≥ s.nextChangeIndex then s := { s with nextChangeIndex := index + 1 }
   return (s, effect, received)
 
 /-- Confirms the transaction into history through `HistoryLedger` (a known pending send confirms in place,
@@ -625,12 +670,64 @@ def tweakedPrivateKey (_w : Wallet) (chain : AddressChain) (index : UInt32) (acc
   let some secret := key.privateKey | throw (.wallet (.invalidDescriptor "neutered key in signing path"))
   WM.liftE (·.name) (BIP86.tweakedPrivateKey secret)
 
-/-- PSBTv2 metadata, a key-path signature per input, finalize, extract. -/
+/-- The secret that signs a coin's key path: BIP86 below the account key, or, for a card's coin, the card's
+private key plus the payment's tweak. The card is derived again from `account` and must be the one the state
+recorded (`accountKeyMismatch`): a state naming another key's card could be watched and never spent. -/
+def spendSecret (w : Wallet) (u : WalletUTXO) (account : HDKey) : WM ByteArray := do
+  let some index := u.card | return ← w.tweakedPrivateKey u.chain u.index account
+  let some card := (← w.state).cards.find? (·.index == index) | throw (.named "unknownCard")
+  let (code, secret) ← WM.liftE (·.name) (CardKeys.issue account index (cardHRP w.network))
+  unless code.key == card.key && code.seed == card.seed do throw (.wallet .accountKeyMismatch)
+  WM.liftE (·.name) (CardKeys.spendSecret secret code u.index)
+
+/-- Issues the next card: its key and seed derived below the account private key, recorded before the code
+is answered, so no code leaves the wallet that the wallet does not watch. Card indices are never reused. -/
+def issueCard (w : Wallet) : WM (UInt32 × CardCode) :=
+  w.cursorLock.atomically (m := WM) do
+    let s ← w.state
+    unless s.cards.size < maximumCards do throw (.named "tooManyCards")
+    let index : UInt32 := s.cards.foldl (fun next c => max next (c.index + 1)) 0
+    let account ← w.accountPrivateKey
+    let (code, _) ← WM.liftE (·.name) (CardKeys.issue account index (cardHRP w.network))
+    let candidate := { s with cards := s.cards.push { index, key := code.key, seed := code.seed } }
+    w.persist candidate
+    w.stateRef.set candidate
+    return (index, code)
+
+/-- How many cards past the last one paid a wallet rebuilt from its phrase looks for. -/
+def cardLookahead : UInt32 := 20
+
+/-- For a wallet rebuilt from its phrase, which does not know what it issued: records every card up to
+`lookahead` past the last one that has been paid (or the first `lookahead`), so a scan back finds their
+payments. Whether it added any: the caller scans, and calls again until it adds none. The cards stay
+recorded, paid or not, so an index that may have been handed out is never issued to someone else. -/
+def restoreCards (w : Wallet) (lookahead : UInt32 := cardLookahead) : WM Bool :=
+  w.cursorLock.atomically (m := WM) do
+    let s ← w.state
+    let paid (c : IssuedCard) : Bool := c.nextIndex > 0 || s.allUtxos.any (·.card == some c.index)
+    let afterLastPaid : UInt32 := s.cards.foldl (fun next c => if paid c then max next (c.index + 1) else next) 0
+    let wanted := min (afterLastPaid.toNat + lookahead.toNat) maximumCards
+    let account ← w.accountPrivateKey
+    let mut cards := s.cards
+    for index in [0:wanted] do
+      if cards.any (·.index == index.toUInt32) then continue
+      if cards.size ≥ maximumCards then break
+      let (code, _) ← WM.liftE (·.name) (CardKeys.issue account index.toUInt32 (cardHRP w.network))
+      cards := cards.push { index := index.toUInt32, key := code.key, seed := code.seed }
+    if cards.size == s.cards.size then return false
+    let candidate := { s with cards }
+    w.persist candidate
+    w.stateRef.set candidate
+    return true
+
+/-- PSBTv2 metadata, a key-path signature per input, finalize, extract. A card's coin carries no BIP371
+origin: its key is not a BIP32 child of the account key. -/
 def sign (w : Wallet) (tx : Transaction) (selected : Array WalletUTXO) (changeIndex : Option UInt32)
     (changeOutputIndex : Option Nat) : WM (PSBT × Transaction) := do
   let o ← WM.wallet (origin w.descriptor)
   let inputInfo ← selected.mapM fun u => do
-    return ({ spentOutput := u.spentOutput, key := some (← w.taprootKey u.chain u.index o.fingerprint o.path) } : PSBT.InputInfo)
+    let key ← if u.card.isSome then pure none else some <$> w.taprootKey u.chain u.index o.fingerprint o.path
+    return ({ spentOutput := u.spentOutput, key } : PSBT.InputInfo)
   let mut outputInfo : Array PSBT.OutputInfo := #[]
   for i in [0:tx.outputs.size] do
     if let some ci := changeIndex then
@@ -643,7 +740,7 @@ def sign (w : Wallet) (tx : Transaction) (selected : Array WalletUTXO) (changeIn
   let signingAccount ← w.accountPrivateKey
   for h : k in [0:selected.size] do
     let u := selected[k]
-    let secret ← w.tweakedPrivateKey u.chain u.index signingAccount
+    let secret ← w.spendSecret u signingAccount
     let aux ← WM.io w.random.auxRand
     psbt ← WM.liftE (·.name) (psbt.signKeyPath k secret aux)
   psbt ← WM.liftE (·.name) psbt.finalize
@@ -666,15 +763,15 @@ def _root_.Winnow.Keys.SilentPayment.ofCode (amount : Int64) (code : String) (ne
   return { amount, address := ← SilentPaymentAddress.decode code (some (SilentPayment.hrp (network == .mainnet))) }
 
 /-- The P2TR scripts of a send's silent payments, in order (`resolveSilentPayments`): BIP352 commits them to
-the selected inputs, so this runs after coin selection, with the inputs' BIP86 key-path secrets (every coin
-the wallet spends is one, the case where all inputs count). -/
+the selected inputs, so this runs after coin selection, with the inputs' key-path secrets (every coin the
+wallet spends is a P2TR key path, BIP86's or a card's, the case where all inputs count). -/
 def resolveSilentPayments (w : Wallet) (silentPayments : Array SilentPayment) (selected : Array WalletUTXO) :
     WM (Array Payment) := do
   if silentPayments.isEmpty then return #[]
   let account ← w.accountPrivateKey
   let inputs ← selected.toList.mapM fun u => do
     return ({ txid := u.txid, vout := u.vout, prevoutScriptPubKey := u.scriptPubKey,
-              privateKey := ← w.tweakedPrivateKey u.chain u.index account } : SilentPaymentSending.Input)
+              privateKey := ← w.spendSecret u account } : SilentPaymentSending.Input)
   let scripts ← WM.liftE (·.name) (SilentPaymentSending.outputScripts inputs (silentPayments.toList.map (·.address)))
   return (silentPayments.zip scripts.toArray).map fun (p, script) => { amount := p.amount, scriptPubKey := script }
 
@@ -711,7 +808,7 @@ def buildSend (w : Wallet) (payments : Array Payment) (feeRateSatPerVByte : Floa
 (outputs to the wallet's own receive addresses are neither). -/
 def classifyOutputs (w : Wallet) (s : WalletState) (tx : Transaction) : WM HistoryEntry.Outputs := do
   let map ← w.watchMap s
-  return HistoryLedger.classifyOutputs tx fun script => map[script]?.map (·.1)
+  return HistoryLedger.classifyOutputs tx fun script => map[script]?.map (·.chain)
 
 def tombstonePending (selected : Array WalletUTXO) (txid : ByteArray) (u : WalletUTXO) : WalletUTXO :=
   if selected.any (fun c => c.outpoint == u.outpoint) then { u with spent := some { spentBy := txid, height := none } } else u
@@ -906,7 +1003,7 @@ def exportBundle (w : Wallet) (includeMnemonic : Bool := false) : WM ImportBundl
       | .error e => throw (.keys e)
     else pure none
   return ImportBundle.«export» w.descriptor.serialized (networkName w.network) lastKnownHeight s.utxos s.history
-    s.nextReceiveIndex s.nextChangeIndex mnemonic s.scannedThroughHash s.pendingSends
+    s.nextReceiveIndex s.nextChangeIndex mnemonic s.scannedThroughHash s.pendingSends s.cards
 
 /-! ### Rollback -/
 
@@ -945,8 +1042,10 @@ def rollBack (w : Wallet) (forkHeight : UInt32) : WM Unit := do
 
 /-! ### Import -/
 
+/-- The descriptor and the neutered account key a bundle restores, and, when the bundle carries the recovery
+phrase, the private account key (which nothing else here has, and the bundle's cards are checked against). -/
 def importedKeyMaterial (bundle : ImportBundle) (network : BitcoinNetwork) (keyStore : KeyStore IO) :
-    WM (Descriptor × HDKey) := do
+    WM (Descriptor × HDKey × Option HDKey) := do
   if let some mnemonic := bundle.mnemonic then
     WM.liftE (·.name) (BIP39.validate mnemonic)
     let master ← WM.liftE (·.name) (HDKey.ofSeed (BIP39.seed mnemonic))
@@ -964,32 +1063,57 @@ def importedKeyMaterial (bundle : ImportBundle) (network : BitcoinNetwork) (keyS
       let existing ← WM.keys (keyStore.load walletID)
       unless existing == .mnemonic mnemonic do throw (.keys (.alreadyExists walletID))
     | .error e => throw (.keys e)
-    return (derived, account.neutered)
+    return (derived, account.neutered, some account)
   let some text := bundle.descriptor | throw (.wallet (.invalidBundle "no usable descriptor"))
   let parsed ← WM.liftE (·.name) (Descriptor.parse text)
   discard <| WM.wallet (origin parsed)
   let .tr key := parsed.expression | throw (.wallet (.invalidDescriptor text))
   let .extended account _ := key.base | throw (.wallet (.invalidDescriptor text))
-  return (parsed, account.neutered)
+  return (parsed, account.neutered, none)
 
-/-- A coin's script is the descriptor's at its chain and index. -/
-def requireOwned (descriptor : Descriptor) (network : BitcoinNetwork) (u : WalletUTXO) : WM Unit := do
+/-- The bundle's cards, checked: well-formed, none twice, and, when the private account key is at hand, each
+the card that key derives at its index. Without the key (a bundle with no phrase) a card is a claim, as the
+descriptor is: a made-up one is watched, and signing refuses it (`spendSecret`). -/
+def validatedCards (bundle : ImportBundle) (network : BitcoinNetwork) (account : Option HDKey) : WM (Array IssuedCard) := do
+  unless IssuedCard.validate bundle.cards do throw (.wallet (.invalidBundle "the bundle's cards are malformed or repeat"))
+  if let some account := account then
+    for c in bundle.cards do
+      match CardKeys.issue account c.index (cardHRP network) with
+      | .ok (code, _) =>
+        unless code.key == c.key && code.seed == c.seed do
+          throw (.wallet (.invalidBundle s!"card {c.index} is not this wallet's"))
+      | .error _ => throw (.wallet (.invalidBundle s!"card {c.index} cannot be derived"))
+  return bundle.cards
+
+/-- A coin's script is the descriptor's at its chain and index, or its card's at its payment index. A tweak
+is never read from the bundle: it is derived. -/
+def requireOwned (descriptor : Descriptor) (network : BitcoinNetwork) (cards : Array IssuedCard) (u : WalletUTXO) : WM Unit := do
+  if let some index := u.card then
+    let mismatch : WalletFailure :=
+      .wallet (.invalidBundle s!"utxo {displayHex u.txid}:{u.vout} scriptPubKey does not match its card")
+    let some card := cards.find? (·.index == index)
+      | throw (.wallet (.invalidBundle s!"utxo {displayHex u.txid}:{u.vout} names a card the bundle does not list"))
+    unless u.chain == .receive do throw mismatch
+    match CardKeys.scriptPubKey (cardCodeOf network card) u.index with
+    | .ok script => unless script == u.scriptPubKey do throw mismatch
+    | .error _ => throw mismatch
+    return
   let outs ← WM.liftE (·.name) (descriptor.derived u.index network)
   let some o := outs[u.chain.rawValue]? | throw (.named "indexOutOfRange")
   unless o.scriptPubKey == u.scriptPubKey do
     throw (.wallet (.invalidBundle s!"utxo {displayHex u.txid}:{u.vout} scriptPubKey does not match the descriptor"))
 
-def validatedClaimedUTXOs (bundle : ImportBundle) (descriptor : Descriptor) (network : BitcoinNetwork) :
-    WM (Array WalletUTXO) := do
+def validatedClaimedUTXOs (bundle : ImportBundle) (descriptor : Descriptor) (network : BitcoinNetwork)
+    (cards : Array IssuedCard) : WM (Array WalletUTXO) := do
   let utxos ← WM.wallet bundle.claimedUTXOs
-  for u in utxos do requireOwned descriptor network u
+  for u in utxos do requireOwned descriptor network cards u
   return utxos
 
 /-- The bundle's pending sends, checked: each transaction decodes, spends exactly its selected coins (the
 wallet's own, none also claimed unspent or spent by another pending send), and names a change output it
 has. The coins come back reserved by the payment, as `send` left them. -/
 def validatedPendingSends (bundle : ImportBundle) (descriptor : Descriptor) (network : BitcoinNetwork)
-    (claimed : Array WalletUTXO) : WM (Array PendingSend × Array WalletUTXO) := do
+    (cards : Array IssuedCard) (claimed : Array WalletUTXO) : WM (Array PendingSend × Array WalletUTXO) := do
   let invalid (reason : String) : WM Unit := throw (.wallet (.invalidBundle s!"pending payment: {reason}"))
   let mut seen : Std.HashSet (ByteArray × UInt32) := claimed.foldl (fun s u => s.insert (u.txid, u.vout)) {}
   let mut reserved : Array WalletUTXO := #[]
@@ -1008,7 +1132,7 @@ def validatedPendingSends (bundle : ImportBundle) (descriptor : Descriptor) (net
     if let some k := p.changeOutputIndex then unless k.toNat < tx.outputs.size do invalid "no such change output"
     for c in p.selected do
       unless c.amount > 0 && c.amount ≤ bitcoinAmountMaximum && c.txid.size == 32 do invalid "invalid coin"
-      requireOwned descriptor network c
+      requireOwned descriptor network cards c
       if seen.contains (c.txid, c.vout) then invalid "a coin is spent twice"
       seen := seen.insert (c.txid, c.vout)
       reserved := reserved.push { c with spent := some { spentBy := tx.txid, height := none } }
@@ -1045,9 +1169,9 @@ def validatedHistory (bundle : ImportBundle) : WM (Array HistoryEntry) :=
     | .error (.inl e) => throw (.wallet e)
     | .error (.inr e) => throw (.named e)
 
-/-- `max(index) + 1` over the coins on `chain`, or 0. -/
+/-- `max(index) + 1` over the descriptor's coins on `chain`, or 0 (a card's coins count under their card). -/
 def nextIndexAfter (utxos : Array WalletUTXO) (chain : AddressChain) : UInt32 :=
-  match (utxos.filter (·.chain == chain)).map (·.index) with
+  match (utxos.filter (fun u => u.chain == chain && u.card.isNone)).map (·.index) with
   | #[] => 0
   | xs => xs.foldl max 0 + 1
 
@@ -1060,10 +1184,17 @@ def importing (bundle : ImportBundle) (keyStore : KeyStore IO) (storagePath : Op
     | throw (.wallet (.invalidBundle s!"unknown network {ImportBundle.excerpt bundle.network}"))
   if bundle.descriptor.isNone && bundle.mnemonic.isNone then
     throw (.wallet (.invalidBundle "need a descriptor or a mnemonic"))
-  let (descriptor, accountKey) ← importedKeyMaterial bundle network keyStore
-  let utxos ← validatedClaimedUTXOs bundle descriptor network
+  let (descriptor, accountKey, privateAccount) ← importedKeyMaterial bundle network keyStore
+  let listed ← validatedCards bundle network privateAccount
+  let utxos ← validatedClaimedUTXOs bundle descriptor network listed
   let history ← validatedHistory bundle
-  let (pendingSends, reserved) ← validatedPendingSends bundle descriptor network utxos
+  let (pendingSends, reserved) ← validatedPendingSends bundle descriptor network listed utxos
+  -- each card's cursor is past every coin the bundle claims under it
+  let cards := listed.map fun c =>
+    let paid := ((utxos ++ reserved).filter (·.card == some c.index)).map (·.index)
+    { c with nextIndex := paid.foldl (fun next i => max next (i + 1)) c.nextIndex }
+  unless IssuedCard.validate cards do
+    throw (.wallet (.invalidBundle "a card's payments leave no room for the gap-limit window"))
   let maxIndex (chain : AddressChain) : UInt32 := nextIndexAfter (utxos ++ reserved) chain
   let receive := max (bundle.nextReceiveIndex.getD 0) (maxIndex .receive)
   let change := max (bundle.nextChangeIndex.getD 0) (maxIndex .change)
@@ -1078,7 +1209,7 @@ def importing (bundle : ImportBundle) (keyStore : KeyStore IO) (storagePath : Op
     creationHeight := bundle.lastKnownHeight,
     nextReceiveIndex := receive, nextChangeIndex := change,
     nextScanHeight := bundle.lastKnownHeight + 1, scannedThroughHash, allUtxos := utxos ++ reserved, history,
-    pendingSends }
+    pendingSends, cards }
   let w ← make network descriptor accountKey keyStore storagePath random state
   persistState storagePath state
   return w

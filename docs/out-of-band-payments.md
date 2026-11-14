@@ -2,10 +2,11 @@
 
 Proposal for [issue #94](https://github.com/winnowwallet/winnow-lean/issues/94), written 2026-11-14.
 
-> Status at this revision: the card code and its derivation exist in `Lean/Winnow/Keys/CardKeys.lean` and
-> are tested (`card-keys-test`, the `card-code` and `card-keys` fuzz targets). The wallet does not issue,
-> watch or spend cards yet, and no screen shows one. The sections "What the wallet will do" and "Results"
-> say which parts are built.
+> Status at this revision: the card code and its derivation exist (`Lean/Winnow/Keys/CardKeys.lean`), and
+> the wallet library issues cards, finds what is paid to them, spends it and restores it
+> (`Lean/Winnow/Wallet/Wallet.lean`), tested without a node and against a regtest Bitcoin Core. The app does
+> not call any of it yet: no screen shows a card and a person cannot be paid by one. The sections "What the
+> wallet does" and "Results" say which parts are built.
 
 ## The problem
 
@@ -210,28 +211,33 @@ between two hashed lists, about 2^128 work, the same margin the curve gives. The
 construction is therefore: the wallet stores what a tweak is derived from and derives it, and never
 stores or accepts a tweak.
 
-The wallet will follow that rule for cards as well: a coin records its card and index, and a backup's
-card coins are checked by deriving their scripts.
+The wallet follows that rule for cards as well: a coin records its card and index, signing derives the
+tweak from them, and a backup's card coins are checked by deriving their scripts.
 
 ## Backup and recovery
 
 - **The seed alone.** Card `k`'s key and seed derive from the account key, so the seed finds every card
   coin by trying cards 0, 1, 2, … and indices 0, 1, 2, … under each, as it tries addresses. The wallet's
-  state will list the cards it has issued, so in ordinary use nothing is guessed. A wallet rebuilt from
-  the phrase alone has to look ahead over cards and scan back. Winnow's phrase-only restore does not
-  scan back today for ordinary addresses either (the README: "words alone do not reconstruct its past
-  transaction history"); the library's bounded back-scan does it and the prototype's test will use that.
-- **The backup file and the iCloud backup** will carry the issued cards and each coin's card and index.
+  state lists the cards it has issued, so in ordinary use nothing is guessed. A wallet rebuilt from the
+  phrase alone looks ahead over cards (`Wallet.restoreCards`: 20 past the last card found paid) and scans
+  back, repeating until a pass finds no further card. The cards it recorded stay recorded, paid or not,
+  so an index that may have been handed out is never issued to someone else. The app does not run this
+  yet: its phrase-only restore does not scan back for ordinary addresses either (the README: "words alone
+  do not reconstruct its past transaction history"). The library's bounded back-scan does, and the regtest
+  run uses it.
+- **The backup file** carries the issued cards and each coin's card and index, as version 3 of the format
+  (`docs/import.html`). A file with the recovery phrase is refused if one of its cards is not the card the
+  phrase derives. The iCloud backup carries the same bundle.
 - **The people file lost or damaged** (the recipient's): coins are found and spent as before. Who each
   card was for is lost.
 - **The payer's phone lost.** The payer loses the card and the index. They ask for the card again; it is
   the same card. A payer restored from an older backup repeats indices, which reuses addresses between
   the same two people. Coins are still credited: they are keyed by outpoint.
-- **Gaps.** The recipient will watch each card `gapLimit` (20) indices past the highest one seen. The
+- **Gaps.** The recipient watches each card `gapLimit` (20) indices past the highest one seen. The
   payer's index advances when a send commits. Twenty committed sends in a row that never confirm would
   put a later payment outside the window until a recovery scan widens it.
 - **A card given to two people.** Both pay the same sequence and each can see the other's payments to it.
-  The screen will say the card is for one person.
+  The screen will have to say the card is for one person.
 - **Showing a card again** is safe: card `k` is always the same code.
 
 ## States
@@ -263,7 +269,7 @@ block that spends it. The wallet matches whole scripts (`filterMatches`), so a c
 items in the set it already matches, and a hit is verified against the block as every hit is. Nothing
 goes on the chain to help: no marker output, no OP_RETURN.
 
-Each card adds its used indices plus 20 scripts to the watched set. The wallet will bound cards at 1,000.
+Each card adds its used indices plus 20 scripts to the watched set. A wallet issues at most 1,000 cards.
 
 ## The channel
 
@@ -320,17 +326,20 @@ Not offered:
 - **Theft by that attacker.** These are Taproot outputs with their public keys on the chain. This is not
   quantum-secure Bitcoin.
 
-## What the wallet will do
+## What the wallet does
 
 Three pull requests.
 
-1. **The construction** (this one): the code, the derivation, vectors written by an independent
+1. **The construction** (done): the code, the derivation, vectors written by an independent
    implementation, fuzz targets, this document.
-2. **The wallet**: issued cards in the wallet's state and backup, their scripts in the watched set, a
-   coin that records its card and index, signing with `b_k + t_i`, restore from a backup and from the
-   phrase.
-3. **People and the screen**: a person's pay-to can be a card code; "Card for <name>" issues or shows a
-   person's card with its QR code and Share; a payment to a card is labelled with its person.
+2. **The wallet** (done, in the library): `Wallet.issueCard` records a card in the wallet's state before
+   answering its code; the watched set holds each card's window of scripts; a coin records its card and
+   index; `Wallet.spendSecret` signs with `b_k + t_i` after checking the card against the key; the backup
+   bundle carries cards (version 3) and import checks them; `Wallet.restoreCards` serves a wallet rebuilt
+   from the phrase. A wallet that never issues a card writes the same wallet file and the same version 2
+   backup as before.
+3. **People and the screen** (not started): a person's pay-to can be a card code; "Card for <name>" issues
+   or shows a person's card with its QR code and Share; a payment to a card is labelled with its person.
 
 ## Results
 
@@ -340,16 +349,39 @@ Three pull requests.
   `fuzz`, 10,000 iterations: `card-keys` took 1,255 mutated inputs; `card-code` took 2, since a
   mutation almost always breaks the checksum. These show that the derivation matches a second implementation and that the issuer's
   secret, and neither secret the payer could hold, signs for an output. They show nothing about a wallet.
-- Regtest runs (a payment found through unmodified basic filters after its block was passed, spent,
-  bumped, reorganised, restored): pull request 2.
+- 2026-11-14, pull request 2, without a node. `multisig-test`: 782 checks, 0 failed, 65 of them new, in
+  seven tests of the wallet with cards. A payer that holds only the card's text pays three indices in one
+  transaction; the two inside the window are credited and the one outside is not; the card's cursor moves
+  and the wallet's address cursors do not. A spend of the card's coins together with an ordinary coin, and
+  its fee bump, carry signatures that verify under BIP341's sighash for each coin's key. A fork takes a
+  payment away and it is found again once. A silent payment from a card's coin pays the script BIP352
+  derives from that coin's key. Backups round-trip; ten altered backups are refused;
+  a card claimed without the phrase is watched and is not signed for. A wallet rebuilt from the phrase
+  finds nothing, records the cards it could have issued, and then finds and spends all three payments.
+- 2026-11-14, pull request 2, regtest. `card-regtest`: 23 checks, 0 failed, against Bitcoin Core 31.1, which
+  is the payer. Core pays two indices of a card; the wallet finds both through the basic filters Core
+  serves and credits them at their block. Core replaces a third payment before it confirms (`bumpfee`);
+  the wallet credits it once, under the replacement's txid. The block is invalidated and the payment mined
+  again in another; the wallet rolls back and credits it once in the block that now holds it. One
+  transaction spending a card's coin is offered to Core three times (`testmempoolaccept`): signed with the
+  tweak, which is all the payer holds, Core answers "Invalid Schnorr signature"; signed with the card's
+  private key alone, the same; signed with their sum, Core takes it. A second wallet made from the same
+  phrase, with its frontier already past every payment, finds none; after `restoreCards` and two passes of
+  `scanRange` over the same filters it holds the same three coins, spends them all in one transaction that
+  Core relays and mines, and the first wallet sees its card's coins spent.
+- What these runs do not show: anything in the app; an unconfirmed payment; more than one peer; mainnet
+  or signet; a device.
 
 ## Open decisions
 
 1. **C or D on the wire.** The prototype uses the card code. A per-person descriptor would let other
    wallets pay and removes our own derivation; it costs the metadata an extended key carries.
 2. **The shared card.** Keep it beside per-person cards, or retire it.
-3. **Issuing a card** reads the wallet's private key. Whether that asks for device authentication.
-4. **Lookahead over cards** on a restore from the phrase: how many cards past the last one found.
+3. **Issuing a card** reads the wallet's private key, and the app asks for device authentication before
+   every read of it. Issuing will therefore ask; showing an issued card again reads no key and will not.
+   Say if issuing should not ask.
+4. **Lookahead over cards** on a restore from the phrase. The library looks 20 cards past the last one
+   found paid, and keeps them, which costs 400 watched scripts on a restored wallet.
 5. **Payer-picked secrets (E, F).** This document recommends against building them: the recipient cannot
    back up what they have not received.
 6. **BIP352 receiving (G)**, as the answer for a recipient who cannot be reached first.
