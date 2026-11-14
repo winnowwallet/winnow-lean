@@ -136,23 +136,23 @@ def personCardSections (m : Model) : List H :=
     | none => ((m.records.people.find? (·.name == person)).map (·.hasCard)).getD false
   let label := if sc.making then "Making…" else if known then s!"Show {person}’s card" else if person.isEmpty then "Make a card" else s!"Make a card for {person}"
   [ .section "A card for one person" "Made for one person and nobody else. It carries your silent payment address and a tweak made for them, so each payment from them goes to an address only the two of you can work out. They cannot see your other addresses, and a payment made with this card is named as theirs. Send it only to them: anyone who has it can see what is paid with it. Every card you make shows the same silent payment address, so two people who compare their cards can tell they pay the same wallet."
-      [ .identified Ids.personCardNameField
+      ([ .identified Ids.personCardNameField
           (.input .plain "" "Their name" sc.forName (fun s => .receive (.setCardFor s)) (some (.receive .makePersonCard)))
-      , .identified Ids.makePersonCardButton
-          (.button label .plain (if sc.making || own.isEmpty || person.isEmpty then none else some (.receive .makePersonCard))) ] ] ++
-  (match sc.personCard with
-   | some (name, card) =>
-     [.section s!"Card for {name}" ""
-       [ .qr card, copyableBlock m "card.person" card Ids.personCardText ]]
-   | none => [])
+       , .identified Ids.makePersonCardButton
+          (.button label .plain (if sc.making || own.isEmpty || person.isEmpty then none else some (.receive .makePersonCard))) ] ++
+       -- the card's rows join this section: a section of their own, put in above "A card for everyone", was
+       -- drawn with that section's footer under it (seen in the simulator, 2026-11-14)
+       (match sc.personCard with
+        | some (name, card) => [ .text s!"Card for {name}" .headline, .qr card, copyableBlock m "card.person" card Ids.personCardText ]
+        | none => [])) ]
 
 /-- `ShareMyCardView`: the name others will see, a card for one person first, and under it the card
 everybody can be given (upstream's one card: public keys only, and every address the wallet has). -/
 def shareCardSheet (m : Model) (inner : List H) : H :=
   formSheet "Share my card" (some .closeSheet) [closeBar "Done" Ids.closeShareCardButton]
-    ([ .section "" "" [.identified Ids.ownNameField
-        (.input .plain "" "Your name, as others will see it" m.settings.ownDisplayName (fun s => .receive (.setOwnName s)) none)] ] ++
-     (if m.shareCard.card.isNone then [.section "" "" [caption "Add a name to make your card."]] else []) ++
+    ([ .section "" "" ([.identified Ids.ownNameField
+        (.input .plain "" "Your name, as others will see it" m.settings.ownDisplayName (fun s => .receive (.setOwnName s)) none)] ++
+        (if m.shareCard.card.isNone then [caption "Add a name to make your card."] else [])) ] ++
      personCardSections m ++
      (match m.shareCard.card with
       | some card =>
