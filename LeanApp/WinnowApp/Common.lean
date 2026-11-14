@@ -73,7 +73,6 @@ def Model.fail (m : Model) (context message : String) : Model :=
   | "feeBump" => { m with feeBump := { m.feeBump with error := some message, bumping := false }, spendingInFlight := false }
   | "export" => { m with exportState := { m.exportState with busy := false, error := some message, file := none } }
   | "reveal" => { m with reveal := { m.reveal with revealing := false, error := some message } }
-  | "card" => { m with shareCard := { m.shareCard with card := none, error := some message } }
   | "personCard" => { m with shareCard := { m.shareCard with making := false, error := some message } }
   | "person" => { m with person := { m.person with saving := false, inferring := false, error := some message } }
   | "recipients" => { m with recipientsError := some message }

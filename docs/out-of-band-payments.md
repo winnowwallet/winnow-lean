@@ -4,17 +4,20 @@ Proposal for [issue #94](https://github.com/winnowwallet/winnow-lean/issues/94),
 
 > Status at this revision: built end to end on regtest. The derivation
 > (`Lean/Winnow/Keys/SilentPaymentPairing.lean`); a wallet that issues cards, finds what is paid with them,
-> spends it and restores it (`Lean/Winnow/Wallet/Wallet.lean`); and the app: Receive → Share my card has "A
-> card for one person", a saved person can be paid by the card they sent, and a payment made with a card is
-> named as its person's. None of it has run on a device, on signet or on mainnet. "Results" says what was
-> checked and how.
+> spends it and restores it (`Lean/Winnow/Wallet/Wallet.lean`); and the app: Receive → Make a card makes a
+> card for one person, a saved person can be paid by the card they sent, a payment made with a card is
+> named as its person's, and a phone restored from a backup looks for the cards made after it. The card
+> for everybody is retired. None of it has run on a device, on signet or on mainnet. "Results" says what
+> was checked and how.
 
 ## The problem
 
-Winnow's card (Receive → Share my card) carries the wallet's account key:
-`tr([fingerprint/86'/coin'/0']xpub…/<0;1>/*)`. Everybody gets the same card. Each holder can derive every
+Winnow's card (Receive → Share my card) carried the wallet's account key:
+`tr([fingerprint/86'/coin'/0']xpub…/<0;1>/*)`. Everybody got the same card. Each holder can derive every
 receive and change address the wallet has or will have, so each holder can read the wallet's whole history
-and balance from the chain.
+and balance from the chain. Winnow no longer makes that card (decided 2026-11-14). One that another wallet
+hands over is still read, saved and paid, and what is paid to one already handed out is still found: its
+addresses are the wallet's own receive addresses.
 
 A silent payment address (BIP352) does not have that problem, but its payments are found by scanning: the
 address a payment goes to depends on the coins the payer spent, so the recipient has to try every
@@ -145,9 +148,22 @@ tweak. A person's tweak `x_k` is different: it is not secret from the payer and 
   has issued, so in ordinary use nothing is guessed. A wallet rebuilt from the phrase alone looks ahead
   over cards (`Wallet.restoreCards`: 20 past the last one found paid) and scans back, repeating until a
   pass finds no further card. The cards it recorded stay recorded, paid or not, so an index that may have
-  been handed out is never issued to someone else. The app does not run this yet: its phrase-only restore
-  does not scan back for ordinary addresses either (the README: "words alone do not reconstruct its past
-  transaction history"). The library's bounded back-scan does, and the regtest run uses it.
+  been handed out is never issued to someone else.
+- **The app restoring from a backup.** A backup lists the cards made before it. Cards made after it are
+  not in it, and a card made after a backup is paid after it. So a phone restored from a backup that
+  carries the phrase records the cards it could have made (`Wallet.beginCardRestore`) before it scans
+  forward from the backup's height, and that scan watches for them. If one of them was paid there may be
+  more after it, paid in blocks the scan has passed: once the scan is at the tip, a sync pass records the
+  next cards, scans those blocks again for their scripts alone, and repeats until a round records none
+  (`finishCardRestore`). Whether there is anything to look for is read from the wallet's file; the phrase
+  is read only when there is. The search is marked in the wallet's file until it ends, so one that a peer
+  or the app's exit cuts short starts again. What this costs: every phone restored from a backup with the
+  phrase keeps at least 20 cards recorded, watches their scripts, and from then on writes version 3
+  backups, whether or not it ever made a card. What it does not do: look below the backup's height. The
+  app never searches the past chain from a phrase (the README: "words alone do not reconstruct its past
+  transaction history"), and a card left out of a backup that was made before it is found only from that
+  height on. A backup without the phrase restores a wallet that cannot derive a card, and none is looked
+  for. Who each found card was for is not recovered unless the people file is restored too.
 - **The backup file** carries the address, the issued cards and each coin's card and index, as version 3
   of the format (`docs/import.html`). A file with the phrase is refused if its address or any card's
   tweak is not what the phrase derives. The iCloud backup carries the same bundle.
@@ -215,7 +231,7 @@ Established by the construction and held by tests:
 
 - The outputs are ordinary key-path Taproot outputs.
 - Two people's tweaks differ, and a card derives its own scripts and no others.
-- The account key, which the shared card carries, derives none of these: the silent payment keys are on
+- The account key, which a version 1 card carries, derives none of these: the silent payment keys are on
   another hardened branch.
 
 Limits the construction does not address:
@@ -237,13 +253,16 @@ analysed: with the scan private key they can derive every tweak.
 - **Wallet.** `Wallet.issueCard` records the address and the card before answering; the watched set holds
   each card's window; a coin records its card and index; `Wallet.spendSecret` signs with
   `b_spend + t_i` after holding the address to the key; the backup carries all of it as version 3 and
-  import derives every script again; `Wallet.restoreCards` serves a wallet rebuilt from the phrase. A
-  wallet that never issues a card writes the same wallet file and the same version 2 backup as before.
+  import derives every script again; `Wallet.restoreCards` serves a wallet rebuilt from the phrase, and
+  `beginCardRestore`, `wantsMoreCards` and `endCardRestore` a phone restored from a backup. A wallet that
+  never issues a card and was never restored writes the same wallet file and the same version 2 backup as
+  before.
 - **People and the screen.** A person's pay-to can be an address with a tweak (`PersonPayTo.card`), read
-  from a version 2 person card. On the card sheet, "A card for one person" comes first: a name, the
-  device's owner is asked, the card is shown with its QR code, Copy and Share; shown again it reads no key
-  and does not ask. The card everybody can be given is under it. Saved recipients have "Make a card" /
-  "Their card". The person is saved as a contact with a link to their card; the card stays in the wallet's
+  from a version 2 person card. The card sheet (Receive → Make a card) has the wallet's own name and "A
+  card for one person": a name, the device's owner is asked, the card is shown with its QR code, Copy and
+  Share; shown again it reads no key and does not ask. The card for everybody is no longer made or shown.
+  Under each saved recipient is "Make a card for …" or "Show the card you made for …". The person is saved
+  as a contact with a link to their card; the card stays in the wallet's
   state. When a block pays a card, the sync labels the payment with the card's person, unless it already
   has a label, and the screen reads its records again.
 
@@ -257,7 +276,7 @@ All on 2026-11-14, every test executable rebuilt first.
   `SilentPaymentSending.outputScript`'s answer for the shared secret, and not what a standard silent
   payment to the same address pays. The recipient's key signs for every output; the person's tweak, the
   output's tweak and the spend key alone do not.
-- **The wallet, without a node.** `multisig-test`: 791 checks, 0 failed, 74 of them in seven tests of cards.
+- **The wallet, without a node.** `multisig-test`: 802 checks, 0 failed, 85 of them in seven tests of cards.
   A payer that holds only a card's text pays three indices in one transaction; the two inside the window
   are credited and the one outside is not. A spend of card coins with an ordinary coin, and its fee bump,
   carry signatures that verify under BIP341's sighash for each coin's key. A fork takes a payment away and
@@ -265,6 +284,8 @@ All on 2026-11-14, every test executable rebuilt first.
   without the phrase is watched and not signed for; a made-up tweak under the wallet's own address is
   watched and spent. A wallet that holds only its account key is refused a card. A wallet rebuilt from the
   phrase finds nothing, records the cards it could have issued, then finds and spends all three payments.
+  The restore's search is begun, says without a key whether there is more to look for, is marked in the
+  wallet's file and not in a backup, and ends; a wallet with only its account key, or none, begins none.
 - **Regtest, Bitcoin Core 31.1 as the payer.** `card-regtest`: 24 checks, 0 failed. Core pays two indices;
   the wallet finds both through the basic filters Core serves. Core replaces a third payment before it
   confirms; it is credited once, under the replacement's txid. Its block is invalidated and the payment
@@ -274,14 +295,25 @@ All on 2026-11-14, every test executable rebuilt first.
   output's tweak, Core takes it. A second wallet from the same phrase, its frontier already past every
   payment, finds none; after `restoreCards` and two passes of `scanRange` over the same filters it holds
   the same three coins and spends them in a transaction Core mines.
-- **The app.** `records-test`: 1,517 checks, 0 failed: the people store (a card by name and by ID, the same
+- **The app.** `records-test`: 1,575 checks, 0 failed: the people store (a card by name and by ID, the same
   card when asked again, the link through an iCloud restore plan, a card for another network or with a bad
-  tweak refused in a sentence) and the card sheet through the app's own `perform` with a fake shell (the
-  per-person section first; making a card asks the device's owner once, declining makes none and says
-  nothing, showing it again does not ask). `backend-test`: 346 checks, 0 failed, three runs: its two-phone
-  flow has Bob make a card for Alice, Alice pay it twice from her saved person at addresses the shared
-  card's key does not derive in its first 200, and Bob's wallet find both, name both as Alice's and spend
-  them. The journey `cardForOnePerson` passes headless with the other nine.
+  tweak refused in a sentence) and the card sheet through the app's own `perform` with a fake shell (no
+  card for everybody is asked for, made or shown; making a card asks the device's owner once, declining
+  makes none and says nothing, showing it again does not ask; a failure to make one lands on the sheet).
+  `backend-test`: 362 checks, 0 failed, three runs. Its two-phone flow has Bob make a card for Alice, Alice
+  pay it twice from her saved person at addresses Bob's account key does not derive in its first 200, and
+  Bob's wallet find both, name both as Alice's and spend them. The journey `cardForOnePerson` passes
+  headless with the other nine.
+- **A phone restored from a backup made before its cards** (`backend-test`'s `cardRestoreFlow`, regtest).
+  Bob backs up with his phrase, then makes 23 cards; Alice pays the 6th and the 23rd, and the node pays an
+  ordinary address of Bob's in the same block. A new phone with only the old backup records 20 cards
+  before it scans, finds the payment to the 6th in the scan forward, and then in two rounds of the search
+  finds the payment to the 23rd in a block the scan had already passed. That block is applied twice and
+  each payment is in the history once. The search ends once, with 43 cards recorded; the next card the
+  phone makes is index 43; its backup is version 3; and it spends all three coins in a transaction the
+  node mines. A backup without the phrase begins no search. Not shown: a search cut short and resumed, a
+  range that must wait for a filter checkpoint (regtest's chain is shorter than one interval), or a
+  restore from iCloud, which goes through the same import.
 - **The rest, unchanged in behaviour:** `silent-payment-test` 272, `crypto-test` 4,246, `ledger-test` 230,
   `multisig-app-test` 667, `cloud-backup-test` 194, `ledger-transport-test` 17, `io-test` 404,
   `multisig-differential` 588, `fuzz` 230,000 cases; all 0 failed.
@@ -299,23 +331,69 @@ All on 2026-11-14, every test executable rebuilt first.
   drawn a second time under the person's card, and the card button pushed Remove off a saved recipient's
   row. It also found that "Paste from clipboard" reads nothing in this simulator, which cannot show iOS's
   paste prompt; the text field's own Paste was used. Whether the button works on a device was not checked.
+  That run was made while the card for everybody was still on the sheet; after it was retired the sheet
+  was looked at once more in the simulator ("Make a card": the wallet's name and "A card for one person",
+  nothing else), and the payment was not run again.
 - **What these runs do not show:** a device, an unconfirmed payment, more than one peer, mainnet or signet,
   or two real phones exchanging a card by QR code, AirDrop or a message.
 
 ## Open
 
-1. **The shared card.** It stays, under the per-person section. Retire it or keep it.
-2. **Receiving standard silent payments**, by a notice from the payer or by a scan, which would also make
-   the bare address safe to hand out.
-3. **The app recovering cards from the phrase**, by running the back-scan the library has.
-4. **Showing an unconfirmed payment** made with a card.
-5. **LeanNative capabilities**: a camera for QR codes, the Bluetooth peripheral role, NFC, and in which
+Decided on 2026-11-14, and done in this revision:
+
+- **The shared card is retired.** The app no longer makes or shows it.
+- **The app recovers cards** when it restores from a backup that carries the phrase ("Backup and
+  recovery").
+
+Decided, and waiting on a way to do it:
+
+- **Receiving standard silent payments: yes, if we know how to find them.** With what Winnow has, we do
+  not. The next section says why and what the ways are. Until one is chosen the bare address is not safe
+  to hand out alone, and the card sheet does not show it alone.
+
+Still open:
+
+1. **Which way to find a standard silent payment**, below.
+2. **Showing an unconfirmed payment** made with a card.
+3. **LeanNative capabilities**: a camera for QR codes, the Bluetooth peripheral role, NFC, and in which
    order.
-6. **A per-payment request** with an amount and an expiry, for "pay exactly this, now".
+4. **A per-payment request** with an amount and an expiry, for "pay exactly this, now".
+
+## Finding a standard silent payment
+
+A standard payment's output is `B_spend + hash(input_hash · a · B_scan ‖ k) · G`. To recognise it the
+recipient needs, for that transaction, the sum of the public keys of its inputs. A compact filter does
+not give that: it answers "does this block touch a script I already know", and the script is what the
+recipient is trying to work out. Three ways are known, and Winnow has none of them today:
+
+- **A full scan.** Every transaction with a Taproot output, with its inputs' public keys. A Taproot
+  key-path input shows a signature and not its key, so the key comes from the output it spends, which a
+  wallet that fetches only matched blocks does not have. This is a full node's work, not a phone's.
+- **A tweak index.** A server computes one 33-byte value per eligible transaction and the wallet fetches
+  them per block, then fetches the blocks its own outputs are in. BIP352's appendix describes it and
+  there are servers that do it, but as of this writing it is not a peer-to-peer service: Bitcoin Core's
+  own silent payment work was still in review, and the write-ups found call the light-client protocol a
+  pre-draft. It is a server Winnow would have to name and trust not to leave a transaction out, and
+  Winnow's sync today asks only Bitcoin peers. These points come from a web search on 2026-11-14 of
+  secondary sources (linked under References), not from the specifications themselves.
+- **A notice from the payer.** The payer sends the recipient the transaction's tweak, or its txid, out of
+  band; the recipient derives the output and finds it by filter like any other script. BIP352's
+  out-of-band notifications appendix is this. It needs a channel back to the recipient for every payment,
+  where a card needs one hand-over. A coin found this way would be recorded the way a card's coin is: the
+  tweak data and an index.
+
+A card is the fourth way, and the one built: the two sides fix the tweak beforehand, so there is nothing
+to find.
 
 ## References
 
 - [BIP352](https://bips.dev/352/), including its out-of-band notifications appendix
+- On finding standard silent payments from a light wallet, read 2026-11-14 and not checked against the
+  specifications: [Silent Payments, Bitcoin Wiki](https://en.bitcoin.it/wiki/Silent_Payments);
+  [a wallet-support comparison](https://www.spark.money/tools/bitcoin-silent-payment-wallet-comparison);
+  [an article on the light-client scanning feed](https://cryptoslate.com/bitcoins-newest-mobile-privacy-feature-could-make-your-incoming-money-completely-invisible/);
+  [Bitcoin Core #35301, "Silent Payments: Implement bip352 (take 2)"](https://mirror.b10c.me/bitcoin-bitcoin/35301/);
+  [Bitcoin Core #27827, "Silent Payments: send and receive"](https://mirror.b10c.me/bitcoin-bitcoin/27827/)
 - [BIP32](https://bips.dev/32/), [BIP340](https://bips.dev/340/),
   [BIP341](https://bips.dev/341/#constructing-and-spending-taproot-outputs)
 - [BIP157](https://bips.dev/157/), [BIP158](https://bips.dev/158/)

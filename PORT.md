@@ -164,12 +164,17 @@ Departures from upstream's formats, each absent until a card is issued:
 - People: `PersonPayTo.card` (an address with a tweak), person cards of version 2 with a `tweak` field, and
   `PersonRecord.issuedCard` in `people.json`, the link from a person to the card this wallet issued them.
   Upstream reads a version 2 card as made by a newer Winnow and ignores the link.
-- The app: "A card for one person" first on Share my card, with upstream's card under it as "A card for
-  everyone"; "Make a card" / "Their card" on saved recipients; the backend's `personCard`; and the sync's
-  `cardPayment` hook, which labels a payment made with a card as its person's.
+- The app: Receive's "Share my card" is "Make a card", and makes a card for one person. Upstream's card
+  (the account key, the same for everybody) is no longer made or shown: `Cmd.ownCard`, `Host.card` and the
+  backend's `ownCard` are gone, and `ownPersonCard` stays only as what such a card from another wallet
+  looks like, which is still read and paid. Under each saved recipient is "Make a card for …" or "Show
+  the card you made for …". A restore from a backup with the phrase begins a search for cards made after
+  the backup (`Wallet.beginCardRestore`, the sync pass's `finishCardRestore`, the wallet file's
+  `cardRestoreFrom`). The backend's `personCard`, and the sync's `cardPayment` hook, which labels a
+  payment made with a card as its person's.
 
 `multisig-test` has the wallet's card tests, `card-regtest` runs them against Bitcoin Core as the payer
-(`scripts/ci-regtest cards`), and `records-test`, `backend-test`'s `cardFlow` and the journey
+(`scripts/ci-regtest cards`), and `records-test`, `backend-test`'s `cardFlow` and `cardRestoreFlow` and the journey
 `cardForOnePerson` hold the app. `docs/out-of-band-payments.md` is the proposal: the design, what it costs,
 what it was compared with, and what is still open.
 

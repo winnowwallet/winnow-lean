@@ -804,7 +804,7 @@ def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
 def answersTo : Cmd → Option Nat
   | .refresh .. => some 3
   | .saveSettings .. | .removeExport .. => some 0
-  | .records .. | .receiveAddress .. | .setReceiveLabel .. | .ownCard .. | .personCard .. | .parsePaste .. | .addPerson .. | .editPerson ..
+  | .records .. | .receiveAddress .. | .setReceiveLabel .. | .personCard .. | .parsePaste .. | .addPerson .. | .editPerson ..
   | .updateRecipient .. | .labelSender .. | .removeSenderLabel .. | .catalogStatus .. | .connectedPeers ..
   | .resetPeers .. | .reconnect .. | .loadPaymentDetails .. | .exportBundle .. | .revealPhrase ..
   | .deleteWallet .. | .paste .. | .importWallet .. => some 1
@@ -871,10 +871,10 @@ def busyFlags : List (String × (Model → Bool)) :=
   , ("person.saving", (·.person.saving)), ("person.inferring", (·.person.inferring))
   , ("multisigAdd.saving", (·.multisigAdd.saving)), ("multisigBuild.creating", (·.multisigBuild.creating))
   , ("ledgerPair.pairing", (·.ledgerPair.pairing)), ("signerKeys.saving", (·.signerKeys.saving))
-  , ("collect.busy", (·.collect.busy)) ]
+  , ("collect.busy", (·.collect.busy)), ("shareCard.making", (·.shareCard.making)) ]
 
 /-- A phone with every screen in the middle of something: each busy flag set, the export holding a file, a
-card shown, the collection step at epoch 4. -/
+card being made, the collection step at epoch 4. -/
 def busyModel : Model :=
   { readyModel "w" with
     onboarding := { busy := true, restoring := true }
@@ -888,7 +888,7 @@ def busyModel : Model :=
     exportState := { busy := true, file := some "/tmp/winnow-export-x/w.json" }
     reveal := { revealing := true }
     person := { saving := true, inferring := true }
-    shareCard := { card := some "card" }
+    shareCard := { making := true }
     multisigAdd := { saving := true }
     multisigBuild := { creating := true }
     ledgerPair := { pairing := true }
@@ -922,7 +922,9 @@ def failTable : List (String × (Model → Bool) × List String) :=
   , ("feeBump.cancelled", (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
   , ("export", fun m => m.exportState.error == boom && m.exportState.file.isNone, ["exportState.busy"])
   , ("reveal", (·.reveal.error == boom), ["reveal.revealing"])
-  , ("card", fun m => m.shareCard.error == boom && m.shareCard.card.isNone, [])
+  , ("personCard", (·.shareCard.error == boom), ["shareCard.making"])
+  -- a declined Face ID before a card is made: nothing is said, and the button is free again
+  , ("personCard.cancelled", (·.shareCard.error.isNone), ["shareCard.making"])
   , ("person", (·.person.error == boom), ["person.saving", "person.inferring"])
   , ("recipients", (·.recipientsError == boom), [])
   , ("multisigAdd", (·.multisigAdd.error == boom), ["multisigAdd.saving"])
@@ -1187,28 +1189,21 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   check "remove: the label is gone" ((lookup m.records.receiveLabels second).isNone && !m.receive.editingLabel &&
     contains (rendered m) "Label this address")
   check "remove: and the backend agrees" ((lookup (← backend.records).receiveLabels second).isNone)
-  -- the share card: no name yet, then one
+  -- the card sheet: no name yet, then one
   let (card, cs) := stepReceive .openCard m
-  check "card: the sheet opens, and asks for a name" (card.topSheet == some .shareCard && !cs.any (· matches .ownCard ..) &&
-    contains (renderedH (shareCardSheet card [])) "Add a name to make your card.")
+  check "card: the sheet opens, and asks for a name"
+    (card.topSheet == some .shareCard && (cs.all fun | .journal .. => true | _ => false) &&
+     contains (renderedH (shareCardSheet card [])) "Add your name to make a card.")
   let (card, left) ← sh.tap (.receive (.setOwnName "Alice")) card
   check "card: the name is saved" (card.settings.ownDisplayName == "Alice" && left.isEmpty)
   let shown := renderedH (shareCardSheet card [])
-  let some text := card.shareCard.card | check "card: made for the name" false; return
-  check "card: shown with its QR code" (contains shown "A card for everyone" && contains shown "\"qr\"")
-  let afterPersonSection := (shown.splitOn "A card for one person").getD 1 ""
-  check "card: under the card for one person" (contains afterPersonSection "A card for everyone")
-  let read ← backend.parsePaste text
-  check "card: another phone reads Alice and a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
-  let (named, cs) := stepReceive .openCard { m with settings := { m.settings with ownDisplayName := "Alice" } }
-  check "card: opening it with a name set asks for the card" (cs.any fun | .ownCard _ n => n == "Alice" | _ => false)
-  let (named, _) ← sh.run named cs
-  check "card: the card arrives" (named.shareCard.card == some text)
-  let stale := onHost (.card named.generation "Bob" "other") named
-  check "card: one made for another name is dropped" (stale.1.shareCard.card == some text)
+  check "card: with a name the sheet stops asking for one" (!contains shown "Add your name to make a card.")
+  -- the card for everybody (the account key) is retired: none is asked for, made or shown
+  check "card: no card for everybody on the sheet"
+    (!contains shown "A card for everyone" && !contains shown "\"qr\"" && !contains shown "tpub")
   let (cleared, _) ← sh.tap (.receive (.setOwnName "  ")) card
-  check "card: an empty name takes the card away" (cleared.shareCard.card.isNone &&
-    contains (renderedH (shareCardSheet cleared [])) "Add a name to make your card.")
+  check "card: an empty name is asked for again"
+    (contains (renderedH (shareCardSheet cleared [])) "Add your name to make a card.")
   -- a card for one person, on the same sheet
   let sheet := renderedH (shareCardSheet card [])
   check "person card: the sheet offers one, and waits for a name"
@@ -1226,7 +1221,7 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   check "person card: shown for Dana with its QR code" (madeFor == "Dana" && !made.shareCard.making &&
     contains (renderedH (shareCardSheet made [])) "Card for Dana" && contains (renderedH (shareCardSheet made [])) "Show Dana’s card")
   check "person card: Dana is a contact with a card" (made.records.people.any fun p => p.name == "Dana" && p.hasCard)
-  check "person card: not the shared card, and no account key in it" (some personText != made.shareCard.card && !contains personText "tpub")
+  check "person card: no account key in it" (!contains personText "tpub")
   let readBack ← backend.parsePaste personText
   check "person card: another phone reads Alice and a fresh address each payment" (readBack.name == some "Alice" && readBack.payTo == some true)
   let (again, cs) := stepReceive .makePersonCard made
@@ -1752,13 +1747,28 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
   backendRef.set backend
   rootDir.set (root / "screens-alice").toString
 
+/-- A version 1 card, as other wallets hand one out (upstream's, and Winnow's own before issue #94): the
+account key as the pay-to key. The app no longer makes one; it still reads one and pays it. Built here from
+the descriptor in the phone's backup. -/
+def accountKeyCard (b : Backend) (name : String) : IO String := do
+  let bundle ← match Winnow.ImportBundle.decode (← b.exportBundle false) with
+    | .ok bundle => pure bundle
+    | .error _ => throw (IO.userError "accountKeyCard: the backup does not decode")
+  let some text := bundle.descriptor | throw (IO.userError "accountKeyCard: the backup has no descriptor")
+  let descriptor ← match Winnow.Descriptor.parse text with
+    | .ok d => pure d
+    | .error e => throw (IO.userError s!"accountKeyCard: {e.name}")
+  match ← (WinnowApp.RecordsReal.ownPersonCardOf descriptor .regtest name).run with
+  | .ok card => return card.serialized
+  | .error _ => throw (IO.userError "accountKeyCard: no card")
+
 /-- The screen flows, in one directory. -/
 def screens (root : System.FilePath) : IO Unit := do
   failuresReachTheirScreens
   settingsScreen root
   let (alice, aliceID) ← screenPhone root "screens-alice" 0xA1
   let (bob, _) ← screenPhone root "screens-bob" 0xB2
-  let cardB ← bob.ownCard "Bob"
+  let cardB ← accountKeyCard bob "Bob"
   let bobAddress ← bob.receiveAddress false
   let otherAddress ← bob.receiveAddress true
   let funder ← bob.receiveAddress true

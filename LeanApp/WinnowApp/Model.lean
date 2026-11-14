@@ -320,7 +320,6 @@ structure PersonForm where
   deriving Repr, Inhabited
 
 structure ShareCard where
-  card : Option String := none
   error : Option String := none
   /-- The name typed under "A card for one person". -/
   forName : String := ""
@@ -625,7 +624,6 @@ inductive Host where
   | peersReset (gen : Nat)
   | exported (gen epoch : Nat) (file : String)
   | revealed (gen epoch : Nat) (words : List String)
-  | card (gen : Nat) (name : String) (card : String)
   | personCard (gen : Nat) (personName : String) (card : String) (records : Records)
   | pasteParsed (gen : Nat) (text : String) (r : Except String PastePreview)
   | senderLookup (gen : Nat) (txid source : String) (addresses : List String)
@@ -968,7 +966,6 @@ inductive Cmd where
   /-- `ExportStagingFile.remove` for that file: its staging directory goes. -/
   | removeExport (file : String)
   | revealPhrase (gen epoch : Nat)
-  | ownCard (gen : Nat) (name : String)
   /-- A card for one person alone (the saved person `personID`, else by name), under the wallet's own name. -/
   | personCard (gen : Nat) (personID : Option String) (personName ownName : String)
   | parsePaste (gen : Nat) (text : String)

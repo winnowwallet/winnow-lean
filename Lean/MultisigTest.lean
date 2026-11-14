@@ -1087,6 +1087,11 @@ def cardsAreIssued : TM Unit := do
   let accountOnly ← need "account-key wallet" (Wallet.createFromAccountKey (← accountKey ms[0]!) ms[0]!.fingerprint .signet (← newKeyStore) none 100 0 pinned)
   check "cards: a wallet that holds only its account key is told it cannot make one"
     (match ← accountOnly.issueCard.run with | .error (.named "cardsNeedThePhrase") => true | _ => false)
+  -- restored from a backup, neither looks for cards it could not have made
+  check "cards: restored, a wallet without its key begins no search"
+    ((← watchOnly.beginCardRestore.run).toOption == some false && (← watchOnly.cardRestoreFrom).isNone && (← watchOnly.cards).isEmpty)
+  check "cards: restored, a wallet with only its account key begins no search"
+    ((← accountOnly.beginCardRestore.run).toOption == some false && (← accountOnly.cardRestoreFrom).isNone && (← accountOnly.cards).isEmpty)
   check "cards: and records nothing" ((← accountOnly.cards).isEmpty && (← accountOnly.state).silentPaymentAddress.isNone)
 
 def aCardIsPaidAndSpent : TM Unit := do
@@ -1281,6 +1286,35 @@ def aPhraseAloneFindsItsCards : TM Unit := do
   check "phrase: the rebuilt wallet spends them" (keyPathSignaturesVerify prepared.built.transaction (← rebuilt.utxos))
   check "phrase: a new card takes an index none of them could have had"
     ((← (rebuilt.issueCard).run).toOption.map (·.1) == some 23)
+  -- the same search as a restore from a backup runs it: begun before the scan, ended when a round adds none
+  let restored ← emptyWallet (← newKeyStore)
+  check "restore: before it begins, the wallet wants the cards it could have made"
+    ((← restored.wantsMoreCards) && (← restored.cardRestoreFrom).isNone)
+  let startsAt := (← restored.state).nextScanHeight
+  check "restore: begun, the first cards are recorded and the search is marked from the next height to scan"
+    ((← need "begin" restored.beginCardRestore) && (← restored.cards).size == Wallet.cardLookahead.toNat &&
+     (← restored.cardRestoreFrom) == some startsAt)
+  check "restore: with none of them paid it wants no more" (!(← restored.wantsMoreCards))
+  discard (need "apply" (restored.apply (fakeMatch 150 #[paid])))
+  check "restore: one of them paid, it wants more, and says so without a key"
+    ((← restored.balance) == 60_000 && (← restored.wantsMoreCards))
+  let marked ← restored.state
+  check "restore: the mark is in the wallet's file, and reads back"
+    (match marked.encode.toOption.bind fun t => (WalletState.decode t).toOption with
+     | some read => read.cardRestoreFrom == some startsAt && read == marked
+     | none => false)
+  check "restore: the next round records the cards past the one paid"
+    ((← need "restore" restored.restoreCards) && (← restored.cards).size == 23 && !(← restored.wantsMoreCards))
+  need "end" restored.endCardRestore
+  check "restore: ended, the mark is gone and the cards stay"
+    ((← restored.cardRestoreFrom).isNone && (← restored.cards).size == 23 &&
+     ((← restored.state).encode.toOption.map fun t => (t.splitOn "cardRestoreFrom").length) == some 1)
+  check "restore: a wallet that never restored has no mark in its file"
+    (((← w.state).encode.toOption.map fun t => (t.splitOn "cardRestoreFrom").length) == some 1)
+  check "restore: a backup does not carry the mark"
+    (match ← (restored.exportBundle true).run with
+     | .ok bundle => (bundle.serialized.splitOn "cardRestoreFrom").length == 1 && bundle.cards.size == 23
+     | .error _ => false)
 
 def cardsInTheWalletFile : TM Unit := do
   let w ← fundedWallet (← newKeyStore)

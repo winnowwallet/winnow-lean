@@ -473,9 +473,24 @@ def personNamed (b : Backend) (name : String) : IO Person := do
   | some p => return p
   | none => throw (IO.userError s!"no person {name}")
 
+/-- A version 1 card, as other wallets hand one out (upstream's, and Winnow's own before issue #94): the
+account key as the pay-to key. The app no longer makes one; it still reads one and pays it. Built here from
+the descriptor in the phone's backup. -/
+def accountKeyCard (b : Backend) (name : String) : IO String := do
+  let bundle ← match Winnow.ImportBundle.decode (← b.exportBundle false) with
+    | .ok bundle => pure bundle
+    | .error _ => throw (IO.userError "accountKeyCard: the backup does not decode")
+  let some text := bundle.descriptor | throw (IO.userError "accountKeyCard: the backup has no descriptor")
+  let descriptor ← match Winnow.Descriptor.parse text with
+    | .ok d => pure d
+    | .error e => throw (IO.userError s!"accountKeyCard: {e.name}")
+  match ← (WinnowApp.RecordsReal.ownPersonCardOf descriptor .regtest name).run with
+  | .ok card => return card.serialized
+  | .error _ => throw (IO.userError "accountKeyCard: no card")
+
 /-- A card per person between two phones (issue #94). Bob makes a card for Alice alone; Alice saves it and
 pays it twice. Bob's wallet finds both payments through the node's filters, names them as Alice's without
-being told, and spends them. The addresses she paid are none the shared card's account key derives, and
+being told, and spends them. The addresses she paid are none Bob's account key derives, and
 Bob's backup carries the card. -/
 def cardFlow (dir : String) (n : Node) : IO Unit := do
   let settings := regtestSettings n
@@ -520,13 +535,13 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   check "card: the next payment goes to another address" (second.destination != first.destination &&
     (← personNamed alice "Bob").nextPaymentIndex == 1)
   let paidTwice := (← alice.sendPayment payBob second).txid
-  -- neither address is one the card everybody gets could derive
-  let sharedScripts : Array ByteArray := match PersonCard.decode (← bob.ownCard "Bob") with
+  -- neither address is one Bob's account key derives (what a version 1 card carried)
+  let sharedScripts : Array ByteArray := match PersonCard.decode (← accountKeyCard bob "Bob") with
     | .ok shared => ((shared.payTo.bind fun t => (PersonPayTo.ofDescriptor t .regtest).toOption).bind
         fun payTo => (payTo.scripts 200 .regtest).toOption).getD #[]
     | .error _ => #[]
   let paidScripts := [first.destination, second.destination].filterMap fun a => (AddressDecoder.scriptPubKey a .regtest).toOption
-  check "card: Bob's shared card derives neither address Alice paid"
+  check "card: Bob's account key derives neither address Alice paid"
     (sharedScripts.size == 200 && paidScripts.length == 2 && paidScripts.all fun script => !sharedScripts.contains script)
   let mined ← waitUntil 20_000 (do let mp ← n.mempool; return mp.contains paidOnce && mp.contains paidTwice)
   check "card: both payments reach the node" mined
@@ -562,6 +577,107 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   bob.stopNetworking
   alice.stopNetworking
 
+/-- A phone restored from a backup made before its cards (issue #94). Bob backs up with his phrase and then
+makes twenty-three cards. Alice is handed two of them, the sixth and the twenty-third, and pays both; the
+node pays an ordinary address of Bob's in the same block. A new phone has only the old backup. Its scan
+forward watches the twenty cards the wallet could have made, and finds the payment to the sixth; the search
+then looks further, and finds the payment to the twenty-third in a block the scan had already passed, which
+is applied a second time and counted once. Twenty cards past the last one paid stay recorded, so the next
+card it makes has an index nobody was handed. -/
+def cardRestoreFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let phone (name : String) : IO (Backend × String) := do
+    let (b, _) ← Backend.realWithEnv (deps (← IO.mkRef ({} : Keys.InMemorySecrets)) name)
+    let home := s!"{dir}/{name}/BTCSwift/regtest"
+    IO.FS.createDirAll home
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    return (b, home)
+  let (bob, bobHome) ← phone "RestoreBob"
+  discard <| bob.createWallet .regtest bobHome
+  let (alice, aliceHome) ← phone "RestoreAlice"
+  discard <| alice.createWallet .regtest aliceHome
+  discard <| n.wallet #["sendtoaddress", ← alice.receiveAddress false, "1.0"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (funded, _) ← syncUntil alice 60_000 fun s p => s.balance == 100_000_000 && p == .synced
+  check "restore: Alice is funded" (funded.balance == 100_000_000) s!"{funded.balance}"
+  discard <| syncUntil bob 60_000 fun _ p => p == .synced
+  -- the backup, before any card
+  let backup ← bob.exportBundle true
+  check "restore: the backup has the phrase and no card" (match ImportBundle.decode backup with
+    | .ok bundle => bundle.version == 2 && bundle.cards.isEmpty && bundle.mnemonic.isSome
+    | .error _ => false)
+  -- twenty-three cards made after it
+  let mut cards : Array String := #[]
+  for k in [0:23] do
+    cards := cards.push (← bob.personCard none s!"Person {k}" "Bob").1
+  check "restore: twenty-three cards, no two alike" (cards.size == 23 && (Std.HashSet.ofArray cards).size == 23)
+  -- Alice pays the sixth and the twenty-third; the node pays an ordinary address in the same block
+  let mut paid : Array String := #[]
+  for (k, amount) in [(5, "200000"), (22, "300000")] do
+    let name := s!"Bob, card {k}"
+    discard <| alice.addPerson name (some (cards[k]?.getD "")) none none none
+    let pay : SendInputs := { personID := some (← personNamed alice name).id, amount, network := .regtest }
+    let review ← alice.previewSend pay
+    paid := paid.push (← alice.sendPayment pay review).txid
+  let ordinary ← n.wallet #["sendtoaddress", ← bob.receiveAddress false, "0.004"]
+  check "restore: the three payments reach the node"
+    (← waitUntil 20_000 (do let mp ← n.mempool; return paid.all mp.contains && mp.contains ordinary))
+  n.mine 1 mineAddr
+  n.mine 3 mineAddr
+  n.waitFilterIndex
+  let (atBob, _) ← syncUntil bob 60_000 fun s p => s.balance == 900_000 && p == .synced
+  check "restore: the phone that made the cards holds all three" (atBob.balance == 900_000 && atBob.utxoCount == 3)
+    s!"{atBob.balance} sat, {atBob.utxoCount} coin(s)"
+  bob.stopNetworking
+  -- the new phone, from the old backup
+  let (restored, restoredHome) ← phone "RestoreBobNew"
+  discard <| restored.importBundle .regtest restoredHome backup
+  checkJournal "cards.restoreBegun" ["cards", "fromHeight"] (fun f => field f "cards" == "20")
+    "the twenty cards it could have made are recorded before the scan"
+  let (found, _) ← syncUntil restored 90_000 fun s p => s.balance == 900_000 && p == .synced
+  check "restore: it finds the payment to a card past the twenty, in a block its scan had passed"
+    (found.balance == 900_000 && found.utxoCount == 3) s!"{found.balance} sat, {found.utxoCount} coin(s)"
+  check "restore: each payment is in its history once"
+    ((paid.push ordinary).all fun txid => (found.history.filter (·.txid == txid)).length == 1)
+    s!"{found.history.map (·.txid)}"
+  -- card 5 paid: six more; card 22 paid: seventeen more; then a round that records none
+  discard <| syncUntil restored 30_000 fun _ _ => false
+  checkJournal "cards.restored" ["cards", "fromHeight", "rounds"]
+    (fun f => field f "rounds" == "2" && field f "cards" == "43") "two rounds, forty-three cards"
+  let ended := (← journaled "cards.restored").size
+  discard <| syncUntil restored 2_000 fun _ _ => false
+  check "restore: the search ends once" ((← journaled "cards.restored").size == ended) s!"{ended}"
+  -- the next card is one nobody was handed
+  let (next, _) ← restored.personCard none "Zed" "Bob"
+  check "restore: its next card is none of the twenty-three" (!cards.contains next)
+  checkJournal "card.issued" ["card", "personID"] (fun f => field f "card" == "43") "the next card is index 43"
+  check "restore: its backup now carries the cards" (match ImportBundle.decode (← restored.exportBundle true) with
+    | .ok bundle => bundle.version == 3 && bundle.cards.size == 44
+    | .error _ => false)
+  -- and it spends what it found
+  let toNode : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "850000", network := .regtest }
+  let review ← restored.previewSend toNode
+  let spent := (← restored.sendPayment toNode review).txid
+  check "restore: the node takes its spend of all three coins"
+    (← waitUntil 20_000 (do return (← n.mempool).contains spent))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (after, _) ← syncUntil restored 60_000 fun s p => (history? s spent).any (·.height > 0) && p == .synced
+  check "restore: confirmed, it holds what the payment and its fee left"
+    (after.balance == 900_000 - 850_000 - review.fee) s!"{after.balance}"
+  -- a backup without the phrase restores a wallet that cannot derive a card, and is left as it is
+  let (watching, watchingHome) ← phone "RestoreWatching"
+  let begun := (← journaled "cards.restoreBegun").size
+  discard <| watching.importBundle .regtest watchingHome (← alice.exportBundle false)
+  check "restore: a backup without the phrase begins no search"
+    ((← journaled "cards.restoreBegun").size == begun && (← journaled "cards.restoreSkipped").isEmpty)
+  watching.stopNetworking
+  restored.stopNetworking
+  alice.stopNetworking
+
 /-- Alice saves Bob from the card his phone made, pays him twice and he finds both payments, at two addresses;
 someone inferred from a payment's funding is paid with the warning that it is unverified, from the wallet's own
 record and from a fake explorer's answer; a saved address warns of reuse and is reused; a large fee warns; a
@@ -576,7 +692,7 @@ def peopleFlow (dir : String) (n : Node) : IO Unit := do
   discard <| bob.openWallet .regtest dirBob
   bob.startNetworking settings
   discard <| bob.createWallet .regtest dirBob
-  let card ← bob.ownCard "Bob"
+  let card ← accountKeyCard bob "Bob"
   -- the explorer Alice's phone reaches: answers one transaction's funding, and nothing else goes to it
   let explorerAnswer ← IO.mkRef ""
   let explorerAsked ← IO.mkRef (#[] : Array String)
@@ -1840,5 +1956,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n; cardFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

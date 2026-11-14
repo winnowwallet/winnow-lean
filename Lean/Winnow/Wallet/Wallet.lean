@@ -728,6 +728,19 @@ def issueCard (w : Wallet) : WM (UInt32 × PairingCard) :=
 /-- How many cards past the last one paid a wallet rebuilt from its phrase looks for. -/
 def cardLookahead : UInt32 := 20
 
+/-- How many cards a restoring wallet wants recorded: `lookahead` past the last one that has been paid. -/
+def cardsWanted (s : WalletState) (lookahead : UInt32 := cardLookahead) : Nat :=
+  let paid (c : IssuedCard) : Bool := c.nextIndex > 0 || s.allUtxos.any (·.card == some c.index)
+  let afterLastPaid : UInt32 := s.cards.foldl (fun next c => if paid c then max next (c.index + 1) else next) 0
+  min (afterLastPaid.toNat + lookahead.toNat) maximumCards
+
+/-- Whether `restoreCards` would record another card. Read from the wallet's file alone: no key is loaded
+to answer it. -/
+def wantsMoreCards (w : Wallet) (lookahead : UInt32 := cardLookahead) : IO Bool := do
+  let s ← w.state
+  return (List.range (cardsWanted s lookahead)).any fun index =>
+    !s.cards.any (·.index == index.toUInt32) && s.cards.size < maximumCards
+
 /-- For a wallet rebuilt from its phrase, which does not know what it issued: records every card up to
 `lookahead` past the last one that has been paid (or the first `lookahead`), so a scan back finds their
 payments. Whether it added any: the caller scans, and calls again until it adds none. The cards stay
@@ -735,9 +748,7 @@ recorded, paid or not, so an index that may have been handed out is never issued
 def restoreCards (w : Wallet) (lookahead : UInt32 := cardLookahead) : WM Bool :=
   w.cursorLock.atomically (m := WM) do
     let s ← w.state
-    let paid (c : IssuedCard) : Bool := c.nextIndex > 0 || s.allUtxos.any (·.card == some c.index)
-    let afterLastPaid : UInt32 := s.cards.foldl (fun next c => if paid c then max next (c.index + 1) else next) 0
-    let wanted := min (afterLastPaid.toNat + lookahead.toNat) maximumCards
+    let wanted := cardsWanted s lookahead
     let (scan, spend) ← w.cardSecrets (← w.signingKeys).2
     let address ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (silentPaymentHRP w.network))
     let code ← WM.liftE (·.name) address.encoded
@@ -751,6 +762,38 @@ def restoreCards (w : Wallet) (lookahead : UInt32 := cardLookahead) : WM Bool :=
     w.persist candidate
     w.stateRef.set candidate
     return true
+
+/-- Where an unfinished search for cards starts, for a wallet restored from a backup (`beginCardRestore`). -/
+def cardRestoreFrom (w : Wallet) : IO (Option UInt32) := return (← w.state).cardRestoreFrom
+
+/-- For a wallet just restored from a backup. Cards made after the backup are not in it, and the wallet
+would neither watch for their payments nor keep their indices from the next person. So it records the
+cards it could have made (`restoreCards`), before the scan forward from the backup's height, and marks the
+search unfinished from that height: a card made after the backup is paid after it. A wallet that holds
+only its account key, or no key at all, cannot derive a card, and is left as it is. Whether the search
+began. -/
+def beginCardRestore (w : Wallet) : WM Bool := do
+  -- a backup without a secret restores a wallet that only watches
+  match ← WM.io (w.keyStore.load w.id).run with
+  | .error (.notFound _) => return false
+  | _ => pure ()
+  if (← w.signingKeys).2.isNone then return false
+  discard w.restoreCards
+  w.cursorLock.atomically (m := WM) do
+    let s ← w.state
+    let candidate := { s with cardRestoreFrom := some s.nextScanHeight }
+    w.persist candidate
+    w.stateRef.set candidate
+  return true
+
+/-- The search for cards is over: a round of `restoreCards` and a scan of its scripts added nothing. -/
+def endCardRestore (w : Wallet) : WM Unit :=
+  w.cursorLock.atomically (m := WM) do
+    let s ← w.state
+    if s.cardRestoreFrom.isNone then return
+    let candidate := { s with cardRestoreFrom := none }
+    w.persist candidate
+    w.stateRef.set candidate
 
 /-- PSBTv2 metadata, a key-path signature per input, finalize, extract. A card's coin carries no BIP371
 origin: its key is not a BIP32 child of the account key. -/

@@ -228,6 +228,9 @@ structure WalletState where
   first card is issued, and present whenever a card is. Winnow receives at it only what a card's tweak
   derives. -/
   silentPaymentAddress : Option String := none
+  /-- Set while a wallet restored from a backup is still looking for cards the backup does not list: the
+  first height the backup had not seen, where that search starts. Not part of a backup. -/
+  cardRestoreFrom : Option UInt32 := none
   deriving Inhabited, BEq
 
 def WalletState.utxos (s : WalletState) : Array WalletUTXO := s.allUtxos.filter (!·.isSpent)
@@ -535,7 +538,8 @@ def toJV (s : WalletState) : JV :=
     ("pendingSends", some (.arr (s.pendingSends.map PendingSend.toJV))),
     -- written only once a card exists, so a wallet that never issued one keeps the file it had
     ("cards", if s.cards.isEmpty then none else some (.arr (s.cards.map IssuedCard.toJV))),
-    ("silentPaymentAddress", s.silentPaymentAddress.map .str)]
+    ("silentPaymentAddress", s.silentPaymentAddress.map .str),
+    ("cardRestoreFrom", s.cardRestoreFrom.map fun h => ofInt h.toNat)]
 
 /-- Every coin well-formed and no outpoint twice; optionally the total within the monetary range. -/
 def validateCoins (coins : Array WalletUTXO) (countingTotal : Bool := true) : D Unit := do
@@ -584,11 +588,12 @@ def ofJV (v : JV) : D WalletState := do
     | some k => cards.any (·.index == k)
     | none => true
   unless allUtxos.all known && pendingSends.all (·.selected.all known) do dataCorrupted
+  let cardRestoreFrom ← keyIfPresent kvs "cardRestoreFrom" asUInt32
   let s : WalletState :=
     { descriptor := descriptor, network := network, creationHeight := creationHeight,
       nextReceiveIndex := nextReceiveIndex, nextChangeIndex := nextChangeIndex, nextScanHeight := nextScanHeight,
       scannedThroughHash := scannedThroughHash, allUtxos := allUtxos, history := history, observedFeeRates := observedFeeRates, pendingSends := pendingSends,
-      cards := cards, silentPaymentAddress := silentPaymentAddress }
+      cards := cards, silentPaymentAddress := silentPaymentAddress, cardRestoreFrom := cardRestoreFrom }
   validateCoins allUtxos (countingTotal := false)
   validateCoins s.utxos
   for p in pendingSends do

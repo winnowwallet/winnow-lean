@@ -109,8 +109,8 @@ def stepPeople (msg : PeopleMsg) (m : Model) : Model × List Cmd :=
     | some p =>
       let own := m.settings.ownDisplayName.trimAscii.copy
       let m' := { m with shareCard := { forName := p.name, forPerson := some pid, making := !own.isEmpty } }.present .shareCard
-      -- the shared card too, as the sheet shows both; the person's own is asked for once a name is set
-      (m', if own.isEmpty then [] else [.ownCard g own, .personCard g (some pid) p.name own])
+      -- asked for at once when the wallet's own name is set; otherwise once it is typed
+      (m', if own.isEmpty then [] else [.personCard g (some pid) p.name own])
     | none => (m, [])
   | .remove pid => ({ m with recipientsError := none }, [.updateRecipient g pid none false "recipients"])
 

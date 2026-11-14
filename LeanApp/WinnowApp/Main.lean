@@ -400,7 +400,6 @@ def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         let required := (← e2eRef.get).any (·.requireDeviceAuthentication)
         journal "backup.phraseRevealReady" [("deviceAuthenticationRequired", toString required)]
         return .revealed g e words
-  | .ownCard g name => background fx g "card" do return .card g name (← b.ownCard name)
   | .personCard g personID personName ownName =>
     let act : IO Host := do
       let (card, records) ← b.personCard personID personName ownName
@@ -596,7 +595,7 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .pendingFeeRate .. | .previewFeeBump .. | .bumpFee .. =>
     performPayments b fx c
   | .catalogStatus .. | .connectedPeers .. | .resetPeers .. | .exportBundle .. | .removeExport ..
-  | .revealPhrase .. | .ownCard .. | .personCard .. =>
+  | .revealPhrase .. | .personCard .. =>
     performSettings b fx c
   | .parsePaste .. | .addPerson .. | .editPerson .. | .updateRecipient .. | .labelSender ..
   | .removeSenderLabel .. | .lookupSender .. =>

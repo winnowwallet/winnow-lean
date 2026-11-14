@@ -202,9 +202,6 @@ def Model.onSettingsHost (m : Model) (h : Host) : Model × List Cmd :=
   | .revealed g e words =>
     if m.sensitive g e then ({ m with reveal := { words } }.present .revealPhrase, [])
     else (m, [])
-  | .card g name card =>
-    if m.current g && m.settings.ownDisplayName.trimAscii.copy == name then
-      ({ m with shareCard := { m.shareCard with card := some card, error := none } }, []) else (m, [])
   | .personCard g personName card records =>
     if !m.current g then (m, []) else
     -- the person may be new, and now has a card: the records are current either way
@@ -320,7 +317,7 @@ where onArea (h : Host) (m : Model) : Model × List Cmd :=
   | .resolvedRate .. | .previewed .. | .sent .. | .rawTransaction .. | .relay .. | .paymentLoaded .. | .pendingRate ..
   | .bumpPreviewed .. | .bumped .. =>
     m.onSendHost h
-  | .catalogStored .. | .peers .. | .peersReset .. | .exported .. | .revealed .. | .card .. | .personCard .. =>
+  | .catalogStored .. | .peers .. | .peersReset .. | .exported .. | .revealed .. | .personCard .. =>
     m.onSettingsHost h
   | .pasteParsed .. | .senderLookup .. =>
     m.onPeopleHost h

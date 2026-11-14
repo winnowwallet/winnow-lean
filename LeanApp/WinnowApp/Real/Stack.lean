@@ -291,6 +291,44 @@ def startPhasePolling (env : Env) (epoch : Nat) : IO Unit := do
 
 /-! ## One sync pass -/
 
+/-- A restored wallet looks further for cards its backup does not list (issue #94). The scan forward from
+the backup's height watched the cards the wallet could have made since (`Wallet.beginCardRestore`). If one
+of those was paid there may be more after it, and what was paid to them is in blocks that scan has passed.
+So, once the scan has reached the tip: record the next cards, scan the same blocks again for their scripts
+alone, and repeat until a round records none. Only then is the mark that the search is unfinished cleared,
+so a search a peer or the app's exit cuts short starts again on a later pass.
+
+When no card was paid, which the wallet's file answers, it ends here without a key being read. A range
+scan must be able to check what a peer says against a filter checkpoint (every 1,000 blocks), so the range
+starts just above the last one at or below the backup's height; when the header chain starts above that
+and the range holds none, the search waits for the tip to pass the next one. -/
+def finishCardRestore (env : Env) (w : Wallet) (f : FilterSyncIO) (chainStart : UInt32) (serial : Nat)
+    (applyMatch : BlockMatch → NetM Unit) : NetM Unit := do
+  let some fromHeight ← w.cardRestoreFrom | return
+  let finished (rounds : Nat) : NetM Unit := do
+    env.walletWriteNet serial "cards.endRestore" w.endCardRestore
+    env.journal "cards.restored"
+      [("fromHeight", toString fromHeight), ("rounds", toString rounds), ("cards", toString (← w.cards).size)]
+  if !(← w.wantsMoreCards) then return ← finished 0
+  let some through ← f.lastScannedHeight | return
+  if through < fromHeight then return
+  let interval := FilterSync.checkpointInterval
+  let boundaryBelow := ((fromHeight - 1) / interval) * interval
+  let low := max chainStart (if boundaryBelow == 0 then 0 else boundaryBelow + 1)
+  if through ≥ interval && low != 0 && (RangeScan.boundary (low - 1) through through).isNone then return
+  let mut rounds := 0
+  while (← w.wantsMoreCards) do
+    let before : Std.HashSet ByteArray := Std.HashSet.ofArray (← WM.toNet w.watchScripts)
+    discard <| env.walletWriteNet serial "cards.restore" w.restoreCards
+    let fresh := (← WM.toNet w.watchScripts).filter (!before.contains ·)
+    if fresh.isEmpty then break
+    rounds := rounds + 1
+    let outcome ← f.scanRange low through fresh (RangeScanLimits.make (maxBlocks := RangeScanLimits.blocksCeiling))
+      none applyMatch
+    -- cut short: the cards are recorded and watched from here on; a later pass scans back for them
+    unless outcome.isComplete do return
+  finished rounds
+
 /-- `syncOnce()`: the wallet's and its multisig accounts' scripts in one filter stream (an account is
 just more watched scripts); matched blocks update the wallet and the accounts and confirm pending
 broadcasts; the frontier is recorded either way. -/
@@ -325,7 +363,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
     let pass : NetM Unit := do
       let scripts := (← WM.toNet w.watchScripts) ++ multisigScripts
       let b := s.broadcaster
-      f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w serial b fork : IO Unit)) (onMatch := fun m => do
+      let applyMatch : BlockMatch → NetM Unit := fun m => do
         let effect ← env.walletWriteNet serial "sync.apply" (w.apply m)
         -- a payment to a card is its person's: said once the coin is the wallet's, and never a reason to stop
         for coin in effect.received do
@@ -335,8 +373,15 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
         for discarded in ← (env.hooks.multisigApply m w.network : IO _) do b.cancel discarded
         let pending ← b.pendingTxids
         for tx in m.block.transactions do
-          if pending.contains tx.txid then b.markConfirmed tx.txid m.height)
+          if pending.contains tx.txid then b.markConfirmed tx.txid m.height
+      f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w serial b fork : IO Unit)) (onMatch := applyMatch)
       env.walletWriteNet serial "sync.recordScanHeight" (w.recordScanHeight (← f.nextScanHeight))
+      -- a restored wallet's search for cards, once the scan is at the tip. What it cannot do now it does on a
+      -- later pass, and it is never why a pass fails
+      if (← w.cardRestoreFrom).isSome && (← f.nextScanHeight) > (← s.chain.height) then
+        match ← (finishCardRestore env w f (← s.chain.startHeight) serial applyMatch).attempt with
+        | .ok () => pure ()
+        | .error e => env.journal "cards.restoreWaiting" [("error", e.name)]
       b.pruneConfirmed (← f.nextScanHeight)
       if let some d := dir then (finishRollback d : IO Unit)
     match ← pass.attempt with

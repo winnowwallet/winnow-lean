@@ -102,7 +102,10 @@ def ownKeyExpressionOf (d : Descriptor) (multipath : Bool) : RM String := do
 
 def ownKeyExpression (w : Wallet) (multipath : Bool) : RM String := ownKeyExpressionOf w.descriptor multipath
 
-/-- `ownPersonCard(name:)`: this wallet's account key as the pay-to key. Public material only. -/
+/-- `ownPersonCard(name:)`: this wallet's account key as the pay-to key. Public material only. The app no
+longer makes this card (issue #94: it shows every address the wallet has to everyone given it); it is here
+as what a version 1 card from another wallet is, which is still read and paid, and the tests build theirs
+with it. -/
 def ownPersonCardOf (d : Descriptor) (network : BitcoinNetwork) (name : String) : RM PersonCard := do
   let key ← ownKeyExpressionOf d true
   let payTo ← RM.lift (fun e => .named e.name e.description) (PersonPayTo.ofDescriptor s!"tr({key})" network)
