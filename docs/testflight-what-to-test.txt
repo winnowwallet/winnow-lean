@@ -8,8 +8,9 @@ One home: Simple and Advanced mode are gone, and the home has everything Advance
 3. With Bluetooth on and no Ledger paired, unlock a Ledger nearby: a card pairs it, builds a 2-of-2 of this phone and the Ledger, and shows the first address, which must match the Ledger's.
 4. In Airplane Mode the home shows "Offline" in orange words. Tap it, then Network settings: Sync shows the last error and Retry. "Peers see your IP" leads to Peers and routing the same way.
 5. A backup file with the recovery phrase asks for Face ID or the passcode first. Join an account shows the recovery path under Policy, and says when this phone is only the recovery key.
+6. If Winnow could not read its multisig accounts, Settings → Security → Multisig accounts now offers "Set the damaged file aside".
 
-0.9.11 fixed what new tests found (erasing or importing while syncing, Reset and shuffle peers, two background checks at once, Replaced payments); 0.9.10 and 0.9.9 changed only how Winnow is tested; 0.9.8 checked signatures against BIP340's vectors; 0.9.5 generated the Xcode project from Lean; 0.9.3 moved Winnow onto LeanNative (background checks, Keychain, iCloud backup, Face ID, Ledger over Bluetooth).
+0.9.11 fixed what new tests found (erasing or importing while syncing, Reset and shuffle peers, two background checks at once, Replaced payments); 0.9.8 checked signatures against BIP340's vectors; 0.9.5 generated the Xcode project from Lean; 0.9.3 moved Winnow onto LeanNative (background checks, Keychain, iCloud backup, Face ID, Ledger over Bluetooth).
 
 This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Security → Hardware wallets and keys. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
 

@@ -477,6 +477,11 @@ def ofBase64 (text : String) : Except PSBTError PSBT := do
 
 /-- `unsignedTransaction()` (PSBTRoles.swift): the transaction the v2 fields describe. -/
 def unsignedTransaction (p : PSBT) : Except PSBTError Transaction := do
+  -- BIP370's required time and height locktimes (0x11, 0x12) decide the transaction's locktime, and this reads
+  -- the fallback alone: a signature made here would be for another transaction than a cosigner's. Refused,
+  -- as `base64V0` refuses them, until the rule is implemented.
+  if p.inputs.any (fun i => i.pairs.any fun q => q.type == 0x11 || q.type == 0x12) then
+    throw (.malformed "per-input locktime requirements are unsupported")
   let mut ins : Array Transaction.Input := #[]
   for h : k in [0:p.inputs.size] do
     let i := p.inputs[k]

@@ -289,6 +289,11 @@ def stepMultisigAccount (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
     match m.confirm with
     | some (.removeMultisig id) => ({ m with confirm := none, multisigAccountError := none }, [.removeMultisigAccount g id])
     | _ => (m, [])
+  | .askSetAside => if m.multisig.notice.isSome then ({ m with confirm := some .setAsideMultisig }, []) else (m, [])
+  | .setAside =>
+    match m.confirm with
+    | some .setAsideMultisig => ({ m with confirm := none }, [.setAsideMultisig g])
+    | _ => (m, [])
   | .sendFrom id =>
     -- the Send sheet with this account under From; a payment being signed and broadcast stays as it is
     let m' := if m.hasSheet .send then m else m.present .send
@@ -378,7 +383,7 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .setRecoveryThreshold .. | .pasteRecoveryKey | .removeRecoveryKey | .setRecoveryDays .. | .create
   | .registerLedger .. =>
     stepMultisigBuild msg m
-  | .newAddress | .askRemove | .remove | .sendFrom .. | .pasteForAccount .. | .verifyAddress | .rebroadcast ..
+  | .newAddress | .askRemove | .remove | .askSetAside | .setAside | .sendFrom .. | .pasteForAccount .. | .verifyAddress | .rebroadcast ..
   | .askAbandon .. | .abandon =>
     stepMultisigAccount msg m
   | .setPasted .. | .pastePSBT | .addPasted .. | .sign .. | .signWithLedger .. | .broadcast .. | .askDiscard ..
@@ -475,7 +480,12 @@ def literalRow (m : Model) (key text : String) (id := "") : H :=
 /-- Settings → Security → Multisig accounts. -/
 def multisigSection (m : Model) : H :=
   .section "Multisig" "Accounts that need more than one signature to spend. Pair a Ledger or save other people's keys in Settings → Security → Hardware wallets and keys."
-    ((match m.multisig.notice with | some n => [body n] | none => []) ++
+    ((match m.multisig.notice with
+      | some n =>
+        [ warningRow n
+        , caption "While this file is in place Winnow does not sync, so that no payment to these accounts is passed over."
+        , .identified Ids.multisigSetAsideButton (.button "Set the damaged file aside" .plain (some (.multisig .askSetAside))) ]
+      | none => []) ++
      (m.multisig.accounts.map fun a =>
         .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
               Html.tone .secondary (body (satsText a.balance))]) ++

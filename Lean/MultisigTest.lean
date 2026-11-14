@@ -247,6 +247,20 @@ def reviewRefusals : TM Unit := do
   refused "review: immature coinbase" (account.reviewSpend psbt #[young] owned testChainTip) (matching := accountError)
   let mature := { young with height := testChainTip - Wallet.coinbaseMaturity }
   check "review: mature coinbase" (account.reviewSpend psbt #[mature] owned testChainTip).toBool
+  -- #92's finding 12: a coinbase coin short of its hundred blocks is not offered to a spend, so the largest
+  -- coin being one does not stop the others from paying
+  let beside := { utxo with vout := utxo.vout + 7 }
+  check "create: an immature coinbase coin is not among the coins to spend"
+    (match account.spendableCoins #[{ young with amount := 900_000 }, beside] .signers testChainTip with
+     | .ok (coins, _) => coins.map (·.vout) == #[beside.vout] | .error _ => false)
+  check "create: a mature one is"
+    (match account.spendableCoins #[mature, beside] .signers testChainTip with
+     | .ok (coins, _) => coins.size == 2 | .error _ => false)
+  -- #92's finding 11: BIP370's per-input locktimes decide the transaction's locktime, and are refused unread
+  let timed := psbt.modifyInput 0 (·.set (PSBT.KeyValue.make 0x12 .empty (ByteArray.mk #[0xF4, 0x01, 0, 0])))
+  check "psbt: a required height locktime on an input is refused, not signed past"
+    (match timed.unsignedTransaction with | .error (.malformed _) => true | _ => false)
+  check "psbt: without one, the transaction is read" psbt.unsignedTransaction.toBool
   refused "review: creator refuses a big fee"
     (account.createSpend #[utxo] #[{ amount := 50_000, scriptPubKey := destination }] 0 100 testChainTip)
 
@@ -815,6 +829,66 @@ def feeBumpRecordsItsOutputs : TM Unit := do
   check "bump: external amount" (outputs.external.map (·.amount) == #[100_000])
   check "bump: external script" ((outputs.external[0]?.map (·.scriptPubKey)) == some p2trDestination)
   check "bump: change" (outputs.change.size == 1)
+
+/-- #92's finding 5: a send of two coins, bumped, then beaten by another spend of one of them. The bump took the
+original's place in the pending sends, so the coins' reservations have to name it too, or the other coin stays
+reserved by a transaction nothing knows any more. -/
+def aBumpedSendThatLoses : TM Unit := do
+  let w ← need "create" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
+  let script ← need "spk" (w.scriptPubKey .receive 0)
+  let funding : Transaction := { version := 2, inputs := #[coinbaseInput], locktime := 0
+                                 outputs := #[{ value := 100_000, scriptPubKey := script }, { value := 60_000, scriptPubKey := script }] }
+  discard (need "fund" (w.apply (fakeMatch 100 #[funding])))
+  need "mature" (w.recordScanHeight (100 + Wallet.coinbaseMaturity))
+  let original ← need "send" (w.buildSend #[{ amount := 130_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit original)
+  let originalTxid := original.built.transaction.txid
+  check "bumped: the payment needs both coins" (original.built.transaction.inputs.size == 2)
+  let rate ← need "rate" (w.pendingFeeRate originalTxid)
+  let replacement ← need "bump" (w.buildFeeBump originalTxid (rate + 1))
+  need "commit bump" (w.commitFeeBump replacement)
+  let bumpedTxid := replacement.built.transaction.txid
+  let reservedBy (s : WalletState) : Array ByteArray :=
+    (s.allUtxos.filter (·.txid == funding.txid)).filterMap fun u => u.spent.map (·.spentBy)
+  check "bumped: both coins are reserved by the replacement, not the original"
+    (reservedBy (← w.state) == #[bumpedTxid, bumpedTxid])
+  let winner : Transaction := { version := 2, locktime := 0
+                                inputs := #[{ previousOutput := ⟨funding.txid, 1⟩, scriptSig := .empty, sequence := 0xFFFF_FFFD }]
+                                outputs := #[{ value := 59_000, scriptPubKey := p2trDestination }] }
+  discard (need "confirm" (w.apply (fakeMatch 150 #[winner])))
+  check "bumped: the coin the other spend left is spendable again" ((← w.balance) == 100_000) s!"{← w.balance}"
+  check "bumped: nothing is pending" (← w.state).pendingSends.isEmpty
+  check "bumped: no coin is still reserved by a pending transaction"
+    ((← w.state).allUtxos.all fun u => !(u.spent.any (·.height.isNone)))
+
+/-- #92's finding 13: a pending payment in a backup lists its coins in its inputs' order, and its fee is what
+they leave. A fee bump signs input k with coin k, so another order would make a replacement no node takes. -/
+def aPendingSendInABackupIsHeldToItsTransaction : TM Unit := do
+  let w ← need "create" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
+  let script ← need "spk" (w.scriptPubKey .receive 0)
+  let funding : Transaction := { version := 2, inputs := #[coinbaseInput], locktime := 0
+                                 outputs := #[{ value := 100_000, scriptPubKey := script }, { value := 60_000, scriptPubKey := script }] }
+  discard (need "fund" (w.apply (fakeMatch 100 #[funding])))
+  need "mature" (w.recordScanHeight (100 + Wallet.coinbaseMaturity))
+  let send ← need "send" (w.buildSend #[{ amount := 130_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit send)
+  let backup ← need "export" w.exportBundle
+  let decoded ← needE "decode" (·.name) (ImportBundle.decode backup.serialized)
+  check "pending in a backup: one payment of two coins" ((decoded.pendingSends.map (·.selected.size)) == #[2])
+  let imports (b : ImportBundle) : TM (Option String) := do
+    match ← (Wallet.importing b (← newKeyStore) none pinned).run with
+    | .ok _ => return none
+    | .error (.wallet e) => return some e.description
+    | .error e => return some e.name
+  check "pending in a backup: as exported, it imports" ((← imports decoded).isNone) s!"{← imports decoded}"
+  let reordered := { decoded with pendingSends := decoded.pendingSends.map fun p => { p with selected := p.selected.reverse } }
+  check "pending in a backup: its coins in another order are refused"
+    ((← imports reordered) == some (WalletError.invalidBundle "pending payment: its coins are not in its inputs' order").description)
+    s!"{← imports reordered}"
+  let cheaper := { decoded with pendingSends := decoded.pendingSends.map fun p => { p with fee := p.fee + 1 } }
+  check "pending in a backup: a fee its coins and outputs do not leave is refused"
+    ((← imports cheaper) == some (WalletError.invalidBundle "pending payment: its fee is not what its coins and outputs leave").description)
+    s!"{← imports cheaper}"
 
 def recordedOutputsRoundTrip : TM Unit := do
   let path ← tempPath "history-outputs-wallet.json"
@@ -1714,6 +1788,8 @@ def main : IO UInt32 := runMain "multisig-test" do
   runTest "silentPaymentValidation" silentPaymentValidation
   runTest "sendToOwnAddressIsNotExternal" sendToOwnAddressIsNotExternal
   runTest "feeBumpRecordsItsOutputs" feeBumpRecordsItsOutputs
+  runTest "aBumpedSendThatLoses" aBumpedSendThatLoses
+  runTest "aPendingSendInABackupIsHeldToItsTransaction" aPendingSendInABackupIsHeldToItsTransaction
   runTest "recordedOutputsRoundTrip" recordedOutputsRoundTrip
   runTest "backupCompatibility" backupCompatibility
   runTest "aLosingPendingSend" aLosingPendingSend

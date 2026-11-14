@@ -291,6 +291,9 @@ def watchScripts (s : MultisigStore) (network : BitcoinNetwork) : RM (Array Byte
   -- a store that could not be read is not a store with no accounts: a scan on the wallet's scripts alone would
   -- move the scan height past the accounts' payments, and nothing goes back for them
   if s.unavailable then throw (.multisig .unavailable)
+  -- nor is a damaged one: while the file is in place nothing is scanned, so no block's account payments are
+  -- passed over; `MultisigHost.setAsideDamaged` is the way on (the owner's decision, 2026-11-13)
+  if s.isDamaged then throw (.multisig .damaged)
   unless network == s.network do invalid "the account network does not match the open wallet"
   let (caches, store) ← s.ownerCaches s.records
   return (caches.foldl (fun acc c => acc ++ c.scripts.extract 0 (2 * (watchCountOf c s.records).toNat)) #[], store)
@@ -637,6 +640,22 @@ def modify {α} (h : MultisigHost) (f : MultisigStore → RM (MultisigStore × �
 /-- `configureMultisig()`: reads the file of `dir` (none: unreachable storage, nothing persisted). -/
 def configure (h : MultisigHost) (network : BitcoinNetwork) (dir : Option System.FilePath) : IO Unit := do
   let (store, result) ← MultisigStore.configure h.keys (dir.map (· / MultisigStore.fileName)) network
+  h.state.atomically (set store)
+  h.notice.set (match result with | .damaged m => some m | _ => none)
+
+/-- The name a damaged account file is kept under once it is set aside: beside the store, never read again by
+the app, there for whoever can still make something of it. -/
+def setAsideName (stamp : Nat) : String := s!"multisig.damaged-{stamp}.json"
+
+/-- A damaged account file set aside (renamed, kept) and the store begun again with no accounts, so that the
+wallet syncs and accounts can be joined again. Nothing happens to a store that is not damaged. -/
+def setAsideDamaged (h : MultisigHost) (stamp : Nat) : IO Unit := do
+  let s ← h.read
+  if !s.isDamaged then return
+  if let some p := s.path then
+    if ← p.pathExists then
+      IO.FS.rename p ((p.parent.getD ".") / setAsideName stamp)
+  let (store, result) ← MultisigStore.configure h.keys s.path s.network
   h.state.atomically (set store)
   h.notice.set (match result with | .damaged m => some m | _ => none)
 

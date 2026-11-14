@@ -858,8 +858,16 @@ def commitFeeBump (w : Wallet) (prepared : PreparedFeeBump) : WM Unit := do
     | throw (.feeBump .transactionNotPending)
   let signed := prepared.built.transaction
   let txid := signed.txid
-  let mut updated := { s with allUtxos := s.allUtxos.filter fun u =>
-    !(u.txid == prepared.originalTxid && u.vout == prepared.originalChangeOutputIndex) }
+  -- the replacement spends the original's coins: their reservations are its own from here, so that when it
+  -- loses to another spend of one of them (`reconcilePendingConflicts` releases by the loser's txid) the others
+  -- come back, and do not stay reserved by a transaction no pending send names any more
+  let reservedByOriginal (u : WalletUTXO) : Bool :=
+    u.spent.any fun m => m.spentBy == prepared.originalTxid && m.height.isNone
+  let withoutOldChange := s.allUtxos.filter fun u =>
+    !(u.txid == prepared.originalTxid && u.vout == prepared.originalChangeOutputIndex)
+  let taken : Array WalletUTXO := withoutOldChange.map fun u =>
+    if reservedByOriginal u then { u with spent := some ⟨txid, none⟩ } else u
+  let mut updated := { s with allUtxos := taken }
   if let some change := prepared.change then
     let some vout := prepared.changeOutputIndex | throw (.wallet .changeOutputMissing)
     let some o := signed.outputs[vout.toNat]? | throw (.wallet .changeOutputMissing)
@@ -990,6 +998,13 @@ def validatedPendingSends (bundle : ImportBundle) (descriptor : Descriptor) (net
     unless WalletState.inMoney p.fee do invalid "invalid fee"
     unless p.selected.size == tx.inputs.size && tx.inputs.all (fun i => p.selected.any (·.outpoint == i.previousOutput)) do
       invalid "its coins are not its inputs"
+    -- and in its inputs' order: a fee bump signs input k with coin k's key and amount, so another order would
+    -- make a replacement no node takes
+    unless (p.selected.zip tx.inputs).all (fun (c, i) => c.outpoint == i.previousOutput) do
+      invalid "its coins are not in its inputs' order"
+    let spent := p.selected.foldl (fun a c => a + c.amount.toInt) (0 : Int)
+    let paid := tx.outputs.foldl (fun a o => a + o.value.toInt) (0 : Int)
+    unless spent - paid == p.fee.toInt do invalid "its fee is not what its coins and outputs leave"
     if let some k := p.changeOutputIndex then unless k.toNat < tx.outputs.size do invalid "no such change output"
     for c in p.selected do
       unless c.amount > 0 && c.amount ≤ bitcoinAmountMaximum && c.txid.size == 32 do invalid "invalid coin"

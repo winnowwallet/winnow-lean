@@ -42,7 +42,8 @@ def readBE (b : ByteArray) (off n : Nat) : UInt64 := Id.run do
 
 def ByteArray.reverse (b : ByteArray) : ByteArray := ⟨b.data.reverse⟩
 
-/-- Constant-shape equality of two byte strings. -/
+/-- Equality of two byte strings: an ordinary comparison, which stops at the first byte that differs. Not for
+secrets; a tag or a MAC is compared by the constant-time function beside its use (`AESGCM`, the store seal). -/
 def ByteArray.eq (a b : ByteArray) : Bool := a.data == b.data
 
 instance : BEq ByteArray := ⟨ByteArray.eq⟩

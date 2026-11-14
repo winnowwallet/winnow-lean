@@ -1212,6 +1212,11 @@ def keyOrigins (a : MultisigAccount) (choice : Nat) (index : UInt32) : MAM (Arra
 /-- The coins a spend on `path` may use and the sequence its inputs carry. -/
 def spendableCoins (a : MultisigAccount) (utxos : Array WalletUTXO) (path : SpendPath) (chainTip : UInt32) :
     MAM (Array WalletUTXO × UInt32) := do
+  -- a coinbase coin short of its hundred blocks is not a coin to spend yet: selected (the largest first), it
+  -- would only be refused by the review (`checkInput`), with coins beside it that could have paid
+  let mature (u : WalletUTXO) : Bool :=
+    !u.isCoinbase || chainTip.toNat ≥ u.height.toNat + Wallet.coinbaseMaturity.toNat - 1
+  let utxos := utxos.filter mature
   if !path.isRecovery then return (utxos, TransactionBuilder.defaultSequence)
   let some r := a.recovery | refuse "this account has no recovery path"
   let unlocked := utxos.filter (a.isUnlockedForRecovery · chainTip)

@@ -543,6 +543,51 @@ def testAnAccountFileWhoseKeyIsLockedIsReadAgainAndNeverScannedWithout : IO Unit
   let (_, damaged) ← S.open keys (some url)
   check "a tampered file still reads as damage" (match damaged with | .damaged _ => true | _ => false)
 
+/-- A damaged account file stops the scan, and is set aside by the person: renamed and kept, the accounts begun
+again from none, so the wallet syncs and an account can be joined again. -/
+def testADamagedAccountFileStopsTheScanUntilItIsSetAside : IO Unit := do
+  let keys ← memoryKeys
+  let url ← tempFile "multisig.json"
+  let dir := url.parent.get!
+  let a ← twoOfTwo
+  let (store, _) ← S.open keys (some url)
+  discard <| need "add" (store.add "Shared" a 100)
+  let bytes ← IO.FS.readBinFile url
+  let damagedBytes := bytes.set! (bytes.size - 1) (bytes[bytes.size - 1]! ^^^ 1)
+  IO.FS.writeBinFile url damagedBytes
+  let host ← MultisigHost.new keys
+  host.configure signet (some dir)
+  check "damaged: the host says so" ((← host.read).isDamaged && (← host.notice.get).isSome)
+  refused "damaged: no scripts for a scan while the file is in place" ((← host.read).watchScripts signet |>.map (·.1)) "damaged"
+  -- the model: the notice has the button, the button asks, and only the confirmation sets aside
+  let noticed : Model := { stage := .ready, active := true, walletID := some "w",
+                           multisig := { notice := ← host.notice.get } }
+  let section_ := (LeanNative.Html.toWire (multisigSection noticed)).toJson.compress
+  check "damaged: the notice offers to set the file aside" ((section_.splitOn "Set the damaged file aside").length > 1)
+  let (asked, cs) := stepMultisig .askSetAside noticed
+  check "damaged: the button asks first" (asked.confirm == some .setAsideMultisig && cs.isEmpty)
+  let (stray, cs) := stepMultisig .setAside noticed
+  check "damaged: nothing is set aside without the question" (stray.confirm.isNone && cs.isEmpty)
+  let (confirmed, cs) := stepMultisig .setAside asked
+  check "damaged: confirmed, the file is set aside" (confirmed.confirm.isNone && cs.any (· matches .setAsideMultisig _))
+  let (quiet, cs) := stepMultisig .askSetAside { noticed with multisig := {} }
+  check "damaged: with no notice there is nothing to ask" (quiet.confirm.isNone && cs.isEmpty)
+  -- the host
+  host.setAsideDamaged 42
+  let after ← host.read
+  check "set aside: the accounts begin again from none, readable" (!after.isDamaged && after.records.isEmpty && (← host.notice.get).isNone)
+  check "set aside: the damaged file is kept under another name, byte for byte"
+    (!(← url.pathExists) && (← IO.FS.readBinFile (dir / MultisigHost.setAsideName 42)) == damagedBytes)
+  let (scripts, _) ← need "watch scripts after" (after.watchScripts signet)
+  check "set aside: a scan has no account scripts, and is not refused" scripts.isEmpty
+  let added ← (host.modify fun s => do
+    let (s', r) ← s.add keys writeAtomically "Shared again" a 200
+    return (s', r)).run
+  check "set aside: the account can be joined again" (added.toOption.isSome && (← host.read).records.size == 1)
+  host.setAsideDamaged 43
+  check "set aside: a store that is not damaged is left alone"
+    ((← host.read).records.size == 1 && !(← (dir / MultisigHost.setAsideName 43).pathExists))
+
 def testDuplicateWrongNetworkAndBadNamesAreRefused : IO Unit := do
   let a ← twoOfTwo
   let (store, _) ← S.open (← memoryKeys) (some (← tempFile "multisig.json"))
@@ -2524,6 +2569,7 @@ def storeTests : List (String × IO Unit) :=
   , ("testLookaheadFindsPaymentsUpToTheGapLimitAhead", testLookaheadFindsPaymentsUpToTheGapLimitAhead)
   , ("testTamperedUnsealedAndOversizedFilesAreRefusedAndKept", testTamperedUnsealedAndOversizedFilesAreRefusedAndKept)
   , ("testAnAccountFileWhoseKeyIsLockedIsReadAgainAndNeverScannedWithout", testAnAccountFileWhoseKeyIsLockedIsReadAgainAndNeverScannedWithout)
+  , ("testADamagedAccountFileStopsTheScanUntilItIsSetAside", testADamagedAccountFileStopsTheScanUntilItIsSetAside)
   , ("testDuplicateWrongNetworkAndBadNamesAreRefused", testDuplicateWrongNetworkAndBadNamesAreRefused)
   , ("testDraftsFollowTheirCoinsAndAnAbandonedSpendFreesThem", testDraftsFollowTheirCoinsAndAnAbandonedSpendFreesThem)
   , ("testADraftConfirmedByACoSignerPaysItsPerson", testADraftConfirmedByACoSignerPaysItsPerson) ]

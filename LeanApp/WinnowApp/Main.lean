@@ -433,6 +433,9 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .removeMultisigAccount g id => background fx g "multisigAccount" do
       b.removeMultisigAccount id
       return .multisigRemoved g id
+  | .setAsideMultisig g => background fx g "multisigAccount" do
+      b.setAsideDamagedMultisig
+      return .multisig g (← b.multisigOverview)
   | .newMultisigAddress g id => background fx g "multisigAccount" do
       b.newMultisigReceiveAddress id
       return .multisig g (← b.multisigOverview)
@@ -589,6 +592,7 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .removeSenderLabel .. | .lookupSender .. =>
     performPeople b fx c
   | .multisigOverview .. | .checkMultisigDescriptor .. | .addMultisigAccount .. | .removeMultisigAccount ..
+  | .setAsideMultisig ..
   | .newMultisigAddress .. | .createMultisigAccount .. | .registerLedger .. | .pairLedger .. | .addSignerKeys ..
   | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft ..
   | .signDraftWithLedger .. | .adoptDraft .. | .broadcastDraft .. | .discardDraft .. | .rebroadcastSpend ..

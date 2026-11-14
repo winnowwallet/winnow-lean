@@ -82,6 +82,7 @@ def Real.MultisigApp.install (a : Real.MultisigApp) (env : Real.Env) (base : Bac
       let r ← Real.addMultisigAccount env a name d
       return (r.id, ← Real.registerAfterSaving env a r)
     removeMultisigAccount := Real.removeMultisigAccount a
+    setAsideDamagedMultisig := Real.setAsideDamagedMultisig a
     newMultisigReceiveAddress := Real.newMultisigReceiveAddress a
     createMultisigAccount := fun name k members rec => do
       let r ← Real.createMultisigAccount env a name k members rec

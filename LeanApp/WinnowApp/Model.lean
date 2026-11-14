@@ -106,6 +106,8 @@ inductive Confirm where
   | openExternal (url : String) (exposedItem : String)
   /-- MultisigAccountView's "Remove this account from this phone?". -/
   | removeMultisig (id : String)
+  /-- The damaged account file's "Set the damaged file aside?". -/
+  | setAsideMultisig
   /-- The collection step's "Discard this payment?". -/
   | discardDraft (id : String)
   /-- The payment screen's "Give up on this payment?". -/
@@ -821,6 +823,9 @@ inductive MultisigMsg where
   | newAddress
   | askRemove
   | remove
+  /-- The damage notice's button, and its confirmation. -/
+  | askSetAside
+  | setAside
   /-- "Send from this account": the Send sheet, From this account. -/
   | sendFrom (id : String)
   /-- "Paste a PSBT from a co-signer" (the account page). -/
@@ -965,6 +970,7 @@ inductive Cmd where
   | checkMultisigDescriptor (gen : Nat) (text : String)
   | addMultisigAccount (gen : Nat) (name descriptor : String)
   | removeMultisigAccount (gen : Nat) (id : String)
+  | setAsideMultisig (gen : Nat)
   | newMultisigAddress (gen : Nat) (id : String)
   | createMultisigAccount (gen : Nat) (name : String) (threshold : Nat)
       (members : List (List String × Option Nat)) (recovery : Option MultisigRecovery)
