@@ -345,19 +345,20 @@ Decided on 2026-11-14, and done in this revision:
 - **The app recovers cards** when it restores from a backup that carries the phrase ("Backup and
   recovery").
 
-Decided, and waiting on a way to do it:
+Decided, and left for now:
 
 - **Receiving standard silent payments: yes, if we know how to find them.** With what Winnow has, we do
-  not. The next section says why and what the ways are. Until one is chosen the bare address is not safe
-  to hand out alone, and the card sheet does not show it alone.
+  not; the next section says why and what the ways are. It is left until there is a way that needs no
+  server: Winnow will not name a tweak server to trust, and a notice from the payer for every payment is
+  not wanted. Until then the bare address is not safe to hand out alone, and the card sheet does not show
+  it alone.
 
 Still open:
 
-1. **Which way to find a standard silent payment**, below.
-2. **Showing an unconfirmed payment** made with a card.
-3. **LeanNative capabilities**: a camera for QR codes, the Bluetooth peripheral role, NFC, and in which
+1. **Showing an unconfirmed payment** made with a card.
+2. **LeanNative capabilities**: a camera for QR codes, the Bluetooth peripheral role, NFC, and in which
    order.
-4. **A per-payment request** with an amount and an expiry, for "pay exactly this, now".
+3. **A per-payment request** with an amount and an expiry, for "pay exactly this, now".
 
 ## Finding a standard silent payment
 
