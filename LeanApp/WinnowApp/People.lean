@@ -104,6 +104,14 @@ def stepPeople (msg : PeopleMsg) (m : Model) : Model × List Cmd :=
         (m', cs)
     | none => (m, [])
   | .rename pid => m.openPerson { personID := some pid } ""
+  | .card pid =>
+    match m.person? pid with
+    | some p =>
+      let own := m.settings.ownDisplayName.trimAscii.copy
+      let m' := { m with shareCard := { forName := p.name, forPerson := some pid, making := !own.isEmpty } }.present .shareCard
+      -- the shared card too, as the sheet shows both; the person's own is asked for once a name is set
+      (m', if own.isEmpty then [] else [.ownCard g own, .personCard g (some pid) p.name own])
+    | none => (m, [])
   | .remove pid => ({ m with recipientsError := none }, [.updateRecipient g pid none false "recipients"])
 
 /-! ## View -/
@@ -162,6 +170,7 @@ def savedRecipientsSheet (m : Model) (inner : List H) : H :=
      (shown.map fun p =>
         .row [ .button (if p.payTo.isNone then s!"{p.name} — add destination" else p.name) .plain (some (.people (.choose p.id)))
              , .spacer
+             , .button (if p.hasCard then "Their card" else "Make a card") .plain (some (.people (.card p.id)))
              , .button "Rename" .plain (some (.people (.rename p.id)))
              , .button "Remove" .destructive (some (.people (.remove p.id))) ])) inner
 

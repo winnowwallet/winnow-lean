@@ -327,6 +327,10 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
       let b := s.broadcaster
       f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w serial b fork : IO Unit)) (onMatch := fun m => do
         let effect ← env.walletWriteNet serial "sync.apply" (w.apply m)
+        -- a payment to a card is its person's: said once the coin is the wallet's, and never a reason to stop
+        for coin in effect.received do
+          if let some card := coin.card then
+            discard <| ((env.hooks.cardPayment card (Winnow.displayHex coin.txid) : IO Unit)).toBaseIO
         for discarded in effect.discardedReplacements do b.cancel discarded
         for discarded in ← (env.hooks.multisigApply m w.network : IO _) do b.cancel discarded
         let pending ← b.pendingTxids

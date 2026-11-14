@@ -166,6 +166,107 @@ def peopleAndPastes (a b : Phone) : IO Unit := do
   let cardA ← obtain "ownCard A" (do return (← ownPersonCard a.wallet "Alice").serialized)
   discard <| obtain "B adds Alice" (addPerson b.store (some b.wallet) "Alice" (some cardA) none none none)
 
+/-- A card per person (issue #94): A makes a card for one person, B is that person and pays it. -/
+def personCards (a b : Phone) : IO Unit := do
+  let contains (haystack needle : String) : Bool := (haystack.splitOn needle).length > 1
+  let (cardText, r) ← obtain "a card for Dana" (personCard a.store a.wallet none " Dana " "Alice")
+  let some dana := r.people.find? (·.name == "Dana") | check "card: Dana is a contact" false; return
+  check "card: the person is saved by name, with no destination, and has a card"
+    (dana.payTo.isNone && dana.hasCard && !dana.isSavedRecipient)
+  let issued ← a.wallet.cards
+  check "card: the wallet issued one card" (issued.size == 1)
+  let some code := (issued[0]?.map (Wallet.cardCodeOf network ·)) | check "card: issued" false; return
+  let codeText := code.encoded.toOption.getD ""
+  check "card: a version 2 person card under my name, paying the code"
+    (match PersonCard.decode cardText with
+     | .ok c => c.version == 2 && c.name == "Alice" && c.network == "regtest" && c.payTo == some codeText && codeText.startsWith "rwnc1"
+     | .error _ => false) cardText
+  check "card: the card does not carry the account key" (!contains cardText "tpub" && !contains cardText "tr(")
+  let (again, _) ← obtain "Dana's card again" (personCard a.store a.wallet none "Dana" "Alice")
+  check "card: asked again, it is the same card and no new one is issued" (again == cardText && (← a.wallet.cards).size == 1)
+  check "card: whether a person has one" ((← hasPersonCard a.store none "Dana") && (← hasPersonCard a.store none " Dana ") &&
+    (← hasPersonCard a.store (some dana.id) "") && !(← hasPersonCard a.store none "Nobody") &&
+    !(← hasPersonCard a.store none "") && !(← hasPersonCard a.store (some "no such id") "Dana"))
+  let (erinText, r) ← obtain "a card for Erin" (personCard a.store a.wallet none "Erin" "Alice")
+  check "card: another person gets another card" (erinText != cardText && (← a.wallet.cards).size == 2 &&
+    (r.people.filter (·.hasCard)).length == 2)
+  -- two people of one name: by name the first is meant, by ID the one that was chosen
+  let twin ← obtain "a second Dana" (do
+    let (ps, record) ← (← RM.io a.store.read).people.add a.keys writeAtomically "twin" "Dana" none
+    a.store.modify fun st => pure ({ st with people := ps }, record))
+  let (byName, _) ← obtain "Dana by name" (personCard a.store a.wallet none "Dana" "Alice")
+  let (byID, r) ← obtain "the second Dana by ID" (personCard a.store a.wallet (some twin.id) "Dana" "Alice")
+  check "card: by name the first Dana's card, by ID the second Dana's own"
+    (byName == cardText && byID != cardText && (← a.wallet.cards).size == 3 &&
+     (r.people.filter fun p => p.name == "Dana" && p.hasCard).length == 2)
+  refused "card: a person that is not saved has no card" (kind := "unknownPerson") (personCard a.store a.wallet (some "no such id") "Dana" "Alice")
+  discard <| obtain "the second Dana goes" (removePerson a.store (some a.wallet) twin.id)
+  refused "card: a name over two lines makes no card" (kind := "invalidState") (personCard a.store a.wallet none "Da\nna" "Alice")
+  check "card: and issues none" ((← a.wallet.cards).size == 3)
+  -- the person pastes it
+  let read ← obtain "B reads the card" (parsePaste network cardText)
+  check "card: read as Alice, a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
+  let bare ← obtain "B reads the bare code" (parsePaste network s!" {codeText.toUpper}\n")
+  check "card: the code alone reads too" (bare.payTo == some true && bare.name.isNone)
+  -- B already has an Alice (her shared card): names are not unique, so this one is found by its own
+  let rb ← obtain "B saves Alice" (addPerson b.store (some b.wallet) "Alice, her card for me" (some cardText) none none none)
+  let some alice := rb.people.find? (·.name == "Alice, her card for me") | check "card: Alice saved on B" false; return
+  check "card: B's first scripts for Alice are the card's" (
+    let expected := (List.range 20).filterMap fun i => (Keys.CardKeys.scriptPubKey code i.toUInt32).toOption.map hex
+    (rb.recipientByScript.filter (·.2 == alice.id)).map (·.1) == expected && expected.length == 20)
+  let (address0, index0) ← obtain "B's next payment" (nextPaymentAddress b.store alice.id)
+  let script0 := (Keys.CardKeys.scriptPubKey code 0).toOption.getD .empty
+  check "card: B pays payment 0 of the card, an address A's wallet watches"
+    (index0 == 0 && some address0 == AddressDecoder.address script0 network &&
+     ((← (a.wallet.watchScripts).run).toOption.getD #[]).contains script0) address0
+  discard <| advancePersonPaymentIndex b.store (some b.wallet) alice.id index0
+  let (address1, index1) ← obtain "B's payment after that" (nextPaymentAddress b.store alice.id)
+  check "card: the next payment is the next index, another address" (index1 == 1 && address1 != address0)
+  refused "card: the same card for a second person is refused" (kind := "duplicate")
+    (addPerson b.store (some b.wallet) "Alicia" (some cardText) none none none)
+  let mainnetCode := ((CardCode.make code.key code.seed CardCode.mainnetHRP).toOption.bind (·.encoded.toOption)).getD ""
+  let wrongNetwork ← (parsePaste network mainnetCode).run
+  check "card: a code for another network says so" (match wrongNetwork with
+    | .error e => e.description == "That code is for a different Bitcoin network. This wallet is on regtest."
+    | .ok _ => false)
+  refused "card: a code-shaped paste that is not one" (kind := "unrecognised") (parsePaste network "rwnc1qqexample")
+  -- a payment to a card is named as its person's
+  let txid := String.ofList (List.replicate 64 'a')
+  labelCardPayment a.store 0 txid
+  check "card: a payment to Dana's card is labelled Dana's" ((lookup (← a.records).senderByTxid txid) == some dana.id)
+  labelCardPayment a.store 0 txid
+  check "card: labelled once" (((← a.records).senderByTxid.filter (·.1 == txid)).length == 1)
+  let some erin := (← a.records).people.find? (·.name == "Erin") | check "card: Erin" false; return
+  let other := String.ofList (List.replicate 64 'b')
+  discard <| obtain "label by hand" (labelSender a.store (some a.wallet) other erin.id)
+  labelCardPayment a.store 0 other
+  check "card: a label already given is kept" ((lookup (← a.records).senderByTxid other) == some erin.id)
+  labelCardPayment a.store 9 (String.ofList (List.replicate 64 'c'))
+  check "card: a card nobody is linked to labels nothing" ((← a.records).senderByTxid.length == 2)
+  -- the file
+  let reopened ← a.reopen
+  check "card: the links are in the people file" (((← reopened.records).people.filter (·.hasCard)).map (·.name) == ["Dana", "Erin"])
+  let st ← a.store.read
+  let people := st.people.records
+  check "card: two people linked to one card is an invalid file"
+    ((← (PeopleStore.validate (people.map fun (p : PersonRecord) => if p.name == "Erin" then { p with issuedCard := some 0 } else p)
+      st.people.senderByTxid network).run).toOption.isNone)
+  check "card: a person with no card writes no link"
+    (!contains (SwiftJSON.write ({ id := "p", name := "Plain" } : PersonRecord).toJV) "issuedCard")
+  -- an iCloud copy brings the links back to a phone that has the contacts without them
+  let backup ← obtain "backup" st.people.backup
+  let unlinked : PeopleStore := { st.people with records := people.map fun (p : PersonRecord) => { p with issuedCard := none } }
+  let merged : PeopleStore.Backup ← obtain "restore plan" (unlinked.planRestore backup)
+  check "card: a restore gives the contacts their cards back"
+    ((merged.people.filter (·.issuedCard.isSome)).map (fun (p : PersonRecord) => (p.name, p.issuedCard)) == #[("Dana", some 0), ("Erin", some 1)])
+  let taken : PeopleStore := { st.people with records := people.map fun (p : PersonRecord) =>
+    if p.name == "Erin" then { p with issuedCard := some 0 }
+    else if p.name == "Dana" then { p with id := "another", name := "Dan", issuedCard := none } else p }
+  let merged : PeopleStore.Backup ← obtain "restore plan, a card already linked here" (taken.planRestore backup)
+  check "card: a restore never links one card to two people"
+    ((merged.people.filter (·.issuedCard == some 0)).map (fun (p : PersonRecord) => p.name) == #["Erin"] &&
+     merged.people.any (fun (p : PersonRecord) => p.name == "Dana"))
+
 def receiveLabels (a b : Phone) : IO Unit := do
   let addr ← obtain "A receive address" (wm (a.wallet.address .receive 0))
   let foreign ← obtain "B receive address" (wm (b.wallet.address .receive 0))
@@ -693,7 +794,7 @@ def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
 def answersTo : Cmd → Option Nat
   | .refresh .. => some 3
   | .saveSettings .. | .removeExport .. => some 0
-  | .receiveAddress .. | .setReceiveLabel .. | .ownCard .. | .parsePaste .. | .addPerson .. | .editPerson ..
+  | .records .. | .receiveAddress .. | .setReceiveLabel .. | .ownCard .. | .personCard .. | .parsePaste .. | .addPerson .. | .editPerson ..
   | .updateRecipient .. | .labelSender .. | .removeSenderLabel .. | .catalogStatus .. | .connectedPeers ..
   | .resetPeers .. | .reconnect .. | .loadPaymentDetails .. | .exportBundle .. | .revealPhrase ..
   | .deleteWallet .. | .paste .. | .importWallet .. => some 1
@@ -1096,6 +1197,61 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   let (cleared, _) ← sh.tap (.receive (.setOwnName "  ")) card
   check "card: an empty name takes the card away" (cleared.shareCard.card.isNone &&
     contains (renderedH (shareCardSheet cleared [])) "Add a name to make your card.")
+  -- a card for one person, on the same sheet
+  let sheet := renderedH (shareCardSheet card [])
+  check "person card: the sheet offers one, and waits for a name"
+    (contains sheet "A card for one person" && contains sheet "Their name" && (stepReceive .makePersonCard card).2.isEmpty)
+  let (forDana, _) ← sh.tap (.receive (.setCardFor " Dana ")) card
+  check "person card: named, the button says who it is for" (contains (renderedH (shareCardSheet forDana [])) "Make a card for Dana")
+  let (making, cs) := stepReceive .makePersonCard forDana
+  check "person card: asked of the backend, for Dana, under my name"
+    (making.shareCard.making && cs.any fun | .personCard _ none p own => p == "Dana" && own == "Alice" | _ => false)
+  check "person card: a second tap while it is being made asks nothing" ((stepReceive .makePersonCard making).2.isEmpty)
+  let asksBefore := ((← sh.asks.get).filter (·.1 == "auth")).size
+  let (made, _) ← sh.run making cs
+  let some (madeFor, personText) := made.shareCard.personCard | check "person card: made" false s!"{made.shareCard.error}"; return
+  check "person card: making it asked the device's owner" (((← sh.asks.get).filter (·.1 == "auth")).size == asksBefore + 1)
+  check "person card: shown for Dana with its QR code" (madeFor == "Dana" && !made.shareCard.making &&
+    contains (renderedH (shareCardSheet made [])) "Card for Dana" && contains (renderedH (shareCardSheet made [])) "Show Dana’s card")
+  check "person card: Dana is a contact with a card" (made.records.people.any fun p => p.name == "Dana" && p.hasCard)
+  check "person card: not the shared card, and no account key in it" (some personText != made.shareCard.card && !contains personText "tpub")
+  let readBack ← backend.parsePaste personText
+  check "person card: another phone reads Alice and a fresh address each payment" (readBack.name == some "Alice" && readBack.payTo == some true)
+  let (again, cs) := stepReceive .makePersonCard made
+  let (again, _) ← sh.run again cs
+  check "person card: shown again it is the same card, and the device's owner is not asked"
+    (again.shareCard.personCard == some ("Dana", personText) && ((← sh.asks.get).filter (·.1 == "auth")).size == asksBefore + 1)
+  let (other, _) ← sh.tap (.receive (.setCardFor "Erin")) made
+  check "person card: another name takes Dana's card off the sheet" (other.shareCard.personCard.isNone)
+  let late := onHost (.personCard other.generation "Dana" personText other.records) other
+  check "person card: a card that arrives for another name is not shown" (late.1.shareCard.personCard.isNone)
+  -- declined at the device's prompt: nothing made, nothing said
+  sh.auth.set (Lean.Json.mkObj [("ok", Lean.Json.bool false), ("error", Lean.Json.str "User canceled.")])
+  let (declining, cs) := stepReceive .makePersonCard other
+  let (declined, _) ← sh.run declining cs
+  check "person card: declined at the prompt, no card and no error"
+    (declined.shareCard.personCard.isNone && !declined.shareCard.making && declined.shareCard.error.isNone &&
+     !(declined.records.people.any fun p => p.name == "Erin" && p.hasCard))
+  sh.auth.set (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
+  -- a payment arrives in a wallet that has made a card: the people and labels are read again, since the sync
+  -- named it; in a wallet without one, nothing more is asked
+  let incoming : HistoryItem := { txid := String.ofList (List.replicate 64 'd'), height := 0, received := 5_000, spent := 0, fee := none }
+  let withPayment (model : Model) : List Cmd :=
+    (onHost (.snapshot model.generation { model.status with history := incoming :: model.status.history } model.phase) model).2
+  check "person card: a new payment in a wallet with a card reads the records again"
+    ((withPayment made).any (· matches .records ..) && !(withPayment card).any (· matches .records ..))
+  let seen := (onHost (.snapshot made.generation { made.status with history := incoming :: made.status.history } made.phase) made).1
+  check "person card: a payment already shown asks for nothing" (!(withPayment seen).any (· matches .records ..))
+  let passEnds (model : Model) : List Cmd :=
+    let syncing := { model with status := { model.status with syncing := true } }
+    (onHost (.snapshot syncing.generation { syncing.status with syncing := false } syncing.phase) syncing).2
+  check "person card: the end of a sync pass reads them again too, in a wallet with a card only"
+    ((passEnds seen).any (· matches .records ..) && !(passEnds card).any (· matches .records ..))
+  -- from the saved recipients, for someone already there
+  let (fromList, cs) := stepPeople (.card ((made.records.people.find? (·.name == "Dana")).map (·.id) |>.getD "")) made
+  check "person card: from a saved person, the sheet opens on their card"
+    (fromList.topSheet == some .shareCard && fromList.shareCard.forName == "Dana" &&
+     cs.any fun | .personCard _ pid p _ => p == "Dana" && pid.isSome | _ => false)
   let (closed, cs) := step .closeSheet m
   check "receive: Done closes the sheet and the mempool window" (closed.sheets.isEmpty && cs.any (· matches .stopWatchingAddress))
 
@@ -1344,12 +1500,12 @@ def cardsRefusedOnTheAddPersonSheet (sh : Shell) (walletID : String) : IO Unit :
   let (m, _) ← sh.tap (.send .openRecipients) m
   let (m, _) ← sh.tap (.people (.openAdd {} "")) m
   let (m, _) ← sh.tap (.people (.setName "Eve")) m
-  let newer := "{\"name\":\"Eve\",\"network\":\"regtest\",\"version\":2,\"winnow\":\"person-card\"}"
+  let newer := "{\"name\":\"Eve\",\"network\":\"regtest\",\"version\":3,\"winnow\":\"person-card\"}"
   let cards : List (String × String × String) := [
     ("another network's card", (PersonCard.make .mainnet "Eve" none).serialized,
       "This card is for mainnet; this wallet is on regtest."),
     ("a newer Winnow's card", newer,
-      "This card was made by a newer Winnow (card version 2). Update the app to read it."),
+      "This card was made by a newer Winnow (card version 3). Update the app to read it."),
     ("not a person card", "{\"name\":\"Eve\",\"winnow\":\"signer-card\"}", "That isn't a Winnow card.")]
   for (what, card, text) in cards do
     let (refused, _) ← sh.tap (.people (.setPasted card)) m
@@ -1977,6 +2133,7 @@ def main : IO UInt32 := runMain "records-test" do
     let a ← newPhone root "A"
     let b ← newPhone root "B"
     peopleAndPastes a b
+    personCards a b
     receiveLabels a b
     lookupSenderTest b
     let before ← a.records
