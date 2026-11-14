@@ -5,7 +5,7 @@ import Winnow.Wallet.SwiftDouble
 /-! # P2P transaction relay (`Network/Broadcast/TxBroadcaster.swift`)
 
 Announce with `inv(MSG_WITNESS_TX)` to the connected peers, answer `getdata` with the transaction
-(once per peer), re-announce on an exponential backoff (60 s doubling to 3600 s, attempt count capped
+(once per peer, and only a peer it was announced to), re-announce on an exponential backoff (60 s doubling to 3600 s, attempt count capped
 at 63) until confirmed or cancelled. Per peer and transaction: `announced → requested → served`, plus
 `failed` (announcement unanswered for 120 s, disconnect, failed serve — retried on the next attempt)
 and `deprioritized` (three announcements without a getdata: skipped from then on). A peer whose BIP133
@@ -107,6 +107,11 @@ structure TxBroadcaster where
   now : IO Float
   persistenceState : BroadcastPersistenceState
   state : IO.Ref BroadcastState
+  /-- Held across every read, change and save of the pending set (`commit`). Each of `broadcast`,
+  `markConfirmed`, `rollBack`, `pruneConfirmed`, `cancel` and the retry schedule used to read the set, save
+  its own copy and put that copy back, so a payment broadcast in between was dropped from memory and from the
+  file while the wallet had already spent its coins. -/
+  writes : Std.Mutex Unit
 
 namespace TxBroadcaster
 
@@ -287,6 +292,25 @@ private def persist (b : TxBroadcaster) (pending : Std.HashMap ByteArray Pending
   | .ok () => pure ()
   | .error _ => throw (.broadcastStorage .writeFailed)
 
+/-- One change to the pending set, with `writes` held and `st` read under it (and not stopped): saved as it
+applies to that set, then applied to the live set, so what a listener did to an entry meanwhile (a peer's
+relay state) is kept. `shutdown` takes no lock and empties the live set without touching the file, so the
+save is of the set that was read, never of one emptied since, and an emptied set stays empty. -/
+private def commit (b : TxBroadcaster) (st : BroadcastState)
+    (apply : Std.HashMap ByteArray PendingTx → Std.HashMap ByteArray PendingTx) (unblock : Bool := true) : NetM Unit := do
+  b.persist (apply st.pending)
+  b.state.modify fun s =>
+    if s.stopped then s
+    else { s with pending := apply s.pending, persistenceBlocked := if unblock then false else s.persistenceBlocked }
+
+/-- Saves the pending set as it stands (a first serve), in turn with every other save. -/
+private def saveLive (b : TxBroadcaster) : NetM Unit :=
+  b.writes.atomically (m := NetM) do
+    let st ← b.state.get
+    -- a stopped broadcaster holds nothing in memory, and the file is not its to empty
+    if st.stopped then return
+    b.persist st.pending
+
 /-! ## Events and accessors -/
 
 private def emit (b : TxBroadcaster) (e : TxEvent) : IO Unit := do
@@ -345,11 +369,12 @@ private def admitsAnnouncement (b : TxBroadcaster) (txid : ByteArray) (peer : Pe
   if r.2 then b.emit (.deprioritized txid peer.endpoint)
   return r.1
 
-private def recordAnnouncement (b : TxBroadcaster) (txid : ByteArray) (key : String) : IO Unit := do
+/-- Notes that a peer is being told of a transaction, and answers what was known of the peer before. -/
+private def recordAnnouncement (b : TxBroadcaster) (txid : ByteArray) (key : String) : IO (Option PeerRelay) := do
   let now ← b.now
-  b.state.modify fun st =>
+  b.state.modifyGet fun st =>
     match st.pending[txid]? with
-    | none => st
+    | none => (none, st)
     | some e =>
       let relay := match e.peers[key]? with
         | some r => { r with
@@ -357,18 +382,39 @@ private def recordAnnouncement (b : TxBroadcaster) (txid : ByteArray) (key : Str
             lastAnnouncedAt := now
             state := if r.state == .failed then .announced else r.state }
         | none => { state := .announced, announcements := 1, lastAnnouncedAt := now }
-      { st with pending := st.pending.insert txid { e with peers := e.peers.insert key relay } }
+      (e.peers[key]?, { st with pending := st.pending.insert txid { e with peers := e.peers.insert key relay } })
+
+/-- The announcement was not sent: the peer is as it was before `recordAnnouncement`, unless it has asked
+for the transaction meanwhile (an earlier announcement's `getdata`). -/
+private def retractAnnouncement (b : TxBroadcaster) (txid : ByteArray) (key : String) (before : Option PeerRelay) : IO Unit :=
+  b.state.modify fun st =>
+    match st.pending[txid]? with
+    | none => st
+    | some e =>
+      match e.peers[key]? with
+      | some r =>
+        if r.state == .requested || r.state == .served then st
+        else
+          let peers := match before with
+            | some old => e.peers.insert key old
+            | none => e.peers.erase key
+          { st with pending := st.pending.insert txid { e with peers } }
+      | none => st
 
 private def announce (b : TxBroadcaster) (txid : ByteArray) : IO Unit := do
-  if !(← b.state.get).pending.contains txid then return
+  -- a confirmed entry is held for a reorg, not relayed
+  if !((← b.state.get).pending[txid]?.any (·.confirmedAtHeight.isNone)) then return
   let announcement := PeerMessage.inv { vectors := #[{ type := InventoryType.witnessTx, hash := txid }] }
   let mut announced := 0
   for peer in ← b.pool.connectedPeers do
     if ← b.feeFilterRefuses txid peer then continue
     if !(← b.admitsAnnouncement txid peer) then continue
-    let .ok () ← (peer.send announcement).attempt | continue
+    -- noted before it is sent: the peer's `getdata` can be read before `send` returns, and `serve` answers
+    -- only a peer that was told
+    let before ← b.recordAnnouncement txid peer.endpoint.description
+    let .ok () ← (peer.send announcement).attempt
+      | do b.retractAnnouncement txid peer.endpoint.description before; continue
     announced := announced + 1
-    b.recordAnnouncement txid peer.endpoint.description
   b.emit (.announced txid announced)
 
 /-- Fails the peers whose announcement went unanswered past `announcementTimeoutMs`, naming each (io-test's
@@ -415,6 +461,9 @@ private def checkFeeFloors (b : TxBroadcaster) : IO Unit := do
       | _, _ => acc) (#[], st)
   for t in fired do b.emit (.feeFloorExceeded t minimum)
 
+/-- Answers a `getdata` with the transaction, for a peer this broadcaster announced it to and while it is
+unconfirmed. Any other request is passed over in silence, as for a transaction never heard of: answering one
+told whoever connected which txids this wallet holds, confirmed ones too. -/
 private def serve (b : TxBroadcaster) (payload : InventoryPayload) (peer : PeerConnection) : IO Unit := do
   let key := peer.endpoint.description
   let mut seen : Std.HashSet ByteArray := {}
@@ -423,9 +472,9 @@ private def serve (b : TxBroadcaster) (payload : InventoryPayload) (peer : PeerC
     let txid := v.hash
     if !(← b.state.get).pending.contains txid || seen.contains txid then continue
     seen := seen.insert txid
-    let now ← b.now
     let some e := (← b.state.get).pending[txid]? | continue
-    let relay := e.peers[key]?.getD { state := .announced, announcements := 0, lastAnnouncedAt := now }
+    if e.confirmedAtHeight.isSome then continue
+    let some relay := e.peers[key]? | continue
     if relay.state == .served then continue
     let relay := { relay with state := .requested }
     b.state.modify fun st => match st.pending[txid]? with
@@ -438,7 +487,7 @@ private def serve (b : TxBroadcaster) (payload : InventoryPayload) (peer : PeerC
       let firstServe ← b.state.modifyGet fun st => match st.pending[txid]? with
         | some e => (!e.served, { st with pending := st.pending.insert txid { e with served := true } })
         | none => (false, st)
-      if firstServe then discard <| (b.persist (← b.state.get).pending).attempt
+      if firstServe then discard <| b.saveLive.attempt
       b.state.modify fun st => match st.pending[txid]? with
         | some e => { st with pending := st.pending.insert txid { e with peers := e.peers.insert key { relay with state := .served } } }
         | none => st
@@ -525,27 +574,28 @@ private def fireDueAttempts (b : TxBroadcaster) : IO Bool := do
       | none => p
     b.state.modify fun s => { s with pending := due.foldl wait s.pending }
     return true
-  let candidate := due.foldl (fun (p : Std.HashMap ByteArray PendingTx) txid =>
-    match p[txid]? with
-    | some e =>
-      let attempt := min (e.attempt + 1) maximumAttempt
-      p.insert txid { e with attempt, nextAttemptAt := firedAt + seconds (backoffInterval attempt b.rebroadcastBaseMs b.maxRebroadcastMs) }
-    | none => p) st.pending
-  match ← (b.persist candidate).attempt with
+  -- the schedule advances on the set as it is under the lock, not on the one read above: a payment
+  -- broadcast since then is saved with it
+  let advance (p : Std.HashMap ByteArray PendingTx) : Std.HashMap ByteArray PendingTx :=
+    due.foldl (fun p txid =>
+      match p[txid]? with
+      | some e =>
+        if e.confirmedAtHeight.isSome then p
+        else
+          let attempt := min (e.attempt + 1) maximumAttempt
+          p.insert txid { e with attempt, nextAttemptAt := firedAt + seconds (backoffInterval attempt b.rebroadcastBaseMs b.maxRebroadcastMs) }
+      | none => p) p
+  match ← (b.writes.atomically (m := NetM) do
+      let st ← b.state.get
+      if st.stopped then return
+      b.commit st advance).attempt with
   | .error e =>
     b.state.modify fun s => { s with persistenceBlocked := true }
     b.emit (.persistenceFailed e.description)
     -- the loop stops here, and a session must not outlive it
     b.endRelayOnlySession .persistenceBlocked
     return false
-  | .ok () =>
-    -- Merge the schedule into the live state (listeners may have changed relay state meanwhile).
-    let merge (pending : Std.HashMap ByteArray PendingTx) : Std.HashMap ByteArray PendingTx :=
-      due.foldl (fun p txid =>
-        match p[txid]?, candidate[txid]? with
-        | some live, some c => p.insert txid { live with attempt := c.attempt, nextAttemptAt := c.nextAttemptAt }
-        | _, _ => p) pending
-    b.state.modify fun s => { s with persistenceBlocked := false, pending := merge s.pending }
+  | .ok () => pure ()
   for txid in due do
     b.expireStaleAnnouncements txid
     b.announce txid
@@ -590,7 +640,7 @@ def new (pool : PeerPool) (path : Option System.FilePath := none) (rebroadcastBa
   let b : TxBroadcaster := {
     pool, path, rebroadcastBaseMs, maxRebroadcastMs, maxAnnouncementsPerPeer
     announcementTimeoutMs, now, persistenceState
-    state := stateRef }
+    state := stateRef, writes := ← Std.Mutex.new () }
   if !pending.isEmpty then b.scheduleRebroadcast
   return b
 
@@ -643,9 +693,10 @@ def broadcast (b : TxBroadcaster) (rawTx : ByteArray) (feeRate : Option Float :=
   let entry : PendingTx := {
     rawTx, transaction := tx, feeRate, attempt := 0
     nextAttemptAt := if alone then now else now + seconds (backoffInterval 0 b.rebroadcastBaseMs b.maxRebroadcastMs) }
-  let candidate := (← b.state.get).pending.insert txid entry
-  b.persist candidate
-  b.state.modify fun st => { st with pending := candidate, persistenceBlocked := false }
+  b.writes.atomically (m := NetM) do
+    let st ← b.state.get
+    if st.stopped then throw (.broadcast .stopped)
+    b.commit st (·.insert txid entry)
   b.ensurePeerListeners
   b.announce txid
   b.checkFeeFloors
@@ -654,50 +705,53 @@ def broadcast (b : TxBroadcaster) (rawTx : ByteArray) (feeRate : Option Float :=
 
 /-- The transaction was seen in a matched block: keep it as a silent tombstone. -/
 def markConfirmed (b : TxBroadcaster) (txid : ByteArray) (height : UInt32) : NetM Unit := do
-  let st ← b.state.get
-  if st.stopped then throw (.broadcast .stopped)
-  let some e := st.pending[txid]? | return
-  if e.confirmedAtHeight.isSome then return
-  let candidate := st.pending.insert txid { e with confirmedAtHeight := some height, nextAttemptAt := distantFuture }
-  b.persist candidate
-  b.state.modify fun s => { s with pending := candidate, persistenceBlocked := false }
+  let changed ← b.writes.atomically (m := NetM) do
+    let st ← b.state.get
+    if st.stopped then throw (.broadcast .stopped)
+    let some e := st.pending[txid]? | return false
+    if e.confirmedAtHeight.isSome then return false
+    b.commit st fun p => match p[txid]? with
+      | some e => p.insert txid { e with confirmedAtHeight := some height, nextAttemptAt := distantFuture }
+      | none => p
+    return true
+  if !changed then return
   b.emit (.confirmed txid)
   b.scheduleRebroadcast
 
 /-- Reactivates entries whose confirming block was disconnected (io-test's `reorgUnderSendChecks`, from filter
 sync's `onReorg` over a real reorg; backend-test's step 9b, from `resumeInterruptedRollback`). -/
 def rollBack (b : TxBroadcaster) (forkHeight : UInt32) : NetM Unit := do
-  let st ← b.state.get
-  if st.stopped then throw (.broadcast .stopped)
   let now ← b.now
-  let (candidate, reactivated) := st.pending.fold (fun (acc : Std.HashMap ByteArray PendingTx × Bool) txid e =>
-    match e.confirmedAtHeight with
-    | some h => if h > forkHeight then (acc.1.insert txid { e with confirmedAtHeight := none, nextAttemptAt := now, peers := {} }, true) else acc
-    | none => acc) (st.pending, false)
-  if !reactivated then return
-  b.persist candidate
-  b.state.modify fun s => { s with pending := candidate, persistenceBlocked := false }
-  b.scheduleRebroadcast
+  let above (e : PendingTx) : Bool := e.confirmedAtHeight.any (· > forkHeight)
+  let reactivated ← b.writes.atomically (m := NetM) do
+    let st ← b.state.get
+    if st.stopped then throw (.broadcast .stopped)
+    if !st.pending.any (fun _ e => above e) then return false
+    b.commit st fun p => p.fold (fun p txid e =>
+      if above e then p.insert txid { e with confirmedAtHeight := none, nextAttemptAt := now, peers := {} } else p) p
+    return true
+  if reactivated then b.scheduleRebroadcast
 
 /-- Drops held entries confirmed 100 or more blocks below `tip`. -/
 def pruneConfirmed (b : TxBroadcaster) (tip : UInt32) : NetM Unit := do
-  let st ← b.state.get
-  if st.stopped then return
-  let candidate := st.pending.filter fun _ e => match e.confirmedAtHeight with
+  let kept (e : PendingTx) : Bool := match e.confirmedAtHeight with
     | some h => h.toNat + 100 > tip.toNat
     | none => true
-  if candidate.size == st.pending.size then return
-  b.persist candidate
-  b.state.modify fun s => { s with pending := candidate }
+  b.writes.atomically (m := NetM) do
+    let st ← b.state.get
+    if st.stopped then return
+    if st.pending.all (fun _ e => kept e) then return
+    b.commit st (unblock := false) (·.filter fun _ e => kept e)
 
 /-- Stops relaying a pending transaction without a confirmation. -/
 def cancel (b : TxBroadcaster) (txid : ByteArray) : NetM Unit := do
-  let st ← b.state.get
-  if st.stopped then throw (.broadcast .stopped)
-  if !st.pending.contains txid then return
-  let candidate := st.pending.erase txid
-  b.persist candidate
-  b.state.modify fun s => { s with pending := candidate, persistenceBlocked := false }
+  let changed ← b.writes.atomically (m := NetM) do
+    let st ← b.state.get
+    if st.stopped then throw (.broadcast .stopped)
+    if !st.pending.contains txid then return false
+    b.commit st (·.erase txid)
+    return true
+  if !changed then return
   b.emit (.cancelled txid)
   b.scheduleRebroadcast
 

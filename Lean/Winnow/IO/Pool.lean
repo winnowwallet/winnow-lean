@@ -70,6 +70,8 @@ structure PoolState where
   relaySeats : Nat := 0
   /-- the round after an exhausted one drops the Tor-and-I2P mix rule, so a thin overlay still fills -/
   relaxOverlayMix : Bool := false
+  /-- how many header syncs have run: each begins with the next seat (`syncHeaders`) -/
+  headerTurn : Nat := 0
 
 /-- The UI snapshot (`ConnectionStatus`). -/
 structure ConnectionStatus where
@@ -541,15 +543,21 @@ private def settledSync (p : PeerPool) (chain : HeaderStore) (peer : PeerConnect
   if !(← p.evictStaleTips).isEmpty && (← p.state.get).started then spawn p.pruneAndReplenish
   return outcome
 
-/-- Syncs headers against connected peers with bounded failover. -/
+/-- Syncs headers against connected peers with bounded failover. Each call begins with the next seat in
+turn. It used to begin with the first seat every time, and a peer there that answered every `getheaders`
+with nothing (claiming no more height at the handshake than this wallet had) kept the chain where it was
+for as long as it stayed seated: the others are asked only when they claimed far more. Now such a peer
+holds one pass in as many as there are seats. -/
 def syncHeaders (p : PeerPool) (chain : HeaderStore) (timeoutPerPeerMs : Nat := 30_000) (maxAttempts : Nat := 6)
     (maxTransportRetries : Nat := 12) : NetM SyncOutcome := do
   if (← p.state.get).mode != .full then throw (.pool .relayOnly)
+  let turn ← p.state.modifyGet fun s => (s.headerTurn, { s with headerTurn := s.headerTurn + 1 })
   let mut attempts := 0
   let mut transportRetries := 0
   let mut lastError : Option NetError := none
   while attempts < maxAttempts && transportRetries < maxTransportRetries do
-    let some peer := (← p.connectedPeers)[0]? | do
+    let seated ← p.connectedPeers
+    let some peer := seated[turn % seated.size]? | do
       let cooling ← p.coolingEndpoints
       if !cooling.isEmpty || transportRetries > 0 then
         throw (.pool (.allPeersCoolingDown cooling.size
