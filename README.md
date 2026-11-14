@@ -162,7 +162,7 @@ goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (9 cases, six of them nested); and the six journeys headless (LeanNative's `wire-journey`) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest bitcoind: io-test, backend-test and multisig-differential (9 cases, six of them nested); and the six journeys headless (LeanNative's `wire-journey`) |
 | `app` (two at once) | the same build and census import; Debug for the simulator, checked for Swift; the six UI journeys split across the two (`ui-journey-shards`; `scripts/ui-fixture` as the hooks) |
 | `media` | once both parts pass, the website's media from their evidence (LeanNative's `journey-media`: one video, the journeys in order) |
 | `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |

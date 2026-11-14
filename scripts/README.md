@@ -39,6 +39,9 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   segwit and a bare key), each input with the script it spent, from a public Esplora server. Each transaction, and
   each one an input spends from, must hash to its txid, so the server is trusted for nothing. crypto-test holds
   `FundingSources.revelation` to them.
+- [card-keys-vectors](card-keys-vectors) writes `Lean/Vectors/card-keys-vectors.json`: card codes and the
+  payments derived from them (issue #94), computed with the Python standard library alone (BIP32, secp256k1,
+  tagged hashes, bech32m) and none of the wallet's code. `card-keys-test` holds `Winnow.Keys.CardKeys` to them.
 - [swift-utf8-vectors](swift-utf8-vectors) writes `Lean/Vectors/swift-utf8-decoding.json`, Swift's own
   `String(decoding:as: UTF8.self)` over well-formed and ill-formed UTF-8, which `crypto-test` holds
   `Winnow.Text.decodeUTF8Lossy` to. It needs Xcode's Swift and feeds the program to `xcrun swift` on stdin, so

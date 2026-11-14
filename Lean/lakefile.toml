@@ -40,6 +40,12 @@ root = "LedgerTest"
 name = "silent-payment-test"
 root = "SilentPaymentTest"
 
+# A card per person (Winnow/Keys/CardKeys.lean, issue #94): the code and its derivation against vectors an
+# independent implementation wrote (scripts/card-keys-vectors). Run from Lean/; CI runs it.
+[[lean_exe]]
+name = "card-keys-test"
+root = "CardKeysTest"
+
 # AES and AES-GCM (Winnow/Crypto/AES*.lean): FIPS 197, every Wycheproof AES-GCM test and CryptoKit's own
 # output; BIP340 signing against BIP340's test vectors (Vectors/). Run from Lean/; CI runs it.
 [[lean_exe]]
