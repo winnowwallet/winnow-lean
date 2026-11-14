@@ -40,8 +40,9 @@ root = "LedgerTest"
 name = "silent-payment-test"
 root = "SilentPaymentTest"
 
-# A card per person (Winnow/Keys/CardKeys.lean, issue #94): the code and its derivation against vectors an
-# independent implementation wrote (scripts/card-keys-vectors). Run from Lean/; CI runs it.
+# A card per person (Winnow/Keys/SilentPaymentPairing.lean, issue #94): a silent payment address, a person's
+# tweak and the payments they derive, against vectors an independent implementation wrote
+# (scripts/card-keys-vectors). Run from Lean/; CI runs it.
 [[lean_exe]]
 name = "card-keys-test"
 root = "CardKeysTest"

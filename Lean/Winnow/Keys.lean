@@ -7,5 +7,5 @@ import Winnow.Keys.BIP86
 import Winnow.Keys.KeyStore
 import Winnow.Keys.Taproot
 import Winnow.Keys.SilentPayments
-import Winnow.Keys.CardKeys
+import Winnow.Keys.SilentPaymentPairing
 import Winnow.Keys.Unicode

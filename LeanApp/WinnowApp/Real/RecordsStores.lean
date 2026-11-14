@@ -38,8 +38,8 @@ def outpointKey (txid : ByteArray) (vout : UInt32) : String := hex txid ++ ":" +
 
 /-! ## People -/
 
-/-- `PersonRecord`: a saved recipient. Public keys only (a card code's seed finds the payments made to the
-code and cannot spend them). -/
+/-- `PersonRecord`: a saved recipient. Public keys only (a card's tweak finds the payments made with it and
+cannot spend them). -/
 structure PersonRecord where
   /-- Opaque; a UUID string. -/
   id : String
@@ -165,7 +165,7 @@ def validatePayTo (r : PersonRecord) (network : BitcoinNetwork) (seen : Std.Hash
     | .descriptor t => RM.lift (fun e => .named e.name e.description) (PersonPayTo.ofDescriptor t network)
     | .address t => liftNamed network (PersonPayTo.ofAddress t network)
     | .silentPayment t => liftNamed network ((PersonPayTo.ofSilentPayment t network).mapError (·.name))
-    | .card t => liftNamed network ((PersonPayTo.ofCard t network).mapError (·.name))
+    | .card code tweak => liftNamed network (PersonPayTo.ofCard code tweak network)
   unless canonical == payTo do invalid "pay-to key is not in canonical form"
   let id ← payIdentity payTo network
   if seen.contains id then invalid "two people share a pay-to key"

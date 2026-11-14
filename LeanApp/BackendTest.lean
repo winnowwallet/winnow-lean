@@ -499,8 +499,9 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   check "card: before it is made, Alice has none" !(← bob.hasPersonCard none "Alice")
   let (card, records) ← bob.personCard none "Alice" "Bob"
   let has (text part : String) := (text.splitOn part).length > 1
-  check "card: a card code under Bob's name, with no account key in it"
-    (has card "\"payTo\":\"rwnc1" && has card "\"name\":\"Bob\"" && has card "\"version\":2" && !has card "tpub") card
+  check "card: Bob's silent payment address and a tweak under his name, with no account key in it"
+    (has card "\"payTo\":\"tsp1" && has card "\"tweak\":\"" && has card "\"name\":\"Bob\"" && has card "\"version\":2" &&
+     !has card "tpub") card
   check "card: Alice is Bob's contact, with a card" ((records.people.any fun p => p.name == "Alice" && p.hasCard) &&
     (← bob.hasPersonCard none "Alice"))
   check "card: asked again, the same card" ((← bob.personCard none "Alice" "Bob").1 == card)
@@ -1826,11 +1827,11 @@ def main (args : List String) : IO UInt32 := do
   if let ["--card-address", card, index] := args then
     let address := do
       let decoded ← (PersonCard.decode card).toOption
-      let payTo ← (PersonPayTo.ofCard (← decoded.payTo) .regtest).toOption
+      let payTo ← (PersonPayTo.ofCard (← decoded.payTo) (← decoded.tweak) .regtest).toOption
       (payTo.addressAt index.toNat!.toUInt32 .regtest).toOption
     match address with
     | some a => IO.println a; return 0
-    | none => IO.eprintln "not a person card that pays a regtest card code"; return 1
+    | none => IO.eprintln "not a person card with a test-network silent payment address and a tweak"; return 1
   if let ["--sp-expected", datadir, rpc, txid] := args then
     let n ← Node.attach datadir rpc.toNat!.toUInt16
     IO.println (hex (← testReceiverScript n (← n.json #["getrawtransaction", txid, "true"])))

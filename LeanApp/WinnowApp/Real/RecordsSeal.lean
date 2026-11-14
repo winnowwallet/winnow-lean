@@ -182,6 +182,9 @@ def describe (name : String) (network : Tx.BitcoinNetwork) : String :=
   else if name == "wrongHRP" then s!"That code is for a different Bitcoin network. This wallet is on {Wallet.networkName network}."
   else if name == "tooManyCards" then s!"This wallet has made as many cards as it can ({Wallet.maximumCards})."
   else if name == "notFound" then "This wallet has no signing key on this device, so it cannot make a card."
+  else if name == "cardsNeedThePhrase" then
+    "This wallet was set up from an account key, without a recovery phrase. A card for one person needs the phrase, so this wallet cannot make one or spend what one was paid."
+  else if name == "invalidTweak" then "That card's tweak is not valid. Ask for the card again."
   else s!"The operation could not be completed ({name})."
 
 def namedError (name : String) (network : Tx.BitcoinNetwork) : RecordsError := .named name (describe name network)
