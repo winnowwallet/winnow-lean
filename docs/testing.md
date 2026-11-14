@@ -77,8 +77,9 @@ against the node.
   Ledger and has the Ledger show the account's first address to compare. The
   node pays that address and the account sees the coin.
 - `cardForOnePerson`: on the card sheet the wallet makes a card for one
-  person, Dana (issue #94). The node is Dana: from the card's text alone it
-  derives the card's first two addresses and pays each. The wallet finds both
+  person, Dana (issue #94): its silent payment address and a tweak for her.
+  The node is Dana: from the card's text alone it derives her first two
+  addresses and pays each. The wallet finds both
   and the Transactions list names each "Received from Dana", though nobody
   labelled them. The card carries no account key, and shown again it is the
   same card. The headless run answers the device-authentication prompt
@@ -165,8 +166,7 @@ Each target's line in the output says how many mutated inputs it took. A target
 that takes none is only testing refusals, and the run refuses to start if none of a
 target's seeds parses. `address` and `silent-payment-address` always take none,
 because a mutation breaks the checksum: `address-program` and `silent-payment-keys`
-cover the same rules past it. `card-code` takes next to none for the same reason,
-and `card-keys` covers a card code's rules past the checksum.
+cover the same rules past it.
 
 `fuzz` reaches what `Lean/` holds. The stores in `LeanApp/` (people, labels, sealed
 files) are not targets yet. It also can't see a wrong answer that is

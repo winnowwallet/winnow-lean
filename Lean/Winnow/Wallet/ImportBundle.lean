@@ -68,6 +68,8 @@ structure ImportBundle where
   /-- The cards the wallet issued (issue #94): what finds the coins paid to them. A bundle that has any is
   version 3, which a Winnow from before cards refuses instead of restoring without them. -/
   cards : Array IssuedCard := #[]
+  /-- The wallet's silent payment address, which every card pays; present whenever a card is. -/
+  silentPaymentAddress : Option String := none
   deriving Inhabited, BEq
 
 namespace ImportBundle
@@ -136,7 +138,8 @@ def toJV (b : ImportBundle) : JV :=
     ("nextReceiveIndex", b.nextReceiveIndex.map (ofInt ·.toNat)), ("nextChangeIndex", b.nextChangeIndex.map (ofInt ·.toNat)), ("vaults", b.vaults.map (.arr ∘ Array.map MultisigAccountRecord.toJV)),
     ("signers", b.signers.map (.arr ∘ Array.map SignerRecord.toJV)),
     ("pendingSends", if b.pendingSends.isEmpty then none else some (.arr (b.pendingSends.map PendingSend.toJV))),
-    ("cards", if b.cards.isEmpty then none else some (.arr (b.cards.map IssuedCard.toJV)))]
+    ("cards", if b.cards.isEmpty then none else some (.arr (b.cards.map IssuedCard.toJV))),
+    ("silentPaymentAddress", b.silentPaymentAddress.map .str)]
 
 def ofJV (v : JV) : D ImportBundle := do
   let kvs ← asObject v
@@ -154,8 +157,9 @@ def ofJV (v : JV) : D ImportBundle := do
   let nextChangeIndex ← keyIfPresent kvs "nextChangeIndex" asUInt32
   let pendingSends := (← keyIfPresent kvs "pendingSends" (asArray PendingSend.ofJV)).getD #[]
   let cards := (← keyIfPresent kvs "cards" (asArray IssuedCard.ofJV)).getD #[]
+  let silentPaymentAddress ← keyIfPresent kvs "silentPaymentAddress" asString
   return { version, network, descriptor, mnemonic, lastKnownHeight, lastKnownBlockHash, utxos, transactions, vaults,
-           signers, nextReceiveIndex, nextChangeIndex, pendingSends, cards }
+           signers, nextReceiveIndex, nextChangeIndex, pendingSends, cards, silentPaymentAddress }
 
 /-- Decoding failures: a `WalletError` (`invalidBundle`, `unsupportedWalletData`, …) or a
 `DecodingError` case name. -/
@@ -201,7 +205,8 @@ def decodeData (data : ByteArray) : Except Failure ImportBundle := do
     throw (.wallet (.invalidBundle s!"bundle declares {b.transactions.size} transactions, above the {maximumEntries} limit"))
   checkAccountsAndSigners b
   -- cards came with version 3: an older file that names one was not written by Winnow
-  let namesACard := !b.cards.isEmpty || b.utxos.any (·.card.isSome) || b.pendingSends.any (·.selected.any (·.card.isSome))
+  let namesACard := !b.cards.isEmpty || b.silentPaymentAddress.isSome || b.utxos.any (·.card.isSome) ||
+    b.pendingSends.any (·.selected.any (·.card.isSome))
   if namesACard && b.version < cardsVersion then
     throw (.wallet (.invalidBundle s!"a version {b.version} bundle cannot carry cards"))
   return b
@@ -217,8 +222,9 @@ card, so a wallet without cards writes the file it always wrote. -/
 def «export» (descriptor network : String) (lastKnownHeight : UInt32) (utxos : Array WalletUTXO)
     (history : Array HistoryEntry) (nextReceiveIndex nextChangeIndex : UInt32) (mnemonic : Option String := none)
     (lastKnownBlockHash : Option ByteArray := none) (pendingSends : Array PendingSend := #[])
-    (cards : Array IssuedCard := #[]) : ImportBundle :=
+    (cards : Array IssuedCard := #[]) (silentPaymentAddress : Option String := none) : ImportBundle :=
   { version := if cards.isEmpty then 2 else cardsVersion, cards,
+    silentPaymentAddress := if cards.isEmpty then none else silentPaymentAddress,
     network, descriptor := some descriptor, mnemonic, lastKnownHeight,
     lastKnownBlockHash := lastKnownBlockHash.map displayHex,
     utxos := utxos.map fun u =>

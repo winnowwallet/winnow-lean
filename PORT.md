@@ -143,34 +143,35 @@ A device run with a Ledger is not claimed until one happens.
 
 ## Not from upstream: a card per person (issue #94, 2026-11-14)
 
-Upstream has one card, which carries the account key. `Winnow/Keys/CardKeys.lean` is new here and has no
-Swift counterpart: a card code (bech32m, `wnc`/`twnc`/`rwnc`) holding a key and a seed for one person, both
-derived below the account key at `2'/k'`, and the derivation of the Taproot outputs that person pays.
-`card-keys-test` (257 checks) holds it to `Vectors/card-keys-vectors.json`, which `scripts/card-keys-vectors`
-writes without the wallet's code; `fuzz` has `card-code` and `card-keys`.
+Upstream has one card, which carries the account key. Here a card can be made for one person: the wallet's
+silent payment address and a tweak for that person, which stands where a silent payment has the number made
+from the payer's coins, so the wallet knows each payment's address beforehand and finds it through compact
+filters. `Winnow/Keys/SilentPaymentPairing.lean` is new and has no Swift counterpart; the output step is
+`SilentPaymentSending.outputScript`, unchanged. `card-keys-test` holds it to `Vectors/card-keys-vectors.json`,
+which `scripts/card-keys-vectors` writes without the wallet's code.
 
-The wallet library and the app use it. These are departures from upstream's formats, each absent until a
-card is issued:
+Departures from upstream's formats, each absent until a card is issued:
 
-- `wallet.json` gains `cards` (each issued card's index, key, seed and payment cursor), and a coin paid to
-  a card gains `card`. A wallet that never issues a card writes the file it always wrote.
-- The backup bundle gains the same two keys and is then version 3 (`ImportBundle.cardsVersion`); without
-  cards it stays version 2. Upstream reads neither key and refuses version 3.
-- `Wallet.watchMap` answers a `CoinKey` (chain, index, card) where upstream's answers a pair, and
-  `Wallet.spendSecret` stands where `tweakedPrivateKey` was called: a card's coin is signed with the card's
-  private key plus the payment's tweak, with no BIP86 tweak and no BIP371 origin.
-
-- People: `PersonPayTo.card` (a pay-to that is a card code), person cards of version 2 that carry one, and
+- `wallet.json` gains `silentPaymentAddress`, `cards` (each issued card's index, tweak and payment cursor),
+  and a coin paid to a card gains `card`. A wallet that never issues a card writes the file it always wrote.
+- The backup bundle gains the same three keys and is then version 3 (`ImportBundle.cardsVersion`); without
+  cards it stays version 2. Upstream reads none of them and refuses version 3.
+- `Wallet.watchMap` answers a `CoinKey` (chain, index, card) where upstream's answers a pair.
+  `Wallet.signingKeys` returns the master key beside the account key, and `Wallet.spendSecret` stands where
+  `tweakedPrivateKey` was called: a card's coin is signed with the silent payment spend key
+  (`m/352'/coin'/0'/0'/0`) plus the payment's tweak, with no BIP86 tweak and no BIP371 origin. A wallet that
+  holds only its account key can neither make a card nor spend such a coin (`cardsNeedThePhrase`).
+- People: `PersonPayTo.card` (an address with a tweak), person cards of version 2 with a `tweak` field, and
   `PersonRecord.issuedCard` in `people.json`, the link from a person to the card this wallet issued them.
   Upstream reads a version 2 card as made by a newer Winnow and ignores the link.
-- The app: "A card for one person" on Share my card, "Make a card" / "Their card" on saved recipients, the
-  backend's `personCard`, and the sync's `cardPayment` hook, which labels a payment to a card with its
-  person. `records-test`, `backend-test`'s `cardFlow` and the journey `cardForOnePerson` hold them.
+- The app: "A card for one person" first on Share my card, with upstream's card under it as "A card for
+  everyone"; "Make a card" / "Their card" on saved recipients; the backend's `personCard`; and the sync's
+  `cardPayment` hook, which labels a payment made with a card as its person's.
 
-`multisig-test` has the wallet's card tests (issuing, crediting, spending, a reorg, backups and ten refused
-ones, a rebuild from the phrase), and `card-regtest` runs the same against Bitcoin Core as the payer
-(`scripts/ci-regtest cards`). `docs/out-of-band-payments.md` is the proposal: what it was compared with, what
-is built, and the decisions left to the owner.
+`multisig-test` has the wallet's card tests, `card-regtest` runs them against Bitcoin Core as the payer
+(`scripts/ci-regtest cards`), and `records-test`, `backend-test`'s `cardFlow` and the journey
+`cardForOnePerson` hold the app. `docs/out-of-band-payments.md` is the proposal: the design, what it costs,
+what it was compared with, and what is still open.
 
 ## Tracking upstream "one wallet" (#259, with #256 nested multisig)
 

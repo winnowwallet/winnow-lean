@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Writes Lean/Vectors/card-keys-vectors.json: card codes and the payments derived from them, computed here
-without any of the wallet's code, as the oracle for `Winnow.Keys.CardKeys` (card-keys-test).
+"""Writes Lean/Vectors/card-keys-vectors.json: a wallet's silent payment address, the tweaks it makes for
+people and the payments derived from them, computed here without any of the wallet's code, as the oracle for
+`Winnow.Keys.SilentPaymentPairing` (card-keys-test).
 
 Everything is the Python standard library: BIP32 over HMAC-SHA512, secp256k1 in affine coordinates, BIP340's
-tagged hash and bech32m. Each case starts from a BIP32 seed, walks to an account key, then to a card's node at
-account/2'/k', and derives the code and a few payments:
+tagged hash and bech32m. Each case starts from a BIP32 seed, walks to BIP352's scan and spend keys
+(m/352'/coin'/0'/1'/0 and m/352'/coin'/0'/0'/0), and for card k derives the tweak and a few payments:
 
-  s   = hash_Winnow/Card/Seed(chain code of the node)
-  t_i = hash_Winnow/Card/Tweak(network ‖ B ‖ s ‖ ser32(i))
-  P_i = B + t_i·G        p_i = b + t_i mod n
+  x_k    = hash_Winnow/SilentPayment/Pairing(b_scan ‖ ser32(k))
+  shared = x_k·B_scan                       where BIP352 has (input_hash·a)·B_scan
+  t_i    = hash_BIP0352/SharedSecret(ser_P(shared) ‖ ser32(i))
+  P_i    = B_spend + t_i·G                  p_i = b_spend + t_i mod n
 
   scripts/card-keys-vectors            (from the repository root)
 """
@@ -106,39 +108,50 @@ def to5(payload):
     return out
 
 
-NETWORK = {"wnc": 0, "twnc": 1, "rwnc": 2}
 CASES = [
     # (BIP32 seed, coin type, HRP, card index, payment indices)
-    ("000102030405060708090a0b0c0d0e0f", 0, "wnc", 0, [0, 1, 2, 3, 19, 20, 0xFFFFFFFF]),
-    ("000102030405060708090a0b0c0d0e0f", 0, "wnc", 1, [0, 1, 2, 3]),
-    ("000102030405060708090a0b0c0d0e0f", 1, "twnc", 0, [0, 1, 2, 3]),
-    ("000102030405060708090a0b0c0d0e0f", 1, "rwnc", 0, [0, 1, 2, 3]),
+    ("000102030405060708090a0b0c0d0e0f", 0, "sp", 0, [0, 1, 2, 3, 19, 20, 0xFFFFFFFF]),
+    ("000102030405060708090a0b0c0d0e0f", 0, "sp", 1, [0, 1, 2, 3]),
+    ("000102030405060708090a0b0c0d0e0f", 1, "tsp", 0, [0, 1, 2, 3]),
     ("fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
-     1, "rwnc", H - 1, [0, 7, 1000]),
+     1, "tsp", 0xFFFFFFFF, [0, 7, 1000]),
 ]
+
+
+def derive(seed, path):
+    key, chain = master(bytes.fromhex(seed))
+    for step in path:
+        key, chain = child(key, chain, step)
+    return key
+
 
 cases = []
 for seed, coin, hrp, card, indices in CASES:
-    key, chain = master(bytes.fromhex(seed))
-    for step in (86 + H, coin + H, 0 + H, 2 + H, card + H):
-        key, chain = child(key, chain, step)
-    public = compressed(mul(key, G))
-    card_seed = tagged("Winnow/Card/Seed", chain)
+    scan = derive(seed, (352 + H, coin + H, 0 + H, 1 + H, 0))
+    spend = derive(seed, (352 + H, coin + H, 0 + H, 0 + H, 0))
+    scan_public, spend_public = compressed(mul(scan, G)), compressed(mul(spend, G))
+    tweak = tagged("Winnow/SilentPayment/Pairing", scan.to_bytes(32, "big") + card.to_bytes(4, "big"))
+    x = int.from_bytes(tweak, "big")
+    assert 0 < x < N
+    shared = compressed(mul(x, mul(scan, G)))
     payments = []
     for i in indices:
-        t = tagged("Winnow/Card/Tweak", bytes([NETWORK[hrp]]) + public + card_seed + i.to_bytes(4, "big"))
+        t = tagged("BIP0352/SharedSecret", shared + i.to_bytes(4, "big"))
         scalar = int.from_bytes(t, "big")
         assert 0 < scalar < N
-        point = add(mul(key, G), mul(scalar, G))
-        spend = (key + scalar) % N
-        assert point is not None and spend != 0 and mul(spend, G) == point
+        point = add(mul(spend, G), mul(scalar, G))
+        secret = (spend + scalar) % N
+        assert point is not None and secret != 0 and mul(secret, G) == point
         payments.append({
-            "index": i, "tweak": t.hex(), "outputKey": point[0].to_bytes(32, "big").hex(), "oddY": bool(point[1] & 1),
-            "script": "5120" + point[0].to_bytes(32, "big").hex(), "spendSecret": spend.to_bytes(32, "big").hex()})
+            "index": i, "outputTweak": t.hex(), "outputKey": point[0].to_bytes(32, "big").hex(),
+            "oddY": bool(point[1] & 1), "script": "5120" + point[0].to_bytes(32, "big").hex(),
+            "spendSecret": secret.to_bytes(32, "big").hex()})
     cases.append({
-        "seed": seed, "accountPath": f"m/86'/{coin}'/0'", "hrp": hrp, "card": card,
-        "secret": key.to_bytes(32, "big").hex(), "key": public.hex(), "cardSeed": card_seed.hex(),
-        "code": bech32m(hrp, [0] + to5(public + card_seed)), "payments": payments})
+        "seed": seed, "coinType": coin, "hrp": hrp, "card": card,
+        "scanSecret": scan.to_bytes(32, "big").hex(), "spendSecret": spend.to_bytes(32, "big").hex(),
+        "scanKey": scan_public.hex(), "spendKey": spend_public.hex(),
+        "address": bech32m(hrp, [0] + to5(scan_public + spend_public)),
+        "tweak": tweak.hex(), "sharedSecret": shared.hex(), "payments": payments})
 
 parities = {p["oddY"] for c in cases for p in c["payments"]}
 assert parities == {True, False}, "the vectors must hold output keys of both parities"

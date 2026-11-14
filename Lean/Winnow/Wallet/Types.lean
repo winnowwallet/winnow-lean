@@ -4,7 +4,7 @@ import Winnow.Tx.TransactionBuilder
 import Winnow.Tx.SighashBIP341
 import Winnow.Tx.PSBT
 import Winnow.Keys.SilentPayments
-import Winnow.Keys.CardKeys
+import Winnow.Keys.SilentPaymentPairing
 
 /-! # Wallet data types and the wallet file
 
@@ -138,14 +138,13 @@ structure CoinKey where
   card : Option UInt32 := none
   deriving Inhabited, BEq
 
-/-- A card this wallet issued to one person (issue #94, `Keys/CardKeys.lean`): card `index`'s public key and
-seed, as its code carries them, and the lowest payment index not yet seen paid. Both derive from the account
-private key at `2'/index'`; they are kept here so the wallet watches without loading that key. Neither is a
-spending secret. -/
+/-- A card this wallet issued to one person (issue #94, `Keys/SilentPaymentPairing.lean`): person `index`'s
+tweak, which their card carries beside the wallet's silent payment address, and the lowest payment index not
+yet seen paid. The tweak is a hash of the scan private key and `index`; it is kept here so the wallet watches
+without loading a key. It is not a spending secret. -/
 structure IssuedCard where
   index : UInt32
-  key : ByteArray
-  seed : ByteArray
+  tweak : ByteArray
   nextIndex : UInt32 := 0
   deriving Inhabited, BEq
 
@@ -225,6 +224,10 @@ structure WalletState where
   pendingSends : Array PendingSend := #[]
   /-- The cards issued so far, in the order issued. -/
   cards : Array IssuedCard := #[]
+  /-- The wallet's silent payment address (BIP352's account 0), which every card carries: recorded when the
+  first card is issued, and present whenever a card is. Winnow receives at it only what a card's tweak
+  derives. -/
+  silentPaymentAddress : Option String := none
   deriving Inhabited, BEq
 
 def WalletState.utxos (s : WalletState) : Array WalletUTXO := s.allUtxos.filter (!·.isSpent)
@@ -339,32 +342,29 @@ end WalletUTXO
 namespace IssuedCard
 
 def toJV (c : IssuedCard) : JV :=
-  obj [("index", some (ofInt c.index.toNat)), ("key", some (.str (hex c.key))), ("seed", some (.str (hex c.seed))),
+  obj [("index", some (ofInt c.index.toNat)), ("tweak", some (.str (hex c.tweak))),
     ("nextIndex", some (ofInt c.nextIndex.toNat))]
 
 def ofJV (v : JV) : D IssuedCard := do
   let kvs ← asObject v
   let index ← SwiftJSON.key kvs "index" asUInt32
-  let cardKey ← hexField kvs "key"
-  let seed ← hexField kvs "seed"
+  let tweak ← hexField kvs "tweak"
   let nextIndex ← SwiftJSON.key kvs "nextIndex" asUInt32
-  return { index, key := cardKey, seed, nextIndex }
+  return { index, tweak, nextIndex }
 
-/-- A card index is a hardened step, its key a point, its seed 32 bytes, and its payment cursor leaves the
-lookahead room. -/
+/-- A card's tweak is a valid scalar and its payment cursor leaves the lookahead room. -/
 def wellFormed (c : IssuedCard) : Bool :=
-  c.index < 0x8000_0000 && CardCode.isValidPublicKey c.key && c.seed.size == 32 &&
-    c.nextIndex ≤ 0x8000_0000 - Wallet.gapLimit
+  Keys.SilentPaymentPairing.isValidTweak c.tweak && c.nextIndex ≤ 0x8000_0000 - Wallet.gapLimit
 
-/-- Every card well-formed, no index twice, no key twice, and no more than a wallet issues. -/
+/-- Every card well-formed, no index twice, no tweak twice, and no more than a wallet issues. -/
 def validate (cards : Array IssuedCard) : Bool := Id.run do
   if cards.size > Wallet.maximumCards then return false
   let mut indices : Std.HashSet UInt32 := {}
-  let mut keys : Std.HashSet ByteArray := {}
+  let mut tweaks : Std.HashSet ByteArray := {}
   for c in cards do
-    if !c.wellFormed || indices.contains c.index || keys.contains c.key then return false
+    if !c.wellFormed || indices.contains c.index || tweaks.contains c.tweak then return false
     indices := indices.insert c.index
-    keys := keys.insert c.key
+    tweaks := tweaks.insert c.tweak
   return true
 
 end IssuedCard
@@ -534,7 +534,8 @@ def toJV (s : WalletState) : JV :=
     ("observedFeeRates", some (.arr (s.observedFeeRates.map ofDouble))),
     ("pendingSends", some (.arr (s.pendingSends.map PendingSend.toJV))),
     -- written only once a card exists, so a wallet that never issued one keeps the file it had
-    ("cards", if s.cards.isEmpty then none else some (.arr (s.cards.map IssuedCard.toJV)))]
+    ("cards", if s.cards.isEmpty then none else some (.arr (s.cards.map IssuedCard.toJV))),
+    ("silentPaymentAddress", s.silentPaymentAddress.map .str)]
 
 /-- Every coin well-formed and no outpoint twice; optionally the total within the monetary range. -/
 def validateCoins (coins : Array WalletUTXO) (countingTotal : Bool := true) : D Unit := do
@@ -573,6 +574,11 @@ def ofJV (v : JV) : D WalletState := do
   let pendingSends := (← keyIfPresent kvs "pendingSends" (asArray PendingSend.ofJV)).getD #[]
   let cards := (← keyIfPresent kvs "cards" (asArray IssuedCard.ofJV)).getD #[]
   unless IssuedCard.validate cards do dataCorrupted
+  -- every card pays the wallet's silent payment address: cards without one could not be watched for
+  let silentPaymentAddress ← keyIfPresent kvs "silentPaymentAddress" asString
+  match silentPaymentAddress with
+  | some code => unless (SilentPaymentAddress.parse code).toOption.isSome do dataCorrupted
+  | none => unless cards.isEmpty do dataCorrupted
   -- a coin of a card the file does not list could be neither watched for nor spent
   let known (u : WalletUTXO) : Bool := match u.card with
     | some k => cards.any (·.index == k)
@@ -582,7 +588,7 @@ def ofJV (v : JV) : D WalletState := do
     { descriptor := descriptor, network := network, creationHeight := creationHeight,
       nextReceiveIndex := nextReceiveIndex, nextChangeIndex := nextChangeIndex, nextScanHeight := nextScanHeight,
       scannedThroughHash := scannedThroughHash, allUtxos := allUtxos, history := history, observedFeeRates := observedFeeRates, pendingSends := pendingSends,
-      cards := cards }
+      cards := cards, silentPaymentAddress := silentPaymentAddress }
   validateCoins allUtxos (countingTotal := false)
   validateCoins s.utxos
   for p in pendingSends do

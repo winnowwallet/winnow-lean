@@ -175,11 +175,12 @@ def personCards (a b : Phone) : IO Unit := do
     (dana.payTo.isNone && dana.hasCard && !dana.isSavedRecipient)
   let issued ← a.wallet.cards
   check "card: the wallet issued one card" (issued.size == 1)
-  let some code := (issued[0]?.map (Wallet.cardCodeOf network ·)) | check "card: issued" false; return
-  let codeText := code.encoded.toOption.getD ""
-  check "card: a version 2 person card under my name, paying the code"
+  let some code := (← (a.wallet.card 0).run).toOption | check "card: issued" false; return
+  let addressText := code.address.encoded.toOption.getD ""
+  check "card: a version 2 person card under my name, with my silent payment address and Dana's tweak"
     (match PersonCard.decode cardText with
-     | .ok c => c.version == 2 && c.name == "Alice" && c.network == "regtest" && c.payTo == some codeText && codeText.startsWith "rwnc1"
+     | .ok c => c.version == 2 && c.name == "Alice" && c.network == "regtest" && c.payTo == some addressText &&
+         c.tweak == some (hex code.tweak) && addressText.startsWith "tsp1" && some code.tweak == issued[0]?.map (·.tweak)
      | .error _ => false) cardText
   check "card: the card does not carry the account key" (!contains cardText "tpub" && !contains cardText "tr(")
   let (again, _) ← obtain "Dana's card again" (personCard a.store a.wallet none "Dana" "Alice")
@@ -206,16 +207,16 @@ def personCards (a b : Phone) : IO Unit := do
   -- the person pastes it
   let read ← obtain "B reads the card" (parsePaste network cardText)
   check "card: read as Alice, a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
-  let bare ← obtain "B reads the bare code" (parsePaste network s!" {codeText.toUpper}\n")
-  check "card: the code alone reads too" (bare.payTo == some true && bare.name.isNone)
+  let bare ← obtain "B reads the address without the tweak" (parsePaste network addressText)
+  check "card: the address alone is an ordinary silent payment address, not a card" (bare.payTo == some false && bare.name.isNone)
   -- B already has an Alice (her shared card): names are not unique, so this one is found by its own
   let rb ← obtain "B saves Alice" (addPerson b.store (some b.wallet) "Alice, her card for me" (some cardText) none none none)
   let some alice := rb.people.find? (·.name == "Alice, her card for me") | check "card: Alice saved on B" false; return
   check "card: B's first scripts for Alice are the card's" (
-    let expected := (List.range 20).filterMap fun i => (Keys.CardKeys.scriptPubKey code i.toUInt32).toOption.map hex
+    let expected := (List.range 20).filterMap fun i => (Keys.SilentPaymentPairing.scriptPubKey code i.toUInt32).toOption.map hex
     (rb.recipientByScript.filter (·.2 == alice.id)).map (·.1) == expected && expected.length == 20)
   let (address0, index0) ← obtain "B's next payment" (nextPaymentAddress b.store alice.id)
-  let script0 := (Keys.CardKeys.scriptPubKey code 0).toOption.getD .empty
+  let script0 := (Keys.SilentPaymentPairing.scriptPubKey code 0).toOption.getD .empty
   check "card: B pays payment 0 of the card, an address A's wallet watches"
     (index0 == 0 && some address0 == AddressDecoder.address script0 network &&
      ((← (a.wallet.watchScripts).run).toOption.getD #[]).contains script0) address0
@@ -224,12 +225,21 @@ def personCards (a b : Phone) : IO Unit := do
   check "card: the next payment is the next index, another address" (index1 == 1 && address1 != address0)
   refused "card: the same card for a second person is refused" (kind := "duplicate")
     (addPerson b.store (some b.wallet) "Alicia" (some cardText) none none none)
-  let mainnetCode := ((CardCode.make code.key code.seed CardCode.mainnetHRP).toOption.bind (·.encoded.toOption)).getD ""
-  let wrongNetwork ← (parsePaste network mainnetCode).run
-  check "card: a code for another network says so" (match wrongNetwork with
+  let mainnetAddress := ({ code.address with hrp := "sp" } : SilentPaymentAddress).encoded.toOption.getD ""
+  let withPayTo (payTo tweak : String) : String := (PersonCard.make network "Alice" (some payTo) (tweak := some tweak)).serialized
+  let wrongNetwork ← (parsePaste network (withPayTo mainnetAddress (hex code.tweak))).run
+  check "card: a card whose address is for another network says so" (match wrongNetwork with
     | .error e => e.description == "That code is for a different Bitcoin network. This wallet is on regtest."
     | .ok _ => false)
-  refused "card: a code-shaped paste that is not one" (kind := "unrecognised") (parsePaste network "rwnc1qqexample")
+  let badTweak ← (parsePaste network (withPayTo addressText "00")).run
+  check "card: a card whose tweak is not one says so" (match badTweak with
+    | .error e => e.description == "That card's tweak is not valid. Ask for the card again."
+    | .ok _ => false)
+  refused "card: a zero tweak is refused" (kind := "invalidTweak")
+    (parsePaste network (withPayTo addressText (String.ofList (List.replicate 64 '0'))))
+  refused "card: a tweak with an ordinary address is refused" (parsePaste network (withPayTo address0 (hex code.tweak)))
+  check "card: a tweak with nothing to pay is not a card"
+    ((← (parsePaste network "{\"name\":\"Alice\",\"network\":\"regtest\",\"tweak\":\"00\",\"version\":2,\"winnow\":\"person-card\"}").run).toOption.isNone)
   -- a payment to a card is named as its person's
   let txid := String.ofList (List.replicate 64 'a')
   labelCardPayment a.store 0 txid
@@ -1185,7 +1195,9 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   check "card: the name is saved" (card.settings.ownDisplayName == "Alice" && left.isEmpty)
   let shown := renderedH (shareCardSheet card [])
   let some text := card.shareCard.card | check "card: made for the name" false; return
-  check "card: shown with its QR code" (contains shown "Your card" && contains shown "\"qr\"")
+  check "card: shown with its QR code" (contains shown "A card for everyone" && contains shown "\"qr\"")
+  let afterPersonSection := (shown.splitOn "A card for one person").getD 1 ""
+  check "card: under the card for one person" (contains afterPersonSection "A card for everyone")
   let read ← backend.parsePaste text
   check "card: another phone reads Alice and a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
   let (named, cs) := stepReceive .openCard { m with settings := { m.settings with ownDisplayName := "Alice" } }

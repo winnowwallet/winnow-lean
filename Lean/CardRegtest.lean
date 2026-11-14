@@ -5,11 +5,12 @@ import TestKit.Regtest
 
 /-! `card-regtest`: a card per person (issue #94) against a regtest Bitcoin Core, which is the payer.
 
-The wallet issues a card. Core's wallet pays the addresses that card's text derives, replaces one payment
-before it confirms, and a block of them is reorganised away and mined again. The wallet finds each payment
-through BIP157/158 basic filters as Core serves them, verifies the block, and credits each once. Then the two
-halves of "only the issuer spends": one transaction spending a card's coin, signed with what the payer holds
-(Core refuses it) and with the card's private key plus the tweak (Core takes it). Last, the same phrase on a
+The wallet issues a card: its silent payment address and a tweak for one person. Core's wallet pays the
+addresses that text derives, replaces one payment before it confirms, and a block of them is reorganised
+away and mined again. The wallet finds each payment through BIP157/158 basic filters as Core serves them,
+verifies the block, and credits each once. Then the two halves of "only the issuer spends": one transaction
+spending a card's coin, signed with what the payer holds (Core refuses it) and with the spend private key
+plus the output's tweak (Core takes it). Last, the same phrase on a
 wallet with no file: its frontier is already past every payment, it records the cards it could have issued,
 scans back over the same filters, finds the coins and spends one.
 
@@ -48,10 +49,9 @@ def syncWallet (w : Wallet) (fs : FilterSyncIO) (problems : IO.Ref (Array String
     (onMatch := fun m => walletStep problems "apply" (discard (w.apply m))))
   need "record the frontier" (w.recordScanHeight (← fs.nextScanHeight))
 
-/-- What the payer does with a card's text: the address of payment `i`. -/
-def payerAddress (codeText : String) (i : UInt32) : IO (String × ByteArray) := do
-  let code ← needE "the payer reads the code" (·.name) (CardCode.decode codeText (some CardCode.regtestHRP))
-  let script ← needE "the payer derives the script" (·.name) (CardKeys.scriptPubKey code i)
+/-- What the payer does with a card's text (the address, and the tweak in hex): the address of payment `i`. -/
+def payerAddress (cardText : String × String) (i : UInt32) : IO (String × ByteArray) := do
+  let script ← needE "the payer derives the script" id (PersonPayTo.cardScript cardText.1 cardText.2 i .regtest)
   let some address := AddressDecoder.address script .regtest | throw (IO.userError "no address for the script")
   return (address, script)
 
@@ -85,9 +85,10 @@ def cardChecks (n : Node) : IO Unit := do
   let keys ← IO.mkRef {}
   let w ← need "create" (Wallet.create .regtest (inMemoryKeyStore keys) none (some entropy) issuedAt)
   let fs ← runNet "filters" (FilterSyncIO.new pool store issuedAt none)
-  let (cardIndex, code) ← need "issue a card" w.issueCard
-  let codeText ← needE "encode" (·.name) code.encoded
-  check "a regtest card" (cardIndex == 0 && codeText.startsWith "rwnc1")
+  let (cardIndex, card) ← need "issue a card" w.issueCard
+  let codeText : String × String := (← needE "encode" (·.name) card.address.encoded, hex card.tweak)
+  check "a card: a test-network silent payment address and a 32-byte tweak"
+    (cardIndex == 0 && codeText.1.startsWith "tsp1" && codeText.2.length == 64)
 
   -- Core pays payments 0 and 1 of the card
   let (address0, script0) ← payerAddress codeText 0
@@ -138,18 +139,20 @@ def cardChecks (n : Node) : IO Unit := do
   let signedBy (secret : ByteArray) : IO Transaction := do
     let witness ← needE "sign" (fun _ => "signing failed") (Signer.witness unsigned 0 #[coin.spentOutput] secret (auxiliaryRand := zeros32))
     return { unsigned with inputs := unsigned.inputs.modify 0 fun i => { i with witness } }
-  let tweak ← needE "tweak" (·.name) (CardKeys.tweak code 0)
-  let (allowed, reason) ← mempoolVerdict n (← signedBy tweak)
-  check "signed with the tweak, which is all the payer holds: Core refuses it" (!allowed && !reason.isEmpty) reason
-  -- the card's private key, from the phrase and not from the wallet
+  let (allowed, reason) ← mempoolVerdict n (← signedBy card.tweak)
+  check "signed with the person's tweak, which the payer holds: Core refuses it" (!allowed && !reason.isEmpty) reason
+  let outputTweak ← needE "tweak" (·.name) (SilentPaymentPairing.outputTweak card 0)
+  let (allowed, reason) ← mempoolVerdict n (← signedBy outputTweak)
+  check "signed with the output's tweak, which the payer can derive: Core refuses it" (!allowed && !reason.isEmpty) reason
+  -- the spend private key, from the phrase and not from the wallet
   let words ← needE "mnemonic" (fun _ => "bip39") (BIP39.mnemonic entropy)
-  let node ← needE "node" (·.name) (do (← HDKey.ofSeed (BIP39.seed words)).derived "m/86'/1'/0'/2'/0'")
-  let some cardSecret := node.privateKey | throw (IO.userError "no private key")
-  let (allowed, reason) ← mempoolVerdict n (← signedBy cardSecret)
-  check "signed with the card's private key alone: Core refuses it" (!allowed) reason
-  let issuerSecret ← needE "sum" (·.name) (do return Secp.toBE32 (← privateAdd (← secretOf cardSecret) tweak))
+  let node ← needE "node" (·.name) (do (← HDKey.ofSeed (BIP39.seed words)).derived "m/352'/1'/0'/0'/0")
+  let some spendSecret := node.privateKey | throw (IO.userError "no private key")
+  let (allowed, reason) ← mempoolVerdict n (← signedBy spendSecret)
+  check "signed with the spend private key alone: Core refuses it" (!allowed) reason
+  let issuerSecret ← needE "sum" (·.name) (do return Secp.toBE32 (← privateAdd (← secretOf spendSecret) outputTweak))
   let (allowed, reason) ← mempoolVerdict n (← signedBy issuerSecret)
-  check "signed with the card's private key plus the tweak: Core takes it" allowed reason
+  check "signed with the spend private key plus the output's tweak: Core takes it" allowed reason
 
   -- the same phrase, no wallet file: the frontier is already past every payment
   let tip := (← n.height).toUInt32
@@ -170,7 +173,7 @@ def cardChecks (n : Node) : IO Unit := do
     (passes == 2 && complete && (← rebuilt.cards).size == Wallet.cardLookahead.toNat + 1) s!"{passes} passes"
   check "and holds the coins the issuing wallet holds"
     ((← cardCoins rebuilt) == (← cardCoins w) && (← rebuilt.balance) == 85_000_000) s!"{← cardCoins rebuilt}"
-  check "its card 0 is the card that was issued" ((← (rebuilt.cardCode 0).run).toOption == some code)
+  check "its card 0 is the card that was issued" ((← (rebuilt.card 0).run).toOption == some card)
   check "the forward frontier did not move for the scan back" ((← forward.nextScanHeight) == tip + 1)
 
   -- the rebuilt wallet spends everything; the issuing wallet sees its coins go

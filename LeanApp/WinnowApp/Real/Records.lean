@@ -263,22 +263,22 @@ def personNamed (s : RecordsStore) (personID : Option String) (name : String) : 
   return record
 
 /-- The card this wallet issues for one person, as the person card they paste: the wallet's display name
-`ownName` and a card code only they are given. The first call issues the card (which reads the wallet's
+`ownName`, its silent payment address, and a tweak only they are given. The first call issues the card (which reads the wallet's
 private key; the caller has asked the device's owner) and links it to the person; later calls read the same
 card back and need no key. The card is in the wallet's state before the link is written, so a failed link
 leaves a card nobody was given, never a code the wallet does not watch. -/
 def personCard (s : RecordsStore) (w : Wallet) (personID : Option String) (personName ownName : String) :
     RM (String × Records) := do
   let person ← personNamed s personID personName
-  let code ← match person.issuedCard with
-    | some index => liftWallet s.network (w.cardCode index)
+  let issued ← match person.issuedCard with
+    | some index => liftWallet s.network (w.card index)
     | none => do
-      let (index, code) ← liftWallet s.network w.issueCard
+      let (index, issued) ← liftWallet s.network w.issueCard
       discard <| withPeople s (some w) fun ps => ps.linkCard s.keys s.writeData person.id index
       s.note "card.issued" [("personID", person.id), ("card", toString index)]
-      pure code
-  let text ← RM.lift (fun (e : Bech32Error) => namedError e.name s.network) code.encoded
-  let card := PersonCard.make s.network ownName (some text)
+      pure issued
+  let address ← RM.lift (fun (e : Bech32Error) => namedError e.name s.network) issued.address.encoded
+  let card := PersonCard.make s.network ownName (some address) (tweak := some (hex issued.tweak))
   return (card.serialized, ← RM.io (records s (some w)))
 
 /-- Whether the person `personCard` would pick already has a card, so that reading it needs no key. -/

@@ -125,7 +125,8 @@ def receiveSheet (m : Model) (inner : List H) : H :=
 def labelSheet (m : Model) (inner : List H) : H :=
   formSheet "Address label" (if m.labelEditor.saving then none else some .closeSheet) [] (labelEditorView m) inner
 
-/-- A card for one person (issue #94): their name, then a card only they are given. -/
+/-- A card for one person (issue #94): their name, then a card only they are given, which carries the
+wallet's silent payment address and a tweak made for them. -/
 def personCardSections (m : Model) : List H :=
   let sc := m.shareCard
   let own := m.settings.ownDisplayName.trimAscii.copy
@@ -134,7 +135,7 @@ def personCardSections (m : Model) : List H :=
     | some id => m.records.people.any fun p => p.id == id && p.hasCard
     | none => ((m.records.people.find? (·.name == person)).map (·.hasCard)).getD false
   let label := if sc.making then "Making…" else if known then s!"Show {person}’s card" else if person.isEmpty then "Make a card" else s!"Make a card for {person}"
-  [ .section "A card for one person" "Made for one person and nobody else. They pay you at addresses only the two of you can work out, they cannot see your other addresses, and a payment to this card is named as theirs. Send it only to them: anyone who has it can see what is paid to it."
+  [ .section "A card for one person" "Made for one person and nobody else. It carries your silent payment address and a tweak made for them, so each payment from them goes to an address only the two of you can work out. They cannot see your other addresses, and a payment made with this card is named as theirs. Send it only to them: anyone who has it can see what is paid with it. Every card you make shows the same silent payment address, so two people who compare their cards can tell they pay the same wallet."
       [ .identified Ids.personCardNameField
           (.input .plain "" "Their name" sc.forName (fun s => .receive (.setCardFor s)) (some (.receive .makePersonCard)))
       , .identified Ids.makePersonCardButton
@@ -145,17 +146,19 @@ def personCardSections (m : Model) : List H :=
        [ .qr card, copyableBlock m "card.person" card Ids.personCardText ]]
    | none => [])
 
-/-- `ShareMyCardView`: public keys only, plus the name others will see. -/
+/-- `ShareMyCardView`: the name others will see, a card for one person first, and under it the card
+everybody can be given (upstream's one card: public keys only, and every address the wallet has). -/
 def shareCardSheet (m : Model) (inner : List H) : H :=
   formSheet "Share my card" (some .closeSheet) [closeBar "Done" Ids.closeShareCardButton]
     ([ .section "" "" [.identified Ids.ownNameField
         (.input .plain "" "Your name, as others will see it" m.settings.ownDisplayName (fun s => .receive (.setOwnName s)) none)] ] ++
+     (if m.shareCard.card.isNone then [.section "" "" [caption "Add a name to make your card."]] else []) ++
+     personCardSections m ++
      (match m.shareCard.card with
       | some card =>
-        [.section "Your card" "This card carries public keys only. Anyone who has it can pay you and can see every address it derives, the same way your wallet does. People who pay you from their address book use the same list of addresses as your Receive screen, so two people paying at once can land on one address — a privacy detail, never a loss."
+        [.section "A card for everyone" "This card carries public keys only. Anyone who has it can pay you and can see every address it derives, the same way your wallet does. People who pay you from their address book use the same list of addresses as your Receive screen, so two people paying at once can land on one address — a privacy detail, never a loss."
           [ .qr card, copyableBlock m "card.text" card ]]
-      | none => [.section "" "" [caption "Add a name to make your card."]]) ++
-     personCardSections m ++
+      | none => []) ++
      errorRows m.shareCard.error) inner
 
 end WinnowApp
