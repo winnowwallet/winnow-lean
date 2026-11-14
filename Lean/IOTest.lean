@@ -16,7 +16,11 @@ in its mempool, a reorg under it making it pending again (rolled back, saved, an
 peers.json and broadcast.json round trips. Fake peers that never ask for an announced transaction: the
 announcement timeout naming each peer, and a relay-only session ending with `seatsGone`. Fake peers that
 misbehave or go quiet: a burst past its byte bound, the keepalive and a silent peer, a pool replacing a peer it
-lost, and filter votes that split or that one source class carries. Offline policy
+lost, and filter votes that split or that one source class carries. The network findings of the review in
+#92 (`hardeningChecks`): the framer's read offset, a subscriber's queue bounded by bytes, the mempool
+window's share per peer, `getdata` answered only for a peer that was told, a broadcast started beside
+another change to the pending set, the header sync's turn of seats, a peer rested for filters that fail a
+scan, and a pin that two source classes contradict rewound. Offline policy
 checks: HTTP permits and redirects against a local Python server through the curl fetch, seed filtering
 and dns-json, the census catalog (the list each build ships). The node is killed by PID at the end, also on failure. -/
 
@@ -717,6 +721,336 @@ def mempoolRefetchChecks : IO Unit := do
   let (_, seen) := w.handle (.tx tx) b 102
   check "mempool: and that payment is seen" (paid seen)
 
+/-! ## The network findings of the review (#92: 7, 8, 9, 10, 16, 17, 18) -/
+
+/-- Finding 10: taking a message moves an offset and copies nothing of what follows it. -/
+def framerOffsetChecks : IO Unit := do
+  let ping := MessageFramer.frame "ping" (filled 8 1) regtest.magic
+  let empty := MessageFramer.frame "verack" .empty regtest.magic
+  let three := ping ++ empty ++ ping
+  let f : MessageFramer := ({ magic := regtest.magic } : MessageFramer).append three
+  match f.nextMessage with
+  | .ok (some (command, payload), f1) =>
+    check "framer: the first message, the buffer left as it was" (command == "ping" && payload == filled 8 1 &&
+      f1.buffer.size == three.size && f1.offset == ping.size && f1.unread == empty.size + ping.size)
+    match f1.nextMessage with
+    | .ok (some (c2, p2), f2) =>
+      check "framer: the next one starts where the first ended" (c2 == "verack" && p2.isEmpty && f2.offset == ping.size + empty.size)
+      -- half of the third is here; the rest arrives with a fourth
+      let cut : MessageFramer := { f2 with buffer := f2.buffer.extract 0 (f2.buffer.size - 10) }
+      check "framer: part of a message is not a message" (match cut.nextMessage with | .ok (none, g) => g.offset == cut.offset | _ => false)
+      let whole := cut.append (three.extract (three.size - 10) three.size ++ empty)
+      check "framer: more bytes drop what was taken" (whole.offset == 0 && whole.buffer.size == ping.size + empty.size)
+      match whole.nextMessage with
+      | .ok (some (c3, p3), f3) =>
+        check "framer: a message split across reads" (c3 == "ping" && p3 == filled 8 1 &&
+          (match f3.nextMessage with | .ok (some (c4, _), f4) => c4 == "verack" && f4.unread == 0 | _ => false))
+      | _ => check "framer: a message split across reads" false
+    | _ => check "framer: the next one starts where the first ended" false
+  | _ => check "framer: the first message, the buffer left as it was" false
+  -- a megabyte of empty messages in one read: about 19 GB of copying before, the megabyte now (the time is
+  -- printed, not judged)
+  let count := 40_000
+  let mut flood := ByteArray.emptyWithCapacity (count * empty.size)
+  for _ in [0:count] do flood := flood ++ empty
+  let mut g : MessageFramer := ({ magic := regtest.magic } : MessageFramer).append flood
+  let started ← IO.monoMsNow
+  let mut taken := 0
+  repeat
+    match g.nextMessage with
+    | .ok (some _, rest) => g := rest; taken := taken + 1
+    | _ => break
+  let spent := (← IO.monoMsNow) - started
+  check s!"framer: {count} empty messages in one read are all taken" (taken == count && g.unread == 0) s!"{spent} ms"
+
+/-- Finding 16: a subscriber's queue is bounded by bytes, so a burst of small messages is kept whole. -/
+def subscriberQueueChecks : IO Unit := do
+  let s : EventStream Nat Unit ← EventStream.new 0 256 (some 100)
+  for i in [0:5] do s.yield i 10
+  check "stream: five light elements within the weight are all kept" ((← s.state.get).queue.map (·.1) == #[0, 1, 2, 3, 4])
+  s.yield 5 80
+  check "stream: past the weight the oldest go, down to it"
+    ((← s.state.get).queue.map (·.1) == #[3, 4, 5] && (← s.state.get).queuedWeight == 100)
+  s.yield 6 150
+  check "stream: an element heavier than the limit is kept alone" ((← s.state.get).queue.map (·.1) == #[6])
+  check "stream: reading gives the weight back"
+    ((match ← s.next with | .value 6 => true | _ => false) && (← s.state.get).queuedWeight == 0)
+  let counted : EventStream Nat Unit ← EventStream.new 0 2
+  for i in [0:4] do counted.yield i
+  check "stream: without a weight limit the capacity counts, as before" ((← counted.state.get).queue.map (·.1) == #[2, 3])
+  -- five announcements in a burst, to a subscriber that is not reading
+  let inv (tag : UInt8) : PeerMessage := .inv { vectors := #[{ type := InventoryType.tx, hash := filled 32 tag }] }
+  let node ← fakeNode regtest (answer := fun send m => do
+    if m matches .ping _ then for tag in [1, 2, 3, 4, 5] do send (inv tag))
+  let c ← connectedTo node
+  let stream ← c.events
+  runNet "ping" (c.ping 5_000)
+  let tags : IO (Array UInt8) := do
+    return (← stream.state.get).queue.filterMap fun
+      | (.message (.inv p), _) => p.vectors[0]?.map (·.hash.get! 0)
+      | _ => none
+  let all ← waitUntil 3_000 (do return (← tags).size == 5)
+  check "a burst of five announcements reaches a subscriber that has not read yet" (all && (← tags) == #[1, 2, 3, 4, 5])
+    s!"{← tags}"
+  c.disconnect
+
+/-- Finding 17: one peer's announcements hold a share of the fetches, not all of them. -/
+def mempoolQuotaChecks : IO Unit := do
+  let a : PeerEndpoint := { host := "127.0.0.1", port := 1 }
+  let b : PeerEndpoint := { host := "127.0.0.1", port := 2 }
+  let txid (i : Nat) : ByteArray := ByteArray.mk #[(i / 256).toUInt8, (i % 256).toUInt8] ++ filled 30 9
+  let announce (first last : Nat) : PeerMessage :=
+    .inv { vectors := (Array.range (last - first)).map fun i => { type := InventoryType.tx, hash := txid (first + i) } }
+  let asked (es : Array MempoolEffect) (of : PeerEndpoint) : Array ByteArray :=
+    es.flatMap fun | .sendGetData p r => if p == of then r.vectors.map (·.hash) else #[] | _ => #[]
+  let opened : MempoolWindow := (({ watchScripts := {} } : MempoolWindow).start).1
+  let quota := opened.maxInFlightPerPeer
+  let (w, first) := opened.handle (announce 0 600) a 100
+  check s!"mempool: one peer's 600 announcements fetch its share ({quota})"
+    (asked first a == (Array.range quota).map txid && w.inFlightTo a.description == quota)
+  let (w, more) := w.handle (announce 600 700) a 101
+  check "mempool: and no more while those are out" ((asked more a).isEmpty && w.inFlight.size == quota)
+  let (w, other) := w.handle (announce 0 600) b 102
+  check "mempool: another peer's announcements of the rest are fetched from it"
+    (asked other b == (Array.range quota).map (fun i => txid (quota + i)) && w.inFlightTo b.description == quota)
+  let swept := w.sweep (100 + w.requestTimeout + 2)
+  check "mempool: a share is free again once its fetches time out"
+    (swept.inFlightTo a.description == 0 && (asked (swept.handle (announce 0 10) a 200).2 a).size == 10)
+  let tight : MempoolWindow := (({ watchScripts := {}, maxInFlight := 10 } : MempoolWindow).start).1
+  check "mempool: the limit across all peers still holds" ((asked (tight.handle (announce 0 600) a 100).2 a).size == 10)
+
+/-- A fake node that keeps what it is sent and can be made to speak (`say`), once connected to. -/
+structure TalkingNode where
+  endpoint : PeerEndpoint
+  heard : IO.Ref (Array PeerMessage)
+  say : IO.Ref (Option (PeerMessage → IO Unit))
+
+def talkingNode (onConnect : Array PeerMessage := #[]) : IO TalkingNode := do
+  let heard ← IO.mkRef #[]
+  let say ← IO.mkRef none
+  let endpoint ← fakeNode regtest (answer := fun send m => do
+    heard.modify (·.push m)
+    if m matches .verack then
+      say.set (some send)
+      for first in onConnect do send first)
+  return { endpoint, heard, say }
+
+def TalkingNode.send (n : TalkingNode) (m : PeerMessage) : IO Unit := do
+  let some send ← n.say.get | throw (IO.userError "the fake node was not connected to")
+  send m
+
+def TalkingNode.gotTx (n : TalkingNode) (txid : ByteArray) : IO Bool := do
+  return (← n.heard.get).any fun | .tx t => t.txid == txid | _ => false
+
+def TalkingNode.gotInv (n : TalkingNode) (txid : ByteArray) : IO Bool := do
+  return (← n.heard.get).any fun | .inv p => p.vectors.any (·.hash == txid) | _ => false
+
+/-- Finding 18: `getdata` is answered for a peer that was told of the transaction, while it is unconfirmed. -/
+def serveOnlyTheToldChecks : IO Unit := do
+  -- a fee filter above the payment's rate: this peer is never told of it
+  let untold ← talkingNode (onConnect := #[.feefilter 50_000_000])
+  let early ← talkingNode
+  let late ← talkingNode
+  let pool ← PeerPool.new regtest (peerCount := 3) (manualPeers := #[untold.endpoint, early.endpoint, late.endpoint])
+    (seedResolver := some noSeeds)
+  pool.start
+  let seated ← waitUntil 5_000 (do return (← pool.connectedPeers).size == 3)
+  let filtered ← waitUntil 3_000 (do
+    return (← (← pool.connectedPeers).filterM fun c => do return (← c.feeFilter).isSome).size == 1)
+  check "serve: three peers seated, one with a fee filter" (seated && filtered)
+  let b ← runNet "serve broadcaster" (TxBroadcaster.new pool (rebroadcastBaseMs := 60_000))
+  let events ← collect (← b.events)
+  let txid ← runNet "serve broadcast" (b.broadcast (fakeRawTx 3) (feeRate := some 1.0))
+  let told ← waitUntil 3_000 (do return (← early.gotInv txid) && (← late.gotInv txid))
+  check "serve: the payment is announced to the two peers that take its fee, not the third"
+    (told && !(← untold.gotInv txid))
+  let ask : PeerMessage := .getdata { vectors := #[{ type := InventoryType.witnessTx, hash := txid }] }
+  early.send ask
+  check "serve: a peer that was told and asks is sent it" (← waitUntil 3_000 (early.gotTx txid))
+  untold.send ask
+  -- a ping after it: the pong shows the peer's messages up to here were read
+  let pinged (n : TalkingNode) (nonce : UInt64) : IO Bool := do
+    n.send (.ping nonce)
+    waitUntil 3_000 (do return (← n.heard.get).any fun | .pong k => k == nonce | _ => false)
+  let read ← pinged untold 41
+  IO.sleep 200
+  check "serve: a peer that was never told asks and is sent nothing"
+    (read && !(← untold.gotTx txid) &&
+     !((← events.get).any fun | .requested t p => t == txid && p == untold.endpoint | _ => false))
+  runNet "serve confirm" (b.markConfirmed txid 7)
+  late.send ask
+  let read ← pinged late 42
+  IO.sleep 200
+  check "serve: once confirmed it is sent to nobody, a peer that was told included" (read && !(← late.gotTx txid))
+  b.shutdown
+  pool.stop
+
+/-- Finding 7: a payment broadcast while another change to the pending set is being saved stays, in memory
+and in the file. Each round starts a broadcast and a cancel (or a confirmation) of an earlier payment at once;
+before the lock, whichever saved second put back a set without the other's change. -/
+def broadcastRaceChecks (dir : String) : IO Unit := do
+  let pool ← PeerPool.new regtest (peerCount := 1) (manualPeers := #[]) (seedResolver := some noSeeds)
+  let path : System.FilePath := s!"{dir}/race-broadcast.json"
+  let b ← runNet "race broadcaster" (TxBroadcaster.new pool (some path) (rebroadcastBaseMs := 3_600_000))
+  let rounds := 60
+  let txidOf (tag : Nat) : IO ByteArray := do
+    match Transaction.decode (fakeRawTx tag.toUInt8) with
+    | .ok t => pure t.txid
+    | .error _ => throw (IO.userError "fakeRawTx does not decode")
+  let mut failures : Array String := #[]
+  for i in [0:rounds] do
+    let old := 2 * i + 10
+    let new := 2 * i + 11
+    discard <| runNet "race: the earlier payment" (b.broadcast (fakeRawTx old.toUInt8))
+    let oldTxid ← txidOf old
+    let sending ← IO.asTask (prio := .dedicated) (b.broadcast (fakeRawTx new.toUInt8)).toBaseIO
+    let changing ← IO.asTask (prio := .dedicated)
+      (if i % 2 == 0 then b.cancel oldTxid else b.markConfirmed oldTxid 5).toBaseIO
+    for (name, result) in [("broadcast", (← IO.wait sending).map (fun r => r.map fun _ => ())), ("change", ← IO.wait changing)] do
+      match result with
+      | .ok (.ok ()) => pure ()
+      | .ok (.error e) => failures := failures.push s!"{name} {i}: {e.description}"
+      | .error e => failures := failures.push s!"{name} {i}: {e}"
+  check "race: every broadcast, cancel and confirmation went through" failures.isEmpty s!"{failures}"
+  let mut expected : Array ByteArray := #[]
+  for i in [0:rounds] do expected := expected.push (← txidOf (2 * i + 11))
+  let sorted (xs : Array ByteArray) : Array String := (xs.map hex).qsort (· < ·)
+  let live := sorted (← b.pendingTxids)
+  check s!"race: all {rounds} payments broadcast beside another change are still pending" (live == sorted expected)
+    s!"{live.size} of {rounds}"
+  -- the earlier ones: cancelled, or held as confirmed and so not pending
+  let held := (← b.state.get).pending.size
+  check "race: and each earlier one was cancelled or is held as confirmed" (held == rounds + rounds / 2) s!"{held} entries"
+  b.shutdown
+  let reloaded ← runNet "race reload" (TxBroadcaster.new pool (some path))
+  check "race: the file holds the same payments" (sorted (← reloaded.pendingTxids) == sorted expected &&
+    reloaded.persistenceState == .loaded (rounds + rounds / 2)) s!"{repr reloaded.persistenceState}"
+  reloaded.shutdown
+
+/-- Finding 8, headers: each header sync begins with the next seat, so a peer that answers every `getheaders`
+with nothing holds one pass in two here, not every pass. -/
+def headerTurnChecks : IO Unit := do
+  let headers := minedHeaders 5
+  let tip := headers.back!.hash
+  let quiet ← fakeNode regtest (answer := fun send m => do
+    if m matches .getheaders _ then send (.headers #[]))
+  let honest ← fakeNode regtest (answer := fun send m => do
+    if let .getheaders r := m then
+      send (.headers (if r.locatorHashes[0]? == some tip then #[] else headers)))
+  let pool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[quiet, honest]) (seedResolver := some noSeeds)
+  pool.start
+  let seated ← waitUntil 5_000 (do return (← pool.connectedPeers).size == 2)
+  let store ← runNet "turn headers" (HeaderStore.open regtest none)
+  let mut heights : Array UInt32 := #[]
+  for _ in [0:2] do
+    discard <| runNet "turn sync" (pool.syncHeaders store (timeoutPerPeerMs := 3_000))
+    heights := heights.push (← store.height)
+  check "header sync: two passes ask two seats, and the chain has the headers one of them held back"
+    (seated && heights.back! == 5 && (← pool.connectedPeers).size == 2) s!"heights {heights}"
+  pool.stop
+
+/-- Finding 8, filters: a peer whose filters fail the scan is rested, so the next pass asks another. -/
+def restedScanPeerChecks : IO Unit := do
+  let headers := minedHeaders 3
+  let hashes := #[(HeaderChain.genesisHeader regtest).hash] ++ headers.map (·.hash)
+  let node ← fakeNode regtest (startHeight := 3) (answer := fun send m => do
+    match m with
+    | .getheaders _ => send (.headers #[])
+    | .getcfcheckpt r => send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := #[] })
+    | .getcfheaders r =>
+      send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := filled 32 0, filterHashes := Array.replicate 4 (filled 32 1) })
+    -- filters that are not the ones its own headers commit to
+    | .getcfilters _ => for h in hashes do send (.cfilter { blockHash := h, filter := filled 40 9 })
+    | _ => pure ())
+  let pool ← PeerPool.new regtest (peerCount := 1) (manualPeers := #[node]) (seedResolver := some noSeeds)
+  pool.start
+  let seated ← waitUntil 5_000 (do return (← pool.connectedPeers).size == 1)
+  let store ← runNet "rest headers" (HeaderStore.open regtest none)
+  discard <| runNet "rest chain" (store.connect headers)
+  let filters ← runNet "rest filters" (FilterSyncIO.new pool store 0)
+  let r ← (filters.sync #[] (onMatch := fun _ => pure ())).attempt
+  check "scan: filters that contradict their headers fail the pass"
+    (seated && (match r with | .error (.filters (.filterHeaderMismatch 0)) => true | _ => false))
+    (match r with | .error e => e.description | .ok () => "synced")
+  check "scan: and the peer that sent them is rested, not left in its seat"
+    ((← pool.isCoolingDown node) && (← pool.connectedPeers).isEmpty && (← filters.nextScanHeight) == 0)
+  pool.stop
+
+/-- Finding 9: a pin above the last checkpoint boundary that an answer agreed across source classes
+contradicts is rewound, and the scan starts again below it; one class's word rewinds nothing. -/
+def disputedPinChecks (dir : String) : IO Unit := do
+  let pins (heights : List Nat) : Std.HashMap String String :=
+    heights.foldl (fun m h => m.insert (toString h) (hex (filled 32 1))) {}
+  check "disputed pin: back to the highest boundary pinned below it"
+    (FilterSync.disputedAnchorBoundary (pins [999, 1000, 2000, 2500]) 2500 == some 2000 &&
+     FilterSync.disputedAnchorBoundary (pins [999, 1000, 2000, 2500]) 2000 == some 1000)
+  check "disputed pin: no boundary below it, so from the start"
+    (FilterSync.disputedAnchorBoundary (pins [0, 500, 999]) 999 == none &&
+     FilterSync.disputedAnchorBoundary (pins [1000]) 1000 == none)
+  let answer : CFHeadersMessage := { stopHash := filled 32 0, previousFilterHeader := filled 32 2, filterHashes := #[] }
+  check "disputed pin: an answer contradicts the pin under it, and only a pin that is there"
+    (FilterSync.anchorDisputed answer 1000 (pins [999]) && !FilterSync.anchorDisputed answer 1000 (pins [998]) &&
+     !FilterSync.anchorDisputed { answer with previousFilterHeader := filled 32 1 } 1000 (pins [999]) &&
+     !FilterSync.anchorDisputed answer 0 (pins [0]))
+  check "disputed pin: two known classes, an unknown one counting for nothing"
+    (FilterSync.spansKnownClasses #[some .manual, some .persisted] && !FilterSync.spansKnownClasses #[some .manual, some .manual] &&
+     !FilterSync.spansKnownClasses #[some .manual, none])
+  -- through a real sync: the chain at 1000, the frontier at 1000 on a wrong pin at 999
+  let store ← runNet "pin headers" (HeaderStore.open regtest none)
+  discard <| runNet "pin chain" (store.connect (minedHeaders 1_000))
+  let honest (send : PeerMessage → IO Unit) : PeerMessage → IO Unit
+    | .getheaders _ => send (.headers #[])
+    | .getcfcheckpt r => send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := #[filled 32 3] })
+    | .getcfheaders r =>
+      send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := filled 32 2, filterHashes := #[filled 32 4] })
+    | _ => pure ()
+  let wrong := "{\"nextScanHeight\":1000,\"filterHeaders\":{\"999\":\"" ++ hex (filled 32 1) ++ "\"}}"
+  let run (name : String) (remembered : Bool) : IO (Except NetError Unit × FilterSyncIO × Array UInt32 × System.FilePath) := do
+    let a ← fakeNode regtest (startHeight := 1_000) (answer := honest)
+    let b ← fakeNode regtest (startHeight := 1_000) (answer := honest)
+    let file : System.FilePath := s!"{dir}/{name}-peers.json"
+    let mut seats := 2
+    if remembered then
+      let c ← fakeNode regtest (v6 := true) (startHeight := 1_000) (answer := honest)
+      IO.FS.writeBinFile file (PersistedPeers.encode #[{ endpoint := c, source := .persisted }])
+      seats := 3
+    let pool ← PeerPool.new regtest (peerCount := seats) (manualPeers := #[a, b])
+      (peersFile := if remembered then some file else none) (seedResolver := some noSeeds)
+    pool.start
+    let seated ← waitUntil 10_000 (do return (← pool.connectedPeers).size == seats)
+    check s!"disputed pin ({name}): {seats} peers seated" seated
+    let progress : System.FilePath := s!"{dir}/{name}-filters.json"
+    IO.FS.writeFile progress wrong
+    let filters ← runNet "pin filters" (FilterSyncIO.new pool store 990 (some progress))
+    let rewound ← IO.mkRef (#[] : Array UInt32)
+    let r ← (filters.sync #[] (onReorg := some fun h => rewound.modify (·.push h)) (onMatch := fun _ => pure ())).attempt
+    pool.stop
+    return (r, filters, ← rewound.get, progress)
+  let (r, filters, rewound, progress) ← run "one-class" false
+  check "disputed pin: one class's answer rewinds nothing, and the pass fails as it did"
+    ((match r with | .error (.filters (.filterHeaderMismatch 1000)) => true | _ => false) && rewound.isEmpty &&
+     (← filters.nextScanHeight) == 1000 && (← filters.pinnedFilterHeaders).contains "999")
+    (match r with | .error e => e.description | .ok () => "synced")
+  let _ := progress
+  let (r, filters, rewound, progress) ← run "two-classes" true
+  check "disputed pin: an answer across two classes rewinds it, the wallet told first"
+    ((match r with | .ok () => true | _ => false) && rewound == #[989] && (← filters.nextScanHeight) == 990 &&
+     (← filters.pinnedFilterHeaders).isEmpty)
+    (match r with | .error e => e.description | .ok () => s!"told {rewound}")
+  let saved ← IO.FS.readFile progress
+  check "disputed pin: and the file starts again from the wallet's first height"
+    (match Progress.ofJsonText saved with | .ok p => p.nextScanHeight == 990 && p.filterHeaders.isEmpty | .error _ => false) saved
+
+def hardeningChecks (dir : String) : IO Unit := do
+  framerOffsetChecks
+  subscriberQueueChecks
+  mempoolQuotaChecks
+  serveOnlyTheToldChecks
+  broadcastRaceChecks dir
+  headerTurnChecks
+  restedScanPeerChecks
+  disputedPinChecks dir
+
 /-- The broadcaster giving up on peers that take the inv and never ask for the transaction (#39), over an
 IPv4 and an IPv6 fake node (ephemeral, so high, ports): an announcement unanswered past
 `announcementTimeoutMs` fails naming its peer's endpoint (`expireStaleAnnouncements`, `endpointOfKey`),
@@ -848,6 +1182,7 @@ def fakeChecks (dir : String) : IO Unit := do
   replenishChecks
   voteChecks dir
   mempoolRefetchChecks
+  hardeningChecks dir
 
 /-- 3b. Restore-only range scans (#226): a back-scan for the funded script below the forward frontier. -/
 def rangeChecks (dir : String) (pool : PeerPool) (store : HeaderStore) (fs : FilterSyncIO) (spk : ByteArray)

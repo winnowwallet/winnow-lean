@@ -33,6 +33,8 @@ structure FilterSyncIO where
   filtersPerChunk : UInt32
   /-- whether a run may advance on answers from one acquisition channel (`CrossCheckPolicy`) -/
   crossCheckPolicy : CrossCheckPolicy
+  /-- the wallet's first height: where a scan starts again when nothing pinned can be kept -/
+  startHeight : UInt32
   path : Option System.FilePath
   persistenceState : PersistenceState
   progress : IO.Ref Progress
@@ -65,7 +67,8 @@ def new (pool : PeerPool) (chain : HeaderStore) (startHeight : UInt32) (path : O
   let (state, progress) ← match initialProgress path.isSome file startHeight with
     | .ok r => pure r
     | .error e => throw (.filterStorage e)
-  return { pool, chain, requiredCheckpointPeers, filtersPerChunk := clampFiltersPerChunk filtersPerChunk, crossCheckPolicy, path,
+  return { pool, chain, requiredCheckpointPeers, filtersPerChunk := clampFiltersPerChunk filtersPerChunk, crossCheckPolicy,
+           startHeight, path,
            persistenceState := state, progress := ← IO.mkRef progress, requesting := ← IO.mkRef false,
            peakChunkFilterBytes := ← IO.mkRef 0, rangeRun := ← IO.mkRef none }
 
@@ -219,8 +222,10 @@ private def collectedCFHeaders (f : FilterSyncIO) (batchStart : UInt32) (stopHas
     answers := answers.push (peer, m)
   return answers
 
+/-- The cfheaders answer the query peers agree on, and whether those who gave it span two known source
+classes (what a rewind of a contradicted pin asks for). -/
 private def crossCheckedCFHeaders (f : FilterSyncIO) (batchStart batchStop : UInt32) (stopHash : ByteArray)
-    (queryPeers : Array PeerConnection) : NetM CFHeadersMessage := do
+    (queryPeers : Array PeerConnection) : NetM (CFHeadersMessage × Bool) := do
   let answers ← f.collectedCFHeaders batchStart stopHash queryPeers
   if answers.isEmpty then throw (← f.noPeersError)
   let some (value, minority) := strictMajority answers | do
@@ -229,13 +234,23 @@ private def crossCheckedCFHeaders (f : FilterSyncIO) (batchStart batchStop : UIn
   let agreeing := (answers.filter (·.2 == value)).map (·.1)
   if (← f.sourceSpanOf agreeing minority).2 then
     f.refuseDisputedVote (answers.map (·.1)) s!"cfheaders at {batchStart}: one source class outvotes another"
+  let spansClasses := spansKnownClasses (← f.classes agreeing)
   for c in minority do f.pool.misbehaving c s!"cfheaders mismatch at {batchStart}"
   match checkCFHeadersCount value batchStart batchStop with
   | .error e => throw (.filters e)
-  | .ok () => return value
+  | .ok () => return (value, spansClasses)
 
+/-- What pinning a batch came to. -/
+inductive Pinned where
+  | headers (h : Std.HashMap String String)
+  /-- an answer agreed across source classes contradicts the stored pin at this height, under the batch -/
+  | disputed (anchor : UInt32)
+
+/-- The batch's filter headers, cross-checked and walked from the stored pin under it. With `rewinds`, a
+stored pin that an answer agreed across source classes contradicts is reported and nothing is walked;
+without (a range scan, whose record is not the frontier), it is the mismatch it always was. -/
 private def pinFilterHeaders (f : FilterSyncIO) (batchStart batchStop : UInt32) (stopHash : ByteArray)
-    (peers : Array PeerConnection) (stored : Std.HashMap String String) : NetM (Std.HashMap String String) := do
+    (peers : Array PeerConnection) (stored : Std.HashMap String String) (rewinds : Bool := false) : NetM Pinned := do
   let mut sourced := #[]
   for c in peers do sourced := sourced.push (c, ← f.pool.source c.endpoint)
   let queryPeers := crossSourceSet sourced
@@ -243,11 +258,35 @@ private def pinFilterHeaders (f : FilterSyncIO) (batchStart batchStop : UInt32) 
   for (start, stop) in batches (requestStart stored batchStart) batchStop do
     let some hash ← (if stop == batchStop then pure (some stopHash) else f.chain.blockHash stop)
       | throw (.filters (.badPeerResponse "missing reconstruction header"))
-    let message ← f.crossCheckedCFHeaders start stop hash queryPeers
+    let (message, spansClasses) ← f.crossCheckedCFHeaders start stop hash queryPeers
+    if rewinds && spansClasses && anchorDisputed message start stored then return .disputed (start - 1)
     headers ← match walkFilterHeaders message start stored headers with
       | .ok h => pure h
       | .error e => throw (.filters e)
-  return headers
+  return .headers headers
+
+/-- A range scan's pins: nothing is rewound there. -/
+private def pinRangeHeaders (f : FilterSyncIO) (batchStart batchStop : UInt32) (stopHash : ByteArray)
+    (peers : Array PeerConnection) (stored : Std.HashMap String String) : NetM (Std.HashMap String String) := do
+  match ← f.pinFilterHeaders batchStart batchStop stopHash peers stored with
+  | .headers h => return h
+  | .disputed anchor => throw (.filters (.filterHeaderMismatch (anchor + 1)))
+
+/-- Goes back from a pin a cross-class answer contradicts (`disputedAnchorBoundary`): to the highest
+checkpoint boundary pinned below it, or to the wallet's first height with nothing pinned. `onReorg` hears
+of it first, as for a fork, so the wallet lets go of what it recorded above. -/
+private def rewindDisputedPin (f : FilterSyncIO) (anchor : UInt32) (onReorg : Option (UInt32 → NetM Unit)) : NetM Unit := do
+  let progress ← f.progress.get
+  match disputedAnchorBoundary progress.filterHeaders anchor with
+  | some boundary =>
+    if let some cb := onReorg then cb boundary
+    f.rollBack boundary
+  | none =>
+    let resume := min f.startHeight progress.nextScanHeight
+    if let some cb := onReorg then cb (if resume == 0 then 0 else resume - 1)
+    let candidate : Progress := { nextScanHeight := resume }
+    f.persist candidate
+    f.progress.set candidate
 
 private def verifiedBlock (f : FilterSyncIO) (peer : PeerConnection) (height : UInt32) (blockHash : ByteArray)
     (timeoutMs : Nat := 120_000) : NetM Block := do
@@ -280,6 +319,17 @@ def chargeRange (f : FilterSyncIO) (filterBytes blockBytes : Nat) : NetM Unit :=
   let total := r.filterBytesRead + r.blockBytesRead
   if total > r.maxBytes then throw (.range (.filterBytesExhausted total r.maxBytes))
 
+/-- A scan this peer failed: it is rested, so the next pass asks another. A peer already refused for the
+session (a burst past its bound, a wrong block) is left as judged, and a cancelled scan is nobody's fault.
+The failure used to be thrown with the peer left in its seat, the first one, so a peer that withheld its
+filters or sent wrong ones was asked again on every pass. A rest and not a ban: a filter that contradicts
+its pinned header says the peer or the pin is wrong, not which. -/
+private def failedScan {α} (f : FilterSyncIO) (peer : PeerConnection) (e : NetError) : NetM α := do
+  match e with
+  | .cancelled => pure ()
+  | _ => if (← f.pool.connectedPeers).contains peer then f.pool.transportFailure peer e.description
+  throw e
+
 /-- One chunk: the burst is bounded (`chunkByteBound`; past it the connection is torn down and the peer
 marked misbehaving), every filter is verified against its pinned header before any is matched, the range
 budget is charged for the chunk, then each filter is matched and each hit's block fetched and delivered. -/
@@ -293,7 +343,7 @@ private def scanChunk (f : FilterSyncIO) (chunkStart chunkStop : UInt32) (peer :
       (chunkTimeoutSeconds count peer.endpoint.isOverlay * 1000) (maxTotalBytes := some (chunkByteBound count))).toBaseIO with
     | .ok r => pure r
     | .error e@(.peer (.protocolViolation _)) => f.pool.misbehaving peer e.description; throw e
-    | .error e => throw e
+    | .error e => f.failedScan peer e
   let mut heightByHash : Std.HashMap ByteArray UInt32 := {}
   for i in [0:count] do
     let h := chunkStart + i.toUInt32
@@ -302,10 +352,10 @@ private def scanChunk (f : FilterSyncIO) (chunkStart chunkStop : UInt32) (peer :
   let mut verified : Array (UInt32 × CFilterMessage) := #[]
   let mut chunkBytes := 0
   for response in responses do
-    let .cfilter m := response | throw (.filters (.badPeerResponse "expected cfilter"))
+    let .cfilter m := response | f.failedScan peer (.filters (.badPeerResponse "expected cfilter"))
     let (height, seen') ← match verifiedFilter m heightByHash seen filterHeaders with
       | .ok r => pure r
-      | .error e => throw (.filters e)
+      | .error e => f.failedScan peer (.filters e)
     seen := seen'
     chunkBytes := chunkBytes + m.filter.size
     verified := verified.push (height, m)
@@ -316,9 +366,11 @@ private def scanChunk (f : FilterSyncIO) (chunkStart chunkStop : UInt32) (peer :
     f.checkRangeDeadline
     let hit ← match filterMatches m watchScripts with
       | .ok b => pure b
-      | .error e => throw (.other s!"filter decode: {e}")
+      | .error e => f.failedScan peer (.other s!"filter decode: {e}")
     if !hit then continue
-    let block ← f.verifiedBlock peer height m.blockHash
+    let block ← match ← (f.verifiedBlock peer height m.blockHash).toBaseIO with
+      | .ok b => pure b
+      | .error e => f.failedScan peer e
     onMatch { height, blockHash := m.blockHash, block }
     -- serialising again only when a range budget is counting
     if (← f.rangeRun.get).isSome then f.chargeRange 0 block.serialized.size
@@ -331,7 +383,7 @@ private def scanFilters (f : FilterSyncIO) (batchStart batchStop : UInt32) (peer
   let mut seen : Nat := 0
   for (cs, ce) in chunks batchStart batchStop f.filtersPerChunk do
     seen := seen + (← f.scanChunk cs ce peer watchScripts filterHeaders onMatch).size
-  if seen != count then throw (.filters (.badPeerResponse s!"missing cfilters: {seen}/{count}"))
+  if seen != count then f.failedScan peer (.filters (.badPeerResponse s!"missing cfilters: {seen}/{count}"))
 
 /-- One sync run (see the module doc). `maxBlocks` bounds it; `onReorg` is awaited before any filter work. -/
 def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option UInt32 := none)
@@ -364,7 +416,12 @@ def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option
       let batchStart := progress.nextScanHeight
       let batchStop := FilterSync.batchStop batchStart ceiling
       let some stopHash ← f.chain.blockHash batchStop | throw (.filters (.badPeerResponse s!"missing header at {batchStop}"))
-      let proposed ← f.pinFilterHeaders batchStart batchStop stopHash peers progress.filterHeaders
+      let proposed ← match ← f.pinFilterHeaders batchStart batchStop stopHash peers progress.filterHeaders (rewinds := true) with
+        | .headers h => pure h
+        | .disputed anchor =>
+          -- the pass ends here as one that did not reach the tip, and the next scans again from the boundary
+          f.rewindDisputedPin anchor onReorg
+          return
       if let .error e := checkPinnedBoundaries proposed reference tip then throw (.filters e)
       peers ← f.approved approvedEndpoints
       let some first := peers[0]? | throw (.filters .noPeers)
@@ -449,7 +506,7 @@ private def runRange (f : FilterSyncIO) (initial : RangeScanProgress) (tip : UIn
     let some stopHash ← f.chain.blockHash batchStop | throw (.filters (.badPeerResponse s!"missing header at {batchStop}"))
     -- read before the peer is asked: pinning writes the announced previous header when the record holds none
     let anchored := batchStart == 0 || record.filterHeaders.contains (toString (batchStart - 1).toNat)
-    let proposed ← f.pinFilterHeaders batchStart batchStop stopHash peers record.filterHeaders
+    let proposed ← f.pinRangeHeaders batchStart batchStop stopHash peers record.filterHeaders
     if let .error e := checkPinnedBoundaries proposed reference tip then throw (.filters e)
     if !anchored then
       if let .error e := RangeScan.requireComparedBoundary proposed batchStart batchStop tip then throw (.filters e)

@@ -258,13 +258,13 @@ def requestMany (c : PeerConnection) (m : PeerMessage) (command : String) (count
 def ping (c : PeerConnection) (timeoutMs : Nat := 10_000) : NetM Unit := do
   discard <| c.request (.ping (← randomU64)) #["pong"] timeoutMs
 
-/-- A multicast stream of unsolicited messages; each caller gets its own, bounded so that a stalled
-subscriber cannot hold more than the backlog's byte ceiling (counted in maximal payloads). -/
+/-- A multicast stream of unsolicited messages; each caller gets its own, bounded as the backlog is: a
+stalled subscriber holds at most `backlogLimit` messages and `backlogByteLimit` payload bytes, the oldest
+going first. (It was counted in largest-possible payloads, which left room for two messages, so a burst of
+`tx` replies or a `getdata` followed by two others lost its head.) -/
 def events (c : PeerConnection) : IO PeerStream := do
-  let largest := min c.backlogByteLimit MessageFramer.maxPayloadSize
-  let slots := min backlogLimit (max 1 (c.backlogByteLimit / largest))
   let id ← c.state.modifyGet fun st => (st.nextId, { st with nextId := st.nextId + 1 })
-  let s : PeerStream ← EventStream.new id slots
+  let s : PeerStream ← EventStream.new id backlogLimit (some c.backlogByteLimit)
   s.onCancel.set (c.state.modify fun st => { st with subscribers := st.subscribers.filter (·.id != id) })
   let added ← c.state.modifyGet fun st =>
     if st.didTeardown then (false, st) else (true, { st with subscribers := st.subscribers.push s })
@@ -278,7 +278,7 @@ private inductive Inbound where
   | resolve (p : IO.Promise (Except NetError PeerMessage)) (m : PeerMessage)
   | collected (p : IO.Promise (Except NetError (Array PeerMessage))) (ms : Array PeerMessage)
   | burstTooLarge (p : IO.Promise (Except NetError (Array PeerMessage))) (e : NetError)
-  | notify (subs : Array PeerStream) (m : PeerMessage)
+  | notify (subs : Array PeerStream) (m : PeerMessage) (bytes : Nat)
   | teardown (e : NetError)
 
 private def handleInbound (c : PeerConnection) (command : String) (payload : ByteArray) : IO Unit := do
@@ -290,7 +290,7 @@ private def handleInbound (c : PeerConnection) (command : String) (payload : Byt
     | .ping n => discard <| (c.send (.pong n)).attempt
     | .feefilter rate =>
       let subs ← c.state.modifyGet fun st => (st.subscribers, { st with feeFilter := some rate })
-      for s in subs do s.yield (.message message)
+      for s in subs do s.yield (.message message) payload.size
     | _ =>
       let bytes := payload.size
       let action ← c.state.modifyGet fun st =>
@@ -324,13 +324,14 @@ private def handleInbound (c : PeerConnection) (command : String) (payload : Byt
                     if b.size > backlogLimit || n > c.backlogByteLimit then trim (b.extract 1 b.size) (n - b[0]!.2) fuel
                     else (b, n)
                 let (b, n) := trim (st.backlog.push (message, bytes)) (st.backlogBytes + bytes) (st.backlog.size + 2)
-                (.notify st.subscribers message, { st with backlog := b, backlogBytes := n })
+                (.notify st.subscribers message bytes, { st with backlog := b, backlogBytes := n })
       match action with
       | .none => pure ()
       | .resolve p m => p.resolve (.ok m)
       | .collected p ms => p.resolve (.ok ms)
-      | .burstTooLarge p e => p.resolve (.error e); c.teardown (some e)
-      | .notify subs m => for s in subs do s.yield (.message m)
+      -- torn down before the caller hears of it, so the caller never sees a connection that is still open
+      | .burstTooLarge p e => c.teardown (some e); p.resolve (.error e)
+      | .notify subs m bytes => for s in subs do s.yield (.message m) bytes
       | .teardown e => c.teardown (some e)
 
 private partial def drainFrames (c : PeerConnection) : IO Unit := do

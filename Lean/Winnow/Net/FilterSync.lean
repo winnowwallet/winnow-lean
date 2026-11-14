@@ -451,6 +451,32 @@ def anchorPreviousHeader (m : CFHeadersMessage) (batchStart : UInt32) (headers :
     | some pinned => if m.previousFilterHeader == pinned then .ok headers else .error (.filterHeaderMismatch batchStart)
     | none => .ok (headers.insert (toString (batchStart - 1).toNat) (hex m.previousFilterHeader))
 
+/-- Whether a cfheaders answer for a batch that starts at `batchStart` contradicts the header pinned under it. -/
+def anchorDisputed (m : CFHeadersMessage) (batchStart : UInt32) (headers : Std.HashMap String String) : Bool :=
+  batchStart > 0 && (filterHeader? headers (batchStart - 1)).any fun pinned => !(m.previousFilterHeader == pinned)
+
+/-- Where a forward scan goes back to when an answer agreed across source classes contradicts the pin at
+`anchor`: the highest pinned checkpoint boundary below it, which the adopted cfcheckpt has been compared
+with (`reconcilePins`). `none`: no boundary is pinned below it, and the scan starts again from its first
+height with nothing pinned.
+
+`reconcilePins` compares only the boundaries, so a wrong pin above the last one (written on a run whose
+peers lied about the filters between that boundary and the tip) was contradicted by every honest answer
+afterwards and never rewound: each sync ended in `filterHeaderMismatch` until the progress file was removed. -/
+def disputedAnchorBoundary (headers : Std.HashMap String String) (anchor : UInt32) : Option UInt32 :=
+  headers.fold (fun acc k _ => match parseUInt32? k with
+    | some h =>
+      if h > 0 && h % checkpointInterval == 0 && h < anchor then some (match acc with | some m => max m h | none => h)
+      else acc
+    | none => acc) none
+
+/-- Whether the peers that agreed span the classes a rewind asks for: two known ones, as a cross-check
+receipt counts them (an unknown class counts for nothing). -/
+def spansKnownClasses (agreeing : Array (Option PeerSource)) : Bool :=
+  (agreeing.foldl (fun acc c => match c with
+    | some s => if acc.contains s then acc else acc.push s
+    | none => acc) (#[] : Array PeerSource)).size ≥ minimumAgreeingSourceClasses
+
 /-- The adopted cfheaders answer must cover the request exactly. -/
 def checkCFHeadersCount (m : CFHeadersMessage) (start stop : UInt32) : Except FilterSyncError Unit :=
   let want := (stop - start).toNat + 1

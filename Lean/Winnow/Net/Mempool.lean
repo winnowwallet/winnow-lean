@@ -41,14 +41,17 @@ structure MempoolWindow where
   watchScripts : Std.HashSet ByteArray
   maxSeenTxids : Nat := 10_000
   maxInFlight : Nat := 512
+  /-- How much of `maxInFlight` one peer's announcements may hold: a peer announcing txids it never delivers
+  fills its own share and leaves the rest for the others. -/
+  maxInFlightPerPeer : Nat := 64
   /-- Seconds a getdata may go unanswered. -/
   requestTimeout : Nat := 30
   running : Bool := false
   generation : Nat := 0
   seenTxids : Std.HashSet ByteArray := {}
   seenOrder : Array ByteArray := #[]
-  /-- txid → when the getdata was sent (seconds). -/
-  inFlight : Std.HashMap ByteArray Nat := {}
+  /-- txid → when the getdata was sent (seconds), and the peer it was sent to (`host:port`). -/
+  inFlight : Std.HashMap ByteArray (Nat × String) := {}
   echoTxids : Std.HashSet ByteArray := {}
   /-- "txidHex|host:port" pairs already echoed. -/
   echoed : Std.HashSet String := {}
@@ -77,13 +80,19 @@ def forget (w : MempoolWindow) (txid : ByteArray) : MempoolWindow :=
     | some i => { w with seenOrder := w.seenOrder.eraseIdx! i }
     | none => w
 
-/-- The tx announcements of an inv worth fetching (echo tracking, dedupe, in-flight cap), recorded
-as seen before the request goes out; the FIFO is trimmed to `maxSeenTxids`. -/
+/-- How many requests are out to this peer. -/
+def inFlightTo (w : MempoolWindow) (peer : String) : Nat :=
+  w.inFlight.fold (fun n _ r => if r.2 == peer then n + 1 else n) 0
+
+/-- The tx announcements of an inv worth fetching (echo tracking, dedupe, the in-flight caps: all peers'
+together and this peer's own), recorded as seen before the request goes out; the FIFO is trimmed to
+`maxSeenTxids`. -/
 def admitAnnouncements (w : MempoolWindow) (p : InventoryPayload) (peer : PeerEndpoint) :
     MempoolWindow × Array InventoryVector × Array MempoolEvent := Id.run do
   let mut w := w
   let mut request : Array InventoryVector := #[]
   let mut events : Array MempoolEvent := #[]
+  let asked := w.inFlightTo peer.description
   for v in p.vectors do
     if !(v.type.baseType == InventoryType.tx) then continue
     let txid := v.hash
@@ -92,7 +101,8 @@ def admitAnnouncements (w : MempoolWindow) (p : InventoryPayload) (peer : PeerEn
       if !w.echoed.contains key then
         w := { w with echoed := w.echoed.insert key }
         events := events.push (.txidEchoed txid peer)
-    if w.seenTxids.contains txid || !(w.inFlight.size + request.size < w.maxInFlight) then continue
+    if w.seenTxids.contains txid || !(w.inFlight.size + request.size < w.maxInFlight) ||
+        !(asked + request.size < w.maxInFlightPerPeer) then continue
     w := { w with seenTxids := w.seenTxids.insert txid, seenOrder := w.seenOrder.push txid }
     request := request.push { type := InventoryType.witnessTx, hash := txid }
   while w.seenOrder.size > w.maxSeenTxids do
@@ -108,7 +118,7 @@ def handleInv (w : MempoolWindow) (p : InventoryPayload) (peer : PeerEndpoint) (
   let effects := events.map MempoolEffect.emit
   if request.isEmpty then (w, effects)
   else
-    let w := request.foldl (fun w v => { w with inFlight := w.inFlight.insert v.hash now }) w
+    let w := request.foldl (fun w v => { w with inFlight := w.inFlight.insert v.hash (now, peer.description) }) w
     (w, effects.push (.sendGetData peer { vectors := request }))
 
 /-- The getdata could not be sent: roll the txids back so another peer's announcement re-requests them
@@ -148,7 +158,7 @@ def handle (w : MempoolWindow) (m : PeerMessage) (peer : PeerEndpoint) (now : Na
 def sweep (w : MempoolWindow) (now : Nat) : MempoolWindow :=
   if !w.running then w
   else
-    let expired := w.inFlight.fold (fun acc txid at_ => if at_ + w.requestTimeout < now then acc.push txid else acc) #[]
+    let expired := w.inFlight.fold (fun acc txid r => if r.1 + w.requestTimeout < now then acc.push txid else acc) #[]
     expired.foldl (fun w txid => ({ w with inFlight := w.inFlight.erase txid } : MempoolWindow).forget txid) w
 
 end MempoolWindow

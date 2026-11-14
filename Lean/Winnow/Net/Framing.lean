@@ -4,7 +4,11 @@ import Winnow.Net.Wire
 /-! # P2P message framing (`Network/Protocol/Framing.swift`)
 
 Header (24 bytes): magic(4) ‖ command(12, ASCII, zero-padded) ‖ length(4 LE) ‖ checksum(first 4 bytes
-of SHA256d(payload)). The deframer is a value: `append` bytes, take complete messages with `nextMessage`. -/
+of SHA256d(payload)). The deframer is a value: `append` bytes, take complete messages with `nextMessage`.
+
+A message taken moves `offset` past it and copies nothing but its payload; the bytes before `offset` are
+dropped when more arrive. Copying the rest of the buffer for every message made a chunk of S bytes of empty
+messages cost about S²/48 bytes of copying, which a peer could spend a core with. -/
 
 namespace Winnow.Net
 
@@ -24,6 +28,8 @@ def FramingError.name : FramingError → String
 structure MessageFramer where
   magic : ByteArray
   buffer : ByteArray := .empty
+  /-- where the next message starts in `buffer`; everything before it has been taken -/
+  offset : Nat := 0
   deriving Inhabited
 
 namespace MessageFramer
@@ -32,7 +38,13 @@ def headerSize : Nat := 24
 /-- MAX_PROTOCOL_MESSAGE_LENGTH in Bitcoin Core. -/
 def maxPayloadSize : Nat := 4_000_000
 
-def append (f : MessageFramer) (data : ByteArray) : MessageFramer := { f with buffer := f.buffer ++ data }
+/-- The bytes not yet taken. -/
+def unread (f : MessageFramer) : Nat := f.buffer.size - f.offset
+
+/-- More bytes from the peer. What has been taken is dropped here, once per chunk and not once per message. -/
+def append (f : MessageFramer) (data : ByteArray) : MessageFramer :=
+  if f.offset == 0 then { f with buffer := f.buffer ++ data }
+  else { f with buffer := f.buffer.extract f.offset f.buffer.size ++ data, offset := 0 }
 
 /-- The command bytes up to the first zero, accepted when non-empty and made only of non-whitespace
 ASCII characters (Swift decodes them lossily, so any byte ≥ 0x80 fails; whitespace is U+0009–U+000D
@@ -45,16 +57,17 @@ def commandOf (b : ByteArray) : Option String :=
 /-- The next complete message, `none` when more bytes are needed. -/
 def nextMessage (f : MessageFramer) : Except FramingError (Option (String × ByteArray) × MessageFramer) := do
   let buf := f.buffer
-  if buf.size < headerSize then return (none, f)
-  if !(buf.extract 0 4 == f.magic) then throw .badMagic
-  let some command := commandOf (buf.extract 4 16) | throw .badCommand
-  let length := (readLE buf 16 4).toUInt32
+  let at_ := f.offset
+  if f.unread < headerSize then return (none, f)
+  if !(buf.extract at_ (at_ + 4) == f.magic) then throw .badMagic
+  let some command := commandOf (buf.extract (at_ + 4) (at_ + 16)) | throw .badCommand
+  let length := (readLE buf (at_ + 16) 4).toUInt32
   if length.toNat > maxPayloadSize then throw (.payloadTooLarge length)
   let total := headerSize + length.toNat
-  if buf.size < total then return (none, f)
-  let payload := buf.extract headerSize total
-  if !((sha256d payload).extract 0 4 == buf.extract 20 24) then throw (.checksumMismatch command)
-  return (some (command, payload), { f with buffer := buf.extract total buf.size })
+  if f.unread < total then return (none, f)
+  let payload := buf.extract (at_ + headerSize) (at_ + total)
+  if !((sha256d payload).extract 0 4 == buf.extract (at_ + 20) (at_ + 24)) then throw (.checksumMismatch command)
+  return (some (command, payload), { f with offset := at_ + total })
 
 /-- One framed message (the command is at most 12 bytes; Swift traps otherwise). -/
 def frame (command : String) (payload magic : ByteArray) : ByteArray :=

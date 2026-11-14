@@ -301,15 +301,23 @@ inductive StreamItem (α ε : Type) where
   | finished (error : Option ε)
 
 structure StreamState (α ε : Type) where
-  queue : Array α := #[]
+  /-- each element with what it weighs (zero for a stream that counts only elements) -/
+  queue : Array (α × Nat) := #[]
+  /-- the sum of the weights queued -/
+  queuedWeight : Nat := 0
   done : Option (Option ε) := none
   waiter : Option (IO.Promise Unit) := none
 
 /-- `AsyncThrowingStream(bufferingPolicy: .bufferingNewest(capacity))` with one consumer:
-`yield` past the capacity drops the oldest buffered element. -/
+`yield` past the capacity drops the oldest buffered element. A stream made with a `weightLimit` also drops
+the oldest while the weights queued (a message's bytes) are past it, never the element just yielded: what a
+stalled consumer can hold is bounded by bytes, and a burst of small messages is not cut to the few that
+would fit were each the largest there can be. -/
 structure EventStream (α ε : Type) where
   id : Nat
   capacity : Nat
+  /-- the most weight queued, when one is set -/
+  weightLimit : Option Nat := none
   state : IO.Ref (StreamState α ε)
   /-- Run once when the consumer cancels (`onTermination`). -/
   onCancel : IO.Ref (IO Unit)
@@ -317,19 +325,33 @@ structure EventStream (α ε : Type) where
 namespace EventStream
 variable {α ε : Type}
 
-def new (id capacity : Nat) : IO (EventStream α ε) := do
-  return { id, capacity, state := ← IO.mkRef {}, onCancel := ← IO.mkRef (pure ()) }
+def new (id capacity : Nat) (weightLimit : Option Nat := none) : IO (EventStream α ε) := do
+  return { id, capacity, weightLimit, state := ← IO.mkRef {}, onCancel := ← IO.mkRef (pure ()) }
+
+/-- How many of the oldest elements go so that the queue is within the capacity and the weight limit, the
+newest always staying. -/
+def overflow (capacity : Nat) (weightLimit : Option Nat) (queue : Array (α × Nat)) (weight : Nat) : Nat × Nat := Id.run do
+  -- a capacity of zero keeps nothing, as before
+  if capacity == 0 then return (queue.size, 0)
+  let mut dropped := 0
+  let mut weight := weight
+  while dropped + 1 < queue.size &&
+      (queue.size - dropped > capacity || weightLimit.any (weight > ·)) do
+    weight := weight - ((queue[dropped]?.map (·.2)).getD 0)
+    dropped := dropped + 1
+  return (dropped, weight)
 
 private def wake (w : Option (IO.Promise Unit)) : BaseIO Unit :=
   match w with | some p => p.resolve () | none => pure ()
 
-def yield (s : EventStream α ε) (a : α) : BaseIO Unit := do
+def yield (s : EventStream α ε) (a : α) (weight : Nat := 0) : BaseIO Unit := do
   let w ← s.state.modifyGet fun st =>
     if st.done.isSome then (none, st)
     else
-      let q := st.queue.push a
-      let q := if q.size > s.capacity then q.extract (q.size - s.capacity) q.size else q
-      (st.waiter, { st with queue := q, waiter := none })
+      let q := st.queue.push (a, weight)
+      let (dropped, queuedWeight) := overflow s.capacity s.weightLimit q (st.queuedWeight + weight)
+      let q := if dropped > 0 then q.extract dropped q.size else q
+      (st.waiter, { st with queue := q, queuedWeight, waiter := none })
   wake w
 
 def finish (s : EventStream α ε) (error : Option ε := none) : BaseIO Unit := do
@@ -341,7 +363,9 @@ def finish (s : EventStream α ε) (error : Option ε := none) : BaseIO Unit := 
 partial def next (s : EventStream α ε) : IO (StreamItem α ε) := do
   let p ← IO.Promise.new
   let r ← s.state.modifyGet fun st =>
-    if h : 0 < st.queue.size then (some (StreamItem.value st.queue[0]), { st with queue := st.queue.extract 1 st.queue.size })
+    if h : 0 < st.queue.size then
+      (some (StreamItem.value st.queue[0].1),
+       { st with queue := st.queue.extract 1 st.queue.size, queuedWeight := st.queuedWeight - st.queue[0].2 })
     else match st.done with
       | some e => (some (.finished e), st)
       | none => (none, { st with waiter := some p })
