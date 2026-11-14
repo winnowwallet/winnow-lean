@@ -406,6 +406,40 @@ private def silentPaymentKeys : Target := {
     let .ok text := code.encoded | return false
     checkCode text }
 
+/-- A card code's rules, whatever made its text: a valid key, a 32-byte seed, a canonical form that reads back,
+and a derivation that pays a P2TR script the issuer's rule would also reach (or refuses the index). -/
+private def checkCardCode (text : String) : IO Bool := do
+  let .ok parsed := CardCode.decode text | return false
+  require (parsed.key.size == 33 && parsed.seed.size == 32) "card code with a malformed key or seed"
+  require (text.length ≤ CardCode.maxLength) "card code over the length bound"
+  let .ok encoded := parsed.encoded | throw (IO.userError "a card code does not encode")
+  require (encoded == text.map Char.toLower) "card code did not round trip"
+  for index in [0, 1, 0xFFFF_FFFF] do
+    match Keys.CardKeys.scriptPubKey parsed index with
+    | .ok script => require (script.size == 34 && script[0]! == 0x51 && script[1]! == 0x20) "a card pays a script that is not P2TR"
+    | .error .invalidTweak => pure ()
+    | .error e => throw (IO.userError s!"a decoded card code does not derive: {e.name}")
+  return true
+
+private def cardCode : Target := {
+  name := "card-code"
+  seeds := #[.empty, utf8 "rwnc1q",
+    -- the first card of Vectors/card-keys-vectors.json
+    utf8 "wnc1qq26gjzkrnhg2v5aqxzvv02m8q397ttaw3hw84xnexy8hpwdszn7422vs40egqhsmxwh7ctalwqzrpcxy9gfrre8nhyx57yktz06asl88hva7e2"]
+  check := fun _ data => checkCardCode (lossy data) }
+
+/-- Past the checksum: the input is `key ‖ seed`, encoded here for each network, any length. -/
+private def cardKeys : Target := {
+  name := "card-keys"
+  seeds := #[gCompressed ++ zeros 32, (⟨#[0x03]⟩ ++ gx) ++ gx]
+  check := fun _ data => do
+    let mut took := false
+    for hrp in [CardCode.mainnetHRP, CardCode.signetHRP, CardCode.regtestHRP] do
+      let code : CardCode := { key := data.extract 0 33, seed := data.extract 33 data.size, hrp }
+      let .ok text := code.encoded | continue
+      if ← checkCardCode text then took := true
+    return took }
+
 /-! ## What upstream's harness could not reach
 
 These lived in the app target or were internal to WalletCore, so upstream fed them hand-written hostile inputs.
@@ -508,6 +542,6 @@ private def ledgerCommands : Target := {
 private def targets : Array Target :=
   #[psbt, descriptor, transaction, block, messages, framing, filter, address, importBundle, census, dnsJSON,
     fundingSources, controlBlock, personPaste, silentPaymentAddress, addressProgram, silentPaymentKeys,
-    persistedPeers, rangeScan, broadcastStore, walletState, ledgerFrames, ledgerCommands]
+    cardCode, cardKeys, persistedPeers, rangeScan, broadcastStore, walletState, ledgerFrames, ledgerCommands]
 
 def main (args : List String) : IO UInt32 := TestKit.Fuzz.main targets "Vectors/fuzz" args

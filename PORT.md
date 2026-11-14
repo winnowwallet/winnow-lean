@@ -141,6 +141,16 @@ address on it.
 The simulator has no Bluetooth, so phases D and E are verified with a test-mode fake and the pure oracles.
 A device run with a Ledger is not claimed until one happens.
 
+## Not from upstream: a card per person (issue #94, 2026-11-14)
+
+Upstream has one card, which carries the account key. `Winnow/Keys/CardKeys.lean` is new here and has no
+Swift counterpart: a card code (bech32m, `wnc`/`twnc`/`rwnc`) holding a key and a seed for one person, both
+derived below the account key at `2'/k'`, and the derivation of the Taproot outputs that person pays.
+`card-keys-test` (257 checks) holds it to `Vectors/card-keys-vectors.json`, which `scripts/card-keys-vectors`
+writes without the wallet's code; `fuzz` has `card-code` and `card-keys`. The wallet does not use it yet.
+`docs/out-of-band-payments.md` is the proposal: what it was compared with, what is built, and the decisions
+left to the owner.
+
 ## Tracking upstream "one wallet" (#259, with #256 nested multisig)
 
 The next upstream step is winnowwallet/winnow#259 at d2ca878, which includes #256 (nested multisig).

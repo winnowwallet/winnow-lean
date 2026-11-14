@@ -19,7 +19,7 @@ Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested); and the eight journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s three suites as three lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test` and `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested); and the eight journeys headless against the app itself (LeanNative's `wire-journey`). |
 | `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump and Retry on one runner; Ledger, census, silent payments and spent-elsewhere on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
@@ -152,7 +152,8 @@ Each target's line in the output says how many mutated inputs it took. A target
 that takes none is only testing refusals, and the run refuses to start if none of a
 target's seeds parses. `address` and `silent-payment-address` always take none,
 because a mutation breaks the checksum: `address-program` and `silent-payment-keys`
-cover the same rules past it.
+cover the same rules past it. `card-code` takes next to none for the same reason,
+and `card-keys` covers a card code's rules past the checksum.
 
 `fuzz` reaches what `Lean/` holds. The stores in `LeanApp/` (people, labels, sealed
 files) are not targets yet. It also can't see a wrong answer that is

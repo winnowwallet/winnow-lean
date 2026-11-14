@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Writes Lean/Vectors/card-keys-vectors.json: card codes and the payments derived from them, computed here
+without any of the wallet's code, as the oracle for `Winnow.Keys.CardKeys` (card-keys-test).
+
+Everything is the Python standard library: BIP32 over HMAC-SHA512, secp256k1 in affine coordinates, BIP340's
+tagged hash and bech32m. Each case starts from a BIP32 seed, walks to an account key, then to a card's node at
+account/2'/k', and derives the code and a few payments:
+
+  s   = hash_Winnow/Card/Seed(chain code of the node)
+  t_i = hash_Winnow/Card/Tweak(network ‖ B ‖ s ‖ ser32(i))
+  P_i = B + t_i·G        p_i = b + t_i mod n
+
+  scripts/card-keys-vectors            (from the repository root)
+"""
+import hashlib, hmac, json
+from pathlib import Path
+
+OUT = Path(__file__).resolve().parent.parent / "Lean/Vectors/card-keys-vectors.json"
+
+P = 2**256 - 2**32 - 977
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+     0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+H = 0x80000000
+
+
+def add(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a[0] == b[0] and (a[1] + b[1]) % P == 0:
+        return None
+    if a == b:
+        lam = 3 * a[0] * a[0] * pow(2 * a[1], -1, P) % P
+    else:
+        lam = (b[1] - a[1]) * pow(b[0] - a[0], -1, P) % P
+    x = (lam * lam - a[0] - b[0]) % P
+    return (x, (lam * (a[0] - x) - a[1]) % P)
+
+
+def mul(k, point):
+    out = None
+    while k:
+        if k & 1:
+            out = add(out, point)
+        point = add(point, point)
+        k >>= 1
+    return out
+
+
+def compressed(point):
+    return bytes([2 + (point[1] & 1)]) + point[0].to_bytes(32, "big")
+
+
+def tagged(tag, message):
+    t = hashlib.sha256(tag.encode()).digest()
+    return hashlib.sha256(t + t + message).digest()
+
+
+def master(seed):
+    i = hmac.new(b"Bitcoin seed", seed, hashlib.sha512).digest()
+    return int.from_bytes(i[:32], "big"), i[32:]
+
+
+def child(key, chain, index):
+    data = (b"\x00" + key.to_bytes(32, "big") if index >= H else compressed(mul(key, G))) + index.to_bytes(4, "big")
+    i = hmac.new(chain, data, hashlib.sha512).digest()
+    tweak = int.from_bytes(i[:32], "big")
+    assert tweak < N and (key + tweak) % N != 0
+    return (key + tweak) % N, i[32:]
+
+
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+def polymod(values):
+    generators = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
+    chk = 1
+    for v in values:
+        top = chk >> 25
+        chk = (chk & 0x1FFFFFF) << 5 ^ v
+        for i in range(5):
+            chk ^= generators[i] if (top >> i) & 1 else 0
+    return chk
+
+
+def bech32m(hrp, data):
+    expanded = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    mod = polymod(expanded + data + [0] * 6) ^ 0x2BC830A3
+    checksum = [(mod >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(CHARSET[d] for d in data + checksum)
+
+
+def to5(payload):
+    acc = bits = 0
+    out = []
+    for byte in payload:
+        acc = acc << 8 | byte
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            out.append(acc >> bits & 31)
+    if bits:
+        out.append(acc << (5 - bits) & 31)
+    return out
+
+
+NETWORK = {"wnc": 0, "twnc": 1, "rwnc": 2}
+CASES = [
+    # (BIP32 seed, coin type, HRP, card index, payment indices)
+    ("000102030405060708090a0b0c0d0e0f", 0, "wnc", 0, [0, 1, 2, 3, 19, 20, 0xFFFFFFFF]),
+    ("000102030405060708090a0b0c0d0e0f", 0, "wnc", 1, [0, 1, 2, 3]),
+    ("000102030405060708090a0b0c0d0e0f", 1, "twnc", 0, [0, 1, 2, 3]),
+    ("000102030405060708090a0b0c0d0e0f", 1, "rwnc", 0, [0, 1, 2, 3]),
+    ("fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
+     1, "rwnc", H - 1, [0, 7, 1000]),
+]
+
+cases = []
+for seed, coin, hrp, card, indices in CASES:
+    key, chain = master(bytes.fromhex(seed))
+    for step in (86 + H, coin + H, 0 + H, 2 + H, card + H):
+        key, chain = child(key, chain, step)
+    public = compressed(mul(key, G))
+    card_seed = tagged("Winnow/Card/Seed", chain)
+    payments = []
+    for i in indices:
+        t = tagged("Winnow/Card/Tweak", bytes([NETWORK[hrp]]) + public + card_seed + i.to_bytes(4, "big"))
+        scalar = int.from_bytes(t, "big")
+        assert 0 < scalar < N
+        point = add(mul(key, G), mul(scalar, G))
+        spend = (key + scalar) % N
+        assert point is not None and spend != 0 and mul(spend, G) == point
+        payments.append({
+            "index": i, "tweak": t.hex(), "outputKey": point[0].to_bytes(32, "big").hex(), "oddY": bool(point[1] & 1),
+            "script": "5120" + point[0].to_bytes(32, "big").hex(), "spendSecret": spend.to_bytes(32, "big").hex()})
+    cases.append({
+        "seed": seed, "accountPath": f"m/86'/{coin}'/0'", "hrp": hrp, "card": card,
+        "secret": key.to_bytes(32, "big").hex(), "key": public.hex(), "cardSeed": card_seed.hex(),
+        "code": bech32m(hrp, [0] + to5(public + card_seed)), "payments": payments})
+
+parities = {p["oddY"] for c in cases for p in c["payments"]}
+assert parities == {True, False}, "the vectors must hold output keys of both parities"
+assert len({p["script"] for c in cases for p in c["payments"]}) == sum(len(c["payments"]) for c in cases)
+OUT.write_text(json.dumps({"source": "scripts/card-keys-vectors", "cases": cases}, indent=1) + "\n")
+print(f"{len(cases)} cards, {sum(len(c['payments']) for c in cases)} payments")
