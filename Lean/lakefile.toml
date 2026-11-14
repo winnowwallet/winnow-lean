@@ -46,6 +46,13 @@ root = "SilentPaymentTest"
 name = "card-keys-test"
 root = "CardKeysTest"
 
+# A card per person against a regtest Bitcoin Core, the payer: found through its basic filters, replaced,
+# reorganised, spent by the issuer alone, and recovered from the phrase by a scan back. Run from Lean/ with
+# bitcoind on hand (scripts/ci-regtest cards uses the pinned release); CI runs it.
+[[lean_exe]]
+name = "card-regtest"
+root = "CardRegtest"
+
 # AES and AES-GCM (Winnow/Crypto/AES*.lean): FIPS 197, every Wycheproof AES-GCM test and CryptoKit's own
 # output; BIP340 signing against BIP340's test vectors (Vectors/). Run from Lean/; CI runs it.
 [[lean_exe]]
