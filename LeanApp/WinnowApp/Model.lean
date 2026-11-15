@@ -320,8 +320,16 @@ structure PersonForm where
   deriving Repr, Inhabited
 
 structure ShareCard where
-  card : Option String := none
   error : Option String := none
+  /-- The name typed under "A card for one person". -/
+  forName : String := ""
+  /-- The saved person the sheet was opened for; none once the name is typed over. -/
+  forPerson : Option String := none
+  /-- That person's card, with the name it was made for. -/
+  personCard : Option (String × String) := none
+  /-- An ordinary address for that person, for a payer that does not read cards; shown with the card. -/
+  personAddress : Option String := none
+  making : Bool := false
   deriving Repr, Inhabited
 
 /-- MultisigAddView's state. -/
@@ -618,7 +626,7 @@ inductive Host where
   | peersReset (gen : Nat)
   | exported (gen epoch : Nat) (file : String)
   | revealed (gen epoch : Nat) (words : List String)
-  | card (gen : Nat) (name : String) (card : String)
+  | personCard (gen : Nat) (personName : String) (card : String) (address : Option String) (records : Records)
   | pasteParsed (gen : Nat) (text : String) (r : Except String PastePreview)
   | senderLookup (gen : Nat) (txid source : String) (addresses : List String)
   | multisig (gen : Nat) (o : MultisigOverview)
@@ -688,6 +696,8 @@ inductive ReceiveMsg where
   | finishLabel
   | openCard
   | setOwnName (s : String)
+  | setCardFor (s : String)
+  | makePersonCard
   deriving Inhabited
 
 inductive HomeMsg where
@@ -774,6 +784,8 @@ inductive PeopleMsg where
   | choose (personID : String)
   | rename (personID : String)
   | remove (personID : String)
+  /-- The card sheet, for this person. -/
+  | card (personID : String)
   deriving Inhabited
 
 inductive SignerMsg where
@@ -922,6 +934,8 @@ inductive Cmd where
   | importWallet (gen : Nat) (network : Network) (json : String)
   | finishOnboarding (gen : Nat)
   | refresh (gen : Nat)
+  /-- The people and labels alone, read again: a payment to a person's card arrives already named. -/
+  | records (gen : Nat)
   | syncNow (gen : Nat)
   | retryPeers (gen : Nat)
   | reconnect (gen : Nat) (settings : Settings)
@@ -954,7 +968,8 @@ inductive Cmd where
   /-- `ExportStagingFile.remove` for that file: its staging directory goes. -/
   | removeExport (file : String)
   | revealPhrase (gen epoch : Nat)
-  | ownCard (gen : Nat) (name : String)
+  /-- A card for one person alone (the saved person `personID`, else by name), under the wallet's own name. -/
+  | personCard (gen : Nat) (personID : Option String) (personName ownName : String)
   | parsePaste (gen : Nat) (text : String)
   | addPerson (gen : Nat) (name : String) (paste : Option String)
       (provenance : Option Provenance) (source : Option String) (labelTxid : Option String)

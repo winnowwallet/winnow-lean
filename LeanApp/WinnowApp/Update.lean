@@ -107,6 +107,13 @@ def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
     if !m.current g then (m, []) else
     let wasSyncing := m.status.syncing
     let s := { s with history := historyForDisplay s.history }
+    -- in a wallet that has made someone a card, the sync names a payment to that card as the person's as it
+    -- finds it: the people and labels are read again when a payment appears that was not here before, and
+    -- when the pass that found it ends (the name is written just after the payment is, so the first read can
+    -- come too early)
+    let arrived := s.history.any fun e => e.net > 0 && !(m.status.history.any (·.txid == e.txid))
+    let named : List Cmd :=
+      if (arrived || (wasSyncing && !s.syncing)) && m.records.people.any (·.hasCard) then [.records g] else []
     let m := { m with status := s, phase := p }
     -- the mempool window owns only the temporary rows: a payment seen in a block drops its row
     let m := { m with receive := { m.receive with unconfirmed := m.receive.unconfirmed.filter fun (t, _) =>
@@ -119,7 +126,8 @@ def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
           | none => m
         else m
       | none => m
-    if wasSyncing && !s.syncing then m.loadPayment else (m, [])
+    let (m, cs) := if wasSyncing && !s.syncing then m.loadPayment else (m, [])
+    (m, cs ++ named)
   | .records g r => if m.current g then m.onRecords r else (m, [])
   | .updated g d r =>
     if !m.sameWallet g then (m, []) else
@@ -194,8 +202,14 @@ def Model.onSettingsHost (m : Model) (h : Host) : Model × List Cmd :=
   | .revealed g e words =>
     if m.sensitive g e then ({ m with reveal := { words } }.present .revealPhrase, [])
     else (m, [])
-  | .card g name card =>
-    if m.current g && m.settings.ownDisplayName.trimAscii.copy == name then ({ m with shareCard := { card := some card } }, []) else (m, [])
+  | .personCard g personName card address records =>
+    if !m.current g then (m, []) else
+    -- the person may be new, and now has a card: the records are current either way
+    let m := { m with records }
+    if m.shareCard.forName.trimAscii.copy == personName then
+      let shown : ShareCard := { m.shareCard with personCard := some (personName, card), personAddress := address, making := false, error := none }
+      ({ m with shareCard := shown }, [])
+    else ({ m with shareCard := { m.shareCard with making := false } }, [])
   | _ => (m, [])
 
 /-- Adding a person: the parsed paste and the sender lookup. -/
@@ -304,7 +318,7 @@ where onArea (h : Host) (m : Model) : Model × List Cmd :=
   | .resolvedRate .. | .previewed .. | .sent .. | .rawTransaction .. | .relay .. | .paymentLoaded .. | .pendingRate ..
   | .bumpPreviewed .. | .bumped .. =>
     m.onSendHost h
-  | .catalogStored .. | .peers .. | .peersReset .. | .exported .. | .revealed .. | .card .. =>
+  | .catalogStored .. | .peers .. | .peersReset .. | .exported .. | .revealed .. | .personCard .. =>
     m.onSettingsHost h
   | .pasteParsed .. | .senderLookup .. =>
     m.onPeopleHost h

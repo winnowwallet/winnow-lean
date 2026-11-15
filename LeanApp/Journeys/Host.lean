@@ -87,6 +87,10 @@ def confirmed (h : Host) (txid : String) : IO Bool := do
 /-- backend-test's silent payment test receiver (written from BIP352's receiving side): its code, and the
 output script it finds in a transaction on the node. -/
 def silentPaymentCode (h : Host) : IO String := h.run h.backendTest #["--sp-code"]
+/-- The address payment `index` of a person card's code goes to, derived from the card's text alone. -/
+def cardAddress (h : Host) (card : String) (index : Nat) : IO String :=
+  h.run h.backendTest #["--card-address", card, toString index]
+
 def silentPaymentExpectedScript (h : Host) (txid : String) : IO String :=
   h.run h.backendTest #["--sp-expected", h.datadir, toString h.rpc, txid]
 

@@ -296,6 +296,15 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
   switchTo env n dir
   env.replacingWallet
   let w ← runWM (Wallet.importing bundle env.deps.keyStore (some (walletPath dir)) env.deps.random)
+  -- cards made after this backup are not in it: the wallet records the ones it could have made, so the scan
+  -- forward watches for them, and a sync pass looks further if one was paid (`finishCardRestore`). A backup
+  -- without the phrase or a master key restores a wallet that cannot derive a card
+  -- never why a restore fails: the wallet is already written
+  match ← (runWM w.beginCardRestore).toBaseIO with
+  | .ok true =>
+    env.journal "cards.restoreBegun" [("fromHeight", toString ((← w.cardRestoreFrom).getD 0)), ("cards", toString (← w.cards).size)]
+  | .ok false => pure ()
+  | .error e => env.journal "cards.restoreSkipped" [("error", toString e)]
   adopt env w false
   env.hooks.multisigRestore (bundle.vaults.getD #[])
   env.hooks.signerMerge (bundle.signers.getD #[])
