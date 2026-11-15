@@ -661,7 +661,10 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
       let start ← IO.monoMsNow
       activate
       waitFor homeNetworkWarning 30
-      expect ((← text homeNetworkWarning) == "Offline") "the home's warning is not Offline"
+      -- the warning may say "Sync problem" first, while a sync is still failing against the peer that went
+      -- quiet; it is Offline once the pool has given that peer up
+      waitUntil 12 "the home's warning is not Offline" (every := 0.5) do
+        return (← text homeNetworkWarning) == "Offline"
       expectGone retryPeersButton
       shot "60-home-offline"
       pure start
