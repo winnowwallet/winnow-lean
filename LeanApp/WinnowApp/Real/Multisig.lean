@@ -730,6 +730,8 @@ def previewAccountSend (env : Env) (a : MultisigApp) (inputs : SendInputs) : IO 
       pure (address, some (pid, index, rec))
     | none => pure (inputs.destination.trimAscii.copy, none)
   if SilentPaymentAddress.looksLikeCode destination then failText silentPaymentUnsupportedText
+  if Keys.SilentPaymentPairing.looksLikeCardCode destination then failText Wallet.cardCodeInSendText
+  if Keys.SilentPaymentPairing.looksLikeCardAddress destination then failText Wallet.cardAddressAloneText
   let network ← currentNetwork env
   let amount := inputs.amount.trimAscii.copy.toNat?.getD 0
   let payment ← match Payment.ofAddress (← satsOf amount) destination network with

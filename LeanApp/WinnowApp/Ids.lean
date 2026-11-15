@@ -30,6 +30,16 @@ def bumpSignButton : String := "bumpSignButton"
 def censusCatalogText : String := "censusCatalogText"
 def checkPeerGateways : String := "checkPeerGateways"
 def closeReceiveButton : String := "closeReceiveButton"
+/-- The card sheet's "A card for one person": the person's name, the button that makes or shows their card,
+and the card's text. -/
+def personCardNameField : String := "personCardNameField"
+def makePersonCardButton : String := "makePersonCardButton"
+def personCardText : String := "personCardText"
+def personAddressText : String := "personAddressText"
+/-- Under "From one person": the wallet's own name, as a card says who it is from; and Done on the sheet that
+shows one saved person's address and card. -/
+def ownNameField : String := "ownNameField"
+def closeShareCardButton : String := "closeShareCardButton"
 def closeSendButton : String := "closeSendButton"
 def cloudBackupRow : String := "cloudBackupRow"
 def cloudBackupRowStatus : String := "cloudBackupRowStatus"

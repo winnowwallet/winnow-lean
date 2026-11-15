@@ -5,7 +5,7 @@ import Journeys.Screens
 
 /-! # The UI journeys
 
-Nine journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Ten journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -661,7 +661,10 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
       let start ← IO.monoMsNow
       activate
       waitFor homeNetworkWarning 30
-      expect ((← text homeNetworkWarning) == "Offline") "the home's warning is not Offline"
+      -- the warning may say "Sync problem" first, while a sync is still failing against the peer that went
+      -- quiet; it is Offline once the pool has given that peer up
+      waitUntil 12 "the home's warning is not Offline" (every := 0.5) do
+        return (← text homeNetworkWarning) == "Offline"
       expectGone retryPeersButton
       shot "60-home-offline"
       pure start
@@ -692,9 +695,73 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
   finally
     discard <| h.cli #["setnetworkactive", "true"]⟩
 
+/-- A person's name typed on Receive, and their address and card made. On a phone closing the keyboard already
+makes them (the name's return does what the button does; seen on CI's simulator, 2026-11-15), and the button
+is then gone; the headless driver only sets the text, and the button is what makes them. -/
+def makeCardFor (name : String) : UI Unit := do
+  type personCardNameField name
+  unless ← exists? personCardText 2 do
+    let button ← state makePersonCardButton
+    if button.present && button.enabled then
+      -- gone between the look and the tap, the card is there: the wait below says
+      try tap makePersonCardButton catch _ => pure ()
+  waitFor personCardText 30
+
+/-- A card for one person (issue #94). On the card sheet the wallet makes a card for Dana alone; the device's
+owner is asked first, since making it reads the wallet's key. The node is Dana: it holds only the card's text,
+derives the card's first two addresses from it and pays each. The wallet finds both payments and Activity
+names each as received from Dana, though nobody labelled them. The card carries no account key, and shown
+again it is the same card. -/
+def cardForOnePerson : Journey := ⟨"cardForOnePerson", do
+  let r ← Run.new "card"
+  let h := r.host
+  r.launch "card"
+  createWallet
+
+  let card ← step "on Receive, under the wallet's address, Dana's name gives her address and her card" do
+    let own ← Receive.address
+    makeCardFor "Dana"
+    let card ← text personCardText
+    expect ((card.splitOn "\"payTo\":\"twinnowcard1p").length == 2 && (card.splitOn "tweak").length == 1)
+      s!"not a card with a test-network code and no tweak: {card}"
+    expect ((card.splitOn "pub").length == 1) s!"the card carries an extended key: {card}"
+    -- with it, an ordinary address for a payer that reads no card: the card's first payment, and not the
+    -- wallet's own address above
+    waitFor personAddressText 30
+    let hers ← text personAddressText
+    expectEq "Dana's address" hers (← h.cardAddress card 0)
+    expect (hers != own) "Dana's address is the wallet's own"
+    shot "50-card-for-dana"
+    Receive.close
+    -- asked for again, it is the same card
+    discard Receive.address
+    makeCardFor "Dana"
+    expectEq "the card shown again" (← text personCardText) card
+    Receive.close
+    pure card
+
+  let (first, second) ← step "Dana, who holds only the card, pays its first two addresses" do
+    let address0 ← h.cardAddress card 0
+    let address1 ← h.cardAddress card 1
+    expect (address0.startsWith "bcrt1p" && address1.startsWith "bcrt1p" && address0 != address1)
+      s!"the card's addresses: {address0}, {address1}"
+    let first ← h.fund address0 funding
+    waitForBalance funding
+    let second ← h.fund address1 payment
+    waitForBalance (funding + payment)
+    pure (first, second)
+
+  step "Activity names both payments as Dana's" do
+    for txid in [first, second] do
+      waitFor (historyPayment txid) 30
+      scrolled (historyPayment txid)
+      waitUntil 30 "the payment is named as Dana's" (every := 1) do
+        return (← text (historyPayment txid)) == "Received from Dana"
+    shot "51-card-payments-from-dana"⟩
+
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
-   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers]
+   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson]
 
 end WinnowJourneys
 

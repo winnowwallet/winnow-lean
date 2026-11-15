@@ -2,15 +2,19 @@ Winnow: the same wallet, rewritten in Lean
 
 New since 0.9.11
 
-One home: Simple and Advanced mode are gone, and the home has everything Advanced had. Please try:
-1. Settings has Network (Sync, Peers and routing, Block explorer, Chain verification), Security (Hardware wallets and keys, Multisig accounts), Backup and Appearance.
-2. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger"; from 0.5 BTC, "Build an account with other people's keys". "Don't show again" hides a card for good.
-3. With Bluetooth on and no Ledger paired, unlock a Ledger nearby: a card pairs it, builds a 2-of-2 of this phone and the Ledger, and shows the first address, which must match the Ledger's.
-4. In Airplane Mode the home shows "Offline" in orange words. Tap it, then Network settings: Sync shows the last error and Retry. "Peers see your IP" leads to Peers and routing the same way.
-5. A backup file with the recovery phrase asks for Face ID or the passcode first. Join an account shows the recovery path under Policy, and says when this phone is only the recovery key.
-6. If Winnow could not read its multisig accounts, Settings → Security → Multisig accounts now offers "Set the damaged file aside".
+A card for one person: they pay you at a new address each time, with nothing more to send them. It holds a code made for them and none of your wallet's keys, plus an ordinary address for payers without Winnow. Receive is now one page. Cards from 0.9.12 still work. On two phones:
+1. Receiving phone: tap Receive. Under "From one person" type the payer's name and tap the button (Face ID). It shows "An address for …" and "A card for …".
+2. Paying phone: Send → Saved recipients → Add. Type a name, paste the card, Save. Send to them twice.
+3. The receiving phone must show both as "Received from" that name, at two different addresses.
+4. Pay "An address for …" from another wallet or an exchange: it must also show as "Received from" them, and the address must then change.
+5. Cards for two people must share nothing after "winnowcard1p".
 
-0.9.11 fixed what new tests found (erasing or importing while syncing, Reset and shuffle peers, two background checks at once, Replaced payments); 0.9.8 checked signatures against BIP340's vectors; 0.9.5 generated the Xcode project from Lean; 0.9.3 moved Winnow onto LeanNative (background checks, Keychain, iCloud backup, Face ID, Ledger over Bluetooth).
+One home: Simple and Advanced mode are gone, and the home has everything Advanced had:
+1. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger"; from 0.5 BTC, "Build an account with other people's keys". "Don't show again" hides a card for good.
+2. With Bluetooth on and no Ledger paired, unlock a Ledger nearby: a card pairs it, builds a 2-of-2 of this phone and the Ledger, and shows the first address, which must match the Ledger's.
+3. In Airplane Mode the home shows "Offline" in orange words. Tap it, then Network settings: Sync shows the last error and Retry.
+4. A backup file with the recovery phrase asks for Face ID or the passcode first. Join an account shows the recovery path under Policy, and says when this phone is only the recovery key.
+5. If Winnow could not read its multisig accounts, Settings → Security → Multisig accounts now offers "Set the damaged file aside".
 
 This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Security → Hardware wallets and keys. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
 
@@ -18,11 +22,7 @@ Install over the current app
 
 1. With the App Store's Winnow holding a wallet, install this build from TestFlight. The same wallet, balance and Activity must appear, and it must sync to "Up to date".
 2. Settings → Backup: iCloud backup should show "Backed up" with a time after it updates. On a second device signed into the same Apple Account, a fresh install should offer "Restore your iCloud wallet" and restore the same wallet.
-3. Settings → Security → Hardware wallets and keys → Pair a Ledger works (0.9.0 said "Winnow could not safely read its signers").
-
-Everyday use
-
-Receive, Send and Activity work as before. Tap a payment to see its details; copy its transaction ID.
+3. Settings → Security → Hardware wallets and keys → Pair a Ledger works.
 
 One Send
 
@@ -31,6 +31,6 @@ One Send
 3. Sign and continue, then collect signatures (phone, Ledger, a pasted copy) and finalize. The PSBT to share is BIP174 v0, readable by Bitcoin Core.
 4. A payment between the wallet and one of your accounts is one row in Activity.
 
-Also new: Tor and I2P peers under Settings → Network → Peers and routing, background chain checks, and the iPad layout (rotation, sidebar). Mac users with Apple silicon can run the iPad version.
+Also new: Tor and I2P peers under Settings → Network → Peers and routing, background chain checks, and the iPad layout. Macs with Apple silicon can run the iPad version.
 
 Report bugs at https://github.com/winnowwallet/winnow-lean/issues with app version, device, Ledger model, network and steps. Never include recovery words, private keys or backup files.

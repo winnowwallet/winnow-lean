@@ -141,6 +141,57 @@ address on it.
 The simulator has no Bluetooth, so phases D and E are verified with a test-mode fake and the pure oracles.
 A device run with a Ledger is not claimed until one happens.
 
+## Not from upstream: a card per person (issue #94, 2026-11-14)
+
+Upstream has one card, which carries the account key. Here a card can be made for one person. It carries a
+code: the shared secret a silent payment's payer would have made from the wallet's scan key and their coins,
+made beforehand from a tweak for that person, and a spend key made for them (BIP352's labelled spend key). So
+the wallet knows each payment's address beforehand and finds it through compact filters, and a card holds
+neither of the wallet's keys. The code is written with a prefix of the card's own (`winnowcard1p…`,
+`twinnowcard1p…` on a test network), and the wallet's file and a backup record the wallet's two keys under the
+same prefix (`…1q…`), never as `sp1…`: paid the standard way from another wallet that would make an output
+this wallet does not find. For one build (0.9.12) a card carried the two keys and the tweak instead; such a
+card is still read and still found. `Winnow/Keys/SilentPaymentPairing.lean` is new and has no Swift counterpart; the output step is
+`SilentPaymentSending.outputScript`, unchanged. `card-keys-test` holds it to `Vectors/card-keys-vectors.json`,
+which `scripts/card-keys-vectors` writes without the wallet's code.
+
+Departures from upstream's formats, each absent until a card is issued:
+
+- `wallet.json` gains `silentPaymentAddress`, `cards` (each issued card's index, tweak, payment cursor and
+  spend key, and `plainToo` on a card a restore recorded), and a coin paid to a card gains `card`. A wallet
+  that never issues a card writes the file it always wrote.
+- The backup bundle gains the same three keys and is then version 4 (`ImportBundle.cardSpendKeysVersion`), or
+  3 (`cardsVersion`) with only cards 0.9.12 issued; without cards it stays version 2. Upstream reads none of
+  them and refuses both.
+- `Wallet.watchMap` answers a `CoinKey` (chain, index, card) where upstream's answers a pair.
+  `Wallet.signingKeys` returns the master key beside the account key, and `Wallet.spendSecret` stands where
+  `tweakedPrivateKey` was called: a card's coin is signed with the silent payment spend key
+  (`m/352'/coin'/0'/0'/0`) plus the card's label plus the payment's tweak, with no BIP86 tweak and no BIP371
+  origin. A wallet that
+  holds only its account key can neither make a card nor spend such a coin (`cardsNeedThePhrase`).
+- People: `PersonPayTo.card` (a card's code), person cards of version 3 whose `payTo` is a code (and of
+  version 2, 0.9.12's, with the two keys and a `tweak` field), and `PersonRecord.issuedCard` in `people.json`,
+  the link from a person to the card this wallet issued them. Upstream reads either card as made by a newer
+  Winnow and ignores the link.
+- The app: Receive is one page, where upstream asked for a label before it showed an address and kept the
+  card on a sheet of its own ("Share my card"). The address is shown at once and a label is asked for only
+  from "Label this address"; under it, "From one person" takes a name and gives that person's ordinary
+  address and their card. Upstream's card
+  (the account key, the same for everybody) is no longer made or shown: `Cmd.ownCard`, `Host.card` and the
+  backend's `ownCard` are gone, and `ownPersonCard` stays only as what such a card from another wallet
+  looks like, which is still read and paid. Under each saved recipient is "Make …’s address and card" or
+  "Show …’s address and card". A restore from a backup with the phrase begins a search for cards made after
+  the backup (`Wallet.beginCardRestore`, the sync pass's `finishCardRestore`, the wallet file's
+  `cardRestoreFrom`). The backend's `personCard`, and the sync's `cardPayment` hook, which labels a
+  payment made with a card as its person's. Under a card the sheet shows an ordinary address for that
+  person, for a payer that reads no card (the backend's `personAddress`, `Wallet.nextCardAddress`: the
+  card's lowest unpaid payment).
+
+`multisig-test` has the wallet's card tests, `card-regtest` runs them against Bitcoin Core as the payer
+(`scripts/ci-regtest cards`), and `records-test`, `backend-test`'s `cardFlow` and `cardRestoreFlow` and the journey
+`cardForOnePerson` hold the app. `docs/out-of-band-payments.md` is the proposal: the design, what it costs,
+what it was compared with, and what is still open.
+
 ## Tracking upstream "one wallet" (#259, with #256 nested multisig)
 
 The next upstream step is winnowwallet/winnow#259 at d2ca878, which includes #256 (nested multisig).
