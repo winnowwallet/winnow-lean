@@ -96,10 +96,14 @@ def ofSilentPayment (text : String) (network : BitcoinNetwork) : Except SilentPa
   let code ← SilentPaymentAddress.decode (Unicode.trimWhitespace text) (some (SilentPayment.hrp (network == .mainnet)))
   return .silentPayment (← code.encoded.mapError .encoding)
 
-/-- A card's address and tweak, validated: a silent payment address of `network`, and 32 bytes of hex that
-are a valid scalar (`invalidTweak`). -/
+/-- A card's address and tweak, validated: an address in the card's own form on `network`
+(`Wallet.cardHRP`), and 32 bytes of hex that are a valid scalar (`invalidTweak`). An address written as a
+silent payment address (`sp1…`, `tsp1…`) is refused by its own name (`plainSilentPaymentAddress`): no card
+Winnow writes carries one, and one that did would invite paying it the standard way. -/
 def pairing (code tweak : String) (network : BitcoinNetwork) : PM PairingCard := do
-  let address ← (SilentPaymentAddress.decode (Unicode.trimWhitespace code) (some (Wallet.silentPaymentHRP network))).mapError (·.name)
+  let trimmed := Unicode.trimWhitespace code
+  if SilentPaymentAddress.looksLikeCode trimmed then throw "plainSilentPaymentAddress"
+  let address ← (SilentPaymentAddress.decode trimmed (some (Wallet.cardHRP network))).mapError (·.name)
   let some bytes := Winnow.ofHex? (Unicode.trimWhitespace tweak) | throw "invalidTweak"
   unless Keys.SilentPaymentPairing.isValidTweak bytes do throw "invalidTweak"
   return { address, tweak := bytes }
@@ -169,6 +173,18 @@ def toJV : PersonPayTo → JV
   | .silentPayment v => .obj #[("kind", .str "silentPayment"), ("value", .str v)]
   | .card v tweak => .obj #[("kind", .str "card"), ("tweak", .str tweak), ("value", .str v)]
 
+/-- A saved card's address in the card's form. For one day a card's address was written `sp1…`/`tsp1…`; a
+person saved then holds the same keys, and is read into the card's form here (`sp` to `winnowcard`, `tsp` to
+`twinnowcard`), so the people store hands back no string another wallet would pay. Anything else is left as
+it is, for validation to judge. -/
+def cardForm (value : String) : String :=
+  if !SilentPaymentAddress.looksLikeCode value then value else
+  match SilentPaymentAddress.decode value with
+  | .ok a =>
+    let prefix_ := Keys.SilentPaymentPairing.hrp (a.hrp == SilentPayment.hrp true)
+    (({ a with hrp := prefix_ } : SilentPaymentAddress).encoded.toOption).getD value
+  | .error _ => value
+
 def ofJV (v : JV) : D PersonPayTo := do
   let kvs ← asObject v
   let kind ← key kvs "kind" asString
@@ -177,7 +193,7 @@ def ofJV (v : JV) : D PersonPayTo := do
   | "descriptor" => pure (.descriptor value)
   | "address" => pure (.address value)
   | "silentPayment" => pure (.silentPayment value)
-  | "card" => return .card value (← key kvs "tweak" asString)
+  | "card" => return .card (cardForm value) (← key kvs "tweak" asString)
   | _ => dataCorrupted
 
 end PersonPayTo
@@ -267,9 +283,10 @@ structure PersonCard where
   version : Int := 1
   network : String
   name : String
-  /-- Canonical pay-to descriptor, a plain address or a silent payment code. -/
+  /-- Canonical pay-to descriptor, a plain address or a silent payment code; with `tweak`, the issuer's
+  silent payment address in the card's own form (`winnowcard1…`: `SilentPaymentPairing.hrp`). -/
   payTo : Option String := none
-  /-- With a silent payment code in `payTo`: the tweak made for the card's one recipient (32 bytes, hex). -/
+  /-- The tweak made for the card's one recipient (32 bytes, hex), which `payTo` is paid by. -/
   tweak : Option String := none
   deriving Inhabited, BEq
 
@@ -343,7 +360,7 @@ def parseCard (text : String) (network : BitcoinNetwork) : PasteM PersonImport :
   if let some raw := card.payTo.map Unicode.trimWhitespace then
     if !raw.isEmpty then
       payTo ← named <|
-        -- a tweak is for a silent payment address and nothing else: with it the address is paid by the tweak
+        -- a tweak is for a card's address and nothing else: with it the address is paid by the tweak
         if let some tweak := card.tweak then (PersonPayTo.ofCard raw tweak network).map some
         else if raw.startsWith "tr(" then (PersonPayTo.ofDescriptor raw network).mapError (·.name) |>.map some
         else if SilentPaymentAddress.looksLikeCode raw then (PersonPayTo.ofSilentPayment raw network).mapError (·.name) |>.map some
@@ -372,6 +389,8 @@ def parse (text : String) (network : BitcoinNetwork) : PasteM PersonImport := do
   if trimmed.startsWith "tr(" || trimmed.startsWith "rawtr(" then
     let payTo ← named <| (PersonPayTo.ofDescriptor trimmed network).mapError (·.name)
     return { name := none, payTo := some payTo, source := .descriptor }
+  -- the address out of a card, without its tweak, pays nothing
+  if Keys.SilentPaymentPairing.looksLikeCardAddress trimmed then throw (.named "cardAddressAlone")
   -- a code: a wrong network is worth saying; anything else that merely looks like one is unrecognised
   if SilentPaymentAddress.looksLikeCode trimmed then
     match PersonPayTo.ofSilentPayment trimmed network with

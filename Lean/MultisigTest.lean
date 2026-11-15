@@ -1061,7 +1061,10 @@ def cardsAreIssued : TM Unit := do
   let (first, card0) ← need "issue" w.issueCard
   let (second, card1) ← need "issue again" w.issueCard
   check "cards: indices count up" (first == 0 && second == 1)
-  check "cards: a test-network silent payment address" (card0.address.hrp == "tsp" && ((card0.address.encoded.toOption.getD "").startsWith "tsp1"))
+  check "cards: the address has a card's prefix for a test network, not a silent payment address's"
+    (card0.address.hrp == "twinnowcard" && ((card0.address.encoded.toOption.getD "").startsWith "twinnowcard1") &&
+     !SilentPaymentAddress.looksLikeCode (card0.address.encoded.toOption.getD "") &&
+     ((← w.state).silentPaymentAddress == card0.address.encoded.toOption))
   check "cards: two cards carry the same address and different tweaks" (card0.address == card1.address && card0.tweak != card1.tweak)
   -- the same card, derived here from the phrase and not by the wallet
   let master ← needE "master" (·.name) (HDKey.ofSeed (BIP39.seed testWords))
@@ -1218,7 +1221,15 @@ def cardsInABackup : TM Unit := do
   check "card backup: cards without an address are refused"
     (← refusedFor { decoded with silentPaymentAddress := none } "the bundle's cards have no silent payment address")
   check "card backup: an address that is not one is refused"
-    (← refusedFor { decoded with silentPaymentAddress := some "tsp1qqnotanaddress" } "the bundle's silent payment address is not one of this network's")
+    (← refusedFor { decoded with silentPaymentAddress := some "tsp1qqnotanaddress" } "the bundle's silent payment address is not a card address of this network")
+  let ownAsPlain : Option String := (decoded.silentPaymentAddress.bind fun text => (SilentPaymentAddress.parse text).toOption).bind
+    fun own => ({ own with hrp := "tsp" } : SilentPaymentAddress).encoded.toOption
+  let plainRefused ← refusedFor { decoded with silentPaymentAddress := ownAsPlain }
+    "the bundle's silent payment address is not a card address of this network"
+  check "card backup: the wallet's own keys written as a silent payment address are refused"
+    (((ownAsPlain.map (·.startsWith "tsp1")) == some true) && plainRefused)
+  check "card backup: the address in the backup has the card's prefix"
+    ((decoded.silentPaymentAddress.map (·.startsWith "twinnowcard1")) == some true)
   check "card backup: the same card twice is refused"
     (← refusedFor (withCards fun cs => cs.push cs[0]!) "the bundle's cards are malformed or repeat")
   check "card backup: a zero tweak is refused"
@@ -1327,6 +1338,13 @@ def cardsInTheWalletFile : TM Unit := do
   check "card file: a coin of a card the file does not list is damage" ((reads { s with cards := #[] }).isNone)
   check "card file: cards without the address they pay are damage" ((reads { s with silentPaymentAddress := none }).isNone)
   check "card file: an address that is not one is damage" ((reads { s with silentPaymentAddress := some "tsp1qqnotanaddress" }).isNone)
+  check "card file: the address is kept with the card's prefix" ((s.silentPaymentAddress.map (·.startsWith "twinnowcard1")) == some true)
+  -- the one day cards wrote the address as a silent payment address: the same keys, read into the card's form
+  let rewritten (prefix_ : String) : Option String := ({ card.address with hrp := prefix_ } : SilentPaymentAddress).encoded.toOption
+  check "card file: the address written as a silent payment address is read into the card's form"
+    ((rewritten "tsp").isSome && reads { s with silentPaymentAddress := rewritten "tsp" } == some s)
+  check "card file: an address with another network's prefix is damage"
+    ((reads { s with silentPaymentAddress := rewritten "winnowcard" }).isNone && (reads { s with silentPaymentAddress := rewritten "sp" }).isNone)
   check "card file: a card with a zero tweak is damage"
     ((reads { s with cards := s.cards.map fun c => { c with tweak := ByteArray.mk (Array.replicate 32 0) } }).isNone)
   check "card file: a card with a short tweak is damage"

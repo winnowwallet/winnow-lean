@@ -88,7 +88,7 @@ def cardChecks (n : Node) : IO Unit := do
   let (cardIndex, card) ← need "issue a card" w.issueCard
   let codeText : String × String := (← needE "encode" (·.name) card.address.encoded, hex card.tweak)
   check "a card: a test-network silent payment address and a 32-byte tweak"
-    (cardIndex == 0 && codeText.1.startsWith "tsp1" && codeText.2.length == 64)
+    (cardIndex == 0 && codeText.1.startsWith "twinnowcard1" && codeText.2.length == 64)
 
   -- Core pays payments 0 and 1 of the card
   let (address0, script0) ← payerAddress codeText 0

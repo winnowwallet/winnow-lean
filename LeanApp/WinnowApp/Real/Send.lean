@@ -99,6 +99,7 @@ def previewSend (env : Env) (inputs : SendInputs) : IO Preview := do
   let c ← env.get
   let some n := c.network | failWith .noWallet
   -- `parseDestination`: a silent payment code (its HRP checked against this network), else an address
+  if Keys.SilentPaymentPairing.looksLikeCardAddress destination then failText Wallet.cardAddressAloneText
   let (payments, silent) ← if SilentPaymentAddress.looksLikeCode destination then
       match Keys.SilentPayment.ofCode sats destination (Network.tx n) with
       | .ok p => pure (#[], #[p])

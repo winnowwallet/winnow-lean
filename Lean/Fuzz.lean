@@ -367,6 +367,8 @@ private def personPaste : Target := {
     utf8 "{\"winnow\":\"person-card\",\"version\":1,\"network\":\"signet\",\"name\":\"Alice\"}",
     utf8 "{\"winnow\":\"person-card\",\"version\":1,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr\"}",
     -- a card for one person: the first address and tweak of Vectors/card-keys-vectors.json
+    utf8 "{\"winnow\":\"person-card\",\"version\":2,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"winnowcard1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vk6arlx\",\"tweak\":\"02c5352dbcd635ad5b93834861d28554d651de364268c522bd81b3977b55951c\"}",
+    -- the same keys written as a silent payment address, which no card carries: refused
     utf8 "{\"winnow\":\"person-card\",\"version\":2,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"sp1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vc56rgj\",\"tweak\":\"02c5352dbcd635ad5b93834861d28554d651de364268c522bd81b3977b55951c\"}",
     utf8 ("".pushn '[' 16000)]
   tokens := jsonTokens

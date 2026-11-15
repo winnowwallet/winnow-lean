@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes Lean/Vectors/card-keys-vectors.json: a wallet's silent payment address, the tweaks it makes for
+"""Writes Lean/Vectors/card-keys-vectors.json: a wallet's silent payment address in a card's form, the tweaks it makes for
 people and the payments derived from them, computed here without any of the wallet's code, as the oracle for
 `Winnow.Keys.SilentPaymentPairing` (card-keys-test).
 
@@ -109,12 +109,13 @@ def to5(payload):
 
 
 CASES = [
-    # (BIP32 seed, coin type, HRP, card index, payment indices)
-    ("000102030405060708090a0b0c0d0e0f", 0, "sp", 0, [0, 1, 2, 3, 19, 20, 0xFFFFFFFF]),
-    ("000102030405060708090a0b0c0d0e0f", 0, "sp", 1, [0, 1, 2, 3]),
-    ("000102030405060708090a0b0c0d0e0f", 1, "tsp", 0, [0, 1, 2, 3]),
+    # (BIP32 seed, coin type, HRP, card index, payment indices). The HRP is a card's own (`winnowcard`, or
+    # `twinnowcard` on the test networks), not a silent payment address's: see SilentPaymentPairing.hrp.
+    ("000102030405060708090a0b0c0d0e0f", 0, "winnowcard", 0, [0, 1, 2, 3, 19, 20, 0xFFFFFFFF]),
+    ("000102030405060708090a0b0c0d0e0f", 0, "winnowcard", 1, [0, 1, 2, 3]),
+    ("000102030405060708090a0b0c0d0e0f", 1, "twinnowcard", 0, [0, 1, 2, 3]),
     ("fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
-     1, "tsp", 0xFFFFFFFF, [0, 7, 1000]),
+     1, "twinnowcard", 0xFFFFFFFF, [0, 7, 1000]),
 ]
 
 

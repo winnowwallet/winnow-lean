@@ -4,13 +4,13 @@
   {
    "seed": "000102030405060708090a0b0c0d0e0f",
    "coinType": 0,
-   "hrp": "sp",
+   "hrp": "winnowcard",
    "card": 0,
    "scanSecret": "18778f6ba4b363113417af64262408b7c28ac02fb443aeefc285269e8186419b",
    "spendSecret": "320cb82a9e88ac7c562119f44e049bd0b2e6554a1b9682b0630c4105a7982075",
    "scanKey": "03a537378811320ce8d797b936489eeb8a7afd4c79ec8c4cfd2040bba5ef5e2cdd",
    "spendKey": "0391bfc00910a4a2a38ab09ffeae22c18496dbf0852e81afebb452296d73d0a22b",
-   "address": "sp1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vc56rgj",
+   "address": "winnowcard1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vk6arlx",
    "tweak": "02c5352dbcd635ad5b93834861d28554d651de364268c522bd81b3977b55951c",
    "sharedSecret": "0229734d9944e4c0d579bf0a38e92e9aa480503b336c53d606a9692bc477649bd9",
    "payments": [
@@ -75,13 +75,13 @@
   {
    "seed": "000102030405060708090a0b0c0d0e0f",
    "coinType": 0,
-   "hrp": "sp",
+   "hrp": "winnowcard",
    "card": 1,
    "scanSecret": "18778f6ba4b363113417af64262408b7c28ac02fb443aeefc285269e8186419b",
    "spendSecret": "320cb82a9e88ac7c562119f44e049bd0b2e6554a1b9682b0630c4105a7982075",
    "scanKey": "03a537378811320ce8d797b936489eeb8a7afd4c79ec8c4cfd2040bba5ef5e2cdd",
    "spendKey": "0391bfc00910a4a2a38ab09ffeae22c18496dbf0852e81afebb452296d73d0a22b",
-   "address": "sp1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vc56rgj",
+   "address": "winnowcard1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vk6arlx",
    "tweak": "6b78572271607c5408fe87f14bac71512cdac2e2723a74688dbe0c6821650b45",
    "sharedSecret": "0289a43a4cce52ca48a3d592befb88dbba5661aa1aaa7cc8fc2e0033b72c7672a3",
    "payments": [
@@ -122,13 +122,13 @@
   {
    "seed": "000102030405060708090a0b0c0d0e0f",
    "coinType": 1,
-   "hrp": "tsp",
+   "hrp": "twinnowcard",
    "card": 0,
    "scanSecret": "8d33048cb2f37d5977262ab67e5b1a9a5ef79dacc1d3065e12a9e98f35cc4fcc",
    "spendSecret": "7a8610556cf2e4d679871e63ab782430327f6ac3dc2caa3b6620cb67c95f887c",
    "scanKey": "028686498632b0ed7c814bfbe4a14d9231385240153feec7db67ed21c68cc0533f",
    "spendKey": "030bde97206ae1546d0bf3af875063745f3f0e88c21a1557bb3c3a84699c22787f",
-   "address": "tsp1qq2rgvjvxx2cw6lypf0a7fg2djgcns5jqz5l7a37mvlkjr35vcpfn7qctm6tjq6hp23kshua0sagxxazl8u8g3ss6z4tmk0p6s35ecgnc0u8rp7le",
+   "address": "twinnowcard1qq2rgvjvxx2cw6lypf0a7fg2djgcns5jqz5l7a37mvlkjr35vcpfn7qctm6tjq6hp23kshua0sagxxazl8u8g3ss6z4tmk0p6s35ecgnc0utn7hv2",
    "tweak": "2231b01d5f39d64069cb34f217ac00c9f84d35746d38d1937f0ea72cb2f351eb",
    "sharedSecret": "0374cbaff46d05042c07adfa24a2bda0b3e0e7758b33669824c5b7b3007d84393b",
    "payments": [
@@ -169,13 +169,13 @@
   {
    "seed": "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
    "coinType": 1,
-   "hrp": "tsp",
+   "hrp": "twinnowcard",
    "card": 4294967295,
    "scanSecret": "a161b0914ac1f2f855c63a4ca7b0677a54558cf689469f9dfea0d5039bc3b8e8",
    "spendSecret": "148d79ab01a7f0571961ef69bd8100ca526917740f4fc9da9695378a3f4d8cef",
    "scanKey": "032638f222fa5bbb2bb895509390450d7fe6b4894d38f0511cd8bf4ca6846c086b",
    "spendKey": "026432210647fd2ec6437b68d11ac1750c28b75abcc91487a7cd12622581b42135",
-   "address": "tsp1qqvnr3u3zlfdmk2acj4gf8yz9p4l7ddyff5u0q5gumzl5ef5ydsyxkqnyxgssv3la9mryx7mg6ydvzagv9zm440xfzjr60ngjvgjcrdppx5at7tew",
+   "address": "twinnowcard1qqvnr3u3zlfdmk2acj4gf8yz9p4l7ddyff5u0q5gumzl5ef5ydsyxkqnyxgssv3la9mryx7mg6ydvzagv9zm440xfzjr60ngjvgjcrdppx53mpz2a",
    "tweak": "2392ec7ca70ca81d19da82c5bf4663f300ea3768bd7ab7c307ae9949755d9e46",
    "sharedSecret": "029bbd9a5e4897bf74bbe6e4d085e074b3269ae8cbc3c07eb3b86a49fea5143e4e",
    "payments": [

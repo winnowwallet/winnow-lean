@@ -579,10 +579,19 @@ def ofJV (v : JV) : D WalletState := do
   let cards := (← keyIfPresent kvs "cards" (asArray IssuedCard.ofJV)).getD #[]
   unless IssuedCard.validate cards do dataCorrupted
   -- every card pays the wallet's silent payment address: cards without one could not be watched for
-  let silentPaymentAddress ← keyIfPresent kvs "silentPaymentAddress" asString
-  match silentPaymentAddress with
-  | some code => unless (SilentPaymentAddress.parse code).toOption.isSome do dataCorrupted
-  | none => unless cards.isEmpty do dataCorrupted
+  -- It is kept with a card's prefix, never a silent payment address's (`SilentPaymentPairing.hrp`). A file
+  -- from the one day cards wrote `sp1…`/`tsp1…` holds the same keys, and is read into the card's form here,
+  -- so nothing past this line has a string another wallet would pay.
+  let cardPrefix := Keys.SilentPaymentPairing.hrp (network == "mainnet")
+  let silentPaymentAddress ← match ← keyIfPresent kvs "silentPaymentAddress" asString with
+    | some code => match SilentPaymentAddress.parse code with
+      | .ok a =>
+        unless a.hrp == cardPrefix || a.hrp == Keys.SilentPayment.hrp (network == "mainnet") do dataCorrupted
+        match ({ a with hrp := cardPrefix } : SilentPaymentAddress).encoded with
+        | .ok text => pure (some text)
+        | .error _ => dataCorrupted
+      | .error _ => dataCorrupted
+    | none => if cards.isEmpty then pure none else dataCorrupted
   -- a coin of a card the file does not list could be neither watched for nor spent
   let known (u : WalletUTXO) : Bool := match u.card with
     | some k => cards.any (·.index == k)

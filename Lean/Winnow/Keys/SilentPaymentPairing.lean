@@ -26,13 +26,20 @@ phrase gives every tweak it ever handed out. The scan and spend keys are at BIP3
 `m/352'/coin'/0'/1'/0` and `m/352'/coin'/0'/0'/0`, which need the master key: a wallet that holds only its
 account key has neither.
 
+The address in a card is not written as a silent payment address. It is the same two keys in the same
+bech32m form under a prefix of Winnow's own (`winnowcard1…`, `twinnowcard1…` on the test networks: `hrp`),
+which no wallet reads as something to pay. An `sp1…` address lifted out of a card and paid the standard way
+from another wallet would make an output only a scan of the chain finds, and Winnow does no such scan; with
+no `sp1…` string in a card, in the wallet's file or in a backup, there is none to lift.
+
 Nothing here reads the wallet; `card-keys-test` holds it to vectors an independent implementation wrote
 (`scripts/card-keys-vectors`). The curve work is `Secp256k1`, which is not constant-time. -/
 
 namespace Winnow
 
-/-- What one person is handed: the recipient's silent payment address and the tweak made for them. The tweak
-is not a spending secret: whoever holds both can find the payments made with them and cannot spend them. -/
+/-- What one person is handed: the recipient's silent payment address (its `hrp` the card's own,
+`SilentPaymentPairing.hrp`) and the tweak made for them. The tweak is not a spending secret: whoever holds
+both can find the payments made with them and cannot spend them. -/
 structure PairingCard where
   address : SilentPaymentAddress
   /-- 32 bytes, a valid scalar. -/
@@ -60,6 +67,17 @@ def Error.name : Error → String
   | .keyMismatch => "keyMismatch" | .derivation => "derivation"
 
 abbrev PP := Except Error
+
+/-- The prefix a card's address is written with: `winnowcard` on mainnet, `twinnowcard` on every test network
+(as `sp` and `tsp` divide them). Not `sp`/`tsp`: a wallet that does not know cards refuses the string, so
+nobody pays a card's address the standard way, where Winnow would not find it. -/
+def hrp (mainnet : Bool) : String := if mainnet then "winnowcard" else "twinnowcard"
+
+/-- Shaped like the address out of a card, on its own (either case). A shape check only: it routes such text
+to the sentence that says to paste the whole card. -/
+def looksLikeCardAddress (text : String) : Bool :=
+  let lowered := text.trimAscii.toString.toLower
+  lowered.startsWith (hrp true ++ "1") || lowered.startsWith (hrp false ++ "1")
 
 def pairingTag : String := "Winnow/SilentPayment/Pairing"
 
@@ -117,7 +135,7 @@ def keys (master : HDKey) (coinType : UInt32) : PP (ByteArray × ByteArray) := d
     | .error _ => throw .derivation
   return (← secretAt s!"m/352'/{coinType}'/0'/1'/0", ← secretAt s!"m/352'/{coinType}'/0'/0'/0")
 
-/-- The address those keys make, with `hrp` (`sp`, or `tsp` on the test networks). -/
+/-- The address those keys make, with `hrp` (a card's: `SilentPaymentPairing.hrp`). -/
 def address (scan spend : ByteArray) (hrp : String) : PP SilentPaymentAddress := do
   let pub (s : ByteArray) : PP ByteArray := match publicKeyOf s with
     | .ok k => pure k

@@ -121,7 +121,8 @@ def labelSheet (m : Model) (inner : List H) : H :=
   formSheet "Address label" (if m.labelEditor.saving then none else some .closeSheet) [] (labelEditorView m) inner
 
 /-- A card for one person (issue #94): their name, then a card only they are given, which carries the
-wallet's silent payment address and a tweak made for them. -/
+wallet's silent payment address under a card's own prefix (`winnowcard1…`, which no other wallet pays) and
+a tweak made for them. -/
 def personCardSections (m : Model) : List H :=
   let sc := m.shareCard
   let own := m.settings.ownDisplayName.trimAscii.copy
@@ -130,7 +131,7 @@ def personCardSections (m : Model) : List H :=
     | some id => m.records.people.any fun p => p.id == id && p.hasCard
     | none => ((m.records.people.find? (·.name == person)).map (·.hasCard)).getD false
   let label := if sc.making then "Making…" else if known then s!"Show {person}’s card" else if person.isEmpty then "Make a card" else s!"Make a card for {person}"
-  [ .section "A card for one person" "Made for one person and nobody else. It carries your silent payment address and a tweak made for them, so each payment from them goes to an address only the two of you can work out. They cannot see your other addresses, and a payment made with this card is named as theirs. Send it only to them: anyone who has it can see what is paid with it. Every card you make shows the same silent payment address, so two people who compare their cards can tell they pay the same wallet."
+  [ .section "A card for one person" "Made for one person and nobody else. It carries your silent payment address, written in a form only Winnow pays, and a tweak made for them, so each payment from them goes to an address only the two of you can work out. They cannot see your other addresses, and a payment made with this card is named as theirs. Send it only to them: anyone who has it can see what is paid with it. Every card you make shows that same address, so two people who compare their cards can tell they pay the same wallet."
       ([ .identified Ids.personCardNameField
           (.input .plain "" "Their name" sc.forName (fun s => .receive (.setCardFor s)) (some (.receive .makePersonCard)))
        , .identified Ids.makePersonCardButton
