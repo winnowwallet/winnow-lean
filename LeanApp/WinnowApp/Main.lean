@@ -410,7 +410,7 @@ def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
     -- it; a card already made is read back without a key
     discard <| IO.asTask do
       if ← (try b.hasPersonCard personID personName catch _ => pure false) then background fx g "personCard" act
-      else authenticated fx g "personCard" s!"Make a card for {personName}" act
+      else authenticated fx g "personCard" s!"Make {personName}’s address and card" act
   | _ => pure ()
 
 /-- People and sender labels. -/

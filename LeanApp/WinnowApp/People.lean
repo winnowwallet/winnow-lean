@@ -108,9 +108,8 @@ def stepPeople (msg : PeopleMsg) (m : Model) : Model × List Cmd :=
     match m.person? pid with
     | some p =>
       let own := m.settings.ownDisplayName.trimAscii.copy
-      let m' := { m with shareCard := { forName := p.name, forPerson := some pid, making := !own.isEmpty } }.present .shareCard
-      -- asked for at once when the wallet's own name is set; otherwise once it is typed
-      (m', if own.isEmpty then [] else [.personCard g (some pid) p.name own])
+      let m' := { m with shareCard := { forName := p.name, forPerson := some pid, making := true } }.present .shareCard
+      (m', [.personCard g (some pid) p.name own])
     | none => (m, [])
   | .remove pid => ({ m with recipientsError := none }, [.updateRecipient g pid none false "recipients"])
 
@@ -174,7 +173,7 @@ def savedRecipientsSheet (m : Model) (inner : List H) : H :=
                , .button "Remove" .destructive (some (.people (.remove p.id))) ]
         -- on a line of its own: a fourth button in the row above pushed Remove off the screen (seen in the
         -- simulator, 2026-11-14)
-        , .button (if p.hasCard then s!"Show the card you made for {p.name}" else s!"Make a card for {p.name}") .plain
+        , .button (if p.hasCard then s!"Show {p.name}’s address and card" else s!"Make {p.name}’s address and card") .plain
             (some (.people (.card p.id))) ])) inner
 
 end WinnowApp

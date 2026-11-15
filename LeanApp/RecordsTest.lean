@@ -1230,18 +1230,25 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   let first := m.receive.address
   check "receive: the first address" (first.startsWith "bcrt1p" && m.topSheet == some .receive) first
   check "receive: the mempool window opens on it" (left.any fun | .watchAddress _ a => a == first | _ => false)
-  check "receive: an unlabelled address asks who it is for first"
-    (m.receive.editingLabel && contains (rendered m) "Who is this address for?" && contains (rendered m) "Skip for now")
-  let (m, _) ← sh.tap (.receive .finishLabel) m
-  check "receive: Skip shows the address" (!m.receive.editingLabel && contains (rendered m) first && contains (rendered m) "Label this address")
+  check "receive: one page, the address at once and nothing asked first"
+    (!m.receive.editingLabel && contains (rendered m) first && contains (rendered m) "Label this address" &&
+     !contains (rendered m) "Who is this address for?" && contains (rendered m) "From one person")
+  check "receive: no button to a second sheet for a card" (!contains (rendered m) "Make a card")
+  let (asking, _) ← sh.tap (.receive .editLabel) m
+  check "label: asked for only when wanted, and Cancel goes back to the address"
+    (asking.receive.editingLabel && contains (rendered asking) "Who is this address for?" && contains (rendered asking) "Cancel" &&
+     !contains (rendered asking) "Skip for now" &&
+     (let back := (stepReceive .finishLabel asking).1; !back.receive.editingLabel && contains (rendered back) first))
   -- New address
   let (m, left) ← sh.tap (.receive .freshAddress) m
   let second := m.receive.address
   check "New address: differs from the first" (second.startsWith "bcrt1p" && second != first) second
   check "New address: the mempool window moves to it"
     (left.any (· matches .stopWatchingAddress) && left.any fun | .watchAddress _ a => a == second | _ => false)
-  check "New address: the label editor comes first" (m.receive.editingLabel && !m.receive.changing && m.labelEditor.address == second)
+  check "New address: shown at once too" (!m.receive.editingLabel && !m.receive.changing && m.labelEditor.address == second &&
+    contains (rendered m) second)
   -- label it
+  let (m, _) ← sh.tap (.receive .editLabel) m
   let (m, _) ← sh.tap (.receive (.setLabelDraft "  Alice, invoice 12 ")) m
   let (m, _) ← sh.tap (.receive .saveLabel) m
   check "label: saved for the new address only, trimmed"
@@ -1265,27 +1272,23 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   check "remove: the label is gone" ((lookup m.records.receiveLabels second).isNone && !m.receive.editingLabel &&
     contains (rendered m) "Label this address")
   check "remove: and the backend agrees" ((lookup (← backend.records).receiveLabels second).isNone)
-  -- the card sheet: no name yet, then one
-  let (card, cs) := stepReceive .openCard m
-  check "card: the sheet opens, and asks for a name"
-    (card.topSheet == some .shareCard && (cs.all fun | .journal .. => true | _ => false) &&
-     contains (renderedH (shareCardSheet card [])) "Add your name to make a card.")
-  let (card, left) ← sh.tap (.receive (.setOwnName "Alice")) card
-  check "card: the name is saved" (card.settings.ownDisplayName == "Alice" && left.isEmpty)
-  let shown := renderedH (shareCardSheet card [])
-  check "card: with a name the sheet stops asking for one" (!contains shown "Add your name to make a card.")
+  -- one person, on the same page: no sheet of its own, and nothing but their name is asked for
+  let card := m
+  let page (model : Model) : String := renderedH (receiveSheet model [])
+  check "person: Receive offers it under the address, and waits for a name"
+    (card.topSheet == some .receive && contains (page card) "From one person" && contains (page card) "Their name" &&
+     contains (page card) "Make their address and card" && (stepReceive .makePersonCard card).2.isEmpty)
   -- the card for everybody (the account key) is retired: none is asked for, made or shown
-  check "card: no card for everybody on the sheet"
-    (!contains shown "A card for everyone" && !contains shown "\"qr\"" && !contains shown "tpub")
-  let (cleared, _) ← sh.tap (.receive (.setOwnName "  ")) card
-  check "card: an empty name is asked for again"
-    (contains (renderedH (shareCardSheet cleared [])) "Add your name to make a card.")
-  -- a card for one person, on the same sheet
-  let sheet := renderedH (shareCardSheet card [])
-  check "person card: the sheet offers one, and waits for a name"
-    (contains sheet "A card for one person" && contains sheet "Their name" && (stepReceive .makePersonCard card).2.isEmpty)
+  check "person: no card for everybody on the page" (!contains (page card) "A card for everyone" && !contains (page card) "tpub")
+  -- the wallet's own name is not needed: without one the card says nobody's, and the person names it themselves
+  let (unnamed, _) := stepReceive (.setCardFor "Dana") card
+  check "person: without a name of my own, theirs is enough"
+    (card.settings.ownDisplayName.isEmpty && !contains (page card) "Add your name" &&
+     (stepReceive .makePersonCard unnamed).2.any fun | .personCard _ none p own => p == "Dana" && own == "" | _ => false)
+  let (card, left) ← sh.tap (.receive (.setOwnName "Alice")) card
+  check "person: my name is saved" (card.settings.ownDisplayName == "Alice" && left.isEmpty)
   let (forDana, _) ← sh.tap (.receive (.setCardFor " Dana ")) card
-  check "person card: named, the button says who it is for" (contains (renderedH (shareCardSheet forDana [])) "Make a card for Dana")
+  check "person: named, the button says whose it is" (contains (page forDana) "Make Dana’s address and card")
   let (making, cs) := stepReceive .makePersonCard forDana
   check "person card: asked of the backend, for Dana, under my name"
     (making.shareCard.making && cs.any fun | .personCard _ none p own => p == "Dana" && own == "Alice" | _ => false)
@@ -1294,14 +1297,18 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   let (made, _) ← sh.run making cs
   let some (madeFor, personText) := made.shareCard.personCard | check "person card: made" false s!"{made.shareCard.error}"; return
   check "person card: making it asked the device's owner" (((← sh.asks.get).filter (·.1 == "auth")).size == asksBefore + 1)
-  check "person card: shown for Dana with its QR code" (madeFor == "Dana" && !made.shareCard.making &&
-    contains (renderedH (shareCardSheet made [])) "Card for Dana" && contains (renderedH (shareCardSheet made [])) "Show Dana’s card")
+  check "person card: shown for Dana on the same page, under the wallet's address, and the button has gone"
+    (madeFor == "Dana" && !made.shareCard.making && made.topSheet == some .receive &&
+     contains (page made) "A card for Dana" && contains (page made) "If Dana uses Winnow, give them this instead" &&
+     contains (page made) made.receive.address && contains (page made) "Your name on the card (optional)" &&
+     !contains (page made) "Dana’s address and card")
   check "person card: Dana is a contact with a card" (made.records.people.any fun p => p.name == "Dana" && p.hasCard)
   let some danaAddress := made.shareCard.personAddress | check "person address: on the sheet" false; return
   check "person address: shown under the card, as an ordinary address, with what it is for"
-    (danaAddress.startsWith "bcrt1p" && contains (renderedH (shareCardSheet made [])) "An address for Dana" &&
-     contains (renderedH (shareCardSheet made [])) "If Dana pays from another wallet or an exchange, give them this instead." &&
-     contains (renderedH (shareCardSheet made [])) danaAddress)
+    (danaAddress.startsWith "bcrt1p" && danaAddress != made.receive.address && contains (page made) "An address for Dana" &&
+     contains (page made) "For any wallet or an exchange. It changes once it has been paid." && contains (page made) danaAddress)
+  check "person address: it comes before the card, which is for a payer on Winnow"
+    (((page made).splitOn "An address for Dana").head!.length < ((page made).splitOn "A card for Dana").head!.length)
   check "person address: it is the address the card's own payer pays first"
     ((← backend.personAddress none "Dana") == danaAddress &&
      ((PersonPaste.parse personText network).toOption.bind (·.payTo)).bind (fun p => (p.addressAt 0 network).toOption) == some danaAddress)
@@ -1313,15 +1320,18 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   check "person card: shown again it is the same card, and the device's owner is not asked"
     (again.shareCard.personCard == some ("Dana", personText) && ((← sh.asks.get).filter (·.1 == "auth")).size == asksBefore + 1)
   let (other, _) ← sh.tap (.receive (.setCardFor "Erin")) made
-  check "person card: another name takes Dana's card and her address off the sheet"
-    (other.shareCard.personCard.isNone && other.shareCard.personAddress.isNone)
+  check "person card: another name takes Dana's card and her address off the page"
+    (other.shareCard.personCard.isNone && other.shareCard.personAddress.isNone && !contains (page other) "A card for Dana" &&
+     contains (page other) "Make Erin’s address and card")
+  check "person card: her name typed again offers to show what was made"
+    (contains (page (stepReceive (.setCardFor "Dana") other).1) "Show Dana’s address and card")
   let late := onHost (.personCard other.generation "Dana" personText (some danaAddress) other.records) other
   check "person card: a card that arrives for another name is not shown, nor its address"
     (late.1.shareCard.personCard.isNone && late.1.shareCard.personAddress.isNone)
   let bare := onHost (.personCard made.generation "Dana" personText none made.records) made
   check "person address: a card that arrives without one is shown without one"
     (bare.1.shareCard.personCard.isSome && bare.1.shareCard.personAddress.isNone &&
-     !contains (renderedH (shareCardSheet bare.1 [])) "An address for Dana")
+     !contains (page bare.1) "An address for Dana" && contains (page bare.1) "A card for Dana")
   let (renamed, _) ← sh.tap (.receive (.setOwnName "Alicia")) made
   check "person address: under a new name of mine, the card and the address leave the sheet together"
     (renamed.shareCard.personCard.isNone && renamed.shareCard.personAddress.isNone)
@@ -1349,11 +1359,16 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
     ((passEnds seen).any (· matches .records ..) && !(passEnds card).any (· matches .records ..))
   -- from the saved recipients, for someone already there
   let (fromList, cs) := stepPeople (.card ((made.records.people.find? (·.name == "Dana")).map (·.id) |>.getD "")) made
-  check "person card: from a saved person, the sheet opens on their card"
-    (fromList.topSheet == some .shareCard && fromList.shareCard.forName == "Dana" &&
+  check "person card: from a saved person, a sheet opens on what was made for them, and asks at once"
+    (fromList.topSheet == some .shareCard && fromList.shareCard.forName == "Dana" && fromList.shareCard.making &&
+     contains (renderedH (shareCardSheet fromList [])) "From Dana" &&
      cs.any fun | .personCard _ pid p _ => p == "Dana" && pid.isSome | _ => false)
   let (closed, cs) := step .closeSheet m
   check "receive: Done closes the sheet and the mempool window" (closed.sheets.isEmpty && cs.any (· matches .stopWatchingAddress))
+  let (closedAfter, _) := step .closeSheet made
+  check "receive: closed, what was shown for Dana is gone, and opened again the page starts clean"
+    (closedAfter.shareCard.personCard.isNone && closedAfter.shareCard.forName.isEmpty &&
+     (step .openReceive { made with sheets := [] }).1.shareCard.personCard.isNone)
 
 /-! ### People (#35) -/
 

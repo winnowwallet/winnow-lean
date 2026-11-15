@@ -137,10 +137,9 @@ def openAccountRow (account : String) : UI Unit := do
 
 namespace Receive
 
-/-- Opens Receive and reads the address it shows (its label skipped). -/
+/-- Opens Receive and reads the address it shows. -/
 def address : UI String := do
   tap receiveButton
-  if ← exists? skipReceiveAddressLabelButton 20 then tap skipReceiveAddressLabelButton
   waitFor receiveAddress 30
   let address ← text receiveAddress
   expect (address.startsWith "bcrt1") s!"not a regtest address: {address}"

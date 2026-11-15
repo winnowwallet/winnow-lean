@@ -6,8 +6,8 @@ of the wallet's two keys and a tweak).
 
 > Status at this revision: built end to end on regtest. The derivation
 > (`Lean/Winnow/Keys/SilentPaymentPairing.lean`); a wallet that issues cards, finds what is paid with them,
-> spends it and restores it (`Lean/Winnow/Wallet/Wallet.lean`); and the app: Receive → Make a card makes a
-> card for one person, a saved person can be paid by the card they sent, a payment made with a card is
+> spends it and restores it (`Lean/Winnow/Wallet/Wallet.lean`); and the app: Receive, under "From one person", makes an
+> address and a card for one person, a saved person can be paid by the card they sent, a payment made with a card is
 > named as its person's, and a phone restored from a backup looks for the cards made after it. The card
 > for everybody is retired. Build 0.9.12 (TestFlight, internal group) made cards that carried the wallet's
 > two keys and a tweak; those are still read and still found ("Cards made by 0.9.12"). "Results" says what
@@ -336,18 +336,30 @@ analysed: with the scan private key they can derive every tweak and label.
   never issues a card and was never restored writes the same wallet file and the same version 2 backup as
   before.
 - **People and the screen.** A person's pay-to can be a card's code (`PersonPayTo.card`), read from a
-  version 3 person card, from the code pasted alone, or from a version 2 card of 0.9.12. The card sheet (Receive → Make a card) has the wallet's own name and "A
-  card for one person": a name, the device's owner is asked, the card is shown with its QR code, Copy and
-  Share; shown again it reads no key and does not ask. The card for everybody is no longer made or shown.
-  Under each saved recipient is "Make a card for …" or "Show the card you made for …". The person is saved
+  version 3 person card, from the code pasted alone, or from a version 2 card of 0.9.12. Receive is one page: the
+  wallet's own address at once, and under it "From one person", where a name gives that person's ordinary
+  address and their card, each with its QR code, Copy and Share. The device's owner is asked the first time;
+  shown again it reads no key and does not ask. The wallet's own name on the card is optional. Until
+  2026-11-15 Receive asked for a label before it showed an address, and the card was on a sheet of its own
+  ("Make a card") that asked for two names. The card for everybody is no longer made or shown.
+  Under each saved recipient is "Make …’s address and card" or "Show …’s address and card". The person is saved
   as a contact with a link to their card; the card stays in the wallet's
   state. When a block pays a card, the sync labels the payment with the card's person, unless it already
   has a label, and the screen reads its records again.
 
 ## Results
 
-On 2026-11-14, and every count below again on 2026-11-15 at the revision that added a person's ordinary
-address; every test executable rebuilt first.
+On 2026-11-14, and every count below again on 2026-11-15 at the revision that made Receive one page;
+every test executable rebuilt first.
+
+- **Receive as one page (2026-11-15).** `records-test`: the address is shown at once and nothing is asked
+  first; a label is asked for only from "Label this address", and Cancel goes back; "From one person" is on
+  the same page and needs only their name, with or without a name of the wallet's own; what is made is shown
+  on that page, the address before the card, and the button is gone once it is; another name takes it off,
+  and closing Receive clears it. The journey makes Dana's address and card from Receive with her name alone,
+  finds her address is not the wallet's own, and reopens Receive to see the same card. In the simulator
+  (iPhone 17, iOS 26.5, Debug build): Receive opened on the address, and "Carol" typed under "From one
+  person" showed her address and her card on the same page. Not shown: a device.
 
 - **An address any wallet can pay (2026-11-15).** `multisig-test`: the address is the card's first payment
   as its person's code derives it; paid from outside it is the card's coin and the address becomes the
@@ -424,7 +436,7 @@ address; every test executable rebuilt first.
   with the spend key plus the card's label plus the output's tweak, Core takes it. A second wallet from the same phrase, its frontier already past every
   payment, finds none; after `restoreCards` and two passes of `scanRange` over the same filters it holds
   the same three coins and spends them in a transaction Core mines.
-- **The app.** `records-test`: 1,603 checks, 0 failed: the people store (a card by name and by ID, the same
+- **The app.** `records-test`: 1,605 checks, 0 failed: the people store (a card by name and by ID, the same
   card when asked again, the link through an iCloud restore plan, a card for another network or with a bad
   tweak refused in a sentence) and the card sheet through the app's own `perform` with a fake shell (no
   card for everybody is asked for, made or shown; making a card asks the device's owner once, declining

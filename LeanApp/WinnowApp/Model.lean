@@ -694,7 +694,6 @@ inductive ReceiveMsg where
   | saveLabel
   | removeLabel
   | finishLabel
-  | openCard
   | setOwnName (s : String)
   | setCardFor (s : String)
   | makePersonCard

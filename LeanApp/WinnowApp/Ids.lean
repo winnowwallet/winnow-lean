@@ -36,8 +36,8 @@ def personCardNameField : String := "personCardNameField"
 def makePersonCardButton : String := "makePersonCardButton"
 def personCardText : String := "personCardText"
 def personAddressText : String := "personAddressText"
-/-- Receive's "Make a card", and on the card sheet the wallet's own name and Done. -/
-def shareMyCardButton : String := "shareMyCardButton"
+/-- Under "From one person": the wallet's own name, as a card says who it is from; and Done on the sheet that
+shows one saved person's address and card. -/
 def ownNameField : String := "ownNameField"
 def closeShareCardButton : String := "closeShareCardButton"
 def closeSendButton : String := "closeSendButton"

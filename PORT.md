@@ -173,11 +173,14 @@ Departures from upstream's formats, each absent until a card is issued:
   version 2, 0.9.12's, with the two keys and a `tweak` field), and `PersonRecord.issuedCard` in `people.json`,
   the link from a person to the card this wallet issued them. Upstream reads either card as made by a newer
   Winnow and ignores the link.
-- The app: Receive's "Share my card" is "Make a card", and makes a card for one person. Upstream's card
+- The app: Receive is one page, where upstream asked for a label before it showed an address and kept the
+  card on a sheet of its own ("Share my card"). The address is shown at once and a label is asked for only
+  from "Label this address"; under it, "From one person" takes a name and gives that person's ordinary
+  address and their card. Upstream's card
   (the account key, the same for everybody) is no longer made or shown: `Cmd.ownCard`, `Host.card` and the
   backend's `ownCard` are gone, and `ownPersonCard` stays only as what such a card from another wallet
-  looks like, which is still read and paid. Under each saved recipient is "Make a card for …" or "Show
-  the card you made for …". A restore from a backup with the phrase begins a search for cards made after
+  looks like, which is still read and paid. Under each saved recipient is "Make …’s address and card" or
+  "Show …’s address and card". A restore from a backup with the phrase begins a search for cards made after
   the backup (`Wallet.beginCardRestore`, the sync pass's `finishCardRestore`, the wallet file's
   `cardRestoreFrom`). The backend's `personCard`, and the sync's `cardPayment` hook, which labels a
   payment made with a card as its person's. Under a card the sheet shows an ordinary address for that

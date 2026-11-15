@@ -367,7 +367,7 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
     | none => (m, [])
   | .switchNetwork net => m.switchNetwork net
   | .dismissConfirm => ({ m with confirm := none }, [])
-  | .openReceive => ({ m with receive := ({} : Receive) }.present .receive, [.receiveAddress g false])
+  | .openReceive => ({ m with receive := ({} : Receive), shareCard := {} }.present .receive, [.receiveAddress g false])
   | .openSend =>
     let m := { m with send := { inputs := { network := m.settings.network } } }.present .send
     (m, [.resolveRate g m.sendInputs m.status.feeFloorMilli])

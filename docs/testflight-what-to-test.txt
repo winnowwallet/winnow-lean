@@ -2,8 +2,8 @@ Winnow: the same wallet, rewritten in Lean
 
 New since 0.9.11
 
-A card for one person: they pay you at a new address each time, with nothing more to send them. In 0.9.13 it holds a code made for them and none of your wallet's keys, plus an ordinary address for payers without Winnow. Cards from 0.9.12 still work. On two phones:
-1. Receiving phone: Receive → Make a card. Type your name and the payer's, and make their card (Face ID or passcode). It shows the card and, under it, "An address for …".
+A card for one person: they pay you at a new address each time, with nothing more to send them. It holds a code made for them and none of your wallet's keys, plus an ordinary address for payers without Winnow. Receive is now one page. Cards from 0.9.12 still work. On two phones:
+1. Receiving phone: tap Receive. Under "From one person" type the payer's name and tap the button (Face ID). It shows "An address for …" and "A card for …".
 2. Paying phone: Send → Saved recipients → Add. Type a name, paste the card, Save. Send to them twice.
 3. The receiving phone must show both as "Received from" that name, at two different addresses.
 4. Pay "An address for …" from another wallet or an exchange: it must also show as "Received from" them, and the address must then change.
