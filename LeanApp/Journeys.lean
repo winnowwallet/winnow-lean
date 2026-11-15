@@ -695,6 +695,18 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
   finally
     discard <| h.cli #["setnetworkactive", "true"]⟩
 
+/-- A person's name typed on Receive, and their address and card made. On a phone closing the keyboard already
+makes them (the name's return does what the button does; seen on CI's simulator, 2026-11-15), and the button
+is then gone; the headless driver only sets the text, and the button is what makes them. -/
+def makeCardFor (name : String) : UI Unit := do
+  type personCardNameField name
+  unless ← exists? personCardText 2 do
+    let button ← state makePersonCardButton
+    if button.present && button.enabled then
+      -- gone between the look and the tap, the card is there: the wait below says
+      try tap makePersonCardButton catch _ => pure ()
+  waitFor personCardText 30
+
 /-- A card for one person (issue #94). On the card sheet the wallet makes a card for Dana alone; the device's
 owner is asked first, since making it reads the wallet's key. The node is Dana: it holds only the card's text,
 derives the card's first two addresses from it and pays each. The wallet finds both payments and Activity
@@ -708,9 +720,7 @@ def cardForOnePerson : Journey := ⟨"cardForOnePerson", do
 
   let card ← step "on Receive, under the wallet's address, Dana's name gives her address and her card" do
     let own ← Receive.address
-    type personCardNameField "Dana"
-    tap makePersonCardButton
-    waitFor personCardText 30
+    makeCardFor "Dana"
     let card ← text personCardText
     expect ((card.splitOn "\"payTo\":\"twinnowcard1p").length == 2 && (card.splitOn "tweak").length == 1)
       s!"not a card with a test-network code and no tweak: {card}"
@@ -725,9 +735,7 @@ def cardForOnePerson : Journey := ⟨"cardForOnePerson", do
     Receive.close
     -- asked for again, it is the same card
     discard Receive.address
-    type personCardNameField "Dana"
-    tap makePersonCardButton
-    waitFor personCardText 30
+    makeCardFor "Dana"
     expectEq "the card shown again" (← text personCardText) card
     Receive.close
     pure card
