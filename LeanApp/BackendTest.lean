@@ -515,7 +515,7 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   let (card, records) ← bob.personCard none "Alice" "Bob"
   let has (text part : String) := (text.splitOn part).length > 1
   check "card: Bob's silent payment address and a tweak under his name, with no account key in it"
-    (has card "\"payTo\":\"tsp1" && has card "\"tweak\":\"" && has card "\"name\":\"Bob\"" && has card "\"version\":2" &&
+    (has card "\"payTo\":\"twinnowcard1" && has card "\"tweak\":\"" && has card "\"name\":\"Bob\"" && has card "\"version\":2" &&
      !has card "tpub") card
   check "card: Alice is Bob's contact, with a card" ((records.people.any fun p => p.name == "Alice" && p.hasCard) &&
     (← bob.hasPersonCard none "Alice"))
@@ -524,6 +524,12 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   -- Alice saves it and pays it twice
   let read ← alice.parsePaste card
   check "card: Alice's phone reads Bob and a fresh address each payment" (read.name == some "Bob" && read.payTo == some true)
+  -- the address out of the card, without its tweak, is not something Send pays
+  let cardAddress := ((PersonCard.decode card).toOption.bind (·.payTo)).getD ""
+  let lone ← attempt (alice.previewSend { destination := cardAddress, amount := "300000", network := .regtest })
+  check "card: Send refuses the card's address on its own, and says to paste the card"
+    (cardAddress.startsWith "twinnowcard1" && (match lone with
+      | .error e => e == Wallet.cardAddressAloneText | .ok _ => false))
   discard <| alice.addPerson "Bob" (some card) none none none
   let bobID := (← personNamed alice "Bob").id
   let payBob : SendInputs := { personID := some bobID, amount := "300000", network := .regtest }

@@ -180,7 +180,7 @@ def personCards (a b : Phone) : IO Unit := do
   check "card: a version 2 person card under my name, with my silent payment address and Dana's tweak"
     (match PersonCard.decode cardText with
      | .ok c => c.version == 2 && c.name == "Alice" && c.network == "regtest" && c.payTo == some addressText &&
-         c.tweak == some (hex code.tweak) && addressText.startsWith "tsp1" && some code.tweak == issued[0]?.map (·.tweak)
+         c.tweak == some (hex code.tweak) && addressText.startsWith "twinnowcard1" && some code.tweak == issued[0]?.map (·.tweak)
      | .error _ => false) cardText
   check "card: the card does not carry the account key" (!contains cardText "tpub" && !contains cardText "tr(")
   let (again, _) ← obtain "Dana's card again" (personCard a.store a.wallet none "Dana" "Alice")
@@ -207,8 +207,10 @@ def personCards (a b : Phone) : IO Unit := do
   -- the person pastes it
   let read ← obtain "B reads the card" (parsePaste network cardText)
   check "card: read as Alice, a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
-  let bare ← obtain "B reads the address without the tweak" (parsePaste network addressText)
-  check "card: the address alone is an ordinary silent payment address, not a card" (bare.payTo == some false && bare.name.isNone)
+  -- before the card's address had a prefix of its own this read as an ordinary silent payment address, and a
+  -- payment made to it that way is one A's wallet never finds
+  refused "card: the address alone, without the tweak, is not read as anything to pay" (kind := "cardAddressAlone")
+    (parsePaste network addressText)
   -- B already has an Alice (her shared card): names are not unique, so this one is found by its own
   let rb ← obtain "B saves Alice" (addPerson b.store (some b.wallet) "Alice, her card for me" (some cardText) none none none)
   let some alice := rb.people.find? (·.name == "Alice, her card for me") | check "card: Alice saved on B" false; return
@@ -225,12 +227,32 @@ def personCards (a b : Phone) : IO Unit := do
   check "card: the next payment is the next index, another address" (index1 == 1 && address1 != address0)
   refused "card: the same card for a second person is refused" (kind := "duplicate")
     (addPerson b.store (some b.wallet) "Alicia" (some cardText) none none none)
-  let mainnetAddress := ({ code.address with hrp := "sp" } : SilentPaymentAddress).encoded.toOption.getD ""
+  let mainnetAddress := ({ code.address with hrp := Keys.SilentPaymentPairing.hrp true } : SilentPaymentAddress).encoded.toOption.getD ""
   let withPayTo (payTo tweak : String) : String := (PersonCard.make network "Alice" (some payTo) (tweak := some tweak)).serialized
   let wrongNetwork ← (parsePaste network (withPayTo mainnetAddress (hex code.tweak))).run
   check "card: a card whose address is for another network says so" (match wrongNetwork with
     | .error e => e.description == "That code is for a different Bitcoin network. This wallet is on regtest."
     | .ok _ => false)
+  -- the same keys written as a silent payment address: not what a card carries, and refused as that
+  let plainAddress := ({ code.address with hrp := "tsp" } : SilentPaymentAddress).encoded.toOption.getD ""
+  let plain ← (parsePaste network (withPayTo plainAddress (hex code.tweak))).run
+  check "card: a card that carries a plain silent payment address says so" (plainAddress.startsWith "tsp1" && (match plain with
+    | .error e => e.description == "That card carries a plain silent payment address, which a card for one person does not use. Ask for a new card."
+    | .ok _ => false))
+  -- a person saved during the one day a card's address was written tsp1…: the same keys, read into the card's form
+  let saved (address : String) : Option PersonPayTo := (PersonPayTo.ofJV (PersonPayTo.card address (hex code.tweak)).toJV).toOption
+  check "card: a saved card written as a silent payment address is read into the card's form"
+    (saved plainAddress == some (.card addressText (hex code.tweak)))
+  check "card: a saved card in the card's form reads back as it was" (saved addressText == some (.card addressText (hex code.tweak)))
+  check "card: a saved card whose address is not one is left for validation to refuse"
+    (saved "tsp1qqnotanaddress" == some (.card "tsp1qqnotanaddress" (hex code.tweak)) &&
+     (PersonPayTo.ofCard "tsp1qqnotanaddress" (hex code.tweak) network).toOption.isNone)
+  let alone ← (parsePaste network addressText).run
+  check "card: the card's address pasted on its own says to paste the whole card" (match alone with
+    | .error e => e.description == "That is the address from inside a Winnow card. On its own it cannot be paid: paste the whole card."
+    | .ok _ => false)
+  check "card: the card's address is not taken for a silent payment code"
+    ((PersonPayTo.ofSilentPayment addressText network).toOption.isNone && !SilentPaymentAddress.looksLikeCode addressText)
   let badTweak ← (parsePaste network (withPayTo addressText "00")).run
   check "card: a card whose tweak is not one says so" (match badTweak with
     | .error e => e.description == "That card's tweak is not valid. Ask for the card again."

@@ -346,8 +346,13 @@ def freshReceiveAddress (w : Wallet) : WM String := do
 
 /-! ### Cards (issue #94, `Keys/SilentPaymentPairing.lean`) -/
 
-/-- The HRP of this network's silent payment addresses. -/
-def silentPaymentHRP (network : BitcoinNetwork) : String := SilentPayment.hrp (network == .mainnet)
+/-- The prefix a card's address is written with on this network (`SilentPaymentPairing.hrp`), which is not
+a silent payment address's: the wallet's file, its backups and its cards hold the address in this form only. -/
+def cardHRP (network : BitcoinNetwork) : String := SilentPaymentPairing.hrp (network == .mainnet)
+
+/-- What a screen says to the address out of a card pasted on its own, where an address or a card is asked for. -/
+def cardAddressAloneText : String :=
+  "That is the address from inside a Winnow card. On its own it cannot be paid: paste the whole card."
 
 /-- The wallet's silent payment address, recorded with its first card (`noSilentPaymentAddress` before). -/
 def cardAddress (s : WalletState) : WM SilentPaymentAddress := do
@@ -689,9 +694,13 @@ account key has none (`cardsNeedThePhrase`). Once the state records the address,
 def cardSecrets (w : Wallet) (master : Option HDKey) : WM (ByteArray × ByteArray) := do
   let some master := master | throw (.named "cardsNeedThePhrase")
   let (scan, spend) ← WM.liftE (·.name) (SilentPaymentPairing.keys master (coinType w.network))
-  if let some recorded := (← w.state).silentPaymentAddress then
-    let derived ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (silentPaymentHRP w.network))
-    unless derived.encoded.toOption == some recorded do throw (.wallet .accountKeyMismatch)
+  let s ← w.state
+  if s.silentPaymentAddress.isSome then
+    -- by its keys: the text's prefix is the card's own, and says nothing of whose address it is
+    let recorded ← cardAddress s
+    let derived ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (cardHRP w.network))
+    unless derived.scanKey == recorded.scanKey && derived.spendKey == recorded.spendKey do
+      throw (.wallet .accountKeyMismatch)
   return (scan, spend)
 
 /-- The secret that signs a coin's key path: BIP86 below the account key, or, for a card's coin, the silent
@@ -717,7 +726,7 @@ def issueCard (w : Wallet) : WM (UInt32 × PairingCard) :=
     unless s.cards.size < maximumCards do throw (.named "tooManyCards")
     let index : UInt32 := s.cards.foldl (fun next c => max next (c.index + 1)) 0
     let (scan, spend) ← w.cardSecrets (← w.signingKeys).2
-    let address ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (silentPaymentHRP w.network))
+    let address ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (cardHRP w.network))
     let tweak ← WM.liftE (·.name) (SilentPaymentPairing.tweakFor scan index)
     let code ← WM.liftE (·.name) address.encoded
     let candidate := { s with cards := s.cards.push { index, tweak }, silentPaymentAddress := some code }
@@ -750,7 +759,7 @@ def restoreCards (w : Wallet) (lookahead : UInt32 := cardLookahead) : WM Bool :=
     let s ← w.state
     let wanted := cardsWanted s lookahead
     let (scan, spend) ← w.cardSecrets (← w.signingKeys).2
-    let address ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (silentPaymentHRP w.network))
+    let address ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (cardHRP w.network))
     let code ← WM.liftE (·.name) address.encoded
     let mut cards := s.cards
     for index in [0:wanted] do
@@ -1157,15 +1166,15 @@ def validatedCards (bundle : ImportBundle) (network : BitcoinNetwork) (master : 
   let refuse {α} (reason : String) : WM α := throw (.wallet (.invalidBundle reason))
   unless IssuedCard.validate bundle.cards do refuse "the bundle's cards are malformed or repeat"
   let address ← match bundle.silentPaymentAddress with
-    | some code => match SilentPaymentAddress.decode code (some (silentPaymentHRP network)) with
+    | some code => match SilentPaymentAddress.decode code (some (cardHRP network)) with
       | .ok a => pure (some a)
-      | .error _ => refuse "the bundle's silent payment address is not one of this network's"
+      | .error _ => refuse "the bundle's silent payment address is not a card address of this network"
     | none => if bundle.cards.isEmpty then pure none else refuse "the bundle's cards have no silent payment address"
   if let (some master, some address) := (master, address) then
     let (scan, spend) ← match SilentPaymentPairing.keys master (coinType network) with
       | .ok keys => pure keys
       | .error _ => refuse "the silent payment address cannot be derived"
-    unless (SilentPaymentPairing.address scan spend (silentPaymentHRP network)).toOption == some address do
+    unless (SilentPaymentPairing.address scan spend (cardHRP network)).toOption == some address do
       refuse "the silent payment address is not this wallet's"
     for c in bundle.cards do
       unless (SilentPaymentPairing.tweakFor scan c.index).toOption == some c.tweak do

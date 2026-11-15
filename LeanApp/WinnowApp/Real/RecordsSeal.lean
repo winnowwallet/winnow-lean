@@ -185,6 +185,9 @@ def describe (name : String) (network : Tx.BitcoinNetwork) : String :=
   else if name == "cardsNeedThePhrase" then
     "This wallet was set up from an account key, without a recovery phrase. A card for one person needs the phrase, so this wallet cannot make one or spend what one was paid."
   else if name == "invalidTweak" then "That card's tweak is not valid. Ask for the card again."
+  else if name == "plainSilentPaymentAddress" then
+    "That card carries a plain silent payment address, which a card for one person does not use. Ask for a new card."
+  else if name == "cardAddressAlone" then Wallet.cardAddressAloneText
   else s!"The operation could not be completed ({name})."
 
 def namedError (name : String) (network : Tx.BitcoinNetwork) : RecordsError := .named name (describe name network)

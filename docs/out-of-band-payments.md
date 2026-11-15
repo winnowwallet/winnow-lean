@@ -1,6 +1,7 @@
 # Out-of-band private payments: a silent payment address and a tweak per person
 
-Proposal for [issue #94](https://github.com/winnowwallet/winnow-lean/issues/94), written 2026-11-14.
+Proposal for [issue #94](https://github.com/winnowwallet/winnow-lean/issues/94), written 2026-11-14, revised
+2026-11-15 (the form a card's address is written in).
 
 > Status at this revision: built end to end on regtest. The derivation
 > (`Lean/Winnow/Keys/SilentPaymentPairing.lean`); a wallet that issues cards, finds what is paid with them,
@@ -53,14 +54,27 @@ Bob spends with     p_i    = b_spend + t_i mod n
   tweak the wallet ever handed out. A hash that is 0 or at least `n` is refused, for `x_k` and for `t_i`,
   about once in 2^128.
 - A standard silent payment scan does not find these outputs. They are found by knowing `x_k`.
+- The address is handed over under a prefix of the card's own, not as `sp1…` ("The card"), so that no wallet
+  pays it the standard way. The prefix enters no calculation: the keys are the same and so is every `P_i`.
 
 ### The card
 
 The person card Winnow already has, with `version` raised to 2 and one new field:
 
 ```json
-{"name":"Bob","network":"regtest","payTo":"tsp1…","tweak":"<32 bytes, hex>","version":2,"winnow":"person-card"}
+{"name":"Bob","network":"regtest","payTo":"twinnowcard1…","tweak":"<32 bytes, hex>","version":2,"winnow":"person-card"}
 ```
+
+`payTo` is Bob's silent payment address in every respect but its prefix: version 0, the scan key and the
+spend key, 66 bytes in bech32m, with the human-readable part `winnowcard` on mainnet and `twinnowcard` on
+every test network where a silent payment address has `sp` and `tsp`. A wallet that does not know cards
+refuses such a string as an address of no kind it knows, which is the point: an `sp1…` address copied out
+of a card and paid from another wallet makes an output that only a scan of the chain finds, and Winnow
+does no such scan. Winnow refuses the two ways of getting it wrong by name: a card whose `payTo` is
+written `sp1…` or `tsp1…` ("That card carries a plain silent payment address…"), and a card's address
+pasted on its own into Send or Add person ("That is the address from inside a Winnow card. On its own it
+cannot be paid: paste the whole card."). The wallet's file and its backups hold the address in the same
+form, so the wallet writes no `sp1…` string of its own anywhere.
 
 A Winnow from before this answers a version 2 card with "This card was made by a newer Winnow". It must
 not read it as a plain silent payment address: paid the standard way, the payment would not be found. The
@@ -96,9 +110,13 @@ against a design with a separate key per person, which the first prototype used,
    What they cannot do is find each other's payments: those need the other's tweak.
 2. **A wallet that holds only its account key cannot make these cards.** BIP352's keys are below the
    master key. Such a wallet is told so (`cardsNeedThePhrase`) and nothing is recorded.
-3. **The bare address is not safe to hand out on its own.** If someone copies the address out of a card
-   and pays it the standard way from another wallet, Winnow does not find that payment: it would take a
-   silent payment scan, or a notice from the payer. Winnow never shows the address by itself.
+3. **The address in a card is not one another wallet can pay.** Paid the standard way, the address would
+   make an output Winnow does not find: that takes a silent payment scan, or a notice from the payer. So
+   the card does not carry it as `sp1…` (decided 2026-11-15; until then it did, and Winnow only refrained
+   from showing it alone). What that costs: the string in a card no longer looks like the standard thing
+   it is made of, and the day Winnow can receive standard silent payments it will have to show the `sp1…`
+   form as something separate from a card. What it does not stop: someone who decodes the two keys and
+   writes them out as `sp1…` by hand has made an address Winnow does not watch.
 
 A coin records its card and its payment index, which is `{tweak data, k}` in BIP352's terms. Receiving a
 standard silent payment by a notice from the payer would use the same record, with the tweak data taken
@@ -258,7 +276,7 @@ analysed: with the scan private key they can derive every tweak.
   never issues a card and was never restored writes the same wallet file and the same version 2 backup as
   before.
 - **People and the screen.** A person's pay-to can be an address with a tweak (`PersonPayTo.card`), read
-  from a version 2 person card. The card sheet (Receive → Make a card) has the wallet's own name and "A
+  from a version 2 person card, whose address must be in the card's form. The card sheet (Receive → Make a card) has the wallet's own name and "A
   card for one person": a name, the device's owner is asked, the card is shown with its QR code, Copy and
   Share; shown again it reads no key and does not ask. The card for everybody is no longer made or shown.
   Under each saved recipient is "Make a card for …" or "Show the card you made for …". The person is saved
@@ -268,19 +286,37 @@ analysed: with the scan private key they can derive every tweak.
 
 ## Results
 
-All on 2026-11-14, every test executable rebuilt first.
+On 2026-11-14, and every count below again on 2026-11-15 at the revision that gave the card's address its
+own prefix; every test executable rebuilt first.
 
-- **The derivation.** `card-keys-test`: 207 checks, 0 failed, against `Lean/Vectors/card-keys-vectors.json`
+- **The card's address under its own prefix (2026-11-15).** The vectors were written again by
+  `scripts/card-keys-vectors` with the new prefixes: only each case's `hrp` and `address` changed, and no
+  key, tweak or output. `card-keys-test` adds that a reader of silent payment addresses refuses a card's
+  address on either kind of network, and that the same keys under another prefix pay the same script.
+  `multisig-test` adds that a backup naming the wallet's own keys as `tsp1…` is refused, and that a wallet
+  file which holds them as `tsp1…` is read into the card's form while one with another network's prefix
+  is damage. `records-test` adds the two sentences ("The card") and that a saved person whose card was
+  written `tsp1…` is read into the card's form; the check that used to assert that a card's address pasted
+  alone was "an ordinary silent payment address" now asserts its refusal. `backend-test` adds that Send
+  refuses the card's address alone. A real file was also read: the people store that the simulator run
+  below left on 2026-11-14, with Alice saved from a `tsp1…` card. The new code decoded it, validated it,
+  and derived her next address; then the app itself, on that simulator, opened the wallet, refused a
+  `twinnowcard1…` address typed into Send with the sentence, made a card whose text reads
+  `"payTo":"twinnowcard1…`, and wrote the people store back with no `tsp1` in it. Not shown: a wallet file
+  written by those builds that had issued a card (none was left to read; the rule is tested on a file
+  rewritten in the old form), and a device.
+
+- **The derivation.** `card-keys-test`: 212 checks, 0 failed, against `Lean/Vectors/card-keys-vectors.json`
   (4 cards, 18 payments, output keys of both parities), which `scripts/card-keys-vectors` computes with the
   Python standard library and none of the wallet's code. Each script is also checked to be
   `SilentPaymentSending.outputScript`'s answer for the shared secret, and not what a standard silent
   payment to the same address pays. The recipient's key signs for every output; the person's tweak, the
   output's tweak and the spend key alone do not.
-- **The wallet, without a node.** `multisig-test`: 802 checks, 0 failed, 85 of them in seven tests of cards.
+- **The wallet, without a node.** `multisig-test`: 807 checks, 0 failed, 90 of them in seven tests of cards.
   A payer that holds only a card's text pays three indices in one transaction; the two inside the window
   are credited and the one outside is not. A spend of card coins with an ordinary coin, and its fee bump,
   carry signatures that verify under BIP341's sighash for each coin's key. A fork takes a payment away and
-  it is found again once. Backups round-trip; twelve altered backups are refused. An address claimed
+  it is found again once. Backups round-trip; thirteen altered backups are refused. An address claimed
   without the phrase is watched and not signed for; a made-up tweak under the wallet's own address is
   watched and spent. A wallet that holds only its account key is refused a card. A wallet rebuilt from the
   phrase finds nothing, records the cards it could have issued, then finds and spends all three payments.
@@ -295,12 +331,12 @@ All on 2026-11-14, every test executable rebuilt first.
   output's tweak, Core takes it. A second wallet from the same phrase, its frontier already past every
   payment, finds none; after `restoreCards` and two passes of `scanRange` over the same filters it holds
   the same three coins and spends them in a transaction Core mines.
-- **The app.** `records-test`: 1,575 checks, 0 failed: the people store (a card by name and by ID, the same
+- **The app.** `records-test`: 1,580 checks, 0 failed: the people store (a card by name and by ID, the same
   card when asked again, the link through an iCloud restore plan, a card for another network or with a bad
   tweak refused in a sentence) and the card sheet through the app's own `perform` with a fake shell (no
   card for everybody is asked for, made or shown; making a card asks the device's owner once, declining
   makes none and says nothing, showing it again does not ask; a failure to make one lands on the sheet).
-  `backend-test`: 362 checks, 0 failed, three runs. Its two-phone flow has Bob make a card for Alice, Alice
+  `backend-test`: 363 checks, 0 failed, three runs. Its two-phone flow has Bob make a card for Alice, Alice
   pay it twice from her saved person at addresses Bob's account key does not derive in its first 200, and
   Bob's wallet find both, name both as Alice's and spend them. The journey `cardForOnePerson` passes
   headless with the other nine.
@@ -350,8 +386,8 @@ Decided, and left for now:
 - **Receiving standard silent payments: yes, if we know how to find them.** With what Winnow has, we do
   not; the next section says why and what the ways are. It is left until there is a way that needs no
   server: Winnow will not name a tweak server to trust, and a notice from the payer for every payment is
-  not wanted. Until then the bare address is not safe to hand out alone, and the card sheet does not show
-  it alone.
+  not wanted. Until then the wallet writes its address as `sp1…` nowhere: a card, the wallet's file and a
+  backup hold it under the card's prefix ("The card"), so there is none to copy out and pay.
 
 Still open:
 

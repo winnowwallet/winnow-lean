@@ -112,7 +112,8 @@ def main : IO UInt32 := runMain "card-keys-test" do
   let some first := all.head? | throw (IO.userError "a first card")
   let some second := all[1]? | throw (IO.userError "a second card")
   let some third := all[2]? | throw (IO.userError "a third card")
-  let some firstAddress := (SilentPaymentAddress.decode first.address (some "sp")).toOption | throw (IO.userError "the first address")
+  let some firstAddress := (SilentPaymentAddress.decode first.address (some (SilentPaymentPairing.hrp true))).toOption
+    | throw (IO.userError "the first address")
   let card : PairingCard := { address := firstAddress, tweak := hx first.tweak }
   let some script := (scriptPubKey card 0).toOption | throw (IO.userError "the first script")
   let scriptOf (c : PairingCard) (i : UInt32) : Option ByteArray := (scriptPubKey c i).toOption
@@ -121,8 +122,26 @@ def main : IO UInt32 := runMain "card-keys-test" do
     (first.address == second.address && first.tweak != second.tweak)
   check "another index pays another script" (scriptOf card 1 != some script && (scriptOf card 1).isSome)
   check "another person's tweak pays another script" (scriptOf { card with tweak := hx second.tweak } 0 != some script)
-  let some testAddress := (SilentPaymentAddress.decode third.address (some "tsp")).toOption | throw (IO.userError "the third address")
+  let some testAddress := (SilentPaymentAddress.decode third.address (some (SilentPaymentPairing.hrp false))).toOption
+    | throw (IO.userError "the third address")
   check "the same tweak with another wallet's address pays another script" (scriptOf { card with address := testAddress } 0 != some script)
+  -- the form a card's address is written in: the keys of a silent payment address under a prefix that is not one's
+  check "a card's address is written with the card's prefix"
+    (first.address.startsWith "winnowcard1" && third.address.startsWith "twinnowcard1" &&
+     SilentPaymentPairing.looksLikeCardAddress first.address && SilentPaymentPairing.looksLikeCardAddress third.address.toUpper)
+  check "a card's address does not look like a silent payment address"
+    (!SilentPaymentAddress.looksLikeCode first.address && !SilentPaymentAddress.looksLikeCode third.address)
+  check "a reader of silent payment addresses refuses a card's address, on either kind of network"
+    ((match SilentPaymentAddress.decode first.address (some (SilentPayment.hrp true)) with
+      | .error (.wrongHRP "sp" "winnowcard") => true | _ => false) &&
+     (match SilentPaymentAddress.decode third.address (some (SilentPayment.hrp false)) with
+      | .error (.wrongHRP "tsp" "twinnowcard") => true | _ => false))
+  check "a silent payment address does not look like a card's"
+    (match ({ firstAddress with hrp := "sp" } : SilentPaymentAddress).encoded with
+     | .ok plain => plain.startsWith "sp1" && !SilentPaymentPairing.looksLikeCardAddress plain && plain != first.address
+     | .error _ => false)
+  check "the prefix is in no payment: the same keys under another prefix pay the same script"
+    (scriptOf { card with address := { firstAddress with hrp := "sp" } } 0 == some script)
   check "500 payments of one person are 500 scripts" (Id.run do
     let mut seen : Std.HashSet ByteArray := {}
     for i in [0:500] do

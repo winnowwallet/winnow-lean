@@ -77,7 +77,8 @@ against the node.
   Ledger and has the Ledger show the account's first address to compare. The
   node pays that address and the account sees the coin.
 - `cardForOnePerson`: on the card sheet the wallet makes a card for one
-  person, Dana (issue #94): its silent payment address and a tweak for her.
+  person, Dana (issue #94): its silent payment address, under a card's prefix
+  (`twinnowcard1…`), and a tweak for her.
   The node is Dana: from the card's text alone it derives her first two
   addresses and pays each. The wallet finds both
   and the Transactions list names each "Received from Dana", though nobody

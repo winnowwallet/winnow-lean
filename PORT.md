@@ -146,7 +146,9 @@ A device run with a Ledger is not claimed until one happens.
 Upstream has one card, which carries the account key. Here a card can be made for one person: the wallet's
 silent payment address and a tweak for that person, which stands where a silent payment has the number made
 from the payer's coins, so the wallet knows each payment's address beforehand and finds it through compact
-filters. `Winnow/Keys/SilentPaymentPairing.lean` is new and has no Swift counterpart; the output step is
+filters. The address is written in a card, in the wallet's file and in a backup with a prefix of the card's
+own (`winnowcard1…`, `twinnowcard1…` on a test network; 2026-11-15), never as `sp1…`: paid the standard way
+from another wallet it would make an output this wallet does not find. `Winnow/Keys/SilentPaymentPairing.lean` is new and has no Swift counterpart; the output step is
 `SilentPaymentSending.outputScript`, unchanged. `card-keys-test` holds it to `Vectors/card-keys-vectors.json`,
 which `scripts/card-keys-vectors` writes without the wallet's code.
 
