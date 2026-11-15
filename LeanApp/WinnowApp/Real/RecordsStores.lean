@@ -38,7 +38,8 @@ def outpointKey (txid : ByteArray) (vout : UInt32) : String := hex txid ++ ":" +
 
 /-! ## People -/
 
-/-- `PersonRecord`: a saved recipient. Public keys only. -/
+/-- `PersonRecord`: a saved recipient. Public keys only (a card's tweak finds the payments made with it and
+cannot spend them). -/
 structure PersonRecord where
   /-- Opaque; a UUID string. -/
   id : String
@@ -48,6 +49,10 @@ structure PersonRecord where
   savedRecipient : Option Bool := none
   destinationProvenance : Option Provenance := none
   destinationSource : Option String := none
+  /-- The card this wallet issued for the person (`IssuedCard.index` in the wallet's state, issue #94): a
+  link only. The card itself, and so every coin paid to it, is the wallet's; losing this file loses who a
+  card was for and no coin. -/
+  issuedCard : Option UInt32 := none
   deriving Inhabited, BEq
 
 namespace PersonRecord
@@ -72,7 +77,8 @@ def toJV (p : PersonRecord) : JV :=
     ("nextPaymentIndex", some (ofInt p.nextPaymentIndex.toNat)),
     ("savedRecipient", p.savedRecipient.map .bool),
     ("destinationProvenance", p.destinationProvenance.map (.str ∘ provenanceRaw)),
-    ("destinationSource", p.destinationSource.map .str)]
+    ("destinationSource", p.destinationSource.map .str),
+    ("issuedCard", p.issuedCard.map (ofInt ·.toNat))]
 
 /-- Synthesized `init(from:)`: `id`, `name` and `nextPaymentIndex` required (property defaults are not
 used by the synthesized decoder), the optionals `decodeIfPresent`; any other key (a `signerKey` from
@@ -86,7 +92,8 @@ def ofJV (v : JV) : D PersonRecord := do
   let savedRecipient ← keyIfPresent kvs "savedRecipient" asBool
   let destinationProvenance ← keyIfPresent kvs "destinationProvenance" provenanceOfJV
   let destinationSource ← keyIfPresent kvs "destinationSource" asString
-  return { id, name, payTo, nextPaymentIndex, savedRecipient, destinationProvenance, destinationSource }
+  let issuedCard ← keyIfPresent kvs "issuedCard" asUInt32
+  return { id, name, payTo, nextPaymentIndex, savedRecipient, destinationProvenance, destinationSource, issuedCard }
 
 end PersonRecord
 
@@ -158,6 +165,7 @@ def validatePayTo (r : PersonRecord) (network : BitcoinNetwork) (seen : Std.Hash
     | .descriptor t => RM.lift (fun e => .named e.name e.description) (PersonPayTo.ofDescriptor t network)
     | .address t => liftNamed network (PersonPayTo.ofAddress t network)
     | .silentPayment t => liftNamed network ((PersonPayTo.ofSilentPayment t network).mapError (·.name))
+    | .card code tweak => liftNamed network (PersonPayTo.ofCard code tweak network)
   unless canonical == payTo do invalid "pay-to key is not in canonical form"
   let id ← payIdentity payTo network
   if seen.contains id then invalid "two people share a pay-to key"
@@ -172,11 +180,15 @@ def validate (records : Array PersonRecord) (senderByTxid : Array (String × Str
     unless isHexTxid t do invalid "a sender label has an invalid transaction id"
   let mut ids : Std.HashSet String := {}
   let mut pays : Std.HashSet ByteArray := {}
+  let mut cards : Std.HashSet UInt32 := {}
   for r in records do
     if ids.contains r.id then invalid "duplicate person identifier"
     ids := ids.insert r.id
     validateShape r
     pays ← validatePayTo r network pays
+    if let some card := r.issuedCard then
+      if cards.contains card then invalid "two people share an issued card"
+      cards := cards.insert card
 
 def labelsJV (labels : Array (String × String)) : JV := .obj (labels.map fun (k, v) => (k, .str v))
 
@@ -277,6 +289,15 @@ def add (s : PeopleStore) (keys : StoreKeyVault) (writeData : WriteData) (id : S
   unless s.records.size < maximumPeople do throw (.people .tooMany)
   let next ← s.mutate keys writeData (s.records.push candidate)
   return (next, candidate)
+
+/-- Records that card `card` of the wallet was issued for the person. A person keeps the first card linked
+to them, and a card belongs to one person. -/
+def linkCard (s : PeopleStore) (keys : StoreKeyVault) (writeData : WriteData) (id : String) (card : UInt32) : RM PeopleStore := do
+  s.requireReadable
+  let some i := s.records.findIdx? (·.id == id) | throw (.people .unknownPerson)
+  if s.records[i]!.issuedCard == some card then return s
+  unless s.records[i]!.issuedCard.isNone do invalid "this person already has a card"
+  s.mutate keys writeData (s.records.modify i fun r => { r with issuedCard := some card })
 
 /-- `remove(id:)`: the person and every sender label naming them. -/
 def remove (s : PeopleStore) (keys : StoreKeyVault) (writeData : WriteData) (id : String) : RM PeopleStore := do
@@ -383,8 +404,13 @@ def planRestore (s : PeopleStore) (incoming : Backup) : RM Backup := do
       let theirs ← person.payTo.mapM (payIdentity · s.network)
       if ours == theirs then
         merged := merged.modify i fun r => { r with nextPaymentIndex := max e.nextPaymentIndex person.nextPaymentIndex }
+      -- who a card was issued for comes back with the contact, unless this device already says otherwise
+      if e.issuedCard.isNone && person.issuedCard.isSome && !merged.any (·.issuedCard == person.issuedCard) then
+        merged := merged.modify i fun r => { r with issuedCard := person.issuedCard }
     | none =>
-      merged := merged.push person
+      -- a link to a card someone on this device already has is dropped, not the contact
+      let incomingLink := if merged.any (fun r => r.issuedCard.isSome && r.issuedCard == person.issuedCard) then none else person.issuedCard
+      merged := merged.push { person with issuedCard := incomingLink }
       ids := setLabel ids person.id (some person.id)
   let mut labels := s.senderByTxid
   for (txid, id) in incoming.senderByTxid do

@@ -7,7 +7,10 @@ Pay-to keys (`PersonPayTo`), the person card (`PersonCard`) in Winnow's one card
 unescaped slashes, a `winnow` kind field, a 64 KiB ceiling), `DisplayName` and the Add-person paste
 parser. Upstream (1cf93fb) removed signer keys, cosigner fingerprints, the shared-savings and approval
 cards and the savings payment labels with vaults; a card or record written with a `signerKey` still
-decodes, the field ignored. A person may be paid by a silent payment code (`.silentPayment`). -/
+decodes, the field ignored. A person may be paid by a silent payment code (`.silentPayment`).
+
+Not from upstream (issue #94): a person may be paid at their silent payment address with a tweak they made
+for this wallet alone (`.card`, `Keys/SilentPaymentPairing.lean`), both carried by a version 2 person card. -/
 
 namespace Winnow
 open SwiftJSON Keys
@@ -21,6 +24,11 @@ inductive PersonPayTo where
   /-- A BIP352 code, canonical lower case: reusable like a descriptor, but the address is derived from the
   sender's inputs, so there is no script to watch for or match against. -/
   | silentPayment (code : String)
+  /-- The person's silent payment address (canonical lower case) and the tweak they made for this wallet
+  alone (32 bytes, lower-case hex): the tweak stands where a silent payment has the number made from the
+  payer's coins, so each payment's address is known to them before it is paid, and counted like a
+  descriptor's. -/
+  | card (code : String) (tweak : String)
   deriving Inhabited, BEq
 
 inductive PersonPayToError where
@@ -88,10 +96,31 @@ def ofSilentPayment (text : String) (network : BitcoinNetwork) : Except SilentPa
   let code ← SilentPaymentAddress.decode (Unicode.trimWhitespace text) (some (SilentPayment.hrp (network == .mainnet)))
   return .silentPayment (← code.encoded.mapError .encoding)
 
-/-- Whether the payment index moves with each payment (a code is reusable by derivation, not counting). -/
-def derivesFreshAddresses : PersonPayTo → Bool | .descriptor _ => true | _ => false
+/-- A card's address and tweak, validated: a silent payment address of `network`, and 32 bytes of hex that
+are a valid scalar (`invalidTweak`). -/
+def pairing (code tweak : String) (network : BitcoinNetwork) : PM PairingCard := do
+  let address ← (SilentPaymentAddress.decode (Unicode.trimWhitespace code) (some (Wallet.silentPaymentHRP network))).mapError (·.name)
+  let some bytes := Winnow.ofHex? (Unicode.trimWhitespace tweak) | throw "invalidTweak"
+  unless Keys.SilentPaymentPairing.isValidTweak bytes do throw "invalidTweak"
+  return { address, tweak := bytes }
+
+/-- Validates a card's address and tweak on `network` and returns them in canonical (lower-case) form. -/
+def ofCard (code tweak : String) (network : BitcoinNetwork) : PM PersonPayTo := do
+  let c ← pairing code tweak network
+  return .card (← c.address.encoded.mapError (·.name)) (hex c.tweak)
+
+/-- Whether the payment index moves with each payment (a silent payment code is reusable by derivation, not
+counting). -/
+def derivesFreshAddresses : PersonPayTo → Bool | .descriptor _ | .card .. => true | _ => false
 def isSilentPayment : PersonPayTo → Bool | .silentPayment _ => true | _ => false
-def text : PersonPayTo → String | .descriptor v | .address v | .silentPayment v => v
+def isCard : PersonPayTo → Bool | .card .. => true | _ => false
+/-- The key, address or code (a card's tweak is `cardTweak`). -/
+def text : PersonPayTo → String | .descriptor v | .address v | .silentPayment v | .card v _ => v
+def cardTweak : PersonPayTo → Option String | .card _ tweak => some tweak | _ => none
+
+/-- The script of a card's payment `index`. -/
+def cardScript (code tweak : String) (index : UInt32) (network : BitcoinNetwork) : PM ByteArray := do
+  (Keys.SilentPaymentPairing.scriptPubKey (← pairing code tweak network) index).mapError (·.name)
 
 def derivedAt (text : String) (index : UInt32) (network : BitcoinNetwork) : PM Descriptor.DerivedOutput := do
   let d ← (Descriptor.parse text).mapError (·.name)
@@ -103,33 +132,42 @@ def addressAt (p : PersonPayTo) (index : UInt32) (network : BitcoinNetwork) : PM
   match p with
   | .address a | .silentPayment a => pure a
   | .descriptor t => return (← derivedAt t index network).address
+  | .card code tweak => do
+    let some paid := AddressDecoder.address (← cardScript code tweak index network) network | throw "invalidAddress"
+    return paid
 
 def scriptPubKeyAt (p : PersonPayTo) (index : UInt32) (network : BitcoinNetwork) : PM ByteArray :=
   match p with
   | .address a => (AddressDecoder.scriptPubKey a network).mapError (·.name)
   | .descriptor t => return (← derivedAt t index network).scriptPubKey
   | .silentPayment _ => throw PersonPayToError.noFixedScript.name
+  | .card code tweak => cardScript code tweak index network
 
 def scripts (p : PersonPayTo) (count : UInt32) (network : BitcoinNetwork) : PM (Array ByteArray) :=
   match p with
   | .address _ => return #[← p.scriptPubKeyAt 0 network]
-  | .descriptor _ => (Array.range count.toNat).mapM fun i => p.scriptPubKeyAt i.toUInt32 network
+  | .descriptor _ | .card .. => (Array.range count.toNat).mapM fun i => p.scriptPubKeyAt i.toUInt32 network
   -- a code's outputs are labelled from the send that made them
   | .silentPayment _ => return #[]
 
-/-- What makes two pay-to keys one person's: the script at index 0, or a code's two keys (66 bytes, longer
-than any script Winnow pays, so the kinds cannot collide). -/
+/-- What makes two pay-to keys one person's: the script at index 0, or a silent payment code's two keys (66
+bytes), or a card's two keys and tweak (98 bytes): each longer than any script Winnow pays and of its own
+length, so the kinds cannot collide. -/
 def identity (p : PersonPayTo) (network : BitcoinNetwork) : PM ByteArray :=
   match p with
   | .silentPayment code => do
     let a ← (SilentPaymentAddress.decode code).mapError (·.name)
     return a.scanKey ++ a.spendKey
+  | .card code tweak => do
+    let c ← pairing code tweak network
+    return c.address.scanKey ++ c.address.spendKey ++ c.tweak
   | _ => p.scriptPubKeyAt 0 network
 
 def toJV : PersonPayTo → JV
   | .descriptor v => .obj #[("kind", .str "descriptor"), ("value", .str v)]
   | .address v => .obj #[("kind", .str "address"), ("value", .str v)]
   | .silentPayment v => .obj #[("kind", .str "silentPayment"), ("value", .str v)]
+  | .card v tweak => .obj #[("kind", .str "card"), ("tweak", .str tweak), ("value", .str v)]
 
 def ofJV (v : JV) : D PersonPayTo := do
   let kvs ← asObject v
@@ -139,6 +177,7 @@ def ofJV (v : JV) : D PersonPayTo := do
   | "descriptor" => pure (.descriptor value)
   | "address" => pure (.address value)
   | "silentPayment" => pure (.silentPayment value)
+  | "card" => return .card value (← key kvs "tweak" asString)
   | _ => dataCorrupted
 
 end PersonPayTo
@@ -217,31 +256,38 @@ def decode {α} (text : String) (kind : String) (f : JV → D α) : Except Perso
 
 end WinnowCardCoding
 
-def cardVersionOK (v : Int) : Bool := 1 ≤ v && v ≤ 1
+/-- Version 1, or 2 for a card that carries a tweak: a Winnow from before those says of a version 2 card that
+a newer Winnow made it, where it would have paid the address as an ordinary silent payment, which the
+person's wallet would not find. -/
+def cardVersionOK (v : Int) : Bool := 1 ≤ v && v ≤ 2
+def tweakCardVersion : Int := 2
 
 structure PersonCard where
   winnow : String := "person-card"
   version : Int := 1
   network : String
   name : String
-  /-- Canonical pay-to descriptor, or a plain address. -/
+  /-- Canonical pay-to descriptor, a plain address or a silent payment code. -/
   payTo : Option String := none
+  /-- With a silent payment code in `payTo`: the tweak made for the card's one recipient (32 bytes, hex). -/
+  tweak : Option String := none
   deriving Inhabited, BEq
 
 namespace PersonCard
 def kind : String := "person-card"
 
-def make (network : BitcoinNetwork) (name : String) (payTo : Option String) : PersonCard :=
-  { network := Wallet.networkName network, name, payTo }
+def make (network : BitcoinNetwork) (name : String) (payTo : Option String) (tweak : Option String := none) : PersonCard :=
+  { network := Wallet.networkName network, name, payTo, tweak, version := if tweak.isSome then tweakCardVersion else 1 }
 
 def toJV (c : PersonCard) : JV :=
   obj [("winnow", some (.str c.winnow)), ("version", some (ofInt c.version)), ("network", some (.str c.network)),
-    ("name", some (.str c.name)), ("payTo", c.payTo.map .str)]
+    ("name", some (.str c.name)), ("payTo", c.payTo.map .str), ("tweak", c.tweak.map .str)]
 
 def ofJV (v : JV) : D PersonCard := do
   let kvs ← asObject v
   return { winnow := ← key kvs "winnow" asString, version := ← key kvs "version" asInt, network := ← key kvs "network" asString,
-           name := ← key kvs "name" asString, payTo := ← keyIfPresent kvs "payTo" asString }
+           name := ← key kvs "name" asString, payTo := ← keyIfPresent kvs "payTo" asString,
+           tweak := ← keyIfPresent kvs "tweak" asString }
 
 def serialized (c : PersonCard) : String := WinnowCardCoding.serialize c.toJV
 
@@ -296,9 +342,14 @@ def parseCard (text : String) (network : BitcoinNetwork) : PasteM PersonImport :
   let mut payTo : Option PersonPayTo := none
   if let some raw := card.payTo.map Unicode.trimWhitespace then
     if !raw.isEmpty then
-      payTo ← named <| if raw.startsWith "tr(" then (PersonPayTo.ofDescriptor raw network).mapError (·.name) |>.map some
+      payTo ← named <|
+        -- a tweak is for a silent payment address and nothing else: with it the address is paid by the tweak
+        if let some tweak := card.tweak then (PersonPayTo.ofCard raw tweak network).map some
+        else if raw.startsWith "tr(" then (PersonPayTo.ofDescriptor raw network).mapError (·.name) |>.map some
         else if SilentPaymentAddress.looksLikeCode raw then (PersonPayTo.ofSilentPayment raw network).mapError (·.name) |>.map some
         else (PersonPayTo.ofAddress raw network).map some
+  -- a tweak with nothing to pay is not a card Winnow writes
+  if payTo.isNone && card.tweak.isSome then throw (.card .notACard)
   return { name := DisplayName.normalized card.name, payTo, source := .card }
 
 /-- A bare key expression: `[fp/path]tpub…/<0;1>/*` as Winnow exports it, or an account key without a

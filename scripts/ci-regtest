@@ -1,10 +1,10 @@
 #!/bin/bash
 # Winnow's tests against a disposable regtest bitcoind of the pinned Bitcoin Core (scripts/install-bitcoin):
-# io-test, backend-test and the multisig differential, or only the suites named. Each starts its own node, so
-# CI's `lean` job runs the three as separate lines at the same time (.github/workflows/ci.yml); locally, build
+# io-test, backend-test, the multisig differential and card-regtest, or only the suites named. Each starts its own
+# node, so CI's `lean` job runs them as separate lines at the same time (.github/workflows/ci.yml); locally, build
 # them first (README, "Tests").
 #
-#   scripts/ci-regtest [io] [backend] [differential]
+#   scripts/ci-regtest [io] [backend] [differential] [cards]
 #
 #   MULTISIG_CASES  the differential's cases (default 9, six of them nested)
 set -euo pipefail
@@ -14,7 +14,7 @@ export WINNOW_BITCOIND="$BIN/bitcoind" WINNOW_BITCOIN_CLI="$BIN/bitcoin-cli"
 # bitcoin-cli's banner, not bitcoind's: bitcoind -version writes a settings file in the default data directory,
 # and CI runs three of these lines at once (a race that lost one of them)
 "$WINNOW_BITCOIN_CLI" -version | head -1
-[ $# -gt 0 ] || set -- io backend differential
+[ $# -gt 0 ] || set -- io backend differential cards
 for suite in "$@"; do
   case "$suite" in
     io) echo "▶ io-test"; (cd "$ROOT/Lean" && .lake/build/bin/io-test) ;;
@@ -22,6 +22,7 @@ for suite in "$@"; do
     differential)
       echo "▶ multisig-differential"
       (cd "$ROOT/Lean" && .lake/build/bin/multisig-differential --cases "${MULTISIG_CASES:-9}") ;;
-    *) echo "ci-regtest: no suite $suite (io, backend, differential)" >&2; exit 2 ;;
+    cards) echo "▶ card-regtest"; (cd "$ROOT/Lean" && .lake/build/bin/card-regtest) ;;
+    *) echo "ci-regtest: no suite $suite (io, backend, differential, cards)" >&2; exit 2 ;;
   esac
 done
