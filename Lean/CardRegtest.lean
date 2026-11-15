@@ -49,9 +49,9 @@ def syncWallet (w : Wallet) (fs : FilterSyncIO) (problems : IO.Ref (Array String
     (onMatch := fun m => walletStep problems "apply" (discard (w.apply m))))
   need "record the frontier" (w.recordScanHeight (← fs.nextScanHeight))
 
-/-- What the payer does with a card's text (the address, and the tweak in hex): the address of payment `i`. -/
-def payerAddress (cardText : String × String) (i : UInt32) : IO (String × ByteArray) := do
-  let script ← needE "the payer derives the script" id (PersonPayTo.cardScript cardText.1 cardText.2 i .regtest)
+/-- What the payer does with a card's text (its code): the address of payment `i`. -/
+def payerAddress (cardText : String) (i : UInt32) : IO (String × ByteArray) := do
+  let script ← needE "the payer derives the script" id (PersonPayTo.cardScript cardText i .regtest)
   let some address := AddressDecoder.address script .regtest | throw (IO.userError "no address for the script")
   return (address, script)
 
@@ -86,9 +86,11 @@ def cardChecks (n : Node) : IO Unit := do
   let w ← need "create" (Wallet.create .regtest (inMemoryKeyStore keys) none (some entropy) issuedAt)
   let fs ← runNet "filters" (FilterSyncIO.new pool store issuedAt none)
   let (cardIndex, card) ← need "issue a card" w.issueCard
-  let codeText : String × String := (← needE "encode" (·.name) card.address.encoded, hex card.tweak)
-  check "a card: a test-network silent payment address and a 32-byte tweak"
-    (cardIndex == 0 && codeText.1.startsWith "twinnowcard1" && codeText.2.length == 64)
+  let codeText ← needE "encode" (·.name) card.encoded
+  check "a card: a test-network code, which holds neither of the wallet's keys"
+    (cardIndex == 0 && codeText.startsWith "twinnowcard1p" &&
+     ((← w.state).silentPaymentAddress.bind fun keys => (SilentPaymentAddress.parse keys).toOption).any
+       fun own => card.sharedSecret != own.scanKey && card.spendKey != own.spendKey)
 
   -- Core pays payments 0 and 1 of the card
   let (address0, script0) ← payerAddress codeText 0
@@ -139,9 +141,10 @@ def cardChecks (n : Node) : IO Unit := do
   let signedBy (secret : ByteArray) : IO Transaction := do
     let witness ← needE "sign" (fun _ => "signing failed") (Signer.witness unsigned 0 #[coin.spentOutput] secret (auxiliaryRand := zeros32))
     return { unsigned with inputs := unsigned.inputs.modify 0 fun i => { i with witness } }
-  let (allowed, reason) ← mempoolVerdict n (← signedBy card.tweak)
-  check "signed with the person's tweak, which the payer holds: Core refuses it" (!allowed && !reason.isEmpty) reason
-  let outputTweak ← needE "tweak" (·.name) (SilentPaymentPairing.outputTweak card 0)
+  let some issued := (← w.cards).find? (·.index == 0) | throw (IO.userError "no card 0")
+  let (allowed, reason) ← mempoolVerdict n (← signedBy issued.tweak)
+  check "signed with the person's tweak, which the wallet keeps and is no spending secret: Core refuses it" (!allowed && !reason.isEmpty) reason
+  let outputTweak ← needE "tweak" (·.name) (SilentPaymentPairing.codeOutputTweak card 0)
   let (allowed, reason) ← mempoolVerdict n (← signedBy outputTweak)
   check "signed with the output's tweak, which the payer can derive: Core refuses it" (!allowed && !reason.isEmpty) reason
   -- the spend private key, from the phrase and not from the wallet
@@ -150,9 +153,17 @@ def cardChecks (n : Node) : IO Unit := do
   let some spendSecret := node.privateKey | throw (IO.userError "no private key")
   let (allowed, reason) ← mempoolVerdict n (← signedBy spendSecret)
   check "signed with the spend private key alone: Core refuses it" (!allowed) reason
-  let issuerSecret ← needE "sum" (·.name) (do return Secp.toBE32 (← privateAdd (← secretOf spendSecret) outputTweak))
+  let unlabelled ← needE "sum" (·.name) (do return Secp.toBE32 (← privateAdd (← secretOf spendSecret) outputTweak))
+  let (allowed, reason) ← mempoolVerdict n (← signedBy unlabelled)
+  check "signed with the spend private key plus the output's tweak, without the card's label: Core refuses it" (!allowed) reason
+  -- the card's label, from the phrase too: BIP352's label 1 of the scan private key
+  let scanNode ← needE "scan node" (·.name) (do (← HDKey.ofSeed (BIP39.seed words)).derived "m/352'/1'/0'/1'/0")
+  let some scanSecret := scanNode.privateKey | throw (IO.userError "no scan private key")
+  let label ← needE "label" (·.name) (SilentPaymentPairing.labelAt scanSecret 1)
+  let issuerSecret ← needE "sum" (·.name)
+    (do return Secp.toBE32 (← privateAdd (← privateAdd (← secretOf spendSecret) label) outputTweak))
   let (allowed, reason) ← mempoolVerdict n (← signedBy issuerSecret)
-  check "signed with the spend private key plus the output's tweak: Core takes it" allowed reason
+  check "signed with the spend private key plus the card's label plus the output's tweak: Core takes it" allowed reason
 
   -- the same phrase, no wallet file: the frontier is already past every payment
   let tip := (← n.height).toUInt32

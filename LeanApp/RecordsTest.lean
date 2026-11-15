@@ -176,13 +176,19 @@ def personCards (a b : Phone) : IO Unit := do
   let issued ← a.wallet.cards
   check "card: the wallet issued one card" (issued.size == 1)
   let some code := (← (a.wallet.card 0).run).toOption | check "card: issued" false; return
-  let addressText := code.address.encoded.toOption.getD ""
-  check "card: a version 2 person card under my name, with my silent payment address and Dana's tweak"
+  let codeText := code.encoded.toOption.getD ""
+  -- the wallet's own two keys, as its file records them and as a card of 0.9.12 carried them beside a tweak
+  let keysText := (← a.wallet.state).silentPaymentAddress.getD ""
+  let some own := (SilentPaymentAddress.parse keysText).toOption | check "card: the wallet records its keys" false; return
+  let tweakHex := (issued[0]?.map fun c => hex c.tweak).getD ""
+  check "card: a version 3 person card under my name, with Dana's code and nothing else to pay with"
     (match PersonCard.decode cardText with
-     | .ok c => c.version == 2 && c.name == "Alice" && c.network == "regtest" && c.payTo == some addressText &&
-         c.tweak == some (hex code.tweak) && addressText.startsWith "twinnowcard1" && some code.tweak == issued[0]?.map (·.tweak)
+     | .ok c => c.version == 3 && c.name == "Alice" && c.network == "regtest" && c.payTo == some codeText &&
+         c.tweak.isNone && codeText.startsWith "twinnowcard1p"
      | .error _ => false) cardText
-  check "card: the card does not carry the account key" (!contains cardText "tpub" && !contains cardText "tr(")
+  check "card: the card carries neither the account key, nor the wallet's two keys, nor the tweak"
+    (!contains cardText "tpub" && !contains cardText "tr(" && !contains cardText "tweak" && !contains cardText tweakHex &&
+     code.sharedSecret != own.scanKey && code.spendKey != own.spendKey && !contains cardText (keysText.drop 14).toString)
   let (again, _) ← obtain "Dana's card again" (personCard a.store a.wallet none "Dana" "Alice")
   check "card: asked again, it is the same card and no new one is issued" (again == cardText && (← a.wallet.cards).size == 1)
   check "card: whether a person has one" ((← hasPersonCard a.store none "Dana") && (← hasPersonCard a.store none " Dana ") &&
@@ -207,18 +213,22 @@ def personCards (a b : Phone) : IO Unit := do
   -- the person pastes it
   let read ← obtain "B reads the card" (parsePaste network cardText)
   check "card: read as Alice, a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
-  -- before the card's address had a prefix of its own this read as an ordinary silent payment address, and a
-  -- payment made to it that way is one A's wallet never finds
-  refused "card: the address alone, without the tweak, is not read as anything to pay" (kind := "cardAddressAlone")
-    (parsePaste network addressText)
+  -- the code on its own is the whole of what a card pays with: the same person, without the name
+  let lone ← obtain "B reads the code alone" (parsePaste network codeText)
+  check "card: the code pasted alone is read as a card, without a name" (lone.name.isNone && lone.payTo == some true)
+  check "card: in capitals too" ((← (parsePaste network codeText.toUpper).run).toOption.map (·.payTo) == some (some true))
+  -- the wallet's two keys out of a 0.9.12 card are not: before they had a prefix of their own they read as an
+  -- ordinary silent payment address, and a payment made to it that way is one A's wallet never finds
+  refused "card: the two keys of a 0.9.12 card alone, without the tweak, are not read as anything to pay" (kind := "cardAddressAlone")
+    (parsePaste network keysText)
   -- B already has an Alice (her shared card): names are not unique, so this one is found by its own
   let rb ← obtain "B saves Alice" (addPerson b.store (some b.wallet) "Alice, her card for me" (some cardText) none none none)
   let some alice := rb.people.find? (·.name == "Alice, her card for me") | check "card: Alice saved on B" false; return
   check "card: B's first scripts for Alice are the card's" (
-    let expected := (List.range 20).filterMap fun i => (Keys.SilentPaymentPairing.scriptPubKey code i.toUInt32).toOption.map hex
+    let expected := (List.range 20).filterMap fun i => (Keys.SilentPaymentPairing.codeScript code i.toUInt32).toOption.map hex
     (rb.recipientByScript.filter (·.2 == alice.id)).map (·.1) == expected && expected.length == 20)
   let (address0, index0) ← obtain "B's next payment" (nextPaymentAddress b.store alice.id)
-  let script0 := (Keys.SilentPaymentPairing.scriptPubKey code 0).toOption.getD .empty
+  let script0 := (Keys.SilentPaymentPairing.codeScript code 0).toOption.getD .empty
   check "card: B pays payment 0 of the card, an address A's wallet watches"
     (index0 == 0 && some address0 == AddressDecoder.address script0 network &&
      ((← (a.wallet.watchScripts).run).toOption.getD #[]).contains script0) address0
@@ -227,39 +237,73 @@ def personCards (a b : Phone) : IO Unit := do
   check "card: the next payment is the next index, another address" (index1 == 1 && address1 != address0)
   refused "card: the same card for a second person is refused" (kind := "duplicate")
     (addPerson b.store (some b.wallet) "Alicia" (some cardText) none none none)
-  let mainnetAddress := ({ code.address with hrp := Keys.SilentPaymentPairing.hrp true } : SilentPaymentAddress).encoded.toOption.getD ""
+  refused "card: the code alone for a second person is refused too" (kind := "duplicate")
+    (addPerson b.store (some b.wallet) "Alicia" (some codeText) none none none)
+  let withCode (payTo : String) : String := (PersonCard.make network "Alice" (some payTo)).serialized
+  let mainnetCode := ({ code with hrp := Keys.SilentPaymentPairing.hrp true } : CardCode).encoded.toOption.getD ""
+  let otherNetwork (text : String) : IO Bool := do
+    match ← (parsePaste network text).run with
+    | .error e => return e.description == "That code is for a different Bitcoin network. This wallet is on regtest."
+    | .ok _ => return false
+  check "card: a card whose code is for another network says so, and so does that code alone"
+    (mainnetCode.startsWith "winnowcard1p" && (← otherNetwork (withCode mainnetCode)) && (← otherNetwork mainnetCode))
+  let notValid (text : String) : IO Bool := do
+    match ← (parsePaste network text).run with
+    | .error e => return e.description == "That card's code is not valid. Ask for the card again."
+    | .ok _ => return false
+  check "card: a code that is damaged says so, in a card or alone"
+    ((← notValid (codeText ++ "q")) && (← notValid (withCode (codeText ++ "q"))))
+  check "card: a card with the wallet's two keys and no tweak is not a card"
+    (match ← (parsePaste network (withCode keysText)).run with
+     | .error e => e.description == "That isn't a Winnow card."
+     | .ok _ => false)
+  -- a card of 0.9.12: the wallet's two keys and a tweak. It is still read, as the code that pays what it paid
   let withPayTo (payTo tweak : String) : String := (PersonCard.make network "Alice" (some payTo) (tweak := some tweak)).serialized
-  let wrongNetwork ← (parsePaste network (withPayTo mainnetAddress (hex code.tweak))).run
-  check "card: a card whose address is for another network says so" (match wrongNetwork with
-    | .error e => e.description == "That code is for a different Bitcoin network. This wallet is on regtest."
-    | .ok _ => false)
+  let oldCard := withPayTo keysText tweakHex
+  let oldCode := ((Keys.SilentPaymentPairing.codeOf { address := own, tweak := (issued[0]?.map (·.tweak)).getD .empty }).toOption.bind
+    (·.encoded.toOption)).getD ""
+  check "card: a 0.9.12 card is version 2, and is read"
+    (contains oldCard "\"version\":2" && (← (parsePaste network oldCard).run).toOption.map (·.payTo) == some (some true))
+  check "card: it is kept as a code with the wallet's own spend key, which pays what the card paid"
+    (oldCode.startsWith "twinnowcard1p" && oldCode != codeText &&
+     (PersonPayTo.ofCard keysText tweakHex network).toOption == some (.card oldCode) &&
+     (List.range 5).all fun i => (PersonPayTo.cardScript oldCode i.toUInt32 network).toOption ==
+       (Keys.SilentPaymentPairing.scriptPubKey { address := own, tweak := (issued[0]?.map (·.tweak)).getD .empty } i.toUInt32).toOption)
+  check "card: a code with a tweak beside it is refused" ((← (parsePaste network (withPayTo codeText tweakHex)).run).toOption.isNone)
+  let mainnetAddress := ({ own with hrp := Keys.SilentPaymentPairing.hrp true } : SilentPaymentAddress).encoded.toOption.getD ""
+  check "card: a 0.9.12 card whose keys are for another network says so" (← otherNetwork (withPayTo mainnetAddress tweakHex))
   -- the same keys written as a silent payment address: not what a card carries, and refused as that
-  let plainAddress := ({ code.address with hrp := "tsp" } : SilentPaymentAddress).encoded.toOption.getD ""
-  let plain ← (parsePaste network (withPayTo plainAddress (hex code.tweak))).run
+  let plainAddress := ({ own with hrp := "tsp" } : SilentPaymentAddress).encoded.toOption.getD ""
+  let plain ← (parsePaste network (withPayTo plainAddress tweakHex)).run
   check "card: a card that carries a plain silent payment address says so" (plainAddress.startsWith "tsp1" && (match plain with
     | .error e => e.description == "That card carries a plain silent payment address, which a card for one person does not use. Ask for a new card."
     | .ok _ => false))
-  -- a person saved during the one day a card's address was written tsp1…: the same keys, read into the card's form
-  let saved (address : String) : Option PersonPayTo := (PersonPayTo.ofJV (PersonPayTo.card address (hex code.tweak)).toJV).toOption
-  check "card: a saved card written as a silent payment address is read into the card's form"
-    (saved plainAddress == some (.card addressText (hex code.tweak)))
-  check "card: a saved card in the card's form reads back as it was" (saved addressText == some (.card addressText (hex code.tweak)))
-  check "card: a saved card whose address is not one is left for validation to refuse"
-    (saved "tsp1qqnotanaddress" == some (.card "tsp1qqnotanaddress" (hex code.tweak)) &&
-     (PersonPayTo.ofCard "tsp1qqnotanaddress" (hex code.tweak) network).toOption.isNone)
-  let alone ← (parsePaste network addressText).run
+  -- a person saved by 0.9.12 holds the two keys and the tweak, and for a day before that the keys were written
+  -- tsp1…: the same person either way, read into the code that pays the same addresses
+  let saved (keys : String) : Option PersonPayTo :=
+    (PersonPayTo.ofJV (.obj #[("kind", .str "card"), ("tweak", .str tweakHex), ("value", .str keys)])).toOption
+  check "card: a person 0.9.12 saved is read into the code" (saved keysText == some (.card oldCode))
+  check "card: a person saved with the keys written as a silent payment address is read into the same code"
+    (saved plainAddress == some (.card oldCode))
+  check "card: a saved code reads back as it was, and is written without a tweak"
+    ((PersonPayTo.ofJV (PersonPayTo.card codeText).toJV).toOption == some (.card codeText) &&
+     !contains (SwiftJSON.write (PersonPayTo.card codeText).toJV) "tweak")
+  check "card: a saved card whose keys are not keys is left for validation to refuse"
+    (saved "tsp1qqnotanaddress" == some (.card "tsp1qqnotanaddress") &&
+     (PersonPayTo.ofCardCode "tsp1qqnotanaddress" network).toOption.isNone)
+  let alone ← (parsePaste network keysText).run
   check "card: the card's address pasted on its own says to paste the whole card" (match alone with
     | .error e => e.description == "That is the address from inside a Winnow card. On its own it cannot be paid: paste the whole card."
     | .ok _ => false)
-  check "card: the card's address is not taken for a silent payment code"
-    ((PersonPayTo.ofSilentPayment addressText network).toOption.isNone && !SilentPaymentAddress.looksLikeCode addressText)
-  let badTweak ← (parsePaste network (withPayTo addressText "00")).run
+  check "card: neither the code nor the wallet's two keys are taken for a silent payment code"
+    ([codeText, keysText].all fun t => (PersonPayTo.ofSilentPayment t network).toOption.isNone && !SilentPaymentAddress.looksLikeCode t)
+  let badTweak ← (parsePaste network (withPayTo keysText "00")).run
   check "card: a card whose tweak is not one says so" (match badTweak with
     | .error e => e.description == "That card's tweak is not valid. Ask for the card again."
     | .ok _ => false)
   refused "card: a zero tweak is refused" (kind := "invalidTweak")
-    (parsePaste network (withPayTo addressText (String.ofList (List.replicate 64 '0'))))
-  refused "card: a tweak with an ordinary address is refused" (parsePaste network (withPayTo address0 (hex code.tweak)))
+    (parsePaste network (withPayTo keysText (String.ofList (List.replicate 64 '0'))))
+  refused "card: a tweak with an ordinary address is refused" (parsePaste network (withPayTo address0 tweakHex))
   check "card: a tweak with nothing to pay is not a card"
     ((← (parsePaste network "{\"name\":\"Alice\",\"network\":\"regtest\",\"tweak\":\"00\",\"version\":2,\"winnow\":\"person-card\"}").run).toOption.isNone)
   -- a payment to a card is named as its person's
@@ -1529,12 +1573,12 @@ def cardsRefusedOnTheAddPersonSheet (sh : Shell) (walletID : String) : IO Unit :
   let (m, _) ← sh.tap (.send .openRecipients) m
   let (m, _) ← sh.tap (.people (.openAdd {} "")) m
   let (m, _) ← sh.tap (.people (.setName "Eve")) m
-  let newer := "{\"name\":\"Eve\",\"network\":\"regtest\",\"version\":3,\"winnow\":\"person-card\"}"
+  let newer := "{\"name\":\"Eve\",\"network\":\"regtest\",\"version\":4,\"winnow\":\"person-card\"}"
   let cards : List (String × String × String) := [
     ("another network's card", (PersonCard.make .mainnet "Eve" none).serialized,
       "This card is for mainnet; this wallet is on regtest."),
     ("a newer Winnow's card", newer,
-      "This card was made by a newer Winnow (card version 3). Update the app to read it."),
+      "This card was made by a newer Winnow (card version 4). Update the app to read it."),
     ("not a person card", "{\"name\":\"Eve\",\"winnow\":\"signer-card\"}", "That isn't a Winnow card.")]
   for (what, card, text) in cards do
     let (refused, _) ← sh.tap (.people (.setPasted card)) m

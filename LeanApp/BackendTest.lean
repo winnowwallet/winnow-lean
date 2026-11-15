@@ -514,8 +514,8 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   check "card: before it is made, Alice has none" !(← bob.hasPersonCard none "Alice")
   let (card, records) ← bob.personCard none "Alice" "Bob"
   let has (text part : String) := (text.splitOn part).length > 1
-  check "card: Bob's silent payment address and a tweak under his name, with no account key in it"
-    (has card "\"payTo\":\"twinnowcard1" && has card "\"tweak\":\"" && has card "\"name\":\"Bob\"" && has card "\"version\":2" &&
+  check "card: a code under Bob's name, with no tweak and no account key in it"
+    (has card "\"payTo\":\"twinnowcard1p" && !has card "tweak" && has card "\"name\":\"Bob\"" && has card "\"version\":3" &&
      !has card "tpub") card
   check "card: Alice is Bob's contact, with a card" ((records.people.any fun p => p.name == "Alice" && p.hasCard) &&
     (← bob.hasPersonCard none "Alice"))
@@ -524,12 +524,16 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   -- Alice saves it and pays it twice
   let read ← alice.parsePaste card
   check "card: Alice's phone reads Bob and a fresh address each payment" (read.name == some "Bob" && read.payTo == some true)
-  -- the address out of the card, without its tweak, is not something Send pays
-  let cardAddress := ((PersonCard.decode card).toOption.bind (·.payTo)).getD ""
-  let lone ← attempt (alice.previewSend { destination := cardAddress, amount := "300000", network := .regtest })
-  check "card: Send refuses the card's address on its own, and says to paste the card"
-    (cardAddress.startsWith "twinnowcard1" && (match lone with
-      | .error e => e == Wallet.cardAddressAloneText | .ok _ => false))
+  -- a card is paid through its person, who counts its payments: Send does not take its code as a destination
+  let cardCode := ((PersonCard.decode card).toOption.bind (·.payTo)).getD ""
+  let lone ← attempt (alice.previewSend { destination := cardCode, amount := "300000", network := .regtest })
+  check "card: Send refuses the card's code typed as a destination, and says to save it as a recipient"
+    (cardCode.startsWith "twinnowcard1p" && (match lone with
+      | .error e => e == Wallet.cardCodeInSendText | .ok _ => false))
+  -- the two keys out of a 0.9.12 card (these are Vectors/card-keys-vectors.json's), without their tweak
+  let loneKeys ← attempt (alice.previewSend { destination := "twinnowcard1qq2rgvjvxx2cw6lypf0a7fg2djgcns5jqz5l7a37mvlkjr35vcpfn7qctm6tjq6hp23kshua0sagxxazl8u8g3ss6z4tmk0p6s35ecgnc0utn7hv2", amount := "300000", network := .regtest })
+  check "card: Send refuses the two keys of a 0.9.12 card on their own, and says to paste the card"
+    (match loneKeys with | .error e => e == Wallet.cardAddressAloneText | .ok _ => false)
   discard <| alice.addPerson "Bob" (some card) none none none
   let bobID := (← personNamed alice "Bob").id
   let payBob : SendInputs := { personID := some bobID, amount := "300000", network := .regtest }
@@ -574,8 +578,8 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   check "card: confirmed, Bob holds what the payment and its fee left"
     (after.balance == 600_000 - 550_000 - review.fee && (history? after spent).any (·.height > 0)) s!"{after.balance}"
   -- the backup carries the card
-  check "card: Bob's backup is version 3, with the card" (match ImportBundle.decode (← bob.exportBundle true) with
-    | .ok bundle => bundle.version == 3 && bundle.cards.size == 1
+  check "card: Bob's backup is version 4, with the card and its spend key" (match ImportBundle.decode (← bob.exportBundle true) with
+    | .ok bundle => bundle.version == 4 && bundle.cards.size == 1 && bundle.cards.all (·.spendKey.isSome)
     | .error _ => false)
   check "card: Alice, who issued none, still writes version 2" (match ImportBundle.decode (← alice.exportBundle false) with
     | .ok bundle => bundle.version == 2 && bundle.cards.isEmpty
@@ -660,8 +664,9 @@ def cardRestoreFlow (dir : String) (n : Node) : IO Unit := do
   let (next, _) ← restored.personCard none "Zed" "Bob"
   check "restore: its next card is none of the twenty-three" (!cards.contains next)
   checkJournal "card.issued" ["card", "personID"] (fun f => field f "card" == "43") "the next card is index 43"
-  check "restore: its backup now carries the cards" (match ImportBundle.decode (← restored.exportBundle true) with
-    | .ok bundle => bundle.version == 3 && bundle.cards.size == 44
+  check "restore: its backup now carries the cards, the restored ones in both forms" (match ImportBundle.decode (← restored.exportBundle true) with
+    | .ok bundle => bundle.version == 4 && bundle.cards.size == 44 && bundle.cards.all (·.spendKey.isSome) &&
+        (bundle.cards.filter (·.plainToo)).size == 43
     | .error _ => false)
   -- and it spends what it found
   let toNode : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "850000", network := .regtest }
@@ -1948,12 +1953,12 @@ def main (args : List String) : IO UInt32 := do
   -- the address a person card's code derives for payment `index` (the journeys' payer, who holds only the card)
   if let ["--card-address", card, index] := args then
     let address := do
-      let decoded ← (PersonCard.decode card).toOption
-      let payTo ← (PersonPayTo.ofCard (← decoded.payTo) (← decoded.tweak) .regtest).toOption
+      let payTo ← (← (PersonPaste.parse card .regtest).toOption).payTo
+      unless payTo.isCard do none
       (payTo.addressAt index.toNat!.toUInt32 .regtest).toOption
     match address with
     | some a => IO.println a; return 0
-    | none => IO.eprintln "not a person card with a test-network silent payment address and a tweak"; return 1
+    | none => IO.eprintln "not a person card with a test-network code"; return 1
   if let ["--sp-expected", datadir, rpc, txid] := args then
     let n ← Node.attach datadir rpc.toNat!.toUInt16
     IO.println (hex (← testReceiverScript n (← n.json #["getrawtransaction", txid, "true"])))

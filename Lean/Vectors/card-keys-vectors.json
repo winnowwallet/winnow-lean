@@ -2,6 +2,63 @@
  "source": "scripts/card-keys-vectors",
  "cases": [
   {
+   "plainCode": "winnowcard1pqg5hxnvegnjvp4tehu9r36fwn2jgq5pmxdk984sx495jh3rhvjdajqu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vueez77",
+   "labelled": {
+    "label": "b1f185841e0d2ec96ec07209ed491b2d93236b28bb7af4f2fed41f20a3c23183",
+    "spendKey": "03e6acd3a0bc33afe69158afd76f2cc66f18c6d8cd9318853f96d1867f5804366c",
+    "code": "winnowcard1pqg5hxnvegnjvp4tehu9r36fwn2jgq5pmxdk984sx495jh3rhvjdajqlx4nf6p0pn4lnfzk906ahje3n0rrrd3nvnrzznl9k3sel4sppkdslqdc3k",
+    "payments": [
+     {
+      "index": 0,
+      "outputKey": "9f5cba4d09774dd85dfe88f4f37ff0f302bc164e72aaa92cd940dd8e7ca65c0f",
+      "oddY": true,
+      "script": "51209f5cba4d09774dd85dfe88f4f37ff0f302bc164e72aaa92cd940dd8e7ca65c0f",
+      "spendSecret": "39c27ae3198fc67eb3361caa81458f1e7a4f0abf7ebdfe3f49ac65e1f76757b0"
+     },
+     {
+      "index": 1,
+      "outputKey": "09fb1b5d06d1c2992021201e146cd09287c1b32ecf2aab7ab8dc4aff18d6c519",
+      "oddY": true,
+      "script": "512009fb1b5d06d1c2992021201e146cd09287c1b32ecf2aab7ab8dc4aff18d6c519",
+      "spendSecret": "fdfde1c158d510e17d0f91935507b753cbc0b61b31c580bbbb3cd4875a1d9686"
+     },
+     {
+      "index": 2,
+      "outputKey": "d10ff6e21939dbbb6c4bd97fdca3a431b521b1caba510d8854b6ba7816bc9447",
+      "oddY": false,
+      "script": "5120d10ff6e21939dbbb6c4bd97fdca3a431b521b1caba510d8854b6ba7816bc9447",
+      "spendSecret": "5bb98b34afa33658b74a9279d7c285e1a54f1e44e5d58be916f40a1a9eb7c69d"
+     },
+     {
+      "index": 3,
+      "outputKey": "26a0e66a8afb5b7f0c4a2aa7a61af59e1b248638709eb92f988573d84fc735da",
+      "oddY": false,
+      "script": "512026a0e66a8afb5b7f0c4a2aa7a61af59e1b248638709eb92f988573d84fc735da",
+      "spendSecret": "5dbd8572c3aaf89770fe4d0f16d3d4635c09ffede24e64353355970439925215"
+     },
+     {
+      "index": 19,
+      "outputKey": "171fd6327a06a7194160e956827fd51a436b7a8c9172b2e08cec8956488913f8",
+      "oddY": true,
+      "script": "5120171fd6327a06a7194160e956827fd51a436b7a8c9172b2e08cec8956488913f8",
+      "spendSecret": "53036ea4450442db7829654d62ae8e16458a493fd7f4c5386c6486f60e5f7c9d"
+     },
+     {
+      "index": 20,
+      "outputKey": "374416322a5c4f79ef919afd1b9bd696e73c8b5b0ef32bc0dc41fa90a74078d7",
+      "oddY": true,
+      "script": "5120374416322a5c4f79ef919afd1b9bd696e73c8b5b0ef32bc0dc41fa90a74078d7",
+      "spendSecret": "e7bc79942d4d914416e1fee0c0a060397b1ccfde3be1076f70b583e6301dd053"
+     },
+     {
+      "index": 4294967295,
+      "outputKey": "5f3e18b5d3afcf300ee9c4f035b9bfd43744e944822e55e02a6096df266f1317",
+      "oddY": false,
+      "script": "51205f3e18b5d3afcf300ee9c4f035b9bfd43744e944822e55e02a6096df266f1317",
+      "spendSecret": "f7ed5638da125f87e3132ed2b44322fb7913af49a1772fd336f2efda8ae416db"
+     }
+    ]
+   },
    "seed": "000102030405060708090a0b0c0d0e0f",
    "coinType": 0,
    "hrp": "winnowcard",
@@ -73,6 +130,42 @@
    ]
   },
   {
+   "plainCode": "winnowcard1pq2y6gwjveefv5j9r6kfta7ugmwa9vcd2r248ej8u9cqr8devwee2xqu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vnflqns",
+   "labelled": {
+    "label": "852becf16e0a065a59583ba9eba6828d2d4d58348a53644f20fccc5e8d750a7f",
+    "spendKey": "0354be44b1749122a8accc2ac6f9c8f2dc147aaa1e5f0831a641d949f624ae3434",
+    "code": "winnowcard1pq2y6gwjveefv5j9r6kfta7ugmwa9vcd2r248ej8u9cqr8devwee2xq65heztzay3y252enp2cmuu3ukuz3a258jlpqc6vswef8mzft35xsh0hqav",
+    "payments": [
+     {
+      "index": 0,
+      "outputKey": "fbbf862ac21e45d9108366ea128e6d26eca90cee4e4f147d620c203b2f7f3584",
+      "oddY": false,
+      "script": "5120fbbf862ac21e45d9108366ea128e6d26eca90cee4e4f147d620c203b2f7f3584",
+      "spendSecret": "898455d7e8b468681d81299381d1e604c8c2c941292014a65e73df953cb4827b"
+     },
+     {
+      "index": 1,
+      "outputKey": "94bfee8e9e330629192b7fba6441511504d346d10efe982c91f78d0e3ff0fae5",
+      "oddY": false,
+      "script": "512094bfee8e9e330629192b7fba6441511504d346d10efe982c91f78d0e3ff0fae5",
+      "spendSecret": "9c7a065a8ecfeaea0697b4cc382f39731e882121e5857ad182469954d939ed7a"
+     },
+     {
+      "index": 2,
+      "outputKey": "0abbb3ac5de13e125cac771a8674b10dc4eb7f4e536fe8aebad6d7f18bcd4630",
+      "oddY": true,
+      "script": "51200abbb3ac5de13e125cac771a8674b10dc4eb7f4e536fe8aebad6d7f18bcd4630",
+      "spendSecret": "eab9b999805f1fbfe54cc3c393bcdc0c0a9c77ec5c5049c8a35466a74604c26a"
+     },
+     {
+      "index": 3,
+      "outputKey": "cbe2b5d1f2fd286523bacb63508bfe77133cd296219254f69ac619e94756bfdd",
+      "oddY": true,
+      "script": "5120cbe2b5d1f2fd286523bacb63508bfe77133cd296219254f69ac619e94756bfdd",
+      "spendSecret": "3649efcf653732ea8bd027ec21b058d87ddd074d1503e871a03edbe78c310a67"
+     }
+    ]
+   },
    "seed": "000102030405060708090a0b0c0d0e0f",
    "coinType": 0,
    "hrp": "winnowcard",
@@ -120,6 +213,42 @@
    ]
   },
   {
+   "plainCode": "twinnowcard1pqd6vhtl5d5zsgtq84hazfg4a5ze7pem43vekdxpyckmmxqrassunkqctm6tjq6hp23kshua0sagxxazl8u8g3ss6z4tmk0p6s35ecgnc0u7tyrcu",
+   "labelled": {
+    "label": "c4cb0a82a53a21af12307c4c9e9ef7adf174450393a093e2d567d03a1812964f",
+    "spendKey": "02483a148e4426bdbf89c2b1463f596a6553efdce91125048b61c762ff9beedca4",
+    "code": "twinnowcard1pqd6vhtl5d5zsgtq84hazfg4a5ze7pem43vekdxpyckmmxqrassunkqjg8g2gu3pxhklcns43gcl4j6n920hae6g3y5zgkcw8vtlehmku5s5duq9x",
+    "payments": [
+     {
+      "index": 0,
+      "outputKey": "363e0f00af31eb29e5407130a596caa6024b0d606f4535036cc02c8c75c78bf6",
+      "oddY": true,
+      "script": "5120363e0f00af31eb29e5407130a596caa6024b0d606f4535036cc02c8c75c78bf6",
+      "spendSecret": "de4f6247ea8e805562b6b7b13bbeb633b09b793e56a3a98de53740eee2f473a7"
+     },
+     {
+      "index": 1,
+      "outputKey": "791059a676fefdb6543625b8acff1444b7fb1ab58d3f7f104287fb941a191822",
+      "oddY": true,
+      "script": "5120791059a676fefdb6543625b8acff1444b7fb1ab58d3f7f104287fb941a191822",
+      "spendSecret": "62bd6d2861b88ceb1b62d8a7d5a0869a7834018f17abcf9dafc65050aea80e20"
+     },
+     {
+      "index": 2,
+      "outputKey": "b5ad60a7425d133b291d0e31832cc58283b25431257a88d8c0d663cbcecd69e6",
+      "oddY": false,
+      "script": "5120b5ad60a7425d133b291d0e31832cc58283b25431257a88d8c0d663cbcecd69e6",
+      "spendSecret": "5c7c434f3d367017f096ad55fea3e2aac9e89ba1b07f508822d07ffdd23eb323"
+     },
+     {
+      "index": 3,
+      "outputKey": "d6ac78d6edbbb8d6031decd2a887f3941dec14ea742ae400247ff16a41b02610",
+      "oddY": true,
+      "script": "5120d6ac78d6edbbb8d6031decd2a887f3941dec14ea742ae400247ff16a41b02610",
+      "spendSecret": "610f8206721d1963e9570da28c6ec4dc4a6cf6959555613b81e03e9a5b4c7dd9"
+     }
+    ]
+   },
    "seed": "000102030405060708090a0b0c0d0e0f",
    "coinType": 1,
    "hrp": "twinnowcard",
@@ -167,6 +296,8 @@
    ]
   },
   {
+   "plainCode": "twinnowcard1pq2dmmxj7fztm7a9mumjdpp0qwjejdxhge0puql4nhp4ynl49zslyuqnyxgssv3la9mryx7mg6ydvzagv9zm440xfzjr60ngjvgjcrdppx5h7awdy",
+   "labelled": null,
    "seed": "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
    "coinType": 1,
    "hrp": "twinnowcard",

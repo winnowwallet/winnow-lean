@@ -1014,9 +1014,10 @@ def contradictedImportedMetadataIsDropped : TM Unit := do
 
 /-! ## Cards (issue #94): a wallet issues a card per person, finds what is paid to it, and spends it
 
-The payer in these tests holds only what a card carries, as text: the wallet's silent payment address and the
-tweak made for them. Every script it pays is derived from that text by `SilentPaymentPairing`, which
-`card-keys-test` holds to an independent implementation. -/
+The payer in these tests holds only what a card carries, as text: the code made for them. Every script it pays
+is derived from that text by `SilentPaymentPairing`, which `card-keys-test` holds to an independent
+implementation. A card of 0.9.12, which carried the wallet's two keys and a tweak and paid the wallet's own spend
+key, is the payer of `legacyScript`. -/
 
 def testWords : String := "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
@@ -1024,13 +1025,31 @@ def testWords : String := "abandon abandon abandon abandon abandon abandon aband
 def emptyWallet (keyStore : KeyStore IO) (storagePath : Option System.FilePath := none) : TM Wallet :=
   need "create" (Wallet.create .signet keyStore storagePath (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
 
-/-- What a card carries, as the text its person holds: the address and the tweak in hex. -/
-def cardText (c : PairingCard) : TM (String × String) := do
-  return (← needE "encode" (·.name) c.address.encoded, hex c.tweak)
+/-- What a card carries, as the text its person holds: the code. -/
+def cardText (c : CardCode) : TM String := needE "encode" (·.name) c.encoded
 
 /-- What the payer does with a card's text: the script of payment `i`. -/
-def payerScript (text : String × String) (i : UInt32) : TM ByteArray :=
-  needE "the payer derives the script" id (PersonPayTo.cardScript text.1 text.2 i .signet)
+def payerScript (text : String) (i : UInt32) : TM ByteArray :=
+  needE "the payer derives the script" id (PersonPayTo.cardScript text i .signet)
+
+/-- The wallet's own two keys as its file records them, and those keys read. -/
+def ownKeys (w : Wallet) : TM (String × SilentPaymentAddress) := do
+  let some text := (← w.state).silentPaymentAddress | throw "the wallet records no keys"
+  return (text, ← needE "the wallet's keys" (·.name) (SilentPaymentAddress.parse text))
+
+/-- What the payer of a 0.9.12 card did: with the wallet's two keys and the card's tweak as text, the script of
+payment `i`, which is to the wallet's own spend key. -/
+def legacyScript (w : Wallet) (card : UInt32) (i : UInt32) : TM ByteArray := do
+  let some c := (← w.cards).find? (·.index == card) | throw s!"no card {card}"
+  let payTo ← needE "a 0.9.12 card is read" id (PersonPayTo.ofCard (← ownKeys w).1 (hex c.tweak) .signet)
+  needE "its payer derives the script" id (payTo.scriptPubKeyAt i .signet)
+
+/-- The script the wallet watches for payment `i` of a card under `keys`, as the card's person would derive it:
+the tweak times the keys' scan key, and the card's own spend key or the keys'. -/
+def scriptUnder (keys : SilentPaymentAddress) (c : IssuedCard) (i : UInt32) : TM ByteArray := do
+  let secret ← needE "shared secret" (·.name) (SilentPaymentPairing.sharedSecretOf keys.scanKey c.tweak)
+  needE "script" (·.name)
+    (SilentPaymentPairing.codeScript { sharedSecret := secret, spendKey := c.spendKey.getD keys.spendKey, hrp := keys.hrp } i)
 
 /-- A payment from outside the wallet (its one input is nobody's coin here; `marker` tells two apart). -/
 def outsidePayment (marker : UInt8) (outputs : Array (Int64 × ByteArray)) : Transaction :=
@@ -1061,22 +1080,34 @@ def cardsAreIssued : TM Unit := do
   let (first, card0) ← need "issue" w.issueCard
   let (second, card1) ← need "issue again" w.issueCard
   check "cards: indices count up" (first == 0 && second == 1)
-  check "cards: the address has a card's prefix for a test network, not a silent payment address's"
-    (card0.address.hrp == "twinnowcard" && ((card0.address.encoded.toOption.getD "").startsWith "twinnowcard1") &&
-     !SilentPaymentAddress.looksLikeCode (card0.address.encoded.toOption.getD "") &&
-     ((← w.state).silentPaymentAddress == card0.address.encoded.toOption))
-  check "cards: two cards carry the same address and different tweaks" (card0.address == card1.address && card0.tweak != card1.tweak)
+  let (keysText, own) ← ownKeys w
+  let issued ← w.cards
+  check "cards: a code has a card's prefix for a test network and is version 1, not a silent payment address"
+    (card0.hrp == "twinnowcard" && ((card0.encoded.toOption.getD "").startsWith "twinnowcard1p") &&
+     !SilentPaymentAddress.looksLikeCode (card0.encoded.toOption.getD ""))
+  check "cards: the wallet's own two keys are recorded under the same prefix, as version 0"
+    (keysText.startsWith "twinnowcard1q" && !SilentPaymentAddress.looksLikeCode keysText)
+  check "cards: two cards have no key in common, with each other or with the wallet"
+    (card0.sharedSecret != card1.sharedSecret && card0.spendKey != card1.spendKey &&
+     [card0, card1].all fun c => c.sharedSecret != own.scanKey && c.spendKey != own.spendKey)
   -- the same card, derived here from the phrase and not by the wallet
   let master ← needE "master" (·.name) (HDKey.ofSeed (BIP39.seed testWords))
   let scan ← needE "scan" (·.name) (master.derived "m/352'/1'/0'/1'/0")
   let spend ← needE "spend" (·.name) (master.derived "m/352'/1'/0'/0'/0")
-  check "cards: the address is the phrase's BIP352 scan and spend keys"
-    (card0.address.scanKey == scan.publicKey && card0.address.spendKey == spend.publicKey)
+  check "cards: the recorded keys are the phrase's BIP352 scan and spend keys"
+    (own.scanKey == scan.publicKey && own.spendKey == spend.publicKey)
   check "cards: card 0's tweak is the hash of the scan private key and 0"
-    (some card0.tweak == scan.privateKey.map fun b => taggedHash "Winnow/SilentPayment/Pairing" (b ++ ByteArray.mk #[0, 0, 0, 0]))
+    (some issued[0]!.tweak == scan.privateKey.map fun b => taggedHash "Winnow/SilentPayment/Pairing" (b ++ ByteArray.mk #[0, 0, 0, 0]))
+  check "cards: card 0's shared secret is that tweak times the scan key"
+    ((SilentPaymentPairing.sharedSecretOf scan.publicKey issued[0]!.tweak).toOption == some card0.sharedSecret)
+  check "cards: card 0's spend key is the spend key under BIP352's label 1, card 1's under label 2"
+    ([(card0, 1), (card1, 2)].all fun ((c : CardCode), (m : UInt32)) =>
+      (scan.privateKey.bind fun b => (SilentPaymentPairing.labelAt b m).toOption.bind fun l =>
+        (SilentPaymentPairing.labelledSpendKey spend.publicKey l).toOption) == some c.spendKey)
+  check "cards: the wallet records each card's spend key, and that it is the only one the card is paid to"
+    (issued.map (·.spendKey) == #[some card0.spendKey, some card1.spendKey] && issued.all (!·.plainToo))
   check "cards: a card is read back without a key" ((← (w.card 0).run).toOption == some card0)
   check "cards: a card that was not issued" (match ← (w.card 9).run with | .error (.named "unknownCard") => true | _ => false)
-  check "cards: the address is recorded with the first card" ((← w.state).silentPaymentAddress == card0.address.encoded.toOption)
   check "cards: written to the wallet file before the code is answered" (((← IO.FS.readFile path).splitOn "\"cards\"").length == 2)
   let reopened ← need "open" (Wallet.open path keyStore pinned)
   check "cards: a reopened wallet has them" ((← reopened.cards) == (← w.cards) && (← reopened.cards).size == 2)
@@ -1166,10 +1197,14 @@ def aSilentPaymentFromACardCoin : TM Unit := do
   discard (need "apply" (w.apply (fakeMatch 150 #[paid])))
   let address ← spRecipient
   let prepared ← need "send" (w.buildSend #[] 2 testChainTip (silentPayments := #[{ amount := 100_000, address }]))
-  -- the input's key, derived here: the spend private key from the phrase, plus the payment's tweak
+  -- the input's key, derived here: the spend private key from the phrase, plus the card's label, plus the
+  -- payment's tweak
   let node ← needE "node" (·.name) (do (← HDKey.ofSeed (BIP39.seed testWords)).derived "m/352'/1'/0'/0'/0")
-  let tweak ← needE "tweak" (·.name) (SilentPaymentPairing.outputTweak card 4)
-  let secret ← needE "sum" (·.name) (do return Secp.toBE32 (← privateAdd (← secretOf node.privateKey.get!) tweak))
+  let scanNode ← needE "scan node" (·.name) (do (← HDKey.ofSeed (BIP39.seed testWords)).derived "m/352'/1'/0'/1'/0")
+  let label ← needE "label" (·.name) (SilentPaymentPairing.labelAt scanNode.privateKey.get! 1)
+  let tweak ← needE "tweak" (·.name) (SilentPaymentPairing.codeOutputTweak card 4)
+  let secret ← needE "sum" (·.name)
+    (do return Secp.toBE32 (← privateAdd (← privateAdd (← secretOf node.privateKey.get!) label) tweak))
   let input : SilentPaymentSending.Input := { txid := paid.txid, vout := 0, prevoutScriptPubKey := script, privateKey := secret }
   let expected ← needE "derive" (·.name) (SilentPaymentSending.outputScripts [input] [address])
   check "card: a silent payment from a card's coin pays the script BIP352 derives from that coin's key"
@@ -1186,9 +1221,10 @@ def cardsInABackup : TM Unit := do
   let paid := outsidePayment 0x61 #[(70_000, ← payerScript text 0), (30_000, ← payerScript text 6)]
   discard (need "apply" (w.apply (fakeMatch 150 #[paid])))
   let backup ← need "export" (w.exportBundle (includeMnemonic := true))
-  check "card backup: version 3, with the address, the cards and each coin's card"
-    (backup.version == 3 && backup.cards == (← w.cards) && backup.silentPaymentAddress == some text.1 &&
-     (backup.utxos.filter (·.card == some 0)).map (·.index) == #[0, 6])
+  let (keysText, own) ← ownKeys w
+  check "card backup: version 4, with the wallet's keys, the cards and each coin's card"
+    (backup.version == 4 && backup.cards == (← w.cards) && backup.silentPaymentAddress == some keysText &&
+     backup.cards.all (·.spendKey.isSome) && (backup.utxos.filter (·.card == some 0)).map (·.index) == #[0, 6])
   let decoded ← needE "decode" (·.name) (ImportBundle.decode backup.serialized)
   check "card backup: the file reads back the same" (decoded == backup)
   let imports (b : ImportBundle) (store : Option (KeyStore IO) := none) : TM (Except String Wallet) := do
@@ -1204,20 +1240,29 @@ def cardsInABackup : TM Unit := do
   let .ok restored ← imports decoded | throw s!"import: {(← imports decoded).toOption.isNone}"
   check "card backup: the restored wallet has the address, the cards, their cursors and the coins"
     ((← restored.cards) == (← w.cards) && (← restored.cards).map (·.nextIndex) == #[7, 0] && (← restored.balance) == 250_000 &&
-     (← restored.state).silentPaymentAddress == some text.1)
+     (← restored.state).silentPaymentAddress == some keysText)
   let prepared ← need "send" (restored.buildSend #[{ amount := 240_000, scriptPubKey := p2trDestination }] 2 testChainTip)
   check "card backup: and spends them" (keyPathSignaturesVerify prepared.built.transaction (← restored.utxos))
   check "card backup: a later payment to the card is found"
     ((← need "watch" restored.watchScripts).contains (← payerScript text 26))
   -- what a bundle may not claim
   let other ← need "other" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0x5A))) 100 0 pinned)
-  let (_, foreign) ← need "issue" other.issueCard
-  let foreignText ← cardText foreign
+  discard (need "issue" other.issueCard)
+  let foreign := (← other.cards)[0]!
+  let (foreignKeysText, foreignKeys) ← ownKeys other
   let withCards (f : Array IssuedCard → Array IssuedCard) : ImportBundle := { decoded with cards := f decoded.cards }
   check "card backup: a tweak the phrase does not derive is refused"
     (← refusedFor (withCards fun cs => cs.modify 1 fun c => { c with tweak := foreign.tweak }) "card 1 is not this wallet's")
+  check "card backup: a spend key the phrase does not derive is refused"
+    (← refusedFor (withCards fun cs => cs.modify 1 fun c => { c with spendKey := foreign.spendKey }) "card 1's spend key is not this wallet's")
+  check "card backup: another card's spend key is refused"
+    (← refusedFor (withCards fun cs => cs.modify 1 fun c => { c with spendKey := cs[0]!.spendKey }) "the bundle's cards are malformed or repeat")
+  check "card backup: a spend key that is no point is refused"
+    (← refusedFor (withCards fun cs => cs.modify 1 fun c => { c with spendKey := some (ByteArray.mk (Array.replicate 33 0)) }) "the bundle's cards are malformed or repeat")
+  check "card backup: a card said to be paid to the wallet's key too, with no key of its own, is refused"
+    (← refusedFor (withCards fun cs => cs.modify 1 fun c => { c with spendKey := none, plainToo := true }) "the bundle's cards are malformed or repeat")
   check "card backup: another wallet's silent payment address is refused"
-    (← refusedFor { decoded with silentPaymentAddress := some foreignText.1 } "the silent payment address is not this wallet's")
+    (← refusedFor { decoded with silentPaymentAddress := some foreignKeysText } "the silent payment address is not this wallet's")
   check "card backup: cards without an address are refused"
     (← refusedFor { decoded with silentPaymentAddress := none } "the bundle's cards have no silent payment address")
   check "card backup: an address that is not one is refused"
@@ -1249,14 +1294,17 @@ def cardsInABackup : TM Unit := do
   check "card backup: a version 2 file that names a card is refused"
     (match ImportBundle.decode { decoded with version := 2 }.serialized with
      | .error (.wallet (.invalidBundle "a version 2 bundle cannot carry cards")) => true | _ => false)
+  check "card backup: a version 3 file whose card has a spend key of its own is refused"
+    (match ImportBundle.decode { decoded with version := 3 }.serialized with
+     | .error (.wallet (.invalidBundle "a version 3 bundle cannot carry a card's spend key")) => true | _ => false)
   check "card backup: a version this build does not know is refused"
-    ((← imports { decoded with version := 4 }).toOption.isNone)
+    ((← imports { decoded with version := 5 }).toOption.isNone)
   -- without the phrase the address and the cards are claims: they are watched, and signing holds the address
   -- to the key
   let ordinary := decoded.utxos.filter (·.card.isNone)
-  let forged := { decoded with mnemonic := none, utxos := ordinary, silentPaymentAddress := some foreignText.1 }
+  let forged := { decoded with mnemonic := none, utxos := ordinary, silentPaymentAddress := some foreignKeysText }
   let .ok watching ← imports forged (some keyStore) | throw "a bundle without the phrase imports"
-  let forgedScript ← payerScript (foreignText.1, hex decoded.cards[1]!.tweak) 0
+  let forgedScript ← scriptUnder foreignKeys decoded.cards[1]! 0
   discard (need "apply" (watching.apply (fakeMatch 160 #[outsidePayment 0x62 #[(500_000, forgedScript)]])))
   check "card backup: a claimed address is watched" ((← watching.balance) == 650_000) s!"{← watching.balance}"
   check "card backup: and a coin paid to an address the key does not derive is not signed for"
@@ -1266,7 +1314,7 @@ def cardsInABackup : TM Unit := do
   let claimedCards := decoded.cards.modify 1 fun c => { c with tweak := foreign.tweak }
   let stranger := { decoded with mnemonic := none, utxos := ordinary, cards := claimedCards }
   let .ok adopting ← imports stranger (some keyStore) | throw "a bundle with a claimed tweak imports"
-  let strangerScript ← payerScript (text.1, hex foreign.tweak) 2
+  let strangerScript ← scriptUnder own claimedCards[1]! 2
   discard (need "apply" (adopting.apply (fakeMatch 160 #[outsidePayment 0x63 #[(500_000, strangerScript)]])))
   let adopted ← need "send" (adopting.buildSend #[{ amount := 600_000, scriptPubKey := p2trDestination }] 2 testChainTip)
   check "card backup: a claimed tweak under the wallet's own address is watched and its coin spent"
@@ -1274,7 +1322,7 @@ def cardsInABackup : TM Unit := do
 
 def aPhraseAloneFindsItsCards : TM Unit := do
   let w ← emptyWallet (← newKeyStore)
-  let mut codes : Array (String × String) := #[]
+  let mut codes : Array String := #[]
   for _ in [0:3] do
     codes := codes.push (← cardText (← need "issue" w.issueCard).2)
   let paid := outsidePayment 0x71 #[(10_000, ← payerScript codes[2]! 0), (20_000, ← payerScript codes[2]! 3), (30_000, ← payerScript codes[0]! 1)]
@@ -1286,15 +1334,29 @@ def aPhraseAloneFindsItsCards : TM Unit := do
   check "phrase: and so finds none of the payments" ((← rebuilt.balance) == 0)
   check "phrase: it records the first cards it could have issued"
     ((← need "restore" rebuilt.restoreCards) && (← rebuilt.cards).size == Wallet.cardLookahead.toNat)
-  check "phrase: they are the cards that were issued, under the same address"
-    (((← rebuilt.cards).extract 0 3).map (·.tweak) == (← w.cards).map (·.tweak) &&
+  check "phrase: they are the cards that were issued, under the same keys"
+    (((← rebuilt.cards).extract 0 3).map (fun c => (c.tweak, c.spendKey)) == (← w.cards).map (fun c => (c.tweak, c.spendKey)) &&
      (← rebuilt.state).silentPaymentAddress == (← w.state).silentPaymentAddress)
+  check "phrase: not knowing which form each was handed out in, it takes payments to the wallet's own spend key for them too"
+    ((← rebuilt.cards).all (fun c => c.plainToo && c.spendKey.isSome) && (← w.cards).all (!·.plainToo))
   discard (need "apply" (rebuilt.apply (fakeMatch 150 #[paid])))
   check "phrase: the block scanned again credits all three payments" ((← rebuilt.balance) == 60_000)
   check "phrase: finding card 2 paid, it looks further" ((← need "restore" rebuilt.restoreCards) && (← rebuilt.cards).size == 23)
   check "phrase: until nothing more is found" (!(← need "restore" rebuilt.restoreCards))
   let prepared ← need "send" (rebuilt.buildSend #[{ amount := 55_000, scriptPubKey := p2trDestination }] 2 testChainTip)
   check "phrase: the rebuilt wallet spends them" (keyPathSignaturesVerify prepared.built.transaction (← rebuilt.utxos))
+  -- a card 0.9.12 handed out paid the wallet's own spend key: the phrase cannot say which cards those were
+  let old := outsidePayment 0x72 #[(7_000, ← legacyScript rebuilt 1 5)]
+  check "phrase: a card's script in 0.9.12's form is not its script in the code's form"
+    ((← legacyScript rebuilt 1 5) != (← payerScript codes[1]! 5))
+  discard (need "apply" (rebuilt.apply (fakeMatch 151 #[old])))
+  check "phrase: a payment to a card in 0.9.12's form is found by the rebuilt wallet"
+    ((← rebuilt.balance) == 67_000 && ((← rebuilt.cards).find? (·.index == 1)).map (·.nextIndex) == some 6)
+  discard (need "apply" (w.apply (fakeMatch 151 #[old])))
+  check "phrase: the wallet that issued that card as a code does not take it" ((← w.balance) == 60_000)
+  let everything ← need "send" (rebuilt.buildSend #[{ amount := 64_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  check "phrase: the rebuilt wallet spends coins of both forms in one transaction"
+    (everything.selected.size == 4 && keyPathSignaturesVerify everything.built.transaction (← rebuilt.utxos))
   check "phrase: a new card takes an index none of them could have had"
     ((← (rebuilt.issueCard).run).toOption.map (·.1) == some 23)
   -- the same search as a restore from a backup runs it: begun before the scan, ended when a round adds none
@@ -1338,9 +1400,15 @@ def cardsInTheWalletFile : TM Unit := do
   check "card file: a coin of a card the file does not list is damage" ((reads { s with cards := #[] }).isNone)
   check "card file: cards without the address they pay are damage" ((reads { s with silentPaymentAddress := none }).isNone)
   check "card file: an address that is not one is damage" ((reads { s with silentPaymentAddress := some "tsp1qqnotanaddress" }).isNone)
-  check "card file: the address is kept with the card's prefix" ((s.silentPaymentAddress.map (·.startsWith "twinnowcard1")) == some true)
-  -- the one day cards wrote the address as a silent payment address: the same keys, read into the card's form
-  let rewritten (prefix_ : String) : Option String := ({ card.address with hrp := prefix_ } : SilentPaymentAddress).encoded.toOption
+  check "card file: the wallet's keys are kept with the card's prefix" ((s.silentPaymentAddress.map (·.startsWith "twinnowcard1q")) == some true)
+  check "card file: a card's spend key is in the file" (((s.encode.toOption.getD "").splitOn "\"spendKey\"").length == 2)
+  check "card file: a spend key that is no point is damage"
+    ((reads { s with cards := s.cards.map fun c => { c with spendKey := some (ByteArray.mk (Array.replicate 33 0)) } }).isNone)
+  check "card file: a card paid to the wallet's key too, with no key of its own, is damage"
+    ((reads { s with cards := s.cards.map fun c => { c with spendKey := none, plainToo := true } }).isNone)
+  -- the one day cards wrote the keys as a silent payment address: the same keys, read into the card's form
+  let own := (← ownKeys w).2
+  let rewritten (prefix_ : String) : Option String := ({ own with hrp := prefix_ } : SilentPaymentAddress).encoded.toOption
   check "card file: the address written as a silent payment address is read into the card's form"
     ((rewritten "tsp").isSome && reads { s with silentPaymentAddress := rewritten "tsp" } == some s)
   check "card file: an address with another network's prefix is damage"
@@ -1356,6 +1424,49 @@ def cardsInTheWalletFile : TM Unit := do
     ((reads { s with allUtxos := s.allUtxos.map fun u => if u.card.isSome then { u with chain := .change } else u }).isNone)
   check "card file: a legacy tweak is still refused"
     ((WalletState.decode ((s.encode.toOption.getD "").replace "\"card\":0" "\"card\":0,\"silentPaymentTweak\":\"00\"")).toOption.isNone)
+
+/-- A wallet file as 0.9.12 wrote it: its card has no spend key of its own, and is paid to the wallet's. The
+card keeps paying the same scripts, is handed out again as a code that pays them, and its coins are spent. -/
+def aCardFrom0912 : TM Unit := do
+  let path ← tempPath "cards-0912-wallet.json"
+  let keyStore ← newKeyStore
+  let fresh ← emptyWallet keyStore (some path)
+  discard (need "issue" fresh.issueCard)
+  let now ← fresh.state
+  let asWritten : WalletState := { now with cards := now.cards.map fun (c : IssuedCard) => { c with spendKey := none } }
+  let some text := asWritten.encode.toOption | throw "encode"
+  IO.FS.writeFile path text
+  check "0.9.12 file: it names no spend key" ((text.splitOn "spendKey").length == 1 && (text.splitOn "plainToo").length == 1)
+  let w ← need "open" (Wallet.open path keyStore pinned)
+  let (keysText, own) ← ownKeys w
+  check "0.9.12 file: the card is read as one paid to the wallet's own spend key"
+    ((← w.cards).map (fun c => (c.index, c.spendKey, c.plainToo)) == #[(0, none, false)])
+  let old ← legacyScript w 0 0
+  let code ← need "the card, read back" (w.card 0)
+  check "0.9.12 file: handed out again, its code carries the wallet's spend key and pays what the old card paid"
+    (code.spendKey == own.spendKey && (← payerScript (← cardText code) 0) == old && (← payerScript (← cardText code) 9) == (← legacyScript w 0 9))
+  check "0.9.12 file: that code is what a payer makes of the old card"
+    ((PersonPayTo.ofCard keysText (hex (← w.cards)[0]!.tweak) .signet).toOption == some (.card (← cardText code)))
+  let labelled ← needE "master" (·.name) (HDKey.ofSeed (BIP39.seed testWords)) >>= fun master =>
+    needE "the code a new card would have" (·.name) (SilentPaymentPairing.issueCode master 1 "twinnowcard" 0)
+  let unlabelled ← need "watch" w.watchScripts
+  check "0.9.12 file: its scripts are watched, and those of a code it never handed out are not"
+    (unlabelled.contains old && !unlabelled.contains (← payerScript (← cardText labelled) 0))
+  discard (need "apply" (w.apply (fakeMatch 150 #[outsidePayment 0x91 #[(90_000, old), (10_000, ← payerScript (← cardText labelled) 0)]])))
+  check "0.9.12 file: a payment to the old card is credited, one to the other form is not"
+    ((← w.balance) == 90_000 && (← w.cards).map (·.nextIndex) == #[1])
+  let prepared ← need "send" (w.buildSend #[{ amount := 80_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  check "0.9.12 file: its coin is spent" (keyPathSignaturesVerify prepared.built.transaction (← w.utxos))
+  let backup ← need "export" (w.exportBundle (includeMnemonic := true))
+  check "0.9.12 file: its backup is the version 0.9.12 wrote" (backup.version == 3 && backup.cards == (← w.cards))
+  let restored ← need "import" (Wallet.importing (← needE "decode" (·.name) (ImportBundle.decode backup.serialized)) (← newKeyStore) none pinned)
+  check "0.9.12 file: restored from that backup, the card and its coin are there"
+    ((← restored.balance) == 90_000 && ((← restored.cards).find? (·.index == 0)).map (fun c => (c.spendKey, c.plainToo)) == some (none, false))
+  -- the next card is a code with a spend key of its own, and the backup says so by its version
+  let (index, next) ← need "issue the next" w.issueCard
+  check "0.9.12 file: the next card has a spend key of its own"
+    (index == 1 && next.spendKey != own.spendKey && ((← w.cards).find? (·.index == 1)).bind (·.spendKey) == some next.spendKey)
+  check "0.9.12 file: and from then the backup is version 4" ((← need "export" w.exportBundle).version == 4)
 
 /-! ## KeyStoreTests.accountSerialization and the account-key wallet (AccountKeyCustodyTests, signing) -/
 
@@ -2145,6 +2256,7 @@ def main : IO UInt32 := runMain "multisig-test" do
   runTest "cardsInABackup" cardsInABackup
   runTest "aPhraseAloneFindsItsCards" aPhraseAloneFindsItsCards
   runTest "cardsInTheWalletFile" cardsInTheWalletFile
+  runTest "aCardFrom0912" aCardFrom0912
   runTest "invalidMetadata" invalidMetadata
   runTest "contradictedImportedMetadataIsDropped" contradictedImportedMetadataIsDropped
   runTest "accountSecrets" accountSecrets

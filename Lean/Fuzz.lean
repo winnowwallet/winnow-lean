@@ -366,7 +366,10 @@ private def personPaste : Target := {
     utf8 "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
     utf8 "{\"winnow\":\"person-card\",\"version\":1,\"network\":\"signet\",\"name\":\"Alice\"}",
     utf8 "{\"winnow\":\"person-card\",\"version\":1,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr\"}",
-    -- a card for one person: the first address and tweak of Vectors/card-keys-vectors.json
+    -- a card for one person: the first code of Vectors/card-keys-vectors.json, in a card and on its own
+    utf8 "{\"winnow\":\"person-card\",\"version\":3,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"winnowcard1pqg5hxnvegnjvp4tehu9r36fwn2jgq5pmxdk984sx495jh3rhvjdajqlx4nf6p0pn4lnfzk906ahje3n0rrrd3nvnrzznl9k3sel4sppkdslqdc3k\"}",
+    utf8 "winnowcard1pqg5hxnvegnjvp4tehu9r36fwn2jgq5pmxdk984sx495jh3rhvjdajqlx4nf6p0pn4lnfzk906ahje3n0rrrd3nvnrzznl9k3sel4sppkdslqdc3k",
+    -- a card of 0.9.12: the first keys and tweak of the same vectors
     utf8 "{\"winnow\":\"person-card\",\"version\":2,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"winnowcard1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vk6arlx\",\"tweak\":\"02c5352dbcd635ad5b93834861d28554d651de364268c522bd81b3977b55951c\"}",
     -- the same keys written as a silent payment address, which no card carries: refused
     utf8 "{\"winnow\":\"person-card\",\"version\":2,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"sp1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vc56rgj\",\"tweak\":\"02c5352dbcd635ad5b93834861d28554d651de364268c522bd81b3977b55951c\"}",
@@ -377,6 +380,11 @@ private def personPaste : Target := {
     let mut took := false
     for network in [Tx.BitcoinNetwork.mainnet, .signet] do
       if (PersonPaste.parse text network).toBool then took := true
+    if let .ok code := CardCode.decode text.trimAscii.toString then
+      took := true
+      require (code.sharedSecret.size == 33 && code.spendKey.size == 33) "a card's code with malformed points"
+      let .ok again := code.encoded | throw (IO.userError "a card's code does not encode")
+      require ((CardCode.decode again).toOption == some code) "a card's code does not read back"
     if let .ok card := PersonCard.decode text then
       took := true
       let .ok again := PersonCard.decode card.serialized

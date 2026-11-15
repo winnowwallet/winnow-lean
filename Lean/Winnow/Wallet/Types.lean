@@ -139,14 +139,27 @@ structure CoinKey where
   deriving Inhabited, BEq
 
 /-- A card this wallet issued to one person (issue #94, `Keys/SilentPaymentPairing.lean`): person `index`'s
-tweak, which their card carries beside the wallet's silent payment address, and the lowest payment index not
-yet seen paid. The tweak is a hash of the scan private key and `index`; it is kept here so the wallet watches
-without loading a key. It is not a spending secret. -/
+tweak, which makes the shared secret their code carries; the spend key made for them; and the lowest payment
+index not yet seen paid. The tweak is a hash of the scan private key and `index`, and the spend key is the
+wallet's own plus a label hashed from the same two. Both are kept here so the wallet watches without loading
+a key, and neither is a spending secret.
+
+`spendKey` is absent on a card 0.9.12 issued: such a card pays the wallet's own spend key. `plainToo` says
+that payments to the wallet's own spend key are this card's as well as those to `spendKey`: it is set on a
+card recorded by a restore from the phrase, which cannot know in which of the two forms the card was handed
+out. -/
 structure IssuedCard where
   index : UInt32
   tweak : ByteArray
   nextIndex : UInt32 := 0
+  spendKey : Option ByteArray := none
+  plainToo : Bool := false
   deriving Inhabited, BEq
+
+/-- The spend keys a card's payments may be made to, the one its person's code carries first: its own, and
+the wallet's (`own`) for a 0.9.12 card or a restored one. -/
+def IssuedCard.spendKeys (c : IssuedCard) (own : ByteArray) : Array ByteArray :=
+  c.spendKey.toArray ++ (if c.spendKey.isNone || c.plainToo then #[own] else #[])
 
 namespace WalletUTXO
 def isSpent (u : WalletUTXO) : Bool := u.spent.isSome
@@ -224,9 +237,9 @@ structure WalletState where
   pendingSends : Array PendingSend := #[]
   /-- The cards issued so far, in the order issued. -/
   cards : Array IssuedCard := #[]
-  /-- The wallet's silent payment address (BIP352's account 0), which every card carries: recorded when the
-  first card is issued, and present whenever a card is. Winnow receives at it only what a card's tweak
-  derives. -/
+  /-- The wallet's own two silent payment keys (BIP352's account 0), written under a card's prefix, which
+  every card is derived from and none carries: recorded when the first card is issued, and present whenever a
+  card is. Winnow receives at them only what a card derives. -/
   silentPaymentAddress : Option String := none
   /-- Set while a wallet restored from a backup is still looking for cards the backup does not list: the
   first height the backup had not seen, where that search starts. Not part of a backup. -/
@@ -346,26 +359,40 @@ namespace IssuedCard
 
 def toJV (c : IssuedCard) : JV :=
   obj [("index", some (ofInt c.index.toNat)), ("tweak", some (.str (hex c.tweak))),
-    ("nextIndex", some (ofInt c.nextIndex.toNat))]
+    ("nextIndex", some (ofInt c.nextIndex.toNat)), ("spendKey", c.spendKey.map (.str ∘ hex)),
+    ("plainToo", if c.plainToo then some (.bool true) else none)]
 
 def ofJV (v : JV) : D IssuedCard := do
   let kvs ← asObject v
   let index ← SwiftJSON.key kvs "index" asUInt32
   let tweak ← hexField kvs "tweak"
   let nextIndex ← SwiftJSON.key kvs "nextIndex" asUInt32
-  return { index, tweak, nextIndex }
+  let spendKey ← match ← keyIfPresent kvs "spendKey" asString with
+    | none => pure none
+    | some s => match Wire.dataOfHex? s with
+      | some b => pure (some b)
+      | none => dataCorrupted
+  let plainToo := (← keyIfPresent kvs "plainToo" asBool).getD false
+  return { index, tweak, nextIndex, spendKey, plainToo }
 
-/-- A card's tweak is a valid scalar and its payment cursor leaves the lookahead room. -/
+/-- A card's tweak is a valid scalar, its spend key (when it has one) a point, and its payment cursor leaves
+the lookahead room. `plainToo` is said only of a card with a spend key of its own: one without pays the
+wallet's key and nothing else. -/
 def wellFormed (c : IssuedCard) : Bool :=
-  Keys.SilentPaymentPairing.isValidTweak c.tweak && c.nextIndex ≤ 0x8000_0000 - Wallet.gapLimit
+  Keys.SilentPaymentPairing.isValidTweak c.tweak && c.nextIndex ≤ 0x8000_0000 - Wallet.gapLimit &&
+    c.spendKey.all SilentPaymentAddress.isValidPublicKey && (!c.plainToo || c.spendKey.isSome)
 
-/-- Every card well-formed, no index twice, no tweak twice, and no more than a wallet issues. -/
+/-- Every card well-formed, no index twice, no tweak or spend key twice, and no more than a wallet issues. -/
 def validate (cards : Array IssuedCard) : Bool := Id.run do
   if cards.size > Wallet.maximumCards then return false
   let mut indices : Std.HashSet UInt32 := {}
   let mut tweaks : Std.HashSet ByteArray := {}
+  let mut spendKeys : Std.HashSet ByteArray := {}
   for c in cards do
     if !c.wellFormed || indices.contains c.index || tweaks.contains c.tweak then return false
+    if let some key := c.spendKey then
+      if spendKeys.contains key then return false
+      spendKeys := spendKeys.insert key
     indices := indices.insert c.index
     tweaks := tweaks.insert c.tweak
   return true

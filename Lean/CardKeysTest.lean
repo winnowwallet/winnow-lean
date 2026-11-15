@@ -2,10 +2,11 @@ import Lean.Data.Json
 import Winnow.Keys
 import TestKit.Check
 
-/-! `card-keys-test`: a silent payment address and a tweak for one person (`Winnow/Keys/SilentPaymentPairing.lean`,
+/-! `card-keys-test`: a shared secret and a spend key for one person (`Winnow/Keys/SilentPaymentPairing.lean`,
 issue #94) against `Vectors/card-keys-vectors.json`, which `scripts/card-keys-vectors` computes without the
-wallet's code: from a BIP32 seed to BIP352's scan and spend keys, the address, a person's tweak, and each
-payment's tweak, output key, script and spending secret. Then what the vectors cannot say: that each script is
+wallet's code: from a BIP32 seed to BIP352's scan and spend keys, a person's tweak, label and code, and each
+payment's tweak, output key, script and spending secret, both for the code a person is handed and for the
+card 0.9.12 wrote. The label is also held to BIP352's own vectors. Then what the vectors cannot say: that each script is
 BIP352's own output for the pairing's shared secret and is not what a standard silent payment to the same
 address pays, that the spending secret signs for the output and nothing the payer holds does, that another
 tweak, address or index pays another script, and what is refused. Run from `Lean/`. -/
@@ -22,7 +23,15 @@ structure PaymentCase where
   script : String
   spendSecret : String
 
+structure LabelledCase where
+  label : String
+  spendKey : String
+  code : String
+  payments : List PaymentCase
+
 structure CardCase where
+  plainCode : String
+  labelled : Option LabelledCase
   seed : String
   coinType : UInt32
   hrp : String
@@ -42,18 +51,25 @@ def num (j : Json) (k : String) : UInt32 := ((j.getObjValAs? Nat k).toOption.get
 def cases : IO (List CardCase) := do
   let j ← IO.ofExcept (Json.parse (← IO.FS.readFile "Vectors/card-keys-vectors.json"))
   let mut out := #[]
-  for c in (← IO.ofExcept ((j.getObjValD "cases").getArr?)) do
+  let paymentsOf (c : Json) : IO (List PaymentCase) := do
     let mut payments := #[]
     for p in (← IO.ofExcept ((c.getObjValD "payments").getArr?)) do
       payments := payments.push {
         index := num p "index", outputTweak := str p "outputTweak", outputKey := str p "outputKey",
         oddY := (p.getObjValAs? Bool "oddY").toOption.getD false, script := str p "script",
         spendSecret := str p "spendSecret" }
+    return payments.toList
+  for c in (← IO.ofExcept ((j.getObjValD "cases").getArr?)) do
+    let payments ← paymentsOf c
+    let l := c.getObjValD "labelled"
+    let labelled ← if l.isNull then pure none else
+      pure (some { label := str l "label", spendKey := str l "spendKey", code := str l "code", payments := ← paymentsOf l })
     out := out.push {
+      plainCode := str c "plainCode", labelled,
       seed := str c "seed", coinType := num c "coinType", hrp := str c "hrp", card := num c "card",
       scanSecret := str c "scanSecret", spendSecret := str c "spendSecret", scanKey := str c "scanKey",
       spendKey := str c "spendKey", address := str c "address", tweak := str c "tweak",
-      sharedSecret := str c "sharedSecret", payments := payments.toList }
+      sharedSecret := str c "sharedSecret", payments }
   return out.toList
 
 def refusedWith {α} (r : PP α) (e : Error) : Bool :=
@@ -67,6 +83,32 @@ def signsFor (secret xonly : ByteArray) : Bool :=
   match secretOf secret >>= fun d => schnorrSign d message aux with
   | .ok sig => (schnorrVerify xonly message sig).toOption == some true
   | .error _ => false
+
+/-- BIP352's own vectors: every labelled address a receiver expects is `B_scan` with `B_spend + L_m·G`, for
+the label this module computes. How many labels were checked. -/
+def officialLabels : IO (Nat × Bool) := do
+  let j ← IO.ofExcept (Json.parse (← IO.FS.readFile "Vectors/bip352-send-receive-vectors.json"))
+  let mut count := 0
+  let mut ok := true
+  for case in (← IO.ofExcept j.getArr?) do
+    for r in (← IO.ofExcept ((case.getObjValD "receiving").getArr?)) do
+      let given := r.getObjValD "given"
+      let labels := ((given.getObjValD "labels").getArr?).toOption.getD #[]
+      if labels.isEmpty then continue
+      let material := given.getObjValD "key_material"
+      let scan := hx (str material "scan_priv_key")
+      let spend := hx (str material "spend_priv_key")
+      let expected := (((r.getObjValD "expected").getObjValD "addresses").getArr?).toOption.getD #[]
+        |>.filterMap (·.getStr?.toOption)
+      for m in labels do
+        let some m := m.getNat?.toOption | ok := false
+        count := count + 1
+        let found : Option String := do
+          let own ← (address scan spend "sp").toOption
+          let key ← (labelledSpendKey own.spendKey (← (labelAt scan m.toUInt32).toOption)).toOption
+          (← (SilentPaymentAddress.make own.scanKey key "sp").toOption).encoded.toOption
+        unless found.any expected.contains do ok := false
+  return (count, ok)
 
 def main : IO UInt32 := runMain "card-keys-test" do
   let all ← cases
@@ -108,6 +150,45 @@ def main : IO UInt32 := runMain "card-keys-test" do
           check s!"{m}: the person's tweak does not sign for the output" (!signsFor card.tweak (hx p.outputKey))
           check s!"{m}: the output's tweak does not sign for the output" (!signsFor (hx p.outputTweak) (hx p.outputKey))
           check s!"{m}: the spend key alone does not sign for the output" (!signsFor (hx c.spendSecret) (hx p.outputKey))
+    -- the 0.9.12 card as a code: the same scripts, with the wallet's own spend key
+    match issue master c.coinType c.hrp c.card >>= codeOf with
+    | .error e => check s!"{n}: its code ({e.name})" false
+    | .ok plain =>
+      check s!"{n}: a 0.9.12 card as a code" (plain.encoded.toOption == some c.plainCode &&
+        hex plain.sharedSecret == c.sharedSecret && hex plain.spendKey == c.spendKey)
+      check s!"{n}: that code pays what the card pays"
+        (c.payments.all fun p => (codeScript plain p.index).toOption.map hex == some p.script)
+    -- the code a person is handed: their shared secret and a spend key of their own
+    match c.labelled, issueCode master c.coinType c.hrp c.card with
+    | none, r => check s!"{n}: the last index has no label, so no code" (refusedWith r .invalidIndex)
+    | some _, .error e => check s!"{n}: code ({e.name})" false
+    | some l, .ok code =>
+      check s!"{n}: the label is BIP352's label {c.card + 1}"
+        ((labelFor (hx c.scanSecret) c.card).toOption.map hex == some l.label &&
+         (labelAt (hx c.scanSecret) (c.card + 1)).toOption.map hex == some l.label)
+      check s!"{n}: the code is the shared secret and the labelled spend key"
+        (code.encoded.toOption == some l.code && hex code.sharedSecret == c.sharedSecret && hex code.spendKey == l.spendKey)
+      check s!"{n}: the code holds neither of the wallet's keys"
+        (hex code.sharedSecret != c.scanKey && hex code.spendKey != c.spendKey && hex code.sharedSecret != c.spendKey)
+      check s!"{n}: the code reads back" ((CardCode.decode l.code (some c.hrp)).toOption == some code)
+      for p in l.payments do
+        let m := s!"{n} labelled payment {p.index}"
+        check s!"{m}: script" ((codeScript code p.index).toOption.map hex == some p.script)
+        check s!"{m}: not the script a 0.9.12 card pays"
+          ((c.payments.find? (·.index == p.index)).map (·.script) != some p.script)
+        match codeSpendSecret (hx c.spendSecret) (some (hx l.label)) code p.index with
+        | .error e => check s!"{m}: spending secret ({e.name})" false
+        | .ok secret =>
+          check s!"{m}: spending secret" (hex secret == p.spendSecret)
+          check s!"{m}: the recipient signs for the output" (signsFor secret (hx p.outputKey))
+          check s!"{m}: the spend key alone does not sign for the output" (!signsFor (hx c.spendSecret) (hx p.outputKey))
+          check s!"{m}: the label does not sign for the output" (!signsFor (hx l.label) (hx p.outputKey))
+        check s!"{m}: without its label the spend key is refused"
+          (refusedWith (codeSpendSecret (hx c.spendSecret) none code p.index) .keyMismatch)
+      check s!"{n}: another person's label is refused"
+        (refusedWith (codeSpendSecret (hx c.spendSecret) ((labelFor (hx c.scanSecret) (c.card + 1)).toOption) code 0) .keyMismatch)
+  let (officialCount, officialOK) ← officialLabels
+  check s!"BIP352's vectors: {officialCount} labelled addresses are B_scan with B_spend + L·G" (officialOK && officialCount ≥ 8)
   -- one card, read back from its vector
   let some first := all.head? | throw (IO.userError "a first card")
   let some second := all[1]? | throw (IO.userError "a second card")
@@ -149,6 +230,32 @@ def main : IO UInt32 := runMain "card-keys-test" do
       | some s => seen := seen.insert s
       | none => return false
     return seen.size == 500)
+  -- the code's form: version 1 under the card's prefix, which is neither the wallet's two keys nor an address
+  let some firstCode := first.labelled | throw (IO.userError "the first code")
+  let some secondCode := second.labelled | throw (IO.userError "the second code")
+  let some thirdCode := third.labelled | throw (IO.userError "the third code")
+  check "a code is written with the card's prefix, as version 1"
+    (firstCode.code.startsWith "winnowcard1p" && thirdCode.code.startsWith "twinnowcard1p" &&
+     looksLikeCardCode firstCode.code && looksLikeCardCode thirdCode.code.toUpper && !looksLikeCardKeys firstCode.code)
+  check "the wallet's two keys are version 0, and are not a code"
+    (first.address.startsWith "winnowcard1q" && looksLikeCardKeys first.address && !looksLikeCardCode first.address)
+  check "a code is not read as the two keys, nor the two keys as a code"
+    ((match SilentPaymentAddress.decode firstCode.code (some (SilentPaymentPairing.hrp true)) with
+      | .error (.unsupportedVersion 1) => true | _ => false) &&
+     (match CardCode.decode first.address (some (SilentPaymentPairing.hrp true)) with
+      | .error (.unsupportedVersion 0) => true | _ => false))
+  check "a code of another kind of network is refused"
+    (match CardCode.decode thirdCode.code (some (SilentPaymentPairing.hrp true)) with
+     | .error (.wrongHRP "winnowcard" "twinnowcard") => true | _ => false)
+  check "a code does not look like a silent payment address" (!SilentPaymentAddress.looksLikeCode firstCode.code)
+  check "two people of one wallet are handed codes with no key in common"
+    (firstCode.spendKey != secondCode.spendKey && first.sharedSecret != second.sharedSecret &&
+     firstCode.code.drop 14 != secondCode.code.drop 14)
+  check "a code with a point off the curve is not made"
+    ((CardCode.make (ByteArray.mk #[0x02] ++ ByteArray.mk (Array.replicate 32 0xFF)) (hx firstCode.spendKey) "winnowcard").toOption.isNone &&
+     (CardCode.make (hx first.sharedSecret) (ByteArray.mk (Array.replicate 33 0)) "winnowcard").toOption.isNone)
+  check "a damaged code is refused"
+    ((CardCode.decode (firstCode.code ++ "q") none).toOption.isNone && (CardCode.decode ("x" ++ firstCode.code) none).toOption.isNone)
   -- it is not a standard silent payment: one made by spending a coin pays another script
   let payerKey := ByteArray.mk (Array.replicate 31 0) ++ ByteArray.mk #[7]
   let some payerPoint := (publicKeyOf payerKey).toOption | throw (IO.userError "the payer's key")

@@ -711,8 +711,8 @@ def cardForOnePerson : Journey := ⟨"cardForOnePerson", do
     tap makePersonCardButton
     waitFor personCardText 30
     let card ← text personCardText
-    expect ((card.splitOn "\"payTo\":\"twinnowcard1").length == 2 && (card.splitOn "\"tweak\":\"").length == 2)
-      s!"not a card with a test-network silent payment address and a tweak: {card}"
+    expect ((card.splitOn "\"payTo\":\"twinnowcard1p").length == 2 && (card.splitOn "tweak").length == 1)
+      s!"not a card with a test-network code and no tweak: {card}"
     expect ((card.splitOn "pub").length == 1) s!"the card carries an extended key: {card}"
     shot "50-card-for-dana"
     -- shown again, it is the same card

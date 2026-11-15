@@ -66,17 +66,25 @@ structure ImportBundle where
   nextReceiveIndex : Option UInt32 := none
   nextChangeIndex : Option UInt32 := none
   /-- The cards the wallet issued (issue #94): what finds the coins paid to them. A bundle that has any is
-  version 3, which a Winnow from before cards refuses instead of restoring without them. -/
+  version 3 or 4 (`versionFor`), which a Winnow from before cards refuses instead of restoring without them. -/
   cards : Array IssuedCard := #[]
-  /-- The wallet's silent payment address, which every card pays; present whenever a card is. -/
+  /-- The wallet's own two silent payment keys, under a card's prefix, which every card is derived from;
+  present whenever a card is. -/
   silentPaymentAddress : Option String := none
   deriving Inhabited, BEq
 
 namespace ImportBundle
 
-def currentVersion : Int := 3
+def currentVersion : Int := 4
 /-- The first version that may carry cards. -/
 def cardsVersion : Int := 3
+/-- The first version whose cards may carry a spend key of their own (`IssuedCard.spendKey`). A Winnow from
+before those would take such a card for one that pays the wallet's own key, and watch the wrong scripts. -/
+def cardSpendKeysVersion : Int := 4
+/-- The version a bundle with these cards is written as: 2 with none, so a wallet without cards writes the
+file it always wrote, 3 with cards 0.9.12 issued, 4 once a card has a spend key of its own. -/
+def versionFor (cards : Array IssuedCard) : Int :=
+  if cards.isEmpty then 2 else if cards.any (·.spendKey.isSome) then cardSpendKeysVersion else cardsVersion
 def supportedVersions (v : Int) : Bool := 1 ≤ v && v ≤ currentVersion
 def maximumSerializedBytes : Nat := 8 * 1024 * 1024
 def maximumEntries : Nat := 50_000
@@ -209,6 +217,8 @@ def decodeData (data : ByteArray) : Except Failure ImportBundle := do
     b.pendingSends.any (·.selected.any (·.card.isSome))
   if namesACard && b.version < cardsVersion then
     throw (.wallet (.invalidBundle s!"a version {b.version} bundle cannot carry cards"))
+  if b.cards.any (·.spendKey.isSome) && b.version < cardSpendKeysVersion then
+    throw (.wallet (.invalidBundle s!"a version {b.version} bundle cannot carry a card's spend key"))
   return b
 
 /-- `decode(json:)`. -/
@@ -217,13 +227,13 @@ def decode (json : String) : Except Failure ImportBundle := decodeData json.toUT
 /-- Pretty-printed, sorted-key JSON for the share sheet. -/
 def serialized (b : ImportBundle) : String := writePretty "" b.toJV
 
-/-- The writer: display-hex txids, coinbase flag only when set. Version 2, or 3 once the wallet has issued a
-card, so a wallet without cards writes the file it always wrote. -/
+/-- The writer: display-hex txids, coinbase flag only when set. Version 2, or `versionFor`'s once the wallet
+has issued a card, so a wallet without cards writes the file it always wrote. -/
 def «export» (descriptor network : String) (lastKnownHeight : UInt32) (utxos : Array WalletUTXO)
     (history : Array HistoryEntry) (nextReceiveIndex nextChangeIndex : UInt32) (mnemonic : Option String := none)
     (lastKnownBlockHash : Option ByteArray := none) (pendingSends : Array PendingSend := #[])
     (cards : Array IssuedCard := #[]) (silentPaymentAddress : Option String := none) : ImportBundle :=
-  { version := if cards.isEmpty then 2 else cardsVersion, cards,
+  { version := versionFor cards, cards,
     silentPaymentAddress := if cards.isEmpty then none else silentPaymentAddress,
     network, descriptor := some descriptor, mnemonic, lastKnownHeight,
     lastKnownBlockHash := lastKnownBlockHash.map displayHex,

@@ -188,6 +188,8 @@ def describe (name : String) (network : Tx.BitcoinNetwork) : String :=
   else if name == "plainSilentPaymentAddress" then
     "That card carries a plain silent payment address, which a card for one person does not use. Ask for a new card."
   else if name == "cardAddressAlone" then Wallet.cardAddressAloneText
+  else if name == "invalidEncoding" || name == "invalidDataLength" || name == "invalidPublicKey" || name == "unsupportedVersion" then
+    "That card's code is not valid. Ask for the card again."
   else s!"The operation could not be completed ({name})."
 
 def namedError (name : String) (network : Tx.BitcoinNetwork) : RecordsError := .named name (describe name network)

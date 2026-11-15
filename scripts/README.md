@@ -40,7 +40,8 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   each one an input spends from, must hash to its txid, so the server is trusted for nothing. crypto-test holds
   `FundingSources.revelation` to them.
 - [card-keys-vectors](card-keys-vectors) writes `Lean/Vectors/card-keys-vectors.json`: a wallet's silent payment
-  address, the tweaks it makes for people and the payments derived from them (issue #94), computed with the
+  keys, the tweak, label and code it makes for each person and the payments derived from them (issue #94),
+  computed with the
   Python standard library alone (BIP32, secp256k1, tagged hashes, bech32m) and none of the wallet's code.
   `card-keys-test` holds `Winnow.Keys.SilentPaymentPairing` to them.
 - [swift-utf8-vectors](swift-utf8-vectors) writes `Lean/Vectors/swift-utf8-decoding.json`, Swift's own
