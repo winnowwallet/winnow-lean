@@ -202,12 +202,13 @@ def Model.onSettingsHost (m : Model) (h : Host) : Model × List Cmd :=
   | .revealed g e words =>
     if m.sensitive g e then ({ m with reveal := { words } }.present .revealPhrase, [])
     else (m, [])
-  | .personCard g personName card records =>
+  | .personCard g personName card address records =>
     if !m.current g then (m, []) else
     -- the person may be new, and now has a card: the records are current either way
     let m := { m with records }
     if m.shareCard.forName.trimAscii.copy == personName then
-      ({ m with shareCard := { m.shareCard with personCard := some (personName, card), making := false, error := none } }, [])
+      let shown : ShareCard := { m.shareCard with personCard := some (personName, card), personAddress := address, making := false, error := none }
+      ({ m with shareCard := shown }, [])
     else ({ m with shareCard := { m.shareCard with making := false } }, [])
   | _ => (m, [])
 

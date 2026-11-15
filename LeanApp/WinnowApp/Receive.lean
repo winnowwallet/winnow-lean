@@ -43,11 +43,12 @@ def stepReceive (msg : ReceiveMsg) (m : Model) : Model × List Cmd :=
   | .setOwnName s =>
     let st := { m.settings with ownDisplayName := s }
     -- a card made under the old name is not the card to hand over under the new one
-    ({ m with settings := st, shareCard := { m.shareCard with personCard := none } }, [.saveSettings st])
+    ({ m with settings := st, shareCard := { m.shareCard with personCard := none, personAddress := none } }, [.saveSettings st])
   | .setCardFor s =>
     let kept := m.shareCard.personCard.filter (·.1 == s.trimAscii.copy)
     -- typed over, the name is what is meant, not the person the sheet was opened for
-    ({ m with shareCard := { m.shareCard with forName := s, forPerson := none, personCard := kept, error := none } }, [])
+    let address := if kept.isSome then m.shareCard.personAddress else none
+    ({ m with shareCard := { m.shareCard with forName := s, forPerson := none, personCard := kept, personAddress := address, error := none } }, [])
   | .makePersonCard =>
     let own := m.settings.ownDisplayName.trimAscii.copy
     let person := m.shareCard.forName.trimAscii.copy
@@ -139,7 +140,15 @@ def personCardSections (m : Model) : List H :=
        -- the card's rows are rows of this section: as a section of their own they were drawn with the next
        -- section's footer under them (seen in the simulator, 2026-11-14)
        (match sc.personCard with
-        | some (name, card) => [ .text s!"Card for {name}" .headline, .qr card, copyableBlock m "card.person" card Ids.personCardText ]
+        | some (name, card) =>
+          [ .text s!"Card for {name}" .headline, .qr card, copyableBlock m "card.person" card Ids.personCardText ] ++
+          -- for a payer that does not read cards: the next unpaid address of this same card
+          (match sc.personAddress with
+           | some address =>
+             [ .text s!"An address for {name}" .headline
+             , caption s!"If {name} pays from another wallet or an exchange, give them this instead. It is an ordinary address, a payment to it is named as theirs, and it changes once it has been paid."
+             , .qr address, copyableBlock m "card.address" address Ids.personAddressText ]
+           | none => [])
         | none => [])) ]
 
 /-- `ShareMyCardView`: the name others will see, and a card for one person. Upstream's one card for

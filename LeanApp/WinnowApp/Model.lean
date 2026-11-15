@@ -327,6 +327,8 @@ structure ShareCard where
   forPerson : Option String := none
   /-- That person's card, with the name it was made for. -/
   personCard : Option (String × String) := none
+  /-- An ordinary address for that person, for a payer that does not read cards; shown with the card. -/
+  personAddress : Option String := none
   making : Bool := false
   deriving Repr, Inhabited
 
@@ -624,7 +626,7 @@ inductive Host where
   | peersReset (gen : Nat)
   | exported (gen epoch : Nat) (file : String)
   | revealed (gen epoch : Nat) (words : List String)
-  | personCard (gen : Nat) (personName : String) (card : String) (records : Records)
+  | personCard (gen : Nat) (personName : String) (card : String) (address : Option String) (records : Records)
   | pasteParsed (gen : Nat) (text : String) (r : Except String PastePreview)
   | senderLookup (gen : Nat) (txid source : String) (addresses : List String)
   | multisig (gen : Nat) (o : MultisigOverview)

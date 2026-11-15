@@ -1425,6 +1425,40 @@ def cardsInTheWalletFile : TM Unit := do
   check "card file: a legacy tweak is still refused"
     ((WalletState.decode ((s.encode.toOption.getD "").replace "\"card\":0" "\"card\":0,\"silentPaymentTweak\":\"00\"")).toOption.isNone)
 
+/-- A card's ordinary address, for a payer that reads no card: the card's next unpaid payment. -/
+def aCardsOrdinaryAddress : TM Unit := do
+  let w ← emptyWallet (← newKeyStore)
+  let (_, card) ← need "issue" w.issueCard
+  discard (need "issue another" w.issueCard)
+  let text ← cardText card
+  let addressOf (script : ByteArray) : Option String := AddressDecoder.address script .signet
+  let (first, index) ← need "address" (w.nextCardAddress 0)
+  check "address: the card's first payment, as its person's code derives it"
+    (index == 0 && some first == addressOf (← payerScript text 0) && first.startsWith "tb1p")
+  check "address: asked again before it is paid, the same" ((← (w.nextCardAddress 0).run).toOption == some (first, 0))
+  check "address: another card's is another" ((← (w.nextCardAddress 1).run).toOption.any (·.1 != first))
+  check "address: a card that was not issued has none"
+    (match ← (w.nextCardAddress 9).run with | .error (.named "unknownCard") => true | _ => false)
+  -- an exchange pays the address: nothing of Winnow's is in the payment
+  let script ← needE "the address's script" (·.name) (AddressDecoder.scriptPubKey first .signet)
+  discard (need "apply" (w.apply (fakeMatch 150 #[outsidePayment 0xA1 #[(55_000, script)]])))
+  check "address: paid from outside, the coin is the card's"
+    ((← w.balance) == 55_000 && (← w.utxos).map (fun u => (u.card, u.index)) == #[(some 0, 0)])
+  let (second, next) ← need "address" (w.nextCardAddress 0)
+  check "address: once paid, it is the next payment's" (next == 1 && second != first && some second == addressOf (← payerScript text 1))
+  -- an exchange that kept the first address pays it again
+  discard (need "apply" (w.apply (fakeMatch 151 #[outsidePayment 0xA2 #[(5_000, script)]])))
+  check "address: paid again at the old address, the payment is found and the address does not go back"
+    ((← w.balance) == 60_000 && (← (w.nextCardAddress 0).run).toOption == some (second, 1))
+  -- the person's own Winnow, which counts for itself, pays further on
+  discard (need "apply" (w.apply (fakeMatch 152 #[outsidePayment 0xA3 #[(1_000, ← payerScript text 3)]])))
+  check "address: after their Winnow paid payment 3, it is payment 4's" ((← (w.nextCardAddress 0).run).toOption.map (·.2) == some 4)
+  check "address: the other card's has not moved" ((← (w.nextCardAddress 1).run).toOption.map (·.2) == some 0)
+  -- more than any two of the three coins hold
+  let prepared ← need "send" (w.buildSend #[{ amount := 60_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  check "address: what was paid to it is spent" (prepared.selected.size == 3 && keyPathSignaturesVerify prepared.built.transaction (← w.utxos))
+    s!"{prepared.selected.size} coins"
+
 /-- A wallet file as 0.9.12 wrote it: its card has no spend key of its own, and is paid to the wallet's. The
 card keeps paying the same scripts, is handed out again as a code that pays them, and its coins are spent. -/
 def aCardFrom0912 : TM Unit := do
@@ -1457,6 +1491,8 @@ def aCardFrom0912 : TM Unit := do
     ((← w.balance) == 90_000 && (← w.cards).map (·.nextIndex) == #[1])
   let prepared ← need "send" (w.buildSend #[{ amount := 80_000, scriptPubKey := p2trDestination }] 2 testChainTip)
   check "0.9.12 file: its coin is spent" (keyPathSignaturesVerify prepared.built.transaction (← w.utxos))
+  check "0.9.12 file: its ordinary address is the next payment of the old card"
+    ((← (w.nextCardAddress 0).run).toOption == (AddressDecoder.address (← legacyScript w 0 1) .signet).map (·, 1))
   let backup ← need "export" (w.exportBundle (includeMnemonic := true))
   check "0.9.12 file: its backup is the version 0.9.12 wrote" (backup.version == 3 && backup.cards == (← w.cards))
   let restored ← need "import" (Wallet.importing (← needE "decode" (·.name) (ImportBundle.decode backup.serialized)) (← newKeyStore) none pinned)
@@ -2257,6 +2293,7 @@ def main : IO UInt32 := runMain "multisig-test" do
   runTest "aPhraseAloneFindsItsCards" aPhraseAloneFindsItsCards
   runTest "cardsInTheWalletFile" cardsInTheWalletFile
   runTest "aCardFrom0912" aCardFrom0912
+  runTest "aCardsOrdinaryAddress" aCardsOrdinaryAddress
   runTest "invalidMetadata" invalidMetadata
   runTest "contradictedImportedMetadataIsDropped" contradictedImportedMetadataIsDropped
   runTest "accountSecrets" accountSecrets

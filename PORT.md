@@ -180,7 +180,9 @@ Departures from upstream's formats, each absent until a card is issued:
   the card you made for …". A restore from a backup with the phrase begins a search for cards made after
   the backup (`Wallet.beginCardRestore`, the sync pass's `finishCardRestore`, the wallet file's
   `cardRestoreFrom`). The backend's `personCard`, and the sync's `cardPayment` hook, which labels a
-  payment made with a card as its person's.
+  payment made with a card as its person's. Under a card the sheet shows an ordinary address for that
+  person, for a payer that reads no card (the backend's `personAddress`, `Wallet.nextCardAddress`: the
+  card's lowest unpaid payment).
 
 `multisig-test` has the wallet's card tests, `card-regtest` runs them against Bitcoin Core as the payer
 (`scripts/ci-regtest cards`), and `records-test`, `backend-test`'s `cardFlow` and `cardRestoreFlow` and the journey

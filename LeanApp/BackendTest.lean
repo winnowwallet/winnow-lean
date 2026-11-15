@@ -577,6 +577,21 @@ def cardFlow (dir : String) (n : Node) : IO Unit := do
   let (after, _) ← syncUntil bob 60_000 fun s p => (history? s spent).any (·.height > 0) && p == .synced
   check "card: confirmed, Bob holds what the payment and its fee left"
     (after.balance == 600_000 - 550_000 - review.fee && (history? after spent).any (·.height > 0)) s!"{after.balance}"
+  -- a payer that reads no card, an exchange say: Bob gives them Alice's ordinary address, and the node, which
+  -- knows nothing of cards, pays it
+  let plain ← bob.personAddress none "Alice"
+  let third ← alice.previewSend payBob
+  check "address: Alice's ordinary address is the one her own phone would pay next"
+    (plain.startsWith "bcrt1p" && plain == third.destination && plain != first.destination && plain != second.destination) plain
+  let fromOutside := (← n.wallet #["sendtoaddress", plain, "0.002"]).trimAscii.toString
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (credited, _) ← syncUntil bob 60_000 fun s _ => s.balance == after.balance + 200_000
+  check "address: paid by the node, Bob's wallet finds it" (credited.balance == after.balance + 200_000) s!"{credited.balance}"
+  check "address: and names it as Alice's, without Bob labelling it"
+    ((← bob.records).senderByTxid.lookup fromOutside == some aliceAtBob) fromOutside
+  check "address: once paid, Alice's ordinary address is another" ((← bob.personAddress none "Alice") != plain)
+  check "address: a person Bob made no card for has none" ((← attempt (bob.personAddress none "Nobody")).toOption.isNone)
   -- the backup carries the card
   check "card: Bob's backup is version 4, with the card and its spend key" (match ImportBundle.decode (← bob.exportBundle true) with
     | .ok bundle => bundle.version == 4 && bundle.cards.size == 1 && bundle.cards.all (·.spendKey.isSome)

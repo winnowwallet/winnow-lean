@@ -116,6 +116,21 @@ own spend key with no label. Such a card is the code `S_k, B_spend`, and that is
   from inside a Winnow card. On its own it cannot be paid: paste the whole card."), as is a card whose keys
   are written `sp1…` ("That card carries a plain silent payment address…").
 
+### An address any wallet can pay
+
+A card is paid by a Winnow. An exchange, or a person with another wallet, pays an ordinary address, so
+under a person's card the sheet shows one: "An address for …". It is `P_i` for the card's lowest payment
+not yet seen paid (`Wallet.nextCardAddress`), written as the Taproot address it is.
+
+- It is inside the window the wallet already watches for that card, so the payment is found like any other
+  made with the card, and is named as that person's. Nothing new is watched and no key is read.
+- Once it is seen paid, the sheet shows the next. A payer that kept the old one and pays it again reuses
+  an address; the payment is still found.
+- The person's own Winnow counts its payments for itself, from 0. If one person pays both ways, a payment
+  from their Winnow and one to this address can land on the same `P_i`: an address used twice, and both
+  found.
+- What the payer learns is one address. It is not the card: it derives nothing.
+
 ## Who knows what
 
 | | Bob (recipient) | The person the card is for | Anyone else |
@@ -331,8 +346,24 @@ analysed: with the scan private key they can derive every tweak and label.
 
 ## Results
 
-On 2026-11-14, and every count below again on 2026-11-15 at the revision that made a card carry a code;
-every test executable rebuilt first.
+On 2026-11-14, and every count below again on 2026-11-15 at the revision that added a person's ordinary
+address; every test executable rebuilt first.
+
+- **An address any wallet can pay (2026-11-15).** `multisig-test`: the address is the card's first payment
+  as its person's code derives it; paid from outside it is the card's coin and the address becomes the
+  next; paid again at the old address the payment is found and the address does not go back; after the
+  person's own Winnow pays further on, it is the payment after that; another card's does not move; the
+  coins are spent; and a 0.9.12 card's address is that card's next payment in its own form. `records-test`:
+  by name and by ID, another person's is another, a person without a card or nobody has none, and asking
+  issues no card; on the sheet it is shown under the card with what it is for, leaves with the card, and a
+  card that arrives without one is shown without one. `backend-test`, regtest: Bitcoin Core, which knows
+  nothing of cards, pays Alice's address; Bob's wallet finds the payment, names it as Alice's without Bob
+  labelling it, and the address is then another. It is also the address Alice's own phone would have paid
+  next. The journey reads the address under the card and finds it is the card's first. In the simulator
+  (iPhone 17, iOS 26.5, Debug build), on the wallet a build of that morning left with a card in 0.9.12's
+  form: the wallet opened, the card was shown again as a version 3 card with a `twinnowcard1p…` code, and
+  under it "An address for Carol" with a `bcrt1p…` address, its QR code, Copy and Share. Not shown: a real
+  exchange, a mainnet payment, and a device.
 
 - **A card carries a code (2026-11-15).** The vectors were written again by `scripts/card-keys-vectors`:
   every field they had is unchanged, and each case gains the person's label, spend key and code and the
@@ -374,7 +405,7 @@ every test executable rebuilt first.
   `SilentPaymentSending.outputScript`'s answer for the shared secret, and not what a standard silent
   payment to the same address pays. The recipient's key signs for every output; the person's tweak, the
   output's tweak and the spend key alone do not.
-- **The wallet, without a node.** `multisig-test`: 834 checks, 0 failed, 117 of them in eight tests of cards.
+- **The wallet, without a node.** `multisig-test`: 845 checks, 0 failed, 128 of them in nine tests of cards.
   A payer that holds only a card's text pays three indices in one transaction; the two inside the window
   are credited and the one outside is not. A spend of card coins with an ordinary coin, and its fee bump,
   carry signatures that verify under BIP341's sighash for each coin's key. A fork takes a payment away and
@@ -393,12 +424,12 @@ every test executable rebuilt first.
   with the spend key plus the card's label plus the output's tweak, Core takes it. A second wallet from the same phrase, its frontier already past every
   payment, finds none; after `restoreCards` and two passes of `scanRange` over the same filters it holds
   the same three coins and spends them in a transaction Core mines.
-- **The app.** `records-test`: 1,591 checks, 0 failed: the people store (a card by name and by ID, the same
+- **The app.** `records-test`: 1,603 checks, 0 failed: the people store (a card by name and by ID, the same
   card when asked again, the link through an iCloud restore plan, a card for another network or with a bad
   tweak refused in a sentence) and the card sheet through the app's own `perform` with a fake shell (no
   card for everybody is asked for, made or shown; making a card asks the device's owner once, declining
   makes none and says nothing, showing it again does not ask; a failure to make one lands on the sheet).
-  `backend-test`: 364 checks, 0 failed, three runs. Its two-phone flow has Bob make a card for Alice, Alice
+  `backend-test`: 369 checks, 0 failed, three runs. Its two-phone flow has Bob make a card for Alice, Alice
   pay it twice from her saved person at addresses Bob's account key does not derive in its first 200, and
   Bob's wallet find both, name both as Alice's and spend them. The journey `cardForOnePerson` passes
   headless with the other nine.
@@ -453,7 +484,7 @@ Decided, and left for now:
   copy out and pay.
 - **A boring address for a payer who is not Winnow: yes.** An exchange or another wallet pays an ordinary
   address. Each person's card also shows one, taken from the card's own sequence ("An address any wallet
-  can pay"), which is a separate change.
+  can pay").
 
 Still open:
 

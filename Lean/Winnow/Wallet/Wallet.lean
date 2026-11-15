@@ -414,6 +414,23 @@ def card (w : Wallet) (index : UInt32) : WM CardCode := do
   let secret ← w.cardSecret address c
   return { sharedSecret := secret, spendKey := c.spendKey.getD address.spendKey, hrp := address.hrp }
 
+/-- An ordinary address at which a card's person can be paid by a wallet that does not read cards, an
+exchange say: the card's lowest payment not yet seen paid, as their code derives it, with its index. It is
+inside the window the wallet watches, so a payment to it is found and is the card's, like one their own
+Winnow made; once it is seen paid the answer is the next. A payer that keeps the address and pays it again
+reuses it, and is still found. Reads no key. -/
+def nextCardAddress (w : Wallet) (index : UInt32) : WM (String × UInt32) := do
+  let s ← w.state
+  let some c := s.cards.find? (·.index == index) | throw (.named "unknownCard")
+  let address ← cardAddress s
+  -- past the one index in 2^128 that has no script
+  for offset in [0:gapLimit.toNat] do
+    let i := c.nextIndex + offset.toUInt32
+    if let some script ← w.cardScript address c i then
+      let some text := AddressDecoder.address script w.network | throw (.named "invalidAddress")
+      return (text, i)
+  throw (.named "invalidTweak")
+
 /-- Watched scriptPubKey ↦ where its key is: used indices plus the gap-limit lookahead on both chains of the
 descriptor, and the same window of every issued card. -/
 def watchMap (w : Wallet) (s : WalletState) : WM (Std.HashMap ByteArray CoinKey) := do

@@ -79,6 +79,7 @@ against the node.
 - `cardForOnePerson`: on the card sheet the wallet makes a card for one
   person, Dana (issue #94): a code under a card's prefix
   (`twinnowcard1p…`), with no tweak and neither of the wallet's keys in it.
+  Under the card is an ordinary address for her, which is the card's first.
   The node is Dana: from the card's text alone it derives her first two
   addresses and pays each. The wallet finds both
   and the Transactions list names each "Received from Dana", though nobody

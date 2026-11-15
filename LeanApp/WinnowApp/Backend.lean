@@ -67,6 +67,10 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   `ownName`. The first call issues the card and reads the wallet's private key; later calls read it back.
   The card and the records it changed. -/
   personCard : (personID : Option String) → (personName ownName : String) → IO (String × Records)
+  /-- An ordinary address for that person, who has a card: what a wallet that does not read cards, or an
+  exchange, pays them at. It is the next unpaid address of their card, so the payment is found and named as
+  theirs, and it changes once it has been paid. Reads no key. -/
+  personAddress : (personID : Option String) → (personName : String) → IO String
   /-- Whether that person has a card already, so reading it needs no key and no device authentication. -/
   hasPersonCard : (personID : Option String) → (personName : String) → IO Bool
   /-- `PersonPaste.parse`. -/
@@ -200,6 +204,7 @@ def Backend.pending : Backend where
   exportBundle := fun _ => notPorted "Backing up the wallet"
   revealMnemonic := notPorted "Showing the recovery phrase"
   personCard := fun _ _ _ => notPorted "A card for one person"
+  personAddress := fun _ _ => notPorted "An address for one person"
   hasPersonCard := fun _ _ => pure false
   parsePaste := fun _ => notPorted "Reading addresses and cards"
   addPerson := fun _ _ _ _ _ => notPorted "Saving people"

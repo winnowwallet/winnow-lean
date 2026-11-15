@@ -2,21 +2,19 @@ Winnow: the same wallet, rewritten in Lean
 
 New since 0.9.11
 
-A card for one person: they pay you at a new address each time, with nothing more to send them. On two phones with this build:
-1. Receiving phone: Receive → Make a card. Type your name and the payer's, and make their card: it asks for Face ID or the passcode, then shows a QR code and text.
-2. Paying phone: Send → Saved recipients → Add. Type a name, paste the whole card, Save. Send to them twice.
+A card for one person: they pay you at a new address each time, with nothing more to send them. In 0.9.13 it holds a code made for them and none of your wallet's keys, plus an ordinary address for payers without Winnow. Cards from 0.9.12 still work. On two phones:
+1. Receiving phone: Receive → Make a card. Type your name and the payer's, and make their card (Face ID or passcode). It shows the card and, under it, "An address for …".
+2. Paying phone: Send → Saved recipients → Add. Type a name, paste the card, Save. Send to them twice.
 3. The receiving phone must show both as "Received from" that name, at two different addresses.
-4. The "winnowcard1…" address from inside a card, pasted alone into Send, must be refused.
+4. Pay "An address for …" from another wallet or an exchange: it must also show as "Received from" them, and the address must then change.
+5. Cards for two people must share nothing after "winnowcard1p".
 
-One home: Simple and Advanced mode are gone, and the home has everything Advanced had. Please try:
-1. Settings has Network, Security, Backup and Appearance.
-2. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger"; from 0.5 BTC, "Build an account with other people's keys". "Don't show again" hides a card for good.
-3. With Bluetooth on and no Ledger paired, unlock a Ledger nearby: a card pairs it, builds a 2-of-2 of this phone and the Ledger, and shows the first address, which must match the Ledger's.
-4. In Airplane Mode the home shows "Offline" in orange words. Tap it, then Network settings: Sync shows the last error and Retry. "Peers see your IP" leads to Peers and routing the same way.
-5. A backup file with the recovery phrase asks for Face ID or the passcode first. Join an account shows the recovery path under Policy, and says when this phone is only the recovery key.
-6. If Winnow could not read its multisig accounts, Settings → Security → Multisig accounts now offers "Set the damaged file aside".
-
-Since 0.9.3 Winnow runs on LeanNative (background checks, Keychain, iCloud backup, Face ID, Ledger over Bluetooth).
+One home: Simple and Advanced mode are gone, and the home has everything Advanced had:
+1. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger"; from 0.5 BTC, "Build an account with other people's keys". "Don't show again" hides a card for good.
+2. With Bluetooth on and no Ledger paired, unlock a Ledger nearby: a card pairs it, builds a 2-of-2 of this phone and the Ledger, and shows the first address, which must match the Ledger's.
+3. In Airplane Mode the home shows "Offline" in orange words. Tap it, then Network settings: Sync shows the last error and Retry.
+4. A backup file with the recovery phrase asks for Face ID or the passcode first. Join an account shows the recovery path under Policy, and says when this phone is only the recovery key.
+5. If Winnow could not read its multisig accounts, Settings → Security → Multisig accounts now offers "Set the damaged file aside".
 
 This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Security → Hardware wallets and keys. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
 

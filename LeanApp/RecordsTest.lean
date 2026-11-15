@@ -232,6 +232,16 @@ def personCards (a b : Phone) : IO Unit := do
   check "card: B pays payment 0 of the card, an address A's wallet watches"
     (index0 == 0 && some address0 == AddressDecoder.address script0 network &&
      ((← (a.wallet.watchScripts).run).toOption.getD #[]).contains script0) address0
+  -- for a payer that does not read cards, an exchange say: the same card's next unpaid address, as an address
+  let plain ← obtain "an address for Dana" (personAddress a.store a.wallet none " Dana ")
+  check "address: Dana's ordinary address is what her card's first payment goes to" (plain == address0 && plain.startsWith "bcrt1p")
+  check "address: by her ID too, and the same until it is paid"
+    ((← (personAddress a.store a.wallet (some dana.id) "").run).toOption == some plain)
+  check "address: Erin's is another" ((← (personAddress a.store a.wallet none "Erin").run).toOption.any (· != plain))
+  refused "address: nobody by that name" (kind := "unknownPerson") (personAddress a.store a.wallet none "Nobody")
+  refused "address: nobody by that ID" (kind := "unknownPerson") (personAddress a.store a.wallet (some "no such id") "Dana")
+  refused "address: a person without a card has none" (kind := "unknownCard") (personAddress a.store a.wallet none "Bob")
+  check "address: asking for one issues no card" ((← a.wallet.cards).size == 3)
   discard <| advancePersonPaymentIndex b.store (some b.wallet) alice.id index0
   let (address1, index1) ← obtain "B's payment after that" (nextPaymentAddress b.store alice.id)
   check "card: the next payment is the next index, another address" (index1 == 1 && address1 != address0)
@@ -1287,6 +1297,14 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   check "person card: shown for Dana with its QR code" (madeFor == "Dana" && !made.shareCard.making &&
     contains (renderedH (shareCardSheet made [])) "Card for Dana" && contains (renderedH (shareCardSheet made [])) "Show Dana’s card")
   check "person card: Dana is a contact with a card" (made.records.people.any fun p => p.name == "Dana" && p.hasCard)
+  let some danaAddress := made.shareCard.personAddress | check "person address: on the sheet" false; return
+  check "person address: shown under the card, as an ordinary address, with what it is for"
+    (danaAddress.startsWith "bcrt1p" && contains (renderedH (shareCardSheet made [])) "An address for Dana" &&
+     contains (renderedH (shareCardSheet made [])) "If Dana pays from another wallet or an exchange, give them this instead." &&
+     contains (renderedH (shareCardSheet made [])) danaAddress)
+  check "person address: it is the address the card's own payer pays first"
+    ((← backend.personAddress none "Dana") == danaAddress &&
+     ((PersonPaste.parse personText network).toOption.bind (·.payTo)).bind (fun p => (p.addressAt 0 network).toOption) == some danaAddress)
   check "person card: no account key in it" (!contains personText "tpub")
   let readBack ← backend.parsePaste personText
   check "person card: another phone reads Alice and a fresh address each payment" (readBack.name == some "Alice" && readBack.payTo == some true)
@@ -1295,9 +1313,18 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   check "person card: shown again it is the same card, and the device's owner is not asked"
     (again.shareCard.personCard == some ("Dana", personText) && ((← sh.asks.get).filter (·.1 == "auth")).size == asksBefore + 1)
   let (other, _) ← sh.tap (.receive (.setCardFor "Erin")) made
-  check "person card: another name takes Dana's card off the sheet" (other.shareCard.personCard.isNone)
-  let late := onHost (.personCard other.generation "Dana" personText other.records) other
-  check "person card: a card that arrives for another name is not shown" (late.1.shareCard.personCard.isNone)
+  check "person card: another name takes Dana's card and her address off the sheet"
+    (other.shareCard.personCard.isNone && other.shareCard.personAddress.isNone)
+  let late := onHost (.personCard other.generation "Dana" personText (some danaAddress) other.records) other
+  check "person card: a card that arrives for another name is not shown, nor its address"
+    (late.1.shareCard.personCard.isNone && late.1.shareCard.personAddress.isNone)
+  let bare := onHost (.personCard made.generation "Dana" personText none made.records) made
+  check "person address: a card that arrives without one is shown without one"
+    (bare.1.shareCard.personCard.isSome && bare.1.shareCard.personAddress.isNone &&
+     !contains (renderedH (shareCardSheet bare.1 [])) "An address for Dana")
+  let (renamed, _) ← sh.tap (.receive (.setOwnName "Alicia")) made
+  check "person address: under a new name of mine, the card and the address leave the sheet together"
+    (renamed.shareCard.personCard.isNone && renamed.shareCard.personAddress.isNone)
   -- declined at the device's prompt: nothing made, nothing said
   sh.auth.set (Lean.Json.mkObj [("ok", Lean.Json.bool false), ("error", Lean.Json.str "User canceled.")])
   let (declining, cs) := stepReceive .makePersonCard other

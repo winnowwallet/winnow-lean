@@ -403,7 +403,9 @@ def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .personCard g personID personName ownName =>
     let act : IO Host := do
       let (card, records) ← b.personCard personID personName ownName
-      return .personCard g personName card records
+      -- the address is an extra beside the card: a failure to derive it does not keep the card back
+      let address ← try some <$> b.personAddress personID personName catch _ => pure none
+      return .personCard g personName card address records
     -- making a card reads the wallet's private key, so the device's owner is asked, as before every read of
     -- it; a card already made is read back without a key
     discard <| IO.asTask do

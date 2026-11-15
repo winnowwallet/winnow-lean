@@ -284,6 +284,20 @@ def personCard (s : RecordsStore) (w : Wallet) (personID : Option String) (perso
   let card := PersonCard.make s.network ownName (some code)
   return (card.serialized, ← RM.io (records s (some w)))
 
+/-- An ordinary address for the person `personCard` would pick, who has a card: where a wallet that does not
+read cards, or an exchange, pays them (`Wallet.nextCardAddress`). It is the next unpaid address of their own
+card, so the payment is found and named as theirs. Reads no key. -/
+def personAddress (s : RecordsStore) (w : Wallet) (personID : Option String) (personName : String) : RM String := do
+  let people := (← RM.io s.read).people
+  let found ← match personID with
+    | some id => pure (people.record? id)
+    | none => do
+      let wanted ← PeopleStore.normalizedName personName
+      pure (people.records.find? (·.name == wanted))
+  let some person := found | throw (.people .unknownPerson)
+  let some index := person.issuedCard | throw (namedError "unknownCard" s.network)
+  return (← liftWallet s.network (w.nextCardAddress index)).1
+
 /-- Whether the person `personCard` would pick already has a card, so that reading it needs no key. -/
 def hasPersonCard (s : RecordsStore) (personID : Option String) (personName : String) : IO Bool := do
   let people := (← s.read).people

@@ -714,6 +714,9 @@ def cardForOnePerson : Journey := ⟨"cardForOnePerson", do
     expect ((card.splitOn "\"payTo\":\"twinnowcard1p").length == 2 && (card.splitOn "tweak").length == 1)
       s!"not a card with a test-network code and no tweak: {card}"
     expect ((card.splitOn "pub").length == 1) s!"the card carries an extended key: {card}"
+    -- under it, an ordinary address for a payer that reads no card: the card's first payment
+    waitFor personAddressText 30
+    expectEq "the address under the card" (← text personAddressText) (← h.cardAddress card 0)
     shot "50-card-for-dana"
     -- shown again, it is the same card
     tap makePersonCardButton
