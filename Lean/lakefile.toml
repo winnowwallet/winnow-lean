@@ -1,9 +1,15 @@
 # Winnow in Lean: the port of Sources/WalletCore and Sources/WinnowApp (see ../PORT.md).
 name = "winnow"
-defaultTargets = ["Secp", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
+defaultTargets = ["Secp", "WinnowCore", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
 
 [[lean_lib]]
 name = "Secp"
+
+# The core (WinnowCore.lean): transaction review without seed phrases, Unicode tables, coin selection, wallet
+# naming or I/O, for a project that requires this package for that alone. Winnow imports it; scripts/check-core
+# holds its import closure to an allowed list.
+[[lean_lib]]
+name = "WinnowCore"
 
 [[lean_lib]]
 name = "Winnow"

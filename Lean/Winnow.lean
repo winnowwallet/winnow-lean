@@ -1,4 +1,5 @@
 -- Winnow's WalletCore in Lean (the port of Sources/WalletCore; see ../PORT.md for the status).
+import WinnowCore
 import Winnow.Crypto
 import Winnow.Keys
 import Winnow.Tx

@@ -1,4 +1,5 @@
-import Winnow.Keys
+import Winnow.Keys.BIP32
+import Winnow.Keys.Taproot
 import Winnow.Tx.Multisig
 import Winnow.Tx.AddressDecoder
 

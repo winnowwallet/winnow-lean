@@ -8,6 +8,10 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 
 - [build-ios](build-ios) builds the Lean app from a clean checkout with LeanNative's `build-ios`, after the census
   list (`build-ios <Debug|Release> [iossim|ios]`; `PREPARE_ONLY=1` stops before xcodebuild).
+- [check-core](check-core) holds the core library's import closure (`WinnowCore`, `Lean/WinnowCore.lean`:
+  transaction review without seed phrases, Unicode tables, coin selection, wallet naming or I/O) to the list of
+  modules it allows, so the core does not grow back; CI runs it. `--measure MOD...` prints a closure's module
+  count and non-blank lines.
 - [ci-regtest](ci-regtest) runs io-test, backend-test and multisig-differential against a disposable regtest
   bitcoind (CI's `extra` job).
 - [install-bitcoin](install-bitcoin) downloads the pinned Bitcoin Core release (31.1) from bitcoincore.org, checks
