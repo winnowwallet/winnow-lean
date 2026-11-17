@@ -306,7 +306,9 @@ Upstream's Swift tests, UI tests and workflows went with the Swift code; their L
   against a regtest bitcoind io-test, backend-test and multisig-differential (Bitcoin Core as the oracle).
   Not ported from upstream, which had neither: segwit-test and segwit-regtest for SegWit v0 multisig accounts
   (`wsh(sortedmulti(k, KEY, …))`, `Lean/Winnow/Wallet/Segwit*.lean`) and the ECDSA under them, and secpct-test
-  for the constant-time signing code (`Lean/SecpCt`).
+  for the constant-time signing code (`Lean/SecpCt`). In the app: a SegWit v0 account joined through "Join an
+  account" and a pasted payment signed (multisig-app-test), and the same against a regtest Bitcoin Core that
+  builds and co-signs the payment (backend-test's `segwitFlow`).
 * **UI tests**: Lean journeys on the Mac (`LeanApp/Journeys.lean`, LeanNative.Journey), each step carried
   out by LeanNative's one generic XCUITest (LNDriver), driving the app in test mode against
   `backend-test --fixture`. Controls are found by id: LeanNative's

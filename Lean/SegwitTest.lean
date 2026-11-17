@@ -238,6 +238,15 @@ def descriptors : TM Unit := do
   refused "a fixed key that is not a point of the curve"
     (read (descriptorOf 2 #["02" ++ hex (Secp.toBE32 5), a, b])) "invalidDescriptor" (says "not a point")
   refused "a fixed key with a path after it" (read (descriptorOf 2 #[fixed ++ "/0", a, b])) "invalidPath"
+  -- read as whichever kind the text is
+  let either := (AnyMultisigAccount.parse canonical .regtest).toOption
+  check "a record's descriptor reads as this kind by how it opens, with the same identifier and text"
+    ((either.map fun any => any.isSegwit && any.taproot?.isNone && any.id == w.account.id && any.serialized == canonical &&
+      any.policySummary == "2 of 3" && any.threshold == 2 && any.signers.size == 3 && !any.isNested && any.recovery.isNone)
+      == some true)
+  check "and a Taproot one as the other kind"
+    (((AnyMultisigAccount.parse s!"tr({Taproot.unspendableInternalKey |> hex},sortedmulti_a(2,{a},{b}))" .regtest).toOption.map
+      fun any => !any.isSegwit && any.taproot?.isSome) == some true)
   check "this wallet's key is one of the account's, another's is not"
     (w.account.includes account && !w.account.includes (← accountKey (← master 0xC3)))
   check "the master holds a signer, and so does its account key; a stranger's does not"

@@ -1,6 +1,6 @@
 import Winnow.Wallet.Types
 import Winnow.Wallet.Characters
-import Winnow.Wallet.MultisigAccount
+import Winnow.Wallet.AnyMultisigAccount
 import Winnow.Wallet.SignerRecord
 
 /-! # Import bundles (port of `Sources/WalletCore/Wallet/ImportBundle.swift`, data half)
@@ -167,10 +167,11 @@ def checkAccountsAndSigners (b : ImportBundle) : Except Failure Unit := do
     throw (.wallet (.invalidBundle "too many multisig account transactions, or a draft too large"))
   let network := Tx.BitcoinNetwork.ofString? b.network
   -- MuSig2 accounts from the shared-account Winnow have no home here; their coins must not vanish
-  -- from a restore, so a bundle with any account that is not a script-path multisig one is refused.
+  -- from a restore, so a bundle with any account that is not a multisig one this wallet keeps (Taproot
+  -- script-path, or SegWit v0) is refused.
   unless vs.isEmpty do
     let some network := network | throw (.wallet .unsupportedWalletData)
-    unless vs.all (fun r => (MultisigAccount.parse r.descriptor network).toOption.isSome) do
+    unless vs.all (fun r => (AnyMultisigAccount.parse r.descriptor network).toOption.isSome) do
       throw (.wallet .unsupportedWalletData)
   -- A signer list that is not one is refused with the file, never restored in part.
   if let some signers := b.signers then

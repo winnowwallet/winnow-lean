@@ -1759,7 +1759,7 @@ def testPlainCreateAndJoinWording : IO Unit := do
   check "Multisig accounts: no jargon" (!contains wallet "k-of-n" && !contains wallet "Join with a descriptor")
   let (join, _) := stepMultisig .openAdd m
   let shown := rendered join
-  for needle in ["Join an account", "Send this to whoever is creating the account.", "Paste the account (tr(…))",
+  for needle in ["Join an account", "Send this to whoever is creating the account.", "Paste the account (tr(…) or wsh(…))",
                  "Winnow finds coins sent to it from now on.", "multisigKeyText", "multisigDescriptorField"] do
     check s!"Join: {needle}" (contains shown needle)
   for needle in ["Copy 2-of-2 template", "NUMS", "/<0;1>/* suffix", "Add multisig account"] do
@@ -2163,6 +2163,149 @@ def testACollectionPageShowsItsDraftAndDiscardsIt : IO Unit := do
   let sent := { m with collect := { m.collect with broadcastTxid := some "aa11" } }
   check "the receipt" (multisigPSBTTitle sent id == "Payment" && contains (rendered sent) "Payment sent" && contains (rendered sent) "aa11")
 
+/-! ## A SegWit v0 account: `wsh(sortedmulti(2, FIXED, this phone, another phone))` -/
+
+/-- The fixed key's private half: a test key, written here on purpose. In the wallet this kind of account is
+for, that half is in a key service and never anywhere else. -/
+def segwitFixedSecret : ByteArray := sha256 "winnow multisig-app-test fixed key".toUTF8
+
+/-- A payment built somewhere else, as its builder's wallet sends it: BIP174 version 0, each coin stated by
+amount and script (which the phone holds to its own record), nothing signed. -/
+def pastedPayment (tx : Transaction) (coins : Array WalletUTXO) : IO String := do
+  let pairs (fields : List (UInt8 × ByteArray)) : Array PSBT.KeyValue :=
+    PSBT.sortPairs (fields.map fun (type, value) => PSBT.KeyValue.make type .empty value).toArray
+  let psbt : PSBT :=
+    { globals := pairs [(PSBT.GlobalType.version, u32LE 2), (PSBT.GlobalType.txVersion, i32LE tx.version),
+        (PSBT.GlobalType.fallbackLocktime, u32LE tx.locktime), (PSBT.GlobalType.inputCount, compactSize tx.inputs.size.toUInt64),
+        (PSBT.GlobalType.outputCount, compactSize tx.outputs.size.toUInt64)]
+      inputs := tx.inputs.map fun input =>
+        let stated := match coins.find? (·.outpoint == input.previousOutput) with
+          | some coin => [(PSBT.InType.witnessUTXO, Wire.appendVarData (i64LE coin.amount) coin.scriptPubKey)]
+          | none => []
+        ⟨pairs ([(PSBT.InType.previousTxid, input.previousOutput.txid), (PSBT.InType.outputIndex, u32LE input.previousOutput.vout),
+          (PSBT.InType.sequence, u32LE input.sequence)] ++ stated)⟩
+      outputs := tx.outputs.map fun o => ⟨pairs [(PSBT.OutType.amount, i64LE o.value), (PSBT.OutType.script, o.scriptPubKey)]⟩ }
+  needE "the PSBT as version 0" (·.name) psbt.base64V0
+
+/-- A person joins an account whose payments someone else builds: pasted into "Join an account", its address
+shown, a coin found, no Send offered, and then a pasted PSBT checked (what leaves, what comes back to an
+address the builder chose, the fee), signed here, completed by the fixed key's signature arriving in another
+copy, and finalized. -/
+def testASegwitAccountIsJoinedAndAPastedPaymentSignedHere : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let other ← phoneWith 0xC3
+  let stranger ← phoneWith 0xD4
+  let sh ← Shell.new
+  let fixed ← needE "the fixed key" (·.name) (Keys.publicKeyOf segwitFixedSecret)
+  let descriptor := s!"wsh(sortedmulti(2,{hex fixed},{← phone.keyExpression},{← other.keyExpression}))"
+  let account ← need "the account" (SegwitMultisigAccount.parse descriptor signet)
+  let id := account.id
+  -- Join an account
+  let m ← phone.openApp sh
+  let (m, _) ← sh.tap (.multisig .openAdd) m
+  check "the form takes either kind" (contains (rendered m) "Paste the account (tr(…) or wsh(…))")
+  let (m, _) ← sh.tap (.multisig (.setName "Exchange")) m
+  sh.clipboard.set s!"wsh(sortedmulti(2,{hex fixed},{← other.keyExpression},{← stranger.keyExpression}))"
+  let (without, _) ← sh.tap (.multisig .pasteDescriptor) m
+  check "an account with no key of this phone: refused with the reason"
+    (without.multisigAdd.validation.any fun | .error e => e == Real.notASignerText | .ok _ => false)
+  sh.clipboard.set (s!"wsh(sortedmulti(2,{hex fixed},{hex fixed},{← phone.keyExpression}))")
+  let (twice, _) ← sh.tap (.multisig .pasteDescriptor) m
+  check "a key listed twice: refused" (twice.multisigAdd.validation.any (· matches .error _) && !twice.multisigAdd.canSave)
+  sh.clipboard.set descriptor
+  let (m, _) ← sh.tap (.multisig .pasteDescriptor) m
+  check "the pasted account is read: 2 of 3, a SegWit v0 address, no recovery path, no Ledger"
+    (m.multisigAdd.validation.any fun
+      | .ok c => c.policy == "2 of 3" && c.firstAddress.any (·.startsWith "tb1q") && c.recovery.isNone &&
+          c.ledgerName.isNone && c.warning.isNone
+      | .error _ => false)
+  let (m, _) ← sh.tap (.multisig .save) m
+  let some joined := m.multisigInfo? id | check "joined: the account is listed" false; return
+  check "joined: under its canonical descriptor, as an account this phone builds no payments for"
+    (joined.descriptor == account.serialized && joined.name == "Exchange" && !joined.buildsPayments &&
+      joined.policy == some "2 of 3" && joined.threshold == 2 && joined.signerCount == 3 && joined.recovery.isNone &&
+      joined.signerExpressions.isEmpty && !joined.needsLedgerRegistration)
+  let first ← need "the first address" (account.address 0)
+  let (m, _) ← sh.tap (.multisig (.openAccount id)) m
+  let page := rendered m
+  check "the account page: its address, a PSBT to paste, and no Send"
+    (contains page first && contains page Ids.multisigPastePSBTButton && contains page Ids.multisigPaymentsElsewhere &&
+      !contains page Ids.multisigSendButton)
+  let (afterSend, cmds) := step (.multisig (.sendFrom id)) m
+  check "Send from it opens nothing" (cmds.isEmpty && !afterSend.hasSheet .send)
+  check "the builder does not offer it as a member" (!pickerAccountEligible joined true)
+  failsWith "a phone with none of its keys cannot join" (stranger.join "Exchange" descriptor) Real.notASignerText
+  check "the other phone joins the same account" ((← other.join "Exchange" descriptor) == id)
+  -- A coin at the first address reaches both phones.
+  let height := (← phone.record id).createdAtHeight + 1
+  let funding := fundingTx 0x51 (← need "the first script" (account.scriptPubKey 0 0))
+  for p in [phone, other] do p.seeBlock height #[funding]
+  let record ← phone.record id
+  check "the coin is credited" (record.balance == 60_000 && record.nextReceiveIndex == 1) s!"{record.balance}"
+  check "the overview shows it at receive 0"
+    ((((← phone.accounts).find? (·.id == id)).map fun a => a.balance == 60_000 && a.coins.any (contains ·.line "receive 0")) == some true)
+  let destination ← destinationOf (← master 0xE5) 0
+  failsWith "this phone builds no payment from it"
+    (Real.createDraft phone.env phone.multisig id destination 20_000 2.0 false) Real.paymentsMadeElsewhereText
+  -- A payment built elsewhere: 30,000 out, 29,000 back to change address 3 (the builder's choice, not this
+  -- phone's next), 1,000 to the miner.
+  let change ← need "change address 3" (account.scriptPubKey 3 1)
+  let tx := spend #[⟨funding.txid, 0⟩] #[{ value := 30_000, scriptPubKey := elsewhere }, { value := 29_000, scriptPubKey := change }]
+  let proposal ← pastedPayment tx record.utxos
+  let lying ← pastedPayment tx (record.utxos.map fun coin => { coin with amount := coin.amount - 5_000 })
+  match ← (phone.backend.adoptDraft id lying).toBaseIO with
+  | .ok _ => check "a PSBT that states a smaller coin is refused" false
+  | .error e => check "a PSBT that states a smaller coin is refused" (contains (toString e) "wrong amount" && (← phone.record id).draft.isNone)
+  phone.backend.adoptDraft id proposal
+  let draft (p : Phone) : IO (Option MultisigScreen) := do
+    return ((← p.accounts).find? (·.id == id)).bind fun a => a.draft.bind (·.screen)
+  let some shown ← draft phone | check "the pasted payment is reviewed" false; return
+  check "what leaves, what comes back, and the fee"
+    (shown.outputs.map (fun o => (o.owned, o.amount)) == [(false, 30_000), (true, 29_000)] && shown.inputTotal == 60_000 && shown.fee == 1_000)
+  check "nobody has signed: one way to spend, 0 of 2, and this phone's signature wanted"
+    (shown.signatures == [(false, 0, 2)] && shown.progress.phoneHolds && shown.progress.phoneUnsigned &&
+      !shown.progress.ledgerHolds && !shown.progress.complete)
+  phone.backend.signDraft id
+  let some signed ← draft phone | check "the signed payment is reviewed" false; return
+  check "signed here: 1 of 2" (signed.signatures == [(false, 1, 2)] && !signed.progress.phoneUnsigned && !signed.progress.complete)
+  -- The fixed key's signature arrives in a copy of the PSBT that does not have this phone's.
+  let unsigned ← needE "the transaction" (·.name) (← needE "the proposal" (·.name) (PSBT.ofBase64 proposal)).unsignedTransaction
+  let (_, digest) ← need "what the input's signature commits to" (account.signingContext unsigned 0 record.utxos[0]!)
+  let signature ← need "the fixed key signs" (SegwitMultisigAccount.partialSignature segwitFixedSecret fixed digest aux0)
+  let theirs := (← needE "the proposal" (·.name) (PSBT.ofBase64 proposal)).modifyInput 0 (·.setPartialSignature fixed signature)
+  phone.backend.adoptDraft id (← needE "their copy" (·.name) theirs.base64V0)
+  let some complete ← draft phone | check "the combined payment is reviewed" false; return
+  check "combined with the fixed key's signature: 2 of 2, ready to finalize"
+    (complete.signatures == [(false, 2, 2)] && complete.progress.complete)
+  -- Finalizing, as "Finalize and broadcast" does before it announces the transaction.
+  let record ← phone.record id
+  let (_, full) ← Real.draftPSBT record
+  let (_, final) ← need "finalize"
+    (AnyMultisigAccount.finalizeSpend (.segwit account) full record.utxos (Real.ownedCoordinates record) height)
+  check "the transaction is the one pasted, with a witness of two signatures and the script"
+    (final.txid == tx.txid && final.inputs.all (·.witness.size == 4))
+  check "the change is found where the builder put it" ((← Real.changeIndexOf (.segwit account) record final) == some 3)
+  discard <| phone.multisig.withStore fun s => do
+    s.recordSpend phone.multisig.host.keys phone.multisig.host.writeData id final (some 3) height
+  let sent ← phone.record id
+  check "sent: the coin is in flight, the change pending at change 3, the draft gone, the next change address past it"
+    (sent.draft.isNone && sent.nextChangeIndex == 4 && sent.balance == 29_000 &&
+      sent.utxos.any (fun coin => coin.chain == .change && coin.index == 3 && coin.height == 0))
+  -- The block that takes it reaches both phones: the one that signed and the one that did not.
+  for p in [phone, other] do p.seeBlock (height + 1) #[final]
+  for (name, p) in [("the phone that signed", phone), ("the phone that did not", other)] do
+    let r ← p.record id
+    check s!"confirmed on {name}: 29,000 at change 3" (r.balance == 29_000 &&
+      r.utxos.any (fun coin => coin.chain == .change && coin.index == 3 && coin.height == height + 1)) s!"{r.balance}"
+  -- A backup carries the account and a restore takes it.
+  let restored ← phone.multisig.withStore fun s => do
+    let records ← s.backupRecords
+    return (← s.restore phone.multisig.host.keys phone.multisig.host.writeData records, records)
+  check "the account is in the backup and restores" (restored.any (·.id == id) && ((← phone.record id).balance == 29_000))
+  let bundle : ImportBundle := { network := "signet", lastKnownHeight := height.toNat.toUInt32 + 1, vaults := some restored }
+  check "a wallet bundle with it reads back"
+    (match ImportBundle.decode bundle.serialized with | .ok b => (b.vaults.map (·.size)) == some restored.size | .error _ => false)
+
 /-- The builder: a member and a key removed, this phone coming back as a member when the account it came in
 with goes, and the threshold following the members. -/
 def testTheBuilderRemovesMembersAndKeys : IO Unit := do
@@ -2254,6 +2397,7 @@ def testRefusedAddressesAndPSBTsFromAnAccount : IO Unit := do
 def accountTests : List (String × IO Unit) :=
   [ ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
   , ("testJoiningAnAccountFromAPastedDescriptor", testJoiningAnAccountFromAPastedDescriptor)
+  , ("testASegwitAccountIsJoinedAndAPastedPaymentSignedHere", testASegwitAccountIsJoinedAndAPastedPaymentSignedHere)
   , ("testNewAddressMovesTheAccountOn", testNewAddressMovesTheAccountOn)
   , ("testACollectionPageShowsItsDraftAndDiscardsIt", testACollectionPageShowsItsDraftAndDiscardsIt)
   , ("testTheBuilderRemovesMembersAndKeys", testTheBuilderRemovesMembersAndKeys)

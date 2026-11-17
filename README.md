@@ -47,6 +47,13 @@ fewer of the same signers, or by a separate recovery key. A Ledger (Bitcoin
 app 2.1.2 or later; 2.2.1 for a recovery path) can be a signer: Winnow pairs with it
 over Bluetooth, registers the account on it, and asks it to sign after it shows
 the payment on its own screen ([Ledger signer](Lean/Winnow/Ledger)).
+"Join an account" also takes a SegWit v0 account, `wsh(sortedmulti(k, KEY, …))`: the
+kind for a wallet one of whose keys is a single fixed public key that signs only
+with ECDSA and derives nothing (a key held in a cloud key service), the others
+extended keys like this phone's. Winnow shows its addresses, finds its coins, and
+checks and signs a PSBT pasted from whoever builds its payments, then broadcasts
+once enough signatures verify. It builds no payment from such an account itself,
+and a Ledger cannot sign for one from Winnow.
 There are no MuSig2 accounts, cosigner cards or shared-savings screens. A backup carrying a MuSig2
 account from the shared-account Winnow is refused rather than restored without
 those funds.

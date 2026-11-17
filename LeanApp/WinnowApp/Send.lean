@@ -97,7 +97,9 @@ def feePriorityLabel (i : Nat) : String := (feePriorityLabels[i]?).getD "Normal"
 /-- From (when this phone has accounts): the wallet, or a multisig account whose payment needs the other
 signers before it goes out. -/
 def sourceSection (m : Model) : List H :=
-  if m.multisig.accounts.isEmpty then [] else
+  -- the accounts this phone builds payments for (not a SegWit v0 one, whose payments are pasted in as PSBTs)
+  let accounts := m.multisig.accounts.filter (·.buildsPayments)
+  if accounts.isEmpty then [] else
   let selected := m.sendInputs.accountID
   let row (title : String) (balance : Int) (id : Option String) (identifier : String) : H :=
     .identified identifier
@@ -105,7 +107,7 @@ def sourceSection (m : Model) : List H :=
              (if selected == id then [.icon "checkmark"] else [])))
   [.section "From" ""
     ([row "Wallet" m.status.balance none Ids.sendFromWallet] ++
-     (m.multisig.accounts.map fun a =>
+     (accounts.map fun a =>
         row (a.name ++ (if a.draft.isNone then "" else " · awaiting signatures")) a.balance (some a.id) (Ids.sendFrom (a.id))) ++
      (match selected.bind m.multisigInfo? with
       | some a =>
