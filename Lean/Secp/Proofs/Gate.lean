@@ -1,5 +1,6 @@
 import Secp.Gate
 import Secp.Proofs.Keys
+import Secp.Proofs.Ecdsa
 
 /-! # The gate: every advertised theorem, then everything under `Secp`
 
@@ -46,5 +47,11 @@ any axiom beyond the standard three. -/
 #assert_axioms Secp.verify_sound
 #assert_axioms Secp.signRaw_key
 #assert_axioms Secp.sign_verifies
+-- ECDSA: what the verifier accepting means, that a signature made here verifies, and the signer's division
+#assert_axioms Secp.Ecdsa.verify_sound
+#assert_axioms Secp.Ecdsa.sign_verifies
+#assert_axioms Secp.Ecdsa.sign_eq_signRaw
+#assert_axioms Secp.Ecdsa.inverse_eq
+#assert_axioms Secp.Ecdsa.inverse?_spec
 
 #assert_all_axioms Secp

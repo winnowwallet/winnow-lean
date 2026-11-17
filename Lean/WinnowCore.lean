@@ -10,5 +10,6 @@ import Winnow.Keys.Taproot
 import Winnow.Tx
 import Winnow.Wallet.Descriptor
 import Winnow.Wallet.SpendReview
+import Winnow.Wallet.SegwitSpendReview
 import Winnow.Net.Params
 import Winnow.Net.HeaderChain

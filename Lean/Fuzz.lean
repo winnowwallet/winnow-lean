@@ -1,4 +1,6 @@
 import Winnow
+import SecpCt.Schnorr
+import SecpCt.Ecdsa
 import TestKit.Fuzz
 open Winnow Winnow.Net Winnow.IO Lean
 open TestKit.Fuzz
@@ -505,9 +507,279 @@ private def ledgerCommands : Target := {
     require (reply.size ≤ 16777216) "an oversized answer to a Ledger command"
     return true }
 
+/-! ## ECDSA, the constant-time signing code, and SegWit v0 multisig accounts
+
+The same harness on code that is not a parser of a peer's bytes but takes bytes all the same: a signature in
+DER from another signer, a signature to verify, a key to sign with, a pasted descriptor, a PSBT someone else
+made. The signing targets are differential: the constant-time code (`SecpCt`) and the reference (`Secp`) must
+give the same answer for every input, which the proofs say of the definitions (`SecpCt/Gate.lean`) and this
+says of the compiled code, on the inputs tried. -/
+
+private def beNat (b : ByteArray) : Nat := Secp.fromBE b
+private def field32 (data : ByteArray) (k : Nat) : ByteArray :=
+  let piece := data.extract (32 * k) (32 * k + 32)
+  piece ++ zeros (32 - piece.size)
+
+/-- A signature OpenSSL made (`Vectors/openssl-ecdsa-secp256k1.json` has more), `s` in the lower half. -/
+private def opensslKey := ofHex! "033eb723c033df92fee43f9f0bf562ba2f90ff2be1d78330621ea9558e3f48e21d"
+private def opensslDigest := ofHex! "a9b39aa2f942395c700296208d1e67041e6f4bba05a43573d96440f319839f23"
+private def opensslDer := ofHex! ("304402203caf7674ca36b3c124c490b5e066d5e186ce1a7444ea5916af3dfe4df0c2a81c"
+  ++ "02202810eaf82d3fc578719cc13a678afa152b85d1daa3d8f875a4789a4ee2e43786")
+private def opensslSignature : ByteArray := (Secp.Ecdsa.parseDer opensslDer).getD .empty
+
+private def ecdsaDer : Target := {
+  name := "ecdsa-der"
+  seeds := #[.empty, opensslDer, ofHex! "3006020101020101", ofHex! "3026022100" ++ ⟨#[0x80]⟩ ++ zeros 31 ++ ofHex! "020101",
+    ofHex! "30080202008002020080"]
+  tokens := #[⟨#[0x02, 0x01]⟩, ⟨#[0x02, 0x20]⟩, ⟨#[0x02, 0x21, 0x00]⟩, ⟨#[0x30, 0x44]⟩, ⟨#[0x00]⟩, ⟨#[0x80]⟩, ⟨#[0x02, 0x00]⟩,
+    ⟨#[0x30, 0x81, 0x44]⟩]
+  check := fun _ data => do
+    let some signature := Secp.Ecdsa.parseDer data | return false
+    require (signature.size == 64) "a signature read from DER that is not 64 bytes"
+    -- the reader is strict (BIP66): what it takes is exactly what the writer writes
+    require (Secp.Ecdsa.der signature == data) "DER that reads but is not written back the same"
+    return true }
+
+/-- The verifier's equation again on the proved curve code, which compiled code otherwise replaces with
+`Secp.Fast`: `(z/s)·G + (r/s)·Q` has x = r modulo N. -/
+private def provedEquation (signature digest key : ByteArray) : Bool := Id.run do
+  let n := Secp.Spec.N
+  let .ok (qx, qy) := Secp.parseCompressed key | return false
+  let (r, s) := (beNat (signature.extract 0 32), beNat (signature.extract 32 64))
+  let some w := Secp.Ecdsa.inverse? s | return false
+  let some rQ := Secp.smul? (r * w % n) (.pt qx qy) | return false
+  match ((Secp.smulJ (beNat digest % n * w % n) Secp.Gpt).add rQ).toAffine? with
+  | some (.pt x _) => return x.toNat % n == r
+  | _ => return false
+
+private def ecdsaVerify : Target := {
+  name := "ecdsa-verify"
+  seeds := #[opensslSignature ++ opensslDigest ++ opensslKey, zeros 129, zeros 64 ++ opensslDigest ++ gCompressed]
+  check := fun rng data => do
+    let (signature, digest, key) := (data.extract 0 64, data.extract 64 96, data.extract 96 129)
+    let n := Secp.Spec.N
+    let (r, s) := (beNat (signature.extract 0 32), beNat (signature.extract 32 64))
+    -- whether the verifier has an equation to evaluate: sizes, a key that is a point, r and s in range
+    let evaluated := signature.size == 64 && digest.size == 32 && (Secp.parseCompressed key).isOk &&
+      0 < r && r < n && 0 < s && s ≤ n / 2
+    match Secp.Ecdsa.verify signature digest key with
+    | .error _ => throw (IO.userError "the verifier failed inside: a division or a point that did not check")
+    | .ok false =>
+      -- one refusal in eight is put to the proved curve code too (it is slow, which is why not every one)
+      if evaluated && (← index rng 8) == 0 then
+        require (!provedEquation signature digest key) "the verifier refused a signature the proved code accepts"
+      return evaluated
+    | .ok true =>
+      require evaluated "an accepted signature out of range, or under a key that is not a point"
+      require (provedEquation signature digest key) "an accepted signature the proved code refuses"
+      require (Secp.Ecdsa.parseDer (Secp.Ecdsa.der signature) == some signature) "an accepted signature DER changes"
+      let upper := signature.extract 0 32 ++ Secp.toBE32 (n - s)
+      require (Secp.Ecdsa.verify upper digest key matches .ok false) "accepted with s in the upper half"
+      return true }
+
+/-- A point on the proved curve code as the constant-time code returns a public key: x, and whether y is odd. -/
+private def publicKeysAgree (secret : ByteArray) : Bool :=
+  match Secp.pubOf (beNat secret), SecpCt.publicKey secret with
+  | .ok (x, y), some (bytes, odd) => bytes == Secp.toBE32 x.toNat && (odd == 1) == y.isOdd
+  | _, _ => false
+
+private def edgeKeys : Array ByteArray :=
+  (#[1, 2, Secp.Spec.N - 1, Secp.Spec.N, 0, 2 ^ 256 - 1, Secp.Spec.N / 2, Secp.Spec.N / 2 + 1, 2 ^ 255, Secp.P] : Array Nat).map
+    Secp.toBE32
+
+private def ecdsaSign : Target := {
+  name := "ecdsa-sign"
+  seeds := edgeKeys.map (· ++ opensslDigest ++ zeros 32) ++ #[Secp.toBE32 7 ++ zeros 32 ++ zeros 32,
+    Secp.toBE32 7 ++ Secp.toBE32 (2 ^ 256 - 1) ++ Secp.toBE32 (2 ^ 256 - 1), Secp.toBE32 7 ++ Secp.toBE32 Secp.Spec.N ++ zeros 32]
+  check := fun rng data => do
+    let (secret, digest, aux) := (field32 data 0, field32 data 1, field32 data 2)
+    let d := beNat secret
+    let reference := (Secp.Ecdsa.signRaw digest d aux).map Secp.Ecdsa.encode
+    match SecpCt.Ecdsa.sign secret digest aux, reference with
+    | none, .error _ =>
+      require (d == 0 || d ≥ Secp.Spec.N) "neither signer signs for a valid key"
+      return false
+    | some signature, .ok expected =>
+      require (signature == expected) "the constant-time ECDSA signature is not the reference's"
+      require (publicKeysAgree secret) "the constant-time public key is not the reference's"
+      let some (x, odd) := SecpCt.publicKey secret | throw (IO.userError "no public key for a key that signs")
+      let key := ByteArray.mk #[if odd == 1 then 3 else 2] ++ x
+      require (Secp.Ecdsa.verify signature digest key matches .ok true) "a signature made here does not verify"
+      require (Secp.Ecdsa.sign digest d aux matches .ok _) "the reference's own check refuses its signature"
+      require (beNat (signature.extract 32 64) ≤ Secp.Spec.N / 2) "a signature with s in the upper half"
+      -- one bit of the signature or the digest changed: no longer a signature of it
+      let bit ← index rng (96 * 8)
+      let flip (b : ByteArray) (i : Nat) := b.set! (i / 8) (b[i / 8]! ^^^ (1 <<< (i % 8)).toUInt8)
+      let changed := if bit < 64 * 8 then Secp.Ecdsa.verify (flip signature bit) digest key
+        else Secp.Ecdsa.verify signature (flip digest (bit - 64 * 8)) key
+      require (changed matches .ok false) "a signature with one bit changed still verifies"
+      return true
+    | some _, .error _ => throw (IO.userError "the constant-time code signs where the reference refuses")
+    | none, .ok _ => throw (IO.userError "the reference signs where the constant-time code refuses") }
+
+private def schnorrSign : Target := {
+  name := "schnorr-sign"
+  seeds := edgeKeys.map (· ++ opensslDigest ++ zeros 32) ++ #[Secp.toBE32 7 ++ zeros 32 ++ zeros 32]
+  check := fun _ data => do
+    let (secret, message, aux) := (field32 data 0, field32 data 1, field32 data 2)
+    let d := beNat secret
+    -- The reference takes its key as a number and signs for any but a multiple of N, reading a larger one
+    -- modulo N (its callers hand it a key already checked, `Keys.secretOf`). The constant-time code takes
+    -- bytes and refuses any that are not a key as they stand. So they are compared where the bytes are a key.
+    match SecpCt.sign secret message aux, Secp.sign message d aux with
+    | none, reference =>
+      require (d == 0 || d ≥ Secp.Spec.N) "the constant-time code refuses a valid key"
+      require (d != 0 || !reference.isOk) "the reference signs with the key zero"
+      return false
+    | some signature, .ok expected =>
+      require (0 < d && d < Secp.Spec.N) "the constant-time code signs with bytes that are not a key"
+      require (signature == expected) "the constant-time BIP340 signature is not the reference's"
+      require (publicKeysAgree secret) "the constant-time public key is not the reference's"
+      let xOnly := ((SecpCt.publicKey secret).map (·.1)).getD .empty
+      require (Secp.verify signature message xOnly matches .ok true) "a BIP340 signature made here does not verify"
+      return true
+    | some _, .error _ => throw (IO.userError "the constant-time code signs where the reference refuses") }
+
+private def constantTimeArithmetic : Target := {
+  name := "secpct-arithmetic"
+  seeds := (edgeKeys.flatMap fun a => edgeKeys.map fun b => a ++ b)
+  check := fun _ data => do
+    let (a, b) := (field32 data 0, field32 data 1)
+    let (p, n) := (Secp.P, Secp.Spec.N)
+    let (x, y) := (beNat a % p, beNat b % p)
+    let (fa, fb) := (SecpCt.Fe.ofBytes a, SecpCt.Fe.ofBytes b)
+    require (beNat (SecpCt.Fe.mul fa fb).bytes == x * y % p) "field multiplication"
+    require (beNat (SecpCt.Fe.add fa fb).bytes == (x + y) % p) "field addition"
+    require (beNat (SecpCt.Fe.sub fa fb).bytes == (x + p - y) % p) "field subtraction"
+    require (beNat (SecpCt.Fe.neg fa).bytes == (p - x) % p) "field negation"
+    require (beNat (SecpCt.Fe.mul fa (SecpCt.Fe.inv fa)).bytes == (if x == 0 then 0 else 1)) "field inversion"
+    let (u, v) := (beNat a % n, beNat b % n)
+    let (sa, sb) := (SecpCt.Sc.ofBytes a, SecpCt.Sc.ofBytes b)
+    require (beNat (SecpCt.Sc.mul sa sb).bytes == u * v % n) "scalar multiplication"
+    require (beNat (SecpCt.Sc.add sa sb).bytes == (u + v) % n) "scalar addition"
+    require (beNat (SecpCt.Sc.neg sa).bytes == (n - u) % n) "scalar negation"
+    require (beNat (SecpCt.Sc.mul sa (SecpCt.Sc.inv sa)).bytes == (if u == 0 then 0 else 1)) "scalar inversion"
+    require ((SecpCt.Sc.isHigh sa == 1) == (u > n / 2)) "the upper half of the scalars"
+    require (beNat (SecpCt.Sc.inv sa).bytes == Secp.Ecdsa.inverse u) "the scalar inverse is not the reference's"
+    return true }
+
+/-! The account the SegWit v0 targets spend from: a fixed key and two extended keys from seeds written here. -/
+
+private def segwitFixedSecret : ByteArray := sha256 (utf8 "winnow fuzz fixed key")
+private def segwitFixed : ByteArray := (Keys.publicKeyOf segwitFixedSecret).toOption.getD .empty
+private def segwitMaster (byte : UInt8) : Keys.HDKey := (Keys.HDKey.ofSeed ⟨Array.replicate 32 byte⟩).toOption.getD default
+private def segwitKeyText (master : Keys.HDKey) : String :=
+  let account := (master.derived "m/86'/1'/0'").toOption.getD default
+  s!"[{Descriptor.hex8 master.fingerprint}/86'/1'/0']{account.neutered.serialized .testnet}/<0;1>/*"
+private def segwitDescriptorText : String :=
+  s!"wsh(sortedmulti(2,{hex segwitFixed},{segwitKeyText (segwitMaster 0xA1)},{segwitKeyText (segwitMaster 0xB2)}))"
+private def segwitAccount : SegwitMultisigAccount :=
+  (SegwitMultisigAccount.parse segwitDescriptorText .regtest).toOption.getD default
+
+private def segwitDescriptor : Target := {
+  name := "segwit-descriptor"
+  seeds := #[.empty, utf8 segwitDescriptorText, utf8 segwitAccount.serialized,
+    utf8 s!"wsh(sortedmulti(1,{hex segwitFixed},{segwitKeyText (segwitMaster 0xC3)}))",
+    utf8 s!"wsh(sortedmulti(2,{segwitKeyText (segwitMaster 0xA1)},{segwitKeyText (segwitMaster 0xB2)}))"]
+  tokens := #["wsh(", "sortedmulti(", "multi(", ")", ",", "/", "/*", "/0", "/1'", "/<0;1>", "/<2;3>", "[deadbeef/86'/1'/0']",
+    "0", "1", "2", "16", "17", "#", hex segwitFixed, gxHex, "03" ++ gxHex, segwitKeyText (segwitMaster 0xC3), account].map String.toUTF8
+  check := fun rng data => do
+    let .ok parsed := SegwitMultisigAccount.parse (lossy data) .regtest | return false
+    require (2 ≤ parsed.keys.size && parsed.keys.size ≤ 16 && 1 ≤ parsed.threshold && parsed.threshold ≤ parsed.keys.size)
+      "an account outside its own bounds"
+    let .ok again := SegwitMultisigAccount.parse parsed.serialized .regtest
+      | throw (IO.userError s!"an account's canonical descriptor does not parse: {parsed.serialized}")
+    require (again.serialized == parsed.serialized) "account canonical round trip changed it"
+    let choice ← index rng 2
+    let position := (← index rng 1000).toUInt32
+    match parsed.resolved choice position with
+    | .ok there =>
+      require (there.keys.size == parsed.keys.size && there.output.scriptPubKey.size == 34) "an address that is not P2WSH"
+      require (there.witnessScript.size == 3 + 34 * parsed.keys.size) "a witness script of another shape"
+      require ((AddressDecoder.segwitScriptPubKey there.output.address .regtest).toOption == some there.output.scriptPubKey)
+        "an address that does not decode to its script"
+    | .error _ => pure ()
+    return true }
+
+/-- The coins the spend target knows: receive addresses 0 and 1, 100,000 and 50,000 sats. -/
+private def segwitCoins : Array WalletUTXO := (Array.range 2).map fun k =>
+  { txid := ⟨Array.replicate 32 (0x21 + k.toUInt8)⟩, vout := k.toUInt32, amount := if k == 0 then 100_000 else 50_000,
+    scriptPubKey := (segwitAccount.scriptPubKey k.toUInt32 0).toOption.getD .empty, chain := .receive, index := k.toUInt32,
+    height := 100 }
+
+private def segwitOwned : Array MultisigAccount.OutputCoordinate := #[{ choice := 1, index := 0 }]
+
+/-- A version 2 PSBT spending both coins, 60,000 out and 89,000 back to change address 0. -/
+private def segwitUnsigned : PSBT :=
+  let change := (segwitAccount.scriptPubKey 0 1).toOption.getD .empty
+  let pairs (fields : List (UInt8 × ByteArray)) : Array PSBT.KeyValue :=
+    PSBT.sortPairs (fields.map fun (type, value) => PSBT.KeyValue.make type .empty value).toArray
+  { globals := pairs [(0xFB, le32 2), (0x02, le32 2), (0x03, le32 0), (0x04, ⟨#[2]⟩), (0x05, ⟨#[2]⟩)]
+    inputs := segwitCoins.map fun coin => ⟨pairs [(0x0E, coin.txid), (0x0F, le32 coin.vout), (0x10, le32 0xFFFF_FFFD),
+      (0x01, i64LE coin.amount ++ var coin.scriptPubKey)]⟩
+    outputs := #[⟨pairs [(0x03, i64LE 60_000), (0x04, ofHex! "5120" ++ gx)]⟩, ⟨pairs [(0x03, i64LE 89_000), (0x04, change)]⟩] }
+
+/-- The same PSBT signed by the first extended key, and then by the fixed key as well. -/
+private def segwitSigned : PSBT × PSBT :=
+  let aux := zeros 32
+  let one := (segwitAccount.sign segwitUnsigned (segwitMaster 0xA1) segwitCoins segwitOwned 200 aux).toOption.getD segwitUnsigned
+  let two := Id.run do
+    let .ok tx := one.unsignedTransaction | return one
+    let mut signed := one
+    for k in [0:2] do
+      let .ok (_, digest) := segwitAccount.signingContext tx k segwitCoins[k]! | return one
+      let .ok signature := SegwitMultisigAccount.partialSignature segwitFixedSecret segwitFixed digest aux | return one
+      signed := signed.modifyInput k (·.setPartialSignature segwitFixed signature)
+    return signed
+  (one, two)
+
+private def segwitSpend : Target := {
+  name := "segwit-spend"
+  tokens := wideLengths ++ #[⟨#[0x22, 0x02]⟩ ++ segwitFixed, ⟨#[0x01, 0x03, 0x04, 0x01, 0, 0, 0]⟩, ⟨#[0x01, 0x03, 0x04, 0x02, 0, 0, 0]⟩,
+    ⟨#[0x01, 0x05]⟩, ⟨#[0x01, 0x00]⟩, opensslDer.push 0x01]
+  seeds := #[segwitUnsigned.serialized, segwitSigned.1.serialized, segwitSigned.2.serialized,
+    (segwitSigned.2.base64V0.toOption.bind Base64.decode?).getD .empty]
+  check := fun _ data => do
+    let .ok parsed := PSBT.parse data | return false
+    let account := segwitAccount
+    let .ok reviewed := account.reviewSpend parsed segwitCoins segwitOwned 200 | return false
+    require (reviewed.inputTotal - reviewed.outputTotal == reviewed.fee && reviewed.fee ≥ 0 &&
+      reviewed.fee.toInt * 10 ≤ reviewed.inputTotal.toInt) "a reviewed spend whose fee is not what is left, or past a tenth"
+    require (reviewed.inputTotal.toInt ≤ 150_000 && parsed.inputs.size ≤ 2) "a reviewed spend takes more than the coins there are"
+    let .ok unsigned := parsed.unsignedTransaction | throw (IO.userError "a reviewed spend has no transaction")
+    let .ok approvals := account.approvals parsed segwitCoins | throw (IO.userError "a reviewed spend's signatures cannot be counted")
+    require (approvals.all (· < 3)) "a signature counted for a key the account does not have"
+    match account.finalizeSpend parsed segwitCoins segwitOwned 200 with
+    | .error _ => require (approvals.size < account.threshold) "the threshold has signed every input and the spend does not finalize"
+    | .ok (_, tx) =>
+      require (tx.txid == unsigned.txid) "finalizing changed the transaction"
+      for h : k in [0:tx.inputs.size] do
+        let witness := tx.inputs[k].witness
+        let some coin := segwitCoins.find? (·.outpoint == tx.inputs[k].previousOutput) | throw (IO.userError "an unknown coin")
+        let .ok (there, digest) := account.signingContext unsigned k coin | throw (IO.userError "no digest for a finalized input")
+        require (witness.size == account.threshold + 2 && witness[0]!.isEmpty && witness.back? == some there.witnessScript)
+          "a witness that is not an empty item, the threshold of signatures and the script"
+        -- each signature verifies under a key of the script, and the keys go up in the script's order
+        let sorted := sortBytes (fun key => key) there.keys
+        let mut next := 0
+        for signature in witness.extract 1 (witness.size - 1) do
+          let some rs := SegwitMultisigAccount.countedSignature? signature | throw (IO.userError "a witness signature that is not counted")
+          let found := (List.range sorted.size).find? fun position =>
+            position ≥ next && (Secp.Ecdsa.verify rs digest sorted[position]! matches .ok true)
+          let some position := found | throw (IO.userError "a witness signature that verifies under no later key of the script")
+          next := position + 1
+    -- signing a reviewed spend adds this key's approval and leaves the transaction alone
+    match account.sign parsed (segwitMaster 0xB2) segwitCoins segwitOwned 200 (zeros 32) with
+    | .ok signed =>
+      require ((account.approvals signed segwitCoins).toOption.map (·.contains 2) == some true) "signing did not add the signer's approval"
+      require ((signed.unsignedTransaction.toOption.map (·.txid)) == some unsigned.txid) "signing changed the transaction"
+    | .error _ => throw (IO.userError "a reviewed spend that a member cannot sign")
+    return true }
+
 private def targets : Array Target :=
   #[psbt, descriptor, transaction, block, messages, framing, filter, address, importBundle, census, dnsJSON,
     fundingSources, controlBlock, personPaste, silentPaymentAddress, addressProgram, silentPaymentKeys,
-    persistedPeers, rangeScan, broadcastStore, walletState, ledgerFrames, ledgerCommands]
+    persistedPeers, rangeScan, broadcastStore, walletState, ledgerFrames, ledgerCommands,
+    ecdsaDer, ecdsaVerify, ecdsaSign, schnorrSign, constantTimeArithmetic, segwitDescriptor, segwitSpend]
 
 def main (args : List String) : IO UInt32 := TestKit.Fuzz.main targets "Vectors/fuzz" args

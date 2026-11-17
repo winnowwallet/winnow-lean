@@ -12,8 +12,8 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   transaction review without seed phrases, Unicode tables, coin selection, wallet naming or I/O) to the list of
   modules it allows, so the core does not grow back; CI runs it. `--measure MOD...` prints a closure's module
   count and non-blank lines.
-- [ci-regtest](ci-regtest) runs io-test, backend-test and multisig-differential against a disposable regtest
-  bitcoind (CI's `extra` job).
+- [ci-regtest](ci-regtest) runs io-test, backend-test, multisig-differential and segwit-regtest against a
+  disposable regtest bitcoind (CI's `lean` job).
 - [install-bitcoin](install-bitcoin) downloads the pinned Bitcoin Core release (31.1) from bitcoincore.org, checks
   its SHA-256 and prints its bin directory; `ci-regtest` and `ui-fixture` run against it, never a bitcoind
   found on the PATH.
@@ -43,6 +43,12 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   segwit and a bare key), each input with the script it spent, from a public Esplora server. Each transaction, and
   each one an input spends from, must hash to its txid, so the server is trusted for nothing. crypto-test holds
   `FundingSources.revelation` to them.
+- [ecdsa-vectors](ecdsa-vectors) writes `Lean/Vectors/openssl-ecdsa-secp256k1.json`: 64 ECDSA signatures over
+  secp256k1 that OpenSSL made and verified, with their keys, which segwit-test holds the verifier and the DER
+  reader of `Lean/Secp/Ecdsa.lean` to. OpenSSL signs with its own randomness, so the file is one run, kept.
+- [gen-scalar-mul-proofs](gen-scalar-mul-proofs) writes `Lean/SecpCt/ScalarMulProofs.lean`, the proofs about the
+  constant-time scalar multiplication, which are too long to write by hand; Lean checks what it writes like any
+  other proof. `--check` (CI) fails unless the file in the repository is what the script writes.
 - [swift-utf8-vectors](swift-utf8-vectors) writes `Lean/Vectors/swift-utf8-decoding.json`, Swift's own
   `String(decoding:as: UTF8.self)` over well-formed and ill-formed UTF-8, which `crypto-test` holds
   `Winnow.Text.decodeUTF8Lossy` to. It needs Xcode's Swift and feeds the program to `xcrun swift` on stdin, so

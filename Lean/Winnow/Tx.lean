@@ -7,6 +7,7 @@ import Winnow.Tx.Multisig
 import Winnow.Tx.Taproot
 import Winnow.Tx.AddressDecoder
 import Winnow.Tx.SighashBIP341
+import Winnow.Tx.SighashBIP143
 import Winnow.Tx.TransactionBuilder
 import Winnow.Tx.FundingSources
 import Winnow.Tx.Base64

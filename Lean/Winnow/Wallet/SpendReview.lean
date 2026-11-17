@@ -991,13 +991,19 @@ def reviewedInputTotal (a : MultisigAccount) (psbt : PSBT) (knownUTXOs : Array W
     total := sum
   return Int64.ofInt total
 
-def reviewedOutputs (a : MultisigAccount) (psbt : PSBT) (inputTotal : Int64) (owned : Array OutputCoordinate) :
-    MAM (Array SpendReview.Output × Int64) := do
+/-- The coordinates among `owned` that an output may be counted against: receive or change, each once, and
+at most 1,024 of them. -/
+def outputCandidates (owned : Array OutputCoordinate) : MAM (Array OutputCoordinate) := do
   let mut candidates : Array OutputCoordinate := #[]
   for c in owned do
     if (c.choice == 0 || c.choice == 1) && !candidates.contains c then candidates := candidates.push c
   unless candidates.size ≤ 1_024 do refuse "too many candidate account output paths"
-  let ownedScripts ← candidates.mapM fun c => a.scriptPubKey c.index c.choice.toNat
+  return candidates
+
+/-- Every output of `psbt` with a valid amount and script, owned when its script is one of `ownedScripts`,
+and their total, which may not exceed `inputTotal`. Shared by every kind of account. -/
+def reviewedOutputsAmong (psbt : PSBT) (inputTotal : Int64) (ownedScripts : Array ByteArray) :
+    MAM (Array SpendReview.Output × Int64) := do
   let mut total : Int := 0
   let mut reviewed : Array SpendReview.Output := #[]
   for h : k in [0:psbt.outputs.size] do
@@ -1012,6 +1018,12 @@ def reviewedOutputs (a : MultisigAccount) (psbt : PSBT) (inputTotal : Int64) (ow
     reviewed := reviewed.push { amount, scriptPubKey := script, isAccountOwned := ownedScripts.contains script }
   unless total ≤ inputTotal.toInt do refuse "outputs exceed its known inputs"
   return (reviewed, Int64.ofInt total)
+
+def reviewedOutputs (a : MultisigAccount) (psbt : PSBT) (inputTotal : Int64) (owned : Array OutputCoordinate) :
+    MAM (Array SpendReview.Output × Int64) := do
+  let candidates ← outputCandidates owned
+  let ownedScripts ← candidates.mapM fun c => a.scriptPubKey c.index c.choice.toNat
+  reviewedOutputsAmong psbt inputTotal ownedScripts
 
 /-- Validates a PSBT before it is shown, signed, finalized or broadcast (SEC-004): every input a unique
 known coin of this account with the exact amount, script, leaves and internal key; every signature

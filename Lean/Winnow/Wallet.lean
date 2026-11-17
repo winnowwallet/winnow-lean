@@ -12,6 +12,8 @@ import Winnow.Wallet.PSBTRoles
 import Winnow.Wallet.MultisigSpendRecords
 import Winnow.Wallet.SpendReview
 import Winnow.Wallet.MultisigAccount
+import Winnow.Wallet.SegwitSpendReview
+import Winnow.Wallet.SegwitMultisigAccount
 import Winnow.Wallet.SignerRecord
 import Winnow.Wallet.HistoryLedger
 import Winnow.Wallet.Characters

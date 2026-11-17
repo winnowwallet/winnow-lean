@@ -1,9 +1,15 @@
 # Winnow in Lean: the port of Sources/WalletCore and Sources/WinnowApp (see ../PORT.md).
 name = "winnow"
-defaultTargets = ["Secp", "WinnowCore", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
+defaultTargets = ["Secp", "SecpCt", "WinnowCore", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
 
 [[lean_lib]]
 name = "Secp"
+
+# Signing that does the same work whatever the key is (SecpCt/Word.lean): field, scalars, points, BIP 340 and
+# ECDSA on machine words, each proved to return what Secp returns (SecpCt/Gate.lean). ECDSA signing for SegWit v0
+# multisig accounts goes through it.
+[[lean_lib]]
+name = "SecpCt"
 
 # The core (WinnowCore.lean): transaction review without seed phrases, Unicode tables, coin selection, wallet
 # naming or I/O, for a project that requires this package for that alone. Winnow imports it; scripts/check-core
@@ -51,6 +57,27 @@ root = "SilentPaymentTest"
 [[lean_exe]]
 name = "crypto-test"
 root = "CryptoTest"
+
+# SegWit v0 multisig accounts, wsh(sortedmulti(k, KEY, …)), and the ECDSA under them (Secp/Ecdsa.lean,
+# Winnow/Wallet/Segwit*.lean): signatures OpenSSL made, BIP143's and BIP67's vectors, the descriptor, the review's
+# refusals, signing and finalizing. Run from Lean/; CI runs it.
+[[lean_exe]]
+name = "segwit-test"
+root = "SegwitTest"
+
+# SegWit v0 multisig accounts against a regtest Bitcoin Core: the same addresses, and spends signed by Core's
+# wallets and this one together that Core's chain confirms. Run from Lean/ with bitcoind on hand
+# (scripts/ci-regtest segwit uses the pinned release); CI runs it.
+[[lean_exe]]
+name = "segwit-regtest"
+root = "SegwitRegtest"
+
+# The constant-time signing code (SecpCt/) against the reference it is proved equal to (Secp/), as compiled:
+# field and scalar arithmetic against plain numbers, public keys, BIP340 and ECDSA signatures byte for byte.
+# `secpct-test N` tries N keys. CI runs it.
+[[lean_exe]]
+name = "secpct-test"
+root = "SecpCtTest"
 
 # Deterministic fuzzing of every parser that reads bytes the wallet did not write (TestKit/Fuzz.lean, the harness,
 # and Fuzz.lean, the targets). Run from Lean/; CI runs it with a seed from the commit.

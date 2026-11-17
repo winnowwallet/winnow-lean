@@ -41,7 +41,7 @@ jobs:
       runs-on: ${{ (github.event.pull_request.head.repo.fork && 'macos-26') || vars.MACOS_RUNNER || 'macos-26' }}
       lean-packages: Lean LeanApp
       build-targets: |
-        Lean multisig-test ledger-test silent-payment-test crypto-test io-test multisig-differential census-check fuzz
+        Lean multisig-test ledger-test silent-payment-test crypto-test segwit-test secpct-test io-test multisig-differential segwit-regtest census-check fuzz
         LeanApp records-test multisig-app-test ledger-transport-test backend-test cloud-backup-test journeys
       app-dir: LeanApp
       app-root: WinnowApp
@@ -50,12 +50,15 @@ jobs:
       prepare: scripts/import-census && cp build/census/peers-source.txt "$CI_RESULTS/"
       tests: |
         . scripts/check-core
+        . scripts/gen-scalar-mul-proofs --check
         . Lean/.lake/build/bin/census-check build/census/peers.json
         . CENSUS_CHECK="$PWD/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s scripts/tests -v
         Lean .lake/build/bin/multisig-test
         Lean .lake/build/bin/ledger-test
         Lean .lake/build/bin/silent-payment-test
         Lean .lake/build/bin/crypto-test
+        Lean .lake/build/bin/segwit-test
+        Lean .lake/build/bin/secpct-test 2000
         Lean .lake/build/bin/fuzz --iterations 10000 --seed "0x${GITHUB_SHA:0:16}"
         LeanApp .lake/build/bin/records-test
         LeanApp .lake/build/bin/multisig-app-test
@@ -64,6 +67,7 @@ jobs:
         . scripts/ci-regtest io
         . scripts/ci-regtest backend
         . scripts/ci-regtest differential
+        . scripts/ci-regtest segwit
       # the journeys headless against the app itself (LeanNative's wire-journeys), one more line of the tests above,
       # with the simulator run's fixture as its hooks
       wire-journey: journeys

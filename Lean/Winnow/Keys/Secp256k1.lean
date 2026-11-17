@@ -15,10 +15,12 @@ Where P256K passes a buffer to libsecp256k1 without checking its length (tweaks,
 x-only keys), libsecp256k1 reads 32 bytes regardless: shorter buffers are out-of-bounds reads in the
 original. Here they are refused with `incorrectParameterSize`, and the lockstep never sends them.
 
-**Not constant-time** (unlike libsecp256k1, which these functions replace): BIP340 signing (Winnow makes no ECDSA signatures), tweaks
+**Not constant-time** (unlike libsecp256k1, which these functions replace): BIP340 signing, tweaks
 and public-key derivation run on `Secp`'s GMP-backed `Nat` scalars and its bit-by-bit scalar multiplication,
 so their timing depends on the secret key and nonce. They are correct by proof and by lockstep against
-P256K. BIP340 nonces come from the key, the message and fresh auxiliary randomness
+P256K. (The one ECDSA signature Winnow makes, for a SegWit v0 multisig account, does not go through this module:
+`Wallet/SegwitMultisigAccount.lean` signs with `SecpCt.Ecdsa` and checks the result with `Secp.Ecdsa.verify`.)
+BIP340 nonces come from the key, the message and fresh auxiliary randomness
 (`Signer.randomAuxiliaryRand`), so signing one message twice does not repeat a nonce. That is acceptable for
 what Winnow does with it: low-volume signing the user approves, on the user's own device, where no one can
 trigger operations on demand or time them. Do not reuse it in servers, signing services, shared hosts, or

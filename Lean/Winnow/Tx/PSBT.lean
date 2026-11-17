@@ -54,8 +54,16 @@ def version : UInt8 := 0xFB
 end GlobalType
 
 namespace InType
+/-- The whole transaction the coin came from (BIP174), which a SegWit v0 spend may carry. -/
+def nonWitnessUTXO : UInt8 := 0x00
 def witnessUTXO : UInt8 := 0x01
+/-- An ECDSA signature, under the 33-byte public key it is by (BIP174). -/
+def partialSignature : UInt8 := 0x02
 def sighashType : UInt8 := 0x03
+/-- The witness script of a P2WSH coin (BIP174). -/
+def witnessScript : UInt8 := 0x05
+/-- Where a 33-byte public key comes from (BIP174): the master fingerprint, then the path. -/
+def bip32Derivation : UInt8 := 0x06
 def finalScriptWitness : UInt8 := 0x08
 def previousTxid : UInt8 := 0x0E
 def outputIndex : UInt8 := 0x0F
@@ -68,6 +76,10 @@ def tapInternalKey : UInt8 := 0x17
 end InType
 
 namespace OutType
+/-- The witness script of a P2WSH output (BIP174). -/
+def witnessScript : UInt8 := 0x01
+/-- Where a 33-byte public key comes from (BIP174). -/
+def bip32Derivation : UInt8 := 0x02
 def amount : UInt8 := 0x03
 def script : UInt8 := 0x04
 def tapInternalKey : UInt8 := 0x05
@@ -172,6 +184,21 @@ def writeDerivations (pairs : Array KeyValue) (type : UInt8) (origins : Array (B
     ps := setPair ps (KeyValue.make type pubkey v)
   return ps
 
+/-- BIP174 key origins (types 0x06 on an input, 0x02 on an output): a 33-byte public key, its master
+fingerprint and its path. A SegWit v0 key signs for no leaf, so `leafHashes` stays empty. Anything else under
+the type is skipped. -/
+def readKeyOrigins (pairs : Array KeyValue) (type : UInt8) : Array (ByteArray × KeyOrigin) :=
+  dictSorted (·.1) <| pairs.filterMap fun pair =>
+    if pair.type == type && pair.keyData.size == 33 && pair.value.size ≥ 4 && pair.value.size % 4 == 0 then
+      let steps := (Array.range (pair.value.size / 4 - 1)).map fun step => (readLE pair.value (4 + 4 * step) 4).toUInt32
+      some (pair.keyData, ({ masterFingerprint := (readBE pair.value 0 4).toUInt32, path := steps } : KeyOrigin))
+    else none
+
+def writeKeyOrigins (pairs : Array KeyValue) (type : UInt8) (origins : Array (ByteArray × KeyOrigin)) :
+    Array KeyValue :=
+  (dictSorted (·.1) origins).foldl (init := removeType pairs type) fun ps (publicKey, origin) =>
+    setPair ps (KeyValue.make type publicKey (origin.path.foldl (· ++ u32LE ·) (u32BE origin.masterFingerprint)))
+
 /-! ## Inputs -/
 
 structure Input where
@@ -258,6 +285,27 @@ def setTapScriptSignatures (i : Input) (sigs : Array (TapScriptSignatureID × By
     ps := setPair ps (KeyValue.make InType.tapScriptSignature (id.publicKey ++ id.leafHash) sig)
   return ⟨ps⟩
 
+/-! SegWit v0 (BIP174's own fields; the reader keeps them under any name). -/
+
+/-- The whole transaction the coin came from, as its bytes. -/
+def nonWitnessUTXO (i : Input) : Option ByteArray := (i.pair InType.nonWitnessUTXO).map (·.value)
+
+def witnessScript (i : Input) : Option ByteArray := (i.pair InType.witnessScript).map (·.value)
+def setWitnessScript (i : Input) : Option ByteArray → Input
+  | none => i.remove InType.witnessScript
+  | some v => i.set (KeyValue.make InType.witnessScript .empty v)
+
+/-- The ECDSA signatures on the input, each under the 33-byte public key it is by: DER, then the hash type
+byte. In key order. -/
+def partialSignatures (i : Input) : Array (ByteArray × ByteArray) :=
+  dictSorted (·.1) <| i.pairs.filterMap fun p =>
+    if p.type == InType.partialSignature && p.keyData.size == 33 then some (p.keyData, p.value) else none
+def setPartialSignature (i : Input) (publicKey signature : ByteArray) : Input :=
+  i.set (KeyValue.make InType.partialSignature publicKey signature)
+
+def bip32Derivation (i : Input) : Array (ByteArray × KeyOrigin) := readKeyOrigins i.pairs InType.bip32Derivation
+def setBIP32Derivation (i : Input) (o : Array (ByteArray × KeyOrigin)) : Input :=
+  ⟨writeKeyOrigins i.pairs InType.bip32Derivation o⟩
 
 end Input
 
@@ -286,6 +334,10 @@ def setTapInternalKey (o : Output) : Option ByteArray → Output
 def tapBIP32Derivation (o : Output) : Array (ByteArray × KeyOrigin) := readDerivations o.pairs OutType.tapBIP32Derivation
 def setTapBIP32Derivation (o : Output) (d : Array (ByteArray × KeyOrigin)) : Output :=
   ⟨writeDerivations o.pairs OutType.tapBIP32Derivation d⟩
+
+def witnessScript (o : Output) : Option ByteArray := (o.pair OutType.witnessScript).map (·.value)
+
+def bip32Derivation (o : Output) : Array (ByteArray × KeyOrigin) := readKeyOrigins o.pairs OutType.bip32Derivation
 
 /-- depth ‖ leaf version ‖ CompactSize length ‖ script tuples (BIP371). -/
 def tapTree (o : Output) : Option (Array (UInt8 × UInt8 × ByteArray)) := do
