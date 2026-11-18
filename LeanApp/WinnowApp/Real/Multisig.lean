@@ -118,7 +118,7 @@ def withStore {α} (a : MultisigApp) (f : MultisigStore → RM (MultisigStore ×
 def withSigners {α} (a : MultisigApp) (f : SignerStore → RM (SignerStore × α)) : IO α := RM.toIO (a.signers.modify f)
 
 /-- `mergeRestoredSigners(_:)`: the signer list is not the wallet's, so a bundle's joins the phone's own;
-a damaged local list is already reported under Settings → Signers and must not stop the wallet from
+a damaged local list is already reported under Settings → Security → Hardware wallets and keys and must not stop the wallet from
 restoring. -/
 def mergeSigners (a : MultisigApp) (restored : Array SignerRecord) : IO Unit := do
   let r ← (a.signers.modify fun s => do
@@ -491,7 +491,7 @@ def existingOrNew (env : Env) (a : MultisigApp) (name text : String) : IO Multis
   if let some existing := (← a.host.read).record? id then return existing
   addMultisigAccount env a name text
 
-/-! ## Signers (Settings → Signers) -/
+/-! ## Signers (Settings → Security → Hardware wallets and keys) -/
 
 /-- `SignerLabel.fingerprint(of:network:)`: "6824f543", or "?" for text that is not a signer key. -/
 def signerFingerprint (key : String) (network : Tx.BitcoinNetwork) : String :=
@@ -696,7 +696,7 @@ def checkMultisigDescriptor (env : Env) (a : MultisigApp) (text : String) : IO M
 
 /-- `MultisigActionError` cases of #259. -/
 def draftInProgressText : String :=
-  "This account has a payment awaiting signatures. Finish or discard it under Transactions before starting another."
+  "This account has a payment awaiting signatures. Finish or discard it under Activity before starting another."
 def noDraftText : String := "This account has no payment awaiting signatures."
 def draftMismatchText : String := "That PSBT is for a different payment than the one awaiting signatures."
 def silentPaymentUnsupportedText : String :=

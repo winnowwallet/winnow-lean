@@ -11,7 +11,8 @@ of the wallet's two keys and a tweak).
 > named as its person's, and a phone restored from a backup looks for the cards made after it. The card
 > for everybody is retired. Build 0.9.12 (TestFlight, internal group) made cards that carried the wallet's
 > two keys and a tweak; those are still read and still found ("Cards made by 0.9.12"). "Results" says what
-> was checked and how.
+> was checked and how. Since this revision the tags v0.9.14, v0.9.15 and v0.9.16 carry it: the card as a
+> code, and Receive as one page.
 
 ## The problem
 

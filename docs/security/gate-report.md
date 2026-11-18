@@ -1,8 +1,16 @@
 # Limited-mainnet gate report
 
 This is an August 2026 audit record. References to Silent Payments and its tweak
-index describe the implementation reviewed then; those features have since been
-removed. Historical findings and their evidence are retained below.
+index describe the implementation reviewed then. The tweak index and receiving
+were removed and have not returned; sending to a silent payment code was
+reinstated in October 2026 (corrected 2026-11-17 from “those features have
+since been removed”; see the [findings register](findings.md)). Historical
+findings and their evidence are retained below.
+
+Note of 2026-11-17: this report, the decision recorded in it and the device
+evidence it cites are about the Swift app (winnowwallet/winnow), whose
+hashes, suite names and issue numbers it uses. No gate report has been written
+for the Lean app (0.9.x); see the [security notes](README.md).
 
 **Decision: GO — recorded 2026-09-14 by the project owner.** Mainnet has been
 the shipped default since v0.6.0 (2026-09-06) and the app has been on the App
@@ -16,10 +24,10 @@ throughout this register as the strongest remaining confidence artifact is
 still outstanding. The agent-driven
 [independent review of 2026-09-14](independent-review-2026-09-14.md) — one
 High, seven Medium, twenty-two Low, three informational, none Critical — is
-tracked as issues #98–#130. Its [dated tracker](independent-review-2026-09-14.md#tracker)
+tracked as issues winnow#98–winnow#130. Its [dated tracker](independent-review-2026-09-14.md#tracker)
 records subsequent fixes and decisions; the observations concern the reviewed
 revision. The GO is the owner’s decision, not a claim of a completed human audit.
-For current automated release checks, use the [CI runbook](../../.github/internal/ci-release.md).
+For current automated checks, use the [testing guide](../testing.md); the [CI runbook](../../.github/internal/ci-release.md) has the release steps.
 
 ---
 

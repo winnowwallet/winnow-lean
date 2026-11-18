@@ -38,8 +38,8 @@ This file is the plan and the status board; it is updated as each module lands.
 * **Removed (2026-10-27, at the user's request):** the Swift original and everything that compiled
   against it — `Sources/`, the Swift tests (`Tests/`, `AppTests/`, `UITests/`), `Package.swift` and its
   lockfile, the Swift app's `project.yml`, the Swift tools (`Tools/Debug|Fixture|Fuzz|Generate`), the
-  Swift-app CI/release/site scripts and `.github/workflows`. The tree holds no `.swift` file; the only
-  Swift in the app is the generic LeanNative shell, generated at build time (above). The original remains
+  Swift-app CI/release/site scripts and `.github/workflows`. The tree holds no `.swift` file, and the
+  app has no Swift: the generic LeanNative shell is Objective-C, generated at build time (above). The original remains
   upstream in `winnowwallet/winnow`, where `9cca3fc` is this port's first base (the tree of `f4bab06`,
   0.7.3). This repository's history was folded, so that commit is not in it.
 * **During the port** the Swift WalletCore was the **oracle**: for each module, a Swift driver exercised
@@ -61,8 +61,9 @@ This file is the plan and the status board; it is updated as each module lands.
 * The runtime libraries are macOS arm64 objects with their Mach-O `LC_BUILD_VERSION` rewritten to the
   iOS simulator (`retarget_ar.py`). Lean does not support this. Verified: the simulator runs Lean code
   with GMP, tasks and libuv TCP (2026-10-26). Device (platform 2): the app links and archives for
-  `generic/platform=iOS` (2026-10-27, `scripts/build-ios Release ios`, unsigned); not run on a device. The
-  first TestFlight build is the first time Apple's processing and a device see it.
+  `generic/platform=iOS` (2026-10-27, `scripts/build-ios Release ios`, unsigned). It has run on a phone
+  since: 0.9.0 (1) on one upgraded from the Swift app (layer 10 below), and the departures of 2026-10-28 were
+  decided on the user's iPhone.
 * iOS suspends background apps and drops sockets: the peer layer needs reconnect-on-foreground.
 * HTTPS (census catalog, DNS-over-HTTPS, explorer) cannot be Lean: Lean's runtime links OpenSSL but exposes
   no TLS API, and `Std.Http` is server-only. It is the generic shell capability `http.get` (URLSession,
@@ -104,7 +105,7 @@ third-party dependency.
 
 | Phase | Upstream Swift | Status | Verified by |
 |---|---|---|---|
-| A. Removals | Vault, VaultRecord, VaultSetup, MuSig/MuSig2 descriptors, CensusSignature, CensusCatalogStore, FallbackPeersGenerated; the app's vault, shared-savings and MuSig2 screens and stores; their parts of People, PSBTRoles, Descriptor, ImportBundle (a bundle with a MuSig2 account is refused) | **done** (91c6e91, dc439e3): a bundle with accounts is refused (`unsupportedWalletData`); the census is the list shipped with the build (`CensusCatalog.bundled`), but importing it into the iOS build (scripts/import-census plus a resource line in project.yml) is still to do | every Lean target builds; records-test 99/99, backend-test 76/76, io-test 71/71; the simulator app builds and launches |
+| A. Removals | Vault, VaultRecord, VaultSetup, MuSig/MuSig2 descriptors, CensusSignature, CensusCatalogStore, FallbackPeersGenerated; the app's vault, shared-savings and MuSig2 screens and stores; their parts of People, PSBTRoles, Descriptor, ImportBundle (a bundle with a MuSig2 account is refused) | **done** (91c6e91, dc439e3): a bundle with accounts is refused (`unsupportedWalletData`); the census is the list shipped with the build (`CensusCatalog.bundled`), and it was imported into the iOS build later (see "Census in builds") | every Lean target builds; records-test 99/99, backend-test 76/76, io-test 71/71; the simulator app builds and launches |
 | B. WalletCore: multisig | Descriptor and Script/Multisig changes (`tr(NUMS, sortedmulti_a(k, …))`, `tr(KEY,TREE)` as `trTree`, timelocked recovery leaves), MultisigAccount, PSBTRoles (multi-leaf, lock-aware signing and finalizing), HistoryOutputs, account-key secrets, FeePolicy's capped resolution | **done** (`Lean/Winnow/Wallet/MultisigAccount.lean`, `Tx/Multisig.lean`, …) | `multisig-test` 464/464: all of upstream's MultisigAccountTests, TimelockedMultisigTests, HistoryOutputTests, the BIP341 script-path vectors and Core's timelocked-multisig vectors, account secrets, fee resolution. `multisig-differential` (upstream's check-multisig-core in Lean): 1,036 agreements and 0 disagreements with Bitcoin Core v31.1.0 over 24 regtest cases (addresses, every k-of-n subset, finalizer bytes, mempool and mining, recovery locks a block early and on time). The Swift lockstep was not rerun: the archived drivers predate 1cf93fb |
 | C. Ledger protocol | LedgerAPDU, LedgerBluetoothFraming, LedgerMerkle, LedgerWalletPolicy, LedgerClientCommands, LedgerBitcoinClient, LedgerMultisig, Tests/Support/LedgerSimulator | **done** (`Lean/Winnow/Ledger/`): the client is a pure resumable `Ledger.Program` over one APDU exchange; the simulator is in the library for tests and test mode | `ledger-test` 199/199: all of upstream's LedgerTests, Ledger's 15 policy ids and 6 Taproot addresses, and sessions recorded from the Swift at 1cf93fb (its client against its simulator, 2-of-2 and 2-of-3 with recovery) replayed byte-exact on both sides, the signed PSBTs included. The Swift recorder is kept outside the tree (`~/src/winnow-lean-swift-archive/LedgerRecorder/`) |
 | D. App | MultisigStore, AppModel's multisig and Ledger operations, MultisigViews, MultisigBuildView, LedgerViews, LedgerBluetooth's transport | **done** (`LeanApp/WinnowApp/Multisig.lean`, `Real/Multisig.lean`, `Real/MultisigStore.lean`, `Real/LedgerTransport.lean`); the Ledger is `openLedger` over the shell's `ble.*`, or in Debug test mode (`WINNOW_E2E_LEDGER`, entropy hex) the simulated device | `multisig-app-test` 150/150 (MultisigStoreTests, MultisigAccountFlowTests, LedgerPairingTests, LedgerBluetoothTests); `ledger-transport-test` 13/13 (the transport against a fake peripheral backed by the simulator, frame sizes 23 and 153, each failure text); `backend-test` 126/126 against regtest: a 2-of-2 spent by the phone and a second key, and two Ledger accounts (2-of-2, and 2-of-3 with recovery) paired, verified on the device, funded, signed by the Ledger and the phone, broadcast and confirmed, exported and restored. Simulator (test mode, regtest): a simulated Ledger paired, an address verified, a spend signed by Ledger and phone, and the node's mempool held exactly that txid. No real Nano X has been used |
@@ -114,14 +115,14 @@ Scope, as the user set it on 2026-10-27: the Ledger signer and the Taproot multi
 multi, no need for musig2 right now"). The other upstream changes in this range were deferred then;
 automatic iCloud backup, background checks, the app side of the Tor/I2P gateways and the onboarding
 without a phrase checklist are ported since (see "The rest of the app" below). **Restore-only range scans (RangeScan, upstream #226) are done** (091b35e:
-`Winnow/Net/RangeScan.lean`, `FilterSyncIO.scanRange` in `Winnow/IO/Filters.lean`). **The census shipped with the build is done** (2026-10-27): `project.yml`
-bundles `build/census/peers.json` (fetched by `scripts/import-census`, which `scripts/build-ios` runs when
-the list is missing), `CensusCatalog.bundled` reads it, and the UI test `testShippedCensus` requires
+`Winnow/Net/RangeScan.lean`, `FilterSyncIO.scanRange` in `Winnow/IO/Filters.lean`). **The census shipped with the build is done** (2026-10-27): the app's manifest
+(`LeanApp/WinnowApp/Project.lean`) bundles `build/census/peers.json` (fetched by `scripts/import-census`, which `scripts/build-ios` runs when
+the list is missing), `CensusCatalog.bundled` reads it, and the journey `shippedCensus` requires
 Settings on mainnet to show the list's date and count. **Silent-payment sending is done** (2026-10-27):
 `Winnow/Keys/SilentPayments.lean` (the code and the BIP352 derivation; `silent-payment-test`, 263 checks,
 every official sending vector), `Wallet.buildSend` derives the outputs after coin selection and the review
 gate binds them (multisig-test's SilentPaymentSendTests), the Send screen takes a code, notes that the
-address is derived and shows it on the receipt; backend-test and the UI test `testSilentPaymentSend` hold
+address is derived and shows it on the receipt; backend-test and the journey `silentPaymentSend` hold
 the node's transaction to a receiver written from the BIP's receiving side, and Core's watch-only wallet
 finds the coin. A person can be paid by a code (People's `.silentPayment` pay-to: pasted, on a card,
 identified by its two keys; upstream's PeopleTests case in `silent-payment-test`). As upstream, the review
@@ -191,6 +192,27 @@ Departures from upstream's formats, each absent until a card is issued:
 (`scripts/ci-regtest cards`), and `records-test`, `backend-test`'s `cardFlow` and `cardRestoreFlow` and the journey
 `cardForOnePerson` hold the app. `docs/out-of-band-payments.md` is the proposal: the design, what it costs,
 what it was compared with, and what is still open.
+
+## Not from upstream: SegWit v0 multisig accounts, the core library, one secp256k1 (2026-11-17)
+
+Three more changes have no Swift counterpart. Each is described where it is used; this is where to look.
+
+- **SegWit v0 multisig accounts (#115).** "Join an account" also takes `wsh(sortedmulti(k, KEY, …))`, where a
+  key may be a single fixed public key that signs only with ECDSA. The [README](README.md#using-the-wallet)
+  says what the app does with such an account and what it does not. `Lean/Winnow/Wallet/SegwitMultisigAccount.lean`
+  and `SegwitSpendReview.lean` hold it, `AnyMultisigAccount.lean` reads a stored record as whichever kind it is,
+  the sighash is `Lean/Winnow/Tx/SighashBIP143.lean`, and the ECDSA under it is `Lean/SecpCt/Ecdsa.lean` with
+  DER in `Lean/Secp/Der.lean`. Its tests are listed under "Tests, UI tests, CI and TestFlight" below.
+- **The core library (#112, #114).** `WinnowCore` (`Lean/WinnowCore.lean`, a library of `Lean/lakefile.toml`)
+  is what transaction review needs and nothing else: hashes and the curve, BIP32 and key encoding,
+  transactions, PSBTs and sighashes, descriptors and the addresses they derive, spend review, and the header
+  chain, with no seed phrases, Unicode tables, coin selection, wallet naming or I/O. `Winnow` imports it, and
+  `scripts/check-core` (a line of CI's `lean` job) holds its import closure to an allowed list.
+- **One secp256k1 (#116).** Every key, tweak, signature and check runs on `Lean/SecpCt`, each operation proved
+  against the curve as specified in `Lean/Secp` (`Lean/SecpCt/Gate.lean`). Nothing that ships is a second
+  implementation; secpct-test holds the compiled code to `Lean/Vectors/secp-known-answers.json`, which
+  `scripts/secp-vectors` computes without the wallet's code. [SECURITY.md](SECURITY.md#timing-side-channels)
+  says what the proofs cover and what they do not.
 
 ## Tracking upstream "one wallet" (#259, with #256 nested multisig)
 
@@ -353,8 +375,10 @@ onboarding without a checklist.
 
 Upstream's Swift tests, UI tests and workflows went with the Swift code; their Lean replacements:
 
-* **Lean tests**: multisig-test, ledger-test, records-test, multisig-app-test, ledger-transport-test, and
-  against a regtest bitcoind io-test, backend-test and multisig-differential (Bitcoin Core as the oracle).
+* **Lean tests**: in `Lean/`, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test,
+  fuzz and census-check; in `LeanApp/`, records-test, multisig-app-test, ledger-transport-test and
+  cloud-backup-test; and against a regtest bitcoind io-test, backend-test, multisig-differential (Bitcoin Core
+  as the oracle) and card-regtest.
   Not ported from upstream, which had neither: segwit-test and segwit-regtest for SegWit v0 multisig accounts
   (`wsh(sortedmulti(k, KEY, …))`, `Lean/Winnow/Wallet/Segwit*.lean`) and the ECDSA under them, and secpct-test
   for the constant-time signing code (`Lean/SecpCt`). In the app: a SegWit v0 account joined through "Join an
@@ -376,27 +400,38 @@ Upstream's Swift tests, UI tests and workflows went with the Swift code; their L
   the wallet (one "Moved to …" row) and pays from it on the Send tab with the Ledger signing in the
   collection step. Both passed on a throwaway iOS 27 simulator against `backend-test --fixture`. Differences from upstream's harness: the node is regtest, not a
   custom signet; Core co-signers are driven by bitcoin-cli from the runner (posix_spawn, as upstream).
-* **CI** (since 2026-10-28): `ci.yml` calls LeanNative's reusable `ios-app` workflow, which builds the Lean once
-  and caches it, then runs `tests`, `extra` (`scripts/ci-regtest`) and `app` (the iOS builds and the UI
-  journeys) in parallel with live progress, on WarpBuild only (no hosted fallback). Before, `scripts/ci-lane
-  lean|regtest|ios|journey` ran four lanes that each built the Lean. The release check replaces upstream's
-  `strings`-based release check, which cannot work here (test mode is compiled into every build and
-  switched on only when the shell answers Debug): `verify-release-no-test-mode` launches the Release and
-  Debug builds with test mode's environment and requires Debug to start the run and Release to ignore it.
-  `check-no-swift` fails on any Swift source, compile step or library. The `mac` lane builds the Mac
-  Catalyst app and launches its arm64 slice against regtest (`scripts/mac-smoke`).
-* **TestFlight**: `release.yml` as upstream's (tag → CI → archive → verify → upload → internal group), as
-  `com.btcswift.app`. Not run yet: it needs a tag push. Whether an update from a Swift build keeps its
-  wallet (the same Keychain service and storage names, read in place) has not been tried; it must be
-  before a tag reaches testers. The tag must also be above the last version uploaded for the app, or App
-  Store Connect refuses the build. `asc-jwt` replaces `asc-jwt.swift`;
-  `verify-signed-archive` requires the iCloud container with CloudKit again (production iCloud for
-  distribution), now that automatic iCloud backup is ported.
+  Those were the first three journeys. `Journeys.lean`'s `all` now has ten; the
+  [README](README.md#ui-tests) lists them.
+* **CI**: `ci.yml` calls LeanNative's reusable `ios-app` workflow at the commit `LeanApp/lake-manifest.json`
+  pins, on GitHub's hosted `macos-26` runners (or, for this repository's own branches, the label in the
+  repository variable `MACOS_RUNNER` while it is set). Three jobs start at once and each builds the Lean from
+  the cache: `lean` (the test lines of `ci.yml`, `scripts/ci-regtest`'s five suites and the ten journeys
+  headless), `app` (the Debug simulator build and the ten journeys in the simulator, split across two runners)
+  and `release` (Debug and Release for the simulator, Release for devices). `media` joins the two parts'
+  recordings. The release check replaces upstream's `strings`-based release check, which cannot work here
+  (test mode is compiled into every build and switched on only when the shell answers Debug): LeanNative's
+  `test-mode-check` launches the Release and Debug builds with test mode's environment (`test-mode-env` in
+  `ci.yml`) and requires Debug to start the run and Release to ignore it. LeanNative's `check-no-swift` fails
+  on any Swift source, compile step or library. There is no Mac lane (Mac Catalyst is deferred, below). The
+  [README](README.md#ci-and-testflight) and [docs/testing.md](docs/testing.md) list what each job runs.
+* **TestFlight**: `release.yml` calls LeanNative's `ios-release.yml` at the same pinned commit, as
+  `com.btcswift.app`. A `vMAJOR.MINOR.PATCH` tag does not test again: it looks for a successful CI run outside
+  a pull request on the same tree and fails without one. Then it archives, checks the archive and the exported
+  IPA (`leannative-release verify-app` and `verify-ipa`: the identity, version and build number, the
+  signature, the iCloud container with production iCloud, no Swift), uploads, waits for processing, sets What
+  to Test and adds the build to TestFlight's internal group. A GitHub release follows, a pre-release when the
+  tag is not on the default branch. The version is the tag's and the build number is the workflow's run
+  number. The tag must be above the last version uploaded for the app, or App Store Connect refuses the build.
+  Run by hand, the workflow does everything up to the upload and publishes nothing. Every step is LeanNative's `leannative-release`
+  (Lean). The repository's tags run from v0.9.2 to v0.9.16. What
+  to Test (`docs/testflight-what-to-test.txt`) tells testers that an update over the App Store's Swift build
+  keeps its wallet, receive labels and iCloud backups, and that the Swift app's saved people, signers and
+  multisig accounts are set aside (layer 10 below).
 
 ## Design, the Mac, and where the app ships (2026-10-28)
 
 * **Design modernization.** The app's look comes from LeanNative's shell, not from Winnow: the Liquid Glass
-  shell (LeanNative 92dfea8..6b3d432; pinned at a00d262: 62b27f0 sends only events the view accepts, so a
+  shell (LeanNative 92dfea8..6b3d432; pinned at a00d262 when this was written, since moved to the commit in `LeanApp/lakefile.toml`: 62b27f0 sends only events the view accepts, so a
   row without an action is not selectable and sends nothing, and a00d262 builds the background-task
   completion form only under the iOS 27 SDK, so CI's Xcode 26 compiles the shell) renders lists as inset-grouped tables inside
   the page's scroll view (every row stays in the accessibility tree), gives screens real push and pop by
@@ -411,11 +446,12 @@ Upstream's Swift tests, UI tests and workflows went with the Swift code; their L
   the app reaches the Mac as upstream's does: the iPad app on Apple silicon Macs
   (`SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES`). LeanNative keeps its Catalyst support (unused by Winnow).
   iPhone stays portrait-only and iPad keeps all four orientations (ae5bd30).
-* **Where it ships.** The app will ship from a new repository, `winnowwallet/winnow-lean`, as one fresh
-  commit of the final tree: the same app (`com.btcswift.app`, the same App Store Connect record). This
-  branch and PR #260 stay as the history of the port and are not merged. The new repository needs the
-  secrets `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`, `DEV_CERT_P12` and `DEV_CERT_P12_PASSWORD`
-  (set by the maintainer), and the website's `fetch-journey-media` must point at it.
+* **Where it ships.** The app ships from its own repository, `winnowwallet/winnow-lean` (this one), which
+  began as one commit of the final tree (a9aee2e, 2026-10-31): the same app (`com.btcswift.app`, the same App
+  Store Connect record). The port's branch and PR #260 in `winnowwallet/winnow` stay as the history of the
+  port and are not merged. The release workflow uses the repository's secrets `ASC_KEY_ID`, `ASC_ISSUER_ID`,
+  `ASC_PRIVATE_KEY`, `DEV_CERT_P12` and `DEV_CERT_P12_PASSWORD`, and the website's `fetch-journey-media` reads
+  this repository by default.
 
 ## Census in builds
 
@@ -441,6 +477,11 @@ missing; `IMPORT_CENSUS=1` forces an import, `IMPORT_CENSUS=0` keeps an existing
 
 ## Layers and status
 
+> 2026-11-17: this table is the record of the 0.7.3 port and is kept as history. Phase A later removed MuSig2,
+> vaults, shared savings and the signed, downloaded census with its Ed25519 check, and the lockstep harness
+> the rows cite is not in the tree (see Scope). What the app is checked by now is in
+> [docs/testing.md](docs/testing.md).
+
 Each module is done when its lockstep run against the Swift original passes and its vectors pass.
 
 | Layer | Modules | Status |
@@ -459,6 +500,9 @@ Each module is done when its lockstep run against the Swift original passes and 
 | 11. Integration | the app on the iOS Simulator against a Bitcoin node | regtest **done**: the simulator app imports a watch-only backup and verifies it over Lean TCP, syncs headers and filters, shows an unconfirmed payment within seconds (mempool window), picks up the confirming block in the 45 s loop, and reopens from disk (`backend-test --fixture <dir>` starts the node). Independence (2026-10-27): a copy of `Lean/`, `LeanApp/` and `docs/` with no `.swift` file and no `Sources/` builds from a clean Lean build to the iOS app; with the Objective-C shell (2026-10-27) it compiles no Swift at all (0 `SwiftCompile`, and `otool -L` of the app binary lists no Swift library): the shell's six files are printed into `ios/build/native-shell` by `lake exe leannative-shell`. In test mode in the simulator the app built from that output created a wallet (Keychain), showed the backup sheet with live sync progress, took a typed label through the Receive sheet (the caret survives each round trip to Lean) and showed the address and its QR code, turned on Advanced mode through an alert, and showed the tab bar, Settings, the Send tab and a bundled design paper; the native demo exercised the remaining node kinds (picker, stepper, disclosure, sheet dismissal, share sheet). The generated files are byte-identical to the hand-written Objective-C prototype they were transcribed from, except for the render dispatch (one branch per grammar row) and the header's capability table. Text is not selectable as it was with SwiftUI; the app has Copy buttons. `Sources/` remains only as the lockstep oracle. Outside test mode, sending in the simulator stops at device authentication: even a freshly created iOS 26.4 simulator shows the system passcode prompt at the app's `auth` step, and no passcode is entered for it. `NormalModeSendUITests.swift` (archived with the oracle harness in `~/src/winnow-lean-swift-archive`; restore a seed-bearing fixture backup, then send; inputs via TEST_RUNNER_WINNOW_UI_*) reaches that prompt and runs where authentication can pass. Accepted 2026-10-27: sending is verified by test mode in the simulator (the node's mempool held exactly the reviewed transaction) and by `backend-test`, since no simulator passcode is available; in test mode (below), which skips it as Swift's does, create, receive and send all ran in the simulator app. Signet **done** (2026-10-27): from a clean install the simulator app finds real signet peers itself (seeds/DoH through the shell's `http.get`), imports a watch-only backup, syncs headers from the built-in checkpoint (258,000) to the tip (328,174) and verifies the backup by filter-scanning 327,674–328,174, in about 90 s. Records on signet (2026-10-27): a co-owner added from a pasted card, a 2-of-2 shared savings created and shown, its sealed `vaults.json` / `people.json` reopened after a restart. Simulator builds are ad-hoc signed: unsigned, the app has no Keychain entitlement and every Keychain write fails (-34018). |
 
 ## How to port a module (the pattern every area follows)
+
+> 2026-11-17: history. `Lean/Oracle/`, the `oracle-*` executables and `Tools/LeanOracle/` are not in the tree
+> (see Scope), so the commands below no longer run.
 
 Layout during the port (the Swift parts went to the archive and the Lean oracles were removed, see Scope):
 

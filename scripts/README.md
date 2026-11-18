@@ -20,7 +20,7 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 - [ui-fixture](ui-fixture) starts the UI journeys' regtest node and config, and afterwards collects the app's
   journals and stops the node: the hooks of LeanNative's `ui-tests` and `wire-journeys`.
 - [journeys](journeys) runs the journeys locally as CI does: in the simulator, or `--wire` headless against the
-  app itself (no simulator, no XCTest: about a minute for all six).
+  app itself (no simulator, no XCTest). Without names it runs all ten.
 - [ios-simulator](ios-simulator) prints one available iPhone (default) or iPad on the newest iOS runtime.
 - [signet-fixture](signet-fixture) provisions a disposable custom-signet bitcoind (`up`, `down`, `status`,
   `snapshot DIR`, `destroy`). For a regtest node with a funded wallet, use `LeanApp`'s `backend-test --fixture <dir>`.
@@ -29,8 +29,8 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   verifies the Ed25519 signature under the key pinned in [census-public-key.txt](census-public-key.txt)
   ([ed25519_verify.py](ed25519_verify.py)), drops clearnet peers the census's health record scores under 70,
   checks the result with Lean's `census-check` and records its provenance in `build/census/peers-source.txt`.
-  CI runs it once per run (the `build` job's `prepare`); `build-ios` runs it for Release builds and when the
-  list is missing; `IMPORT_CENSUS=1` forces it, `IMPORT_CENSUS=0` keeps an existing list.
+  CI runs it in each job that builds (`prepare` in `ci.yml`: `lean`, `app` and `release`); `build-ios` runs it
+  for CI (`CI=true`) and Release builds and when the list is missing; `IMPORT_CENSUS=1` forces it, `IMPORT_CENSUS=0` keeps an existing list.
 - [foundation-vectors](foundation-vectors) regenerates `LeanApp/FoundationVectors.lean`: what Foundation's `URL`
   and the Swift app's rules answer for custom explorer URLs and manual peers, which records-test checks the
   Lean rules against (macOS, `xcrun swift`).
@@ -43,6 +43,9 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   segwit and a bare key), each input with the script it spent, from a public Esplora server. Each transaction, and
   each one an input spends from, must hash to its txid, so the server is trusted for nothing. crypto-test holds
   `FundingSources.revelation` to them.
+- [bip32-vectors](bip32-vectors) writes `Lean/Vectors/bip32-test-vectors.json`: the test vectors of BIP32
+  itself, read from the BIP's text (vectors 1 to 4 give a seed and each chain's extended keys, vector 5 extended
+  keys that must be refused). crypto-test holds `HDKey` to them.
 - [card-keys-vectors](card-keys-vectors) writes `Lean/Vectors/card-keys-vectors.json`: a wallet's silent payment
   keys, the tweak, label and code it makes for each person and the payments derived from them (issue #94),
   computed with the

@@ -11,12 +11,14 @@ shell; the curve arithmetic behind every key and signature is one secp256k1,
 [App Store](https://apps.apple.com/app/id6801502501) ·
 [TestFlight](https://testflight.apple.com/join/83djpNE7) ·
 [User guides](https://winnowwallet.com) ·
-[Report a bug](https://github.com/winnowwallet/winnow/issues)
+[Report a bug](https://github.com/winnowwallet/winnow-lean/issues)
 
-> **Port status.** This branch brings the Lean port up to upstream 0.8.13 and the
-> Ledger signer (winnowwallet/winnow#255). The sections below describe that
-> version; [PORT.md](PORT.md) lists what the Lean code has reached so far and how
-> each part is verified.
+> **Port status.** The Lean port follows upstream through 0.8.21
+> (winnowwallet/winnow#259, with #256) and adds what upstream does not have:
+> SegWit v0 multisig accounts, a card for one person, and one secp256k1
+> implementation proved against the curve as specified. The sections below
+> describe this version (0.9.x); [PORT.md](PORT.md) lists what the Lean code has
+> reached and how each part is verified.
 
 
 ## Using the wallet
@@ -29,6 +31,12 @@ whose fee controls are folded under Fee. Settings holds the rest: Network
 for trying a development build with test funds), Security (hardware wallets
 and keys, multisig accounts) and Backup (iCloud, a backup file, the recovery
 words).
+
+Receive is one page: the wallet's address at once, and under it "From one
+person", where a name gives that person an address of their own and a card. The
+card is a code made for them and holds neither of the wallet's keys; a Winnow
+that saves it pays a new address each time, and Activity names what they pay as
+theirs ([PORT.md](PORT.md#not-from-upstream-a-card-per-person-issue-94-2026-11-14)).
 
 As the balance grows the home suggests more protection: at 0.1 BTC a Ledger,
 at 0.5 BTC an account with other people's keys (each card can be dismissed).
@@ -91,18 +99,22 @@ well. The
   multisig accounts, silent payments, the Ledger signer, the wallet, compact-filter sync, peers, mempool windows and the broadcaster, over libuv TCP.
   `SecpCt/` is secp256k1 as it runs, the only implementation: field, points, keys, tweaks, BIP340 and ECDSA on
   machine words, doing the same work whatever a secret is. `Secp/` is what it is proved against: the curve as
-  specified and signing as the BIPs give it, with bytes, SHA-256 and DER beside them. `IOTest.lean` (`io-test`) runs the network layer against a disposable
-  regtest bitcoind.
+  specified and signing as the BIPs give it, with bytes, SHA-256 and DER beside them. `WinnowCore.lean` is the core library, the part of `Winnow/` that
+  transaction review needs (hashes and the curve, BIP32, transactions, PSBTs and sighashes, descriptors, spend
+  review, the header chain) with no seed phrases, Unicode tables, coin selection, wallet naming or I/O;
+  `scripts/check-core` holds its import closure to an allowed list. `TestKit/` is what the test executables
+  share: the tally, the test keys, a regtest bitcoind, a fake peer. `IOTest.lean` (`io-test`) runs the network
+  layer against a disposable regtest bitcoind.
 - `LeanApp/`: the app: `WinnowApp/` holds the model, update, views and commands (Elm-style, LeanNative),
   `WinnowApp/Real/` the backend, `WinnowApp/E2E.lean` the Debug-only test mode, `WinnowApp/Project.lean`
   the app's manifest: LeanNative generates the Xcode project from it (`lake exe ios-project` writes the XcodeGen
   spec) and refuses a capability the app uses without its usage text or entitlement. `ios/` keeps only the
-  icon and the UI tests. The project links the Lean-generated C with LeanNative's native shell (renderer, C shim, capabilities:
+  asset catalog (the icon and the accent colour). The project links the Lean-generated C with LeanNative's native shell (renderer, C shim, capabilities:
   Keychain, device authentication, clipboard, HTTPS, paths). The shell is Objective-C printed from Lean
   at build time into `ios/build/native-shell/`, never checked in; the app compiles no Swift at all.
 - `docs/`: the website and the papers the app bundles.
 - [PORT.md](PORT.md): how the port was done and verified, and what differs from the Swift original
-  (removed from this tree; it remains in the history before this port).
+  (not in this repository or its history; it remains upstream in winnowwallet/winnow).
 
 ## Build & test
 
@@ -117,7 +129,7 @@ scripts/journeys                             # the UI journeys (Lean) against a 
 ```
 
 LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
-`LeanApp/.lake/packages/leannative` (its Lake package keeps the name it had as LeanNative).
+`LeanApp/.lake/packages/leannative`.
 `scripts/build-ios <Debug|Release> [iossim|ios]` runs LeanNative's
 `framework/native/ci/build-ios` with Winnow's names: it builds WinnowApp, gathers the generated C, prints the
 Objective-C shell, writes the Xcode project from the manifest (XcodeGen 2.46.0) and builds it. Simulator builds are ad-hoc signed (an unsigned app has no
@@ -127,7 +139,7 @@ PATH; CI sets the first two to the pinned release `scripts/install-bitcoin` down
 
 ### UI tests
 
-The UI journeys are Lean, run on the Mac: `LeanApp/Journeys.lean` holds the six as named steps of what a
+The UI journeys are Lean, run on the Mac: `LeanApp/Journeys.lean` holds the ten as named steps of what a
 person does on each screen, `LeanApp/Journeys/Screens.lean` those screens (create the wallet, fill the Send
 form, build an account, set the recovery delay: the controls and the driver mechanics), and
 `LeanApp/Journeys/Host.lean` the other side (the fixture's node through `bitcoin-cli`, Bitcoin Core wallets as
@@ -144,17 +156,28 @@ what was on screen, and the log shows each step's time:
   signatures; after the one-day delay the phone alone spends on the recovery path;
 - `ledgerPairVerifySpend`: pair test mode's simulated Ledger, have it verify the receive address,
   and spend with the phone's and the Ledger's signatures;
+- `ledgerCardTwoOfTwo`: test mode's simulated Ledger advertising brings the nearby card over the home; Set up
+  pairs it, creates the 2-of-2 of this phone and the Ledger, registers it and shows the first receive address
+  on both; the node pays that address and the account sees the coin;
 - `shippedCensus`: the census peer list the build ships shows in Settings on mainnet;
 - `silentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
   receiver (written from the BIP's receiving side) finds, and the receipt shows its address;
 - `feeBumpReplaceConfirm`: send at a low rate, then bump the fee from the unconfirmed payment's screen;
-  Core checks that the replacement spends the same coins, pays more fee, and is the one that confirms.
+  Core checks that the replacement spends the same coins, pays more fee, and is the one that confirms;
+- `spentElsewhere`: the same recovery phrase on another device spends the phone's coins; a review whose coin
+  has gone fails when the owner signs and Send can be used again, a payment the node refuses is found out from
+  the block that confirms the other spend, and a coin that spend did not take comes back;
+- `retryAfterNoPeers`: the node goes off the network while Winnow is in the background; Home says Offline, its
+  alert leads to Settings → Network → Sync, and with the node back Retry there reconnects and the wallet finds
+  a payment the node sends;
+- `cardForOnePerson`: the wallet makes a card for one person; the node, holding only the card's text, derives
+  its first two addresses and pays each, and Activity names both as received from that person.
 
 They run two ways, both LeanNative's runners with `scripts/ui-fixture` as their hooks. `scripts/journeys --wire`
 (LeanNative's `wire-journeys`) runs them against the app itself, headless: the journeys executable
 runs the app as a child of itself with a fake shell (LeanNative's `LEANNATIVE_DRIVER=wire`: a Keychain in a file,
 paths under the evidence directory, no network, no Bluetooth) and finds each element in the app's view tree, so
-the six take about a minute against the fixture's node, with no simulator; CI runs this in the `lean` job. What
+the ten run against the fixture's node with no simulator; CI runs this in the `lean` job. What
 it does not test is the renderer and real touches, which the simulator run does.
 `scripts/journeys` runs them as CI does in the `app` job: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
 with the journeys as `UI_JOURNEY`, and `scripts/ui-fixture` starting the node before and collecting the app's
@@ -171,8 +194,8 @@ goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test, segwit-test, secpct-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested), card-regtest and segwit-regtest; and the ten journeys headless (LeanNative's `wire-journey`) |
-| `app` (two at once) | the same build and census import; Debug for the simulator, checked for Swift; the six UI journeys split across the two (`ui-journey-shards`; `scripts/ui-fixture` as the hooks) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: `scripts/check-core`, `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test, segwit-test, secpct-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested), card-regtest and segwit-regtest; and the ten journeys headless (LeanNative's `wire-journey`) |
+| `app` (two at once) | the same build and census import; Debug for the simulator, checked for Swift; the ten UI journeys split across the two, five each (`ui-journey-shards`; `scripts/ui-fixture` as the hooks) |
 | `media` | once both parts pass, the website's media from their evidence (LeanNative's `journey-media`: one video, the journeys in order) |
 | `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |
 

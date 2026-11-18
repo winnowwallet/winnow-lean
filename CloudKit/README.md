@@ -2,7 +2,8 @@
 
 Winnow automatically uploads an encrypted wallet backup when iCloud is
 available. It is on by default. Settings → Backup shows **Backing up**,
-**Backed up** or **Not backed up** and holds the backup switch, the backup file
+**Backed up** or **Not backed up** (its Settings row also says **Off**, and
+**Not available** in a build without the iCloud entitlement) and holds the backup switch, the backup file
 and the recovery words; while nothing is backed up, the home offers a backup
 file instead. The wallet remains usable without an Apple Account.
 
@@ -17,21 +18,27 @@ and its limits.
 The backup includes this phone's recovery phrase, wallet descriptor, tracked
 funds, payment history and address counters. Its app context
 also includes saved people and payment cards, sender names, receive-address
-labels, display name and interface mode. Watch-only and xprv-only wallets use manual files because
+labels, display name and the Advanced switch (still written and read, no
+longer applied: the app has one mode). Watch-only and xprv-only wallets use manual files because
 this automatic format requires a mnemonic. Peer and explorer endpoints stay
 device-local. Manual file export does not include the extra app context.
 
-The implementation lives in the app:
+The implementation is in Lean:
 
-- [CloudWalletBackup](../Sources/WinnowApp/CloudWalletBackup.swift) encodes and
+- [CloudWalletBackup](../Lean/Winnow/Wallet/CloudWalletBackup.lean) encodes and
   authenticates the encrypted envelope.
-- [CloudBackupController](../Sources/WinnowApp/CloudBackupController.swift) owns
-  preferences, preparation, retries, account binding and successful-save state.
-- [ICloudBackupStore](../Sources/WinnowApp/ICloudBackupStore.swift) writes private
-  CloudKit records and provides a separate wrapping-key store.
+- [CloudBackup](../LeanApp/WinnowApp/Real/CloudBackup.lean) is the controller: it
+  owns preferences, preparation, retries, account binding and successful-save
+  state. The CloudKit store (private records) and the separate wrapping-key
+  store come in as interfaces: on the phone LeanNative's shell capabilities
+  `cloudkit.*` and `keychain.*`, in tests memory versions.
+- [CloudAppState](../LeanApp/WinnowApp/Real/CloudAppState.lean) is the app
+  context inside the encrypted copy, and
+  [CloudApp](../LeanApp/WinnowApp/Real/CloudApp.lean) the app's side: when a
+  backup is prepared and updated.
 
-WalletCore owns the wallet import format and the contact-card rules; it has no
-CloudKit dependency.
+The wallet library (`Lean/Winnow`) owns the wallet import format and the
+contact-card rules; it has no CloudKit dependency.
 
 ## Encryption and update behavior
 
@@ -97,12 +104,14 @@ and [iCloud configuration](https://developer.apple.com/documentation/xcode/confi
 
 ## Validation
 
-[AppTests/CloudWalletBackupTests.swift](../AppTests/CloudWalletBackupTests.swift)
-checks encrypted round trips, restored signing material, counters, updates,
-tampering, wrong keys and bounded decoding in the iOS app test host. It is no
-longer a SwiftPM package suite. Other app tests use in-memory cloud and key
-stores for defaults, retries, account changes, cancellation and persistent
-opt-out. See the [testing guide](../docs/testing.md) for commands and CI evidence.
+`cloud-backup-test` ([LeanApp/CloudBackupTest.lean](../LeanApp/CloudBackupTest.lean),
+a line of CI's `lean` job) is the Swift app's CloudWalletBackupTests,
+CloudAppStateTests, CloudBackupTests and AutomaticCloudBackupTests in Lean. It
+checks encrypted round trips, updates that keep the phrase box, tampering, wrong
+keys, bounded decoding and the upgrade from version 1, and it reads backups the
+Swift app wrote (`Lean/Vectors/cloud-backup.json`). The controller's tests use
+in-memory cloud and key stores. See the [testing guide](../docs/testing.md) for
+commands and CI evidence.
 
 Actual CloudKit transport, provisioning, account behavior and wrapping-key
 synchronization require physical-device validation. End-to-end two-device
