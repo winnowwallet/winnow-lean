@@ -241,7 +241,7 @@ def multisigFlow (n : Node) (a : Backend) (msA : Real.MultisigApp) (mineAddr : S
   check "the headline sums the wallet and the account" (st.accountsBalance ≥ change + 1_000_000)
   return { id, balance := change + 1_000_000, txid, firstAddress := address }
 
-/-- Pair a simulated Ledger (Settings → Signers), build the 2-of-2 of this phone and it and a 2-of-3 with
+/-- Pair a simulated Ledger (Settings → Security → Hardware wallets and keys), build the 2-of-2 of this phone and it and a 2-of-3 with
 another key, the Ledger and a recovery path (the paired Ledger registers each),
 verify an address of each on the Ledger, fund both, and spend from each with the phone's and the
 Ledger's signatures. The two accounts' ids. -/

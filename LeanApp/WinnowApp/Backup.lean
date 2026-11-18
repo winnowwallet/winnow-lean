@@ -90,7 +90,7 @@ def beginnerBackupSection (m : Model) : H :=
 def cloudBackupSheet (m : Model) (inner : List H) : H :=
   let c := m.cloud
   formSheet "iCloud backup" (some .closeSheet) [closeBar "Close"]
-    [ .section "" "Includes this phone’s signing key, wallet history, saved people and labels. Updates while Winnow is open, after pending payments confirm."
+    [ .section "" "Includes this phone’s signing key, wallet history, saved people and labels. Updates while Winnow is open."
          ([ .identified Ids.automaticCloudBackupToggle (.toggle "Automatic iCloud backup" c.automaticEnabled fun b => .cloud (.setAutomatic b))
           , .identified Ids.cloudBackupStatus (.labeled "Status" (cloudRowStatus c)) ] ++
           (match c.lastSavedText with | some t => [.labeled "Last saved to iCloud" t] | none => []) ++

@@ -450,7 +450,7 @@ structure MultisigInfo where
 
 def MultisigInfo.hasRecovery (a : MultisigInfo) : Bool := a.recovery.isSome
 
-/-- A `SignerRecord` as Settings → Signers and the builder's picker show it. -/
+/-- A `SignerRecord` as Settings → Security → Hardware wallets and keys and the builder's picker show it. -/
 structure SignerInfo where
   id : String
   isLedger : Bool
