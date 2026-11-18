@@ -430,7 +430,12 @@ each one's fee and what replaced the original. -/
 def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
   let r ← Run.new "feebump"
   let h := r.host
-  r.launch "feebump"
+  -- headless, this run's wallet secret is behind the person's presence, as the app's is outside test mode, and
+  -- its device check is on: creating, sending and bumping each read the secret under the authentication they ask
+  -- for, and the fake shell refuses a read without one as a device does. Not in a simulator: there the device
+  -- check is a system sheet that no driver answers, and the Keychain does not enforce an access control anyway
+  let headless := (← IO.getEnv "LEANNATIVE_DRIVER") == some "wire"
+  r.launch "feebump" (if headless then [("WINNOW_E2E_DEVICE_AUTH", "1"), ("WINNOW_E2E_KEYCHAIN_PROTECTION", "1")] else [])
   createWallet
 
   step "the node funds the wallet" do

@@ -1021,6 +1021,26 @@ key, is the payer of `legacyScript`. -/
 
 def testWords : String := "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
+/-- A key store as the app's Keychain is once the wallet's secret asks for the person: items kept as bytes
+beside the secrets, and a switch that refuses every `load`, as a sync pass with nobody there is refused. -/
+def guardedKeyStore : IO (KeyStore IO × IO.Ref Bool × IO.Ref (Std.HashMap String ByteArray)) := do
+  let items ← IO.mkRef ({} : Std.HashMap String ByteArray)
+  let refused ← IO.mkRef false
+  let inner := inMemoryKeyStore (← IO.mkRef {})
+  let store : KeyStore IO :=
+    { inner with
+      load := fun id => do
+        if (← refused.get) then throw (.keychain (-25308))
+        inner.load id
+      delete := fun id => do
+        inner.delete id
+        items.modify (·.erase id)
+      loadBytes := fun id => do return (← items.get)[id]?
+      storeBytes := fun bytes id => do
+        if (← items.get).contains id then throw (.alreadyExists id)
+        items.modify (·.insert id bytes) }
+  return (store, refused, items)
+
 /-- A wallet of the test mnemonic with nothing in it, scanning from 100. -/
 def emptyWallet (keyStore : KeyStore IO) (storagePath : Option System.FilePath := none) : TM Wallet :=
   need "create" (Wallet.create .signet keyStore storagePath (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
@@ -1388,6 +1408,40 @@ def aPhraseAloneFindsItsCards : TM Unit := do
     (match ← (restored.exportBundle true).run with
      | .ok bundle => (bundle.serialized.splitOn "cardRestoreFrom").length == 1 && bundle.cards.size == 23
      | .error _ => false)
+  -- the same search under a key store that gives up the wallet's secret only to a person: what a sync pass
+  -- needs of it, the scan private key, is kept apart while the search lasts
+  let (guarded, refused, items) ← guardedKeyStore
+  let searching ← emptyWallet guarded
+  let searchID := Wallet.cardSearchKeyID searching.id
+  check "search key: there is none before a restore begins" (← items.get).isEmpty
+  check "search key: beginning keeps the scan private key, and that item alone"
+    ((← need "begin" searching.beginCardRestore) && (← items.get).size == 1 &&
+     ((← items.get)[searchID]?.map (·.size)) == some 32)
+  discard (need "apply" (searching.apply (fakeMatch 150 #[paid])))
+  refused.set true
+  check "search key: with the secret refused, the next round still records the cards past the one paid"
+    ((← need "restore" searching.restoreCards) && (← searching.cards).size == 23)
+  check "search key: they are the cards the secret gives" ((← searching.cards) == (← restored.cards))
+  check "search key: it issues nothing, which takes the secret"
+    ((← (searching.issueCard).run).toOption.isNone && (← searching.cards).size == 23)
+  need "end" searching.endCardRestore
+  check "search key: the search over, it is removed" (← items.get).isEmpty
+  -- a search key that is not this wallet's scan key, or none (a search begun before there was one), is not
+  -- a reason to guess: the round waits for the secret
+  let (guarded, refused, items) ← guardedKeyStore
+  let waiting ← emptyWallet guarded
+  discard (need "begin" waiting.beginCardRestore)
+  discard (need "apply" (waiting.apply (fakeMatch 150 #[paid])))
+  refused.set true
+  items.modify (·.insert (Wallet.cardSearchKeyID waiting.id) (ByteArray.mk (Array.replicate 32 7)))
+  check "search key: another key is not used, and the round fails with the secret refused"
+    ((← (waiting.restoreCards).run).toOption.isNone && (← waiting.cards).size == Wallet.cardLookahead.toNat)
+  items.modify (·.erase (Wallet.cardSearchKeyID waiting.id))
+  check "search key: without one the round fails the same way"
+    ((← (waiting.restoreCards).run).toOption.isNone && (← waiting.cards).size == Wallet.cardLookahead.toNat)
+  refused.set false
+  check "search key: with the secret, the round records the right cards"
+    ((← need "restore" waiting.restoreCards) && (← waiting.cards) == (← restored.cards))
 
 def cardsInTheWalletFile : TM Unit := do
   let w ← fundedWallet (← newKeyStore)

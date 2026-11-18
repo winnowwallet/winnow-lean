@@ -47,11 +47,21 @@ inert unless the shell reports a Debug build.
 
 The wallet's secret is a Keychain item under the service
 `org.btc-swift.wallet`, readable only on this device while it is unlocked
-([`Real/Shell.lean`](../LeanApp/WinnowApp/Real/Shell.lean)). The item carries
-no user-presence flag of its own. The app asks for device authentication
-instead (`authenticated` in `Main.lean`) before it creates a wallet, imports or
-exports a recovery phrase, shows the phrase, sends, bumps a fee, signs for a
-multisig account or makes a person's card. Every curve operation goes through
+([`Real/Shell.lean`](../LeanApp/WinnowApp/Real/Shell.lean)). The item is
+behind an access control that requires the person (Face ID, Touch ID or the
+passcode), so the Keychain itself gives the secret only under an
+authentication. The app asks for one (`authenticated` in `Main.lean`) before it
+creates a wallet, imports or exports a recovery phrase, shows the phrase,
+sends, bumps a fee, signs for a multisig account or makes a person's card. The
+shell keeps that authentication for the reads of the one action and ends it
+with the action; a read with none is refused, never a prompt. An item stored
+by a build before this is given the access control in place when the wallet
+opens. The sealed stores' keys are separate items without it, because sync
+passes read them with nobody present. So is the scan private key a restored
+wallet keeps while it searches for its cards
+(`Wallet.cardSearchKeyID`); it finds payments and signs for nothing, and is
+removed when the search ends. That iOS enforces the access control is device
+evidence: a simulator's Keychain does not. Every curve operation goes through
 [`Keys/Secp256k1.lean`](../Lean/Winnow/Keys/Secp256k1.lean) to `SecpCt`.
 [SECURITY.md](../SECURITY.md) says what is proved, and what is and is not
 claimed about timing.

@@ -703,9 +703,9 @@ def taprootKey (w : Wallet) (chain : AddressChain) (index : UInt32) (fingerprint
 walked down the descriptor origin, or an account secret at that origin, not derived again), which must be
 private and its public half this wallet's account key (`accountKeyMismatch`); and the master key, when the
 secret is a phrase or a master key and not an account key alone. -/
-def signingKeys (w : Wallet) : WM (HDKey × Option HDKey) := do
+def signingKeysFrom (w : Wallet) (secret : WalletSecret) : WM (HDKey × Option HDKey) := do
   let o ← WM.wallet (origin w.descriptor)
-  let (resolved, master) ← match ← WM.keys (w.keyStore.load w.id) with
+  let (resolved, master) ← match secret with
     | .mnemonic words => do
       let master ← WM.liftE (·.name) (HDKey.ofSeed (BIP39.seed words))
       pure (← WM.liftE (·.name) (master.derivedPath o.path), some master)
@@ -723,6 +723,10 @@ def signingKeys (w : Wallet) : WM (HDKey × Option HDKey) := do
       neutered.childIndex == w.accountKey.childIndex do
     throw (.wallet .accountKeyMismatch)
   return (resolved, master)
+
+/-- `signingKeysFrom` the wallet's secret as the key store holds it: one read of it. -/
+def signingKeys (w : Wallet) : WM (HDKey × Option HDKey) := do
+  w.signingKeysFrom (← WM.keys (w.keyStore.load w.id))
 
 /-- The account private key, loaded for one signing operation (`signingKeys`). -/
 def accountPrivateKey (w : Wallet) : WM HDKey := return (← w.signingKeys).1
@@ -753,6 +757,48 @@ def cardSecrets (w : Wallet) (master : Option HDKey) : WM (ByteArray × ByteArra
     unless derived.scanKey == recorded.scanKey && derived.spendKey == recorded.spendKey do
       throw (.wallet .accountKeyMismatch)
   return (scan, spend)
+
+/-- The key-store item a restoring wallet keeps the scan private key of its cards in while it searches for
+them (`beginCardRestore`): beside the wallet's secret and apart from it. A store may ask for the person before
+it gives up the secret (the app's Keychain does), and the search goes on in sync passes, in the background
+too, with nobody there to ask. The scan key finds the payments made to this wallet's cards; it signs for
+nothing, and the item is removed when the search ends (`endCardRestore`). -/
+def cardSearchKeyID (walletID : String) : String := "card-search." ++ walletID
+
+/-- Removes the search key, if one is kept. Never an error. -/
+def forgetCardSearchKey (w : Wallet) : IO Unit := do
+  try discard (w.keyStore.delete (cardSearchKeyID w.id)).run catch _ => pure ()
+
+/-- Keeps `scan` for the search, in place of one an earlier restore left. Whether it was kept: a store that
+keeps no such items (`KeyStore.storeBytes`'s default) keeps none, and the search then reads the wallet's
+secret, as it did before there was a search key. -/
+def keepCardSearchKey (w : Wallet) (scan : ByteArray) : IO Bool := do
+  w.forgetCardSearchKey
+  try
+    match ← (w.keyStore.storeBytes scan (cardSearchKeyID w.id)).run with
+    | .ok () => return true
+    | .error _ => return false
+  catch _ => return false
+
+/-- What `restoreCards` makes cards from: the scan private key, the spend public key, and the wallet's address
+as its file records it. They come from the search key and the recorded address when a restore kept the one,
+the file has the other and both are the same scan key, so that no secret is read; otherwise from the wallet's
+secret (`cardSecrets`), which also checks them against a recorded address. -/
+def cardSearchKeys (w : Wallet) : WM (ByteArray × ByteArray × String) := do
+  let s ← w.state
+  if let some text := s.silentPaymentAddress then
+    let recorded ← cardAddress s
+    let kept ← WM.io do
+      try
+        match ← (w.keyStore.loadBytes (cardSearchKeyID w.id)).run with
+        | .ok found => pure found
+        | .error _ => pure none
+      catch _ => pure none
+    if let some scan := kept then
+      if (publicKeyOf scan).toOption == some recorded.scanKey then return (scan, recorded.spendKey, text)
+  let (scan, spend) ← w.cardSecrets (← w.signingKeys).2
+  let address ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (cardHRP w.network))
+  return (scan, address.spendKey, ← WM.liftE (·.name) address.encoded)
 
 /-- The secret that signs a coin's key path: BIP86 below the account key, or, for a card's coin, the silent
 payment spend key (`cardKeys`: the scan and spend private keys, loaded once for the transaction) plus the
@@ -820,19 +866,22 @@ def wantsMoreCards (w : Wallet) (lookahead : UInt32 := cardLookahead) : IO Bool 
 `lookahead` past the last one that has been paid (or the first `lookahead`), so a scan back finds their
 payments. Whether it added any: the caller scans, and calls again until it adds none. The cards stay
 recorded, paid or not, so an index that may have been handed out is never issued to someone else. -/
-def restoreCards (w : Wallet) (lookahead : UInt32 := cardLookahead) : WM Bool :=
+def restoreCards (w : Wallet) (lookahead : UInt32 := cardLookahead)
+    (keys : Option (ByteArray × ByteArray × String) := none) : WM Bool :=
   w.cursorLock.atomically (m := WM) do
     let s ← w.state
     let wanted := cardsWanted s lookahead
-    let (scan, spend) ← w.cardSecrets (← w.signingKeys).2
-    let address ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (cardHRP w.network))
-    let code ← WM.liftE (·.name) address.encoded
+    -- `keys`: the scan private key, the spend public key and the address, from a caller that holds the
+    -- wallet's secret already (`beginCardRestore`); otherwise the search key, or failing that the secret
+    let (scan, spendKey, code) ← match keys with
+      | some held => pure held
+      | none => w.cardSearchKeys
     let mut cards := s.cards
     for index in [0:wanted] do
       if cards.any (·.index == index.toUInt32) then continue
       if cards.size ≥ maximumCards then break
       -- which form the card was handed out in is not known here, so its payments are looked for in both
-      let own ← WM.liftE (·.name) (SilentPaymentPairing.codeFor scan spend (cardHRP w.network) index.toUInt32)
+      let own ← WM.liftE (·.name) (SilentPaymentPairing.codeForKeys scan spendKey (cardHRP w.network) index.toUInt32)
       cards := cards.push { index := index.toUInt32, spendKey := some own.spendKey, plainToo := true,
                             tweak := ← WM.liftE (·.name) (SilentPaymentPairing.tweakFor scan index.toUInt32) }
     if cards.size == s.cards.size then return false
@@ -848,21 +897,46 @@ def cardRestoreFrom (w : Wallet) : IO (Option UInt32) := return (← w.state).ca
 would neither watch for their payments nor keep their indices from the next person. So it records the
 cards it could have made (`restoreCards`), before the scan forward from the backup's height, and marks the
 search unfinished from that height: a card made after the backup is paid after it. A wallet that holds
-only its account key, or no key at all, cannot derive a card, and is left as it is. Whether the search
-began. -/
-def beginCardRestore (w : Wallet) : WM Bool := do
-  -- a backup without a secret restores a wallet that only watches
-  match ← WM.io (w.keyStore.load w.id).run with
-  | .error (.notFound _) => return false
-  | _ => pure ()
-  if (← w.signingKeys).2.isNone then return false
-  discard w.restoreCards
+only its account key, or no key at all, cannot derive a card, and is left as it is. The secret is read
+here, where the person restoring is present; the rounds that follow in sync passes read the search key kept
+here instead (`cardSearchKeyID`). Whether the search began. -/
+def beginCardRestore (w : Wallet) (secret : Option WalletSecret := none) : WM Bool := do
+  let master ← match secret with
+    -- the secret the restore has in hand, the one it just stored: the key store is not asked for it again
+    | some held => pure (← w.signingKeysFrom held).2
+    | none =>
+      -- a backup without a secret restores a wallet that only watches
+      match ← WM.io (w.keyStore.load w.id).run with
+      | .error (.notFound _) => return false
+      | _ => pure ()
+      pure (← w.signingKeys).2
+  if master.isNone then return false
+  -- the search goes on after this without the secret: what it needs of it is kept apart, until it ends
+  let (scan, spend) ← w.cardSecrets master
+  let address ← WM.liftE (·.name) (SilentPaymentPairing.address scan spend (cardHRP w.network))
+  discard <| WM.io (w.keepCardSearchKey scan)
+  discard <| w.restoreCards (keys := some (scan, address.spendKey, ← WM.liftE (·.name) address.encoded))
   w.cursorLock.atomically (m := WM) do
     let s ← w.state
     let candidate := { s with cardRestoreFrom := some s.nextScanHeight }
     w.persist candidate
     w.stateRef.set candidate
   return true
+
+/-- For a search that has no search key: one begun before there was such a thing, or under a key store that
+kept none then. Called where the person is present and the secret can be read; keeps the scan private key so
+that the rounds in sync passes go on without it. Whether it kept one. A search that has its key, or no search
+under way, reads nothing. -/
+def keepCardSearchKeyIfWaiting (w : Wallet) : WM Bool := do
+  let s ← w.state
+  if s.cardRestoreFrom.isNone then return false
+  if s.silentPaymentAddress.isSome then
+    let recorded ← cardAddress s
+    match ← WM.io (do try (w.keyStore.loadBytes (cardSearchKeyID w.id)).run catch _ => pure (.ok none)) with
+    | .ok (some scan) => if (publicKeyOf scan).toOption == some recorded.scanKey then return false
+    | _ => pure ()
+  let (scan, _) ← w.cardSecrets (← w.signingKeys).2
+  WM.io (w.keepCardSearchKey scan)
 
 /-- The search for cards is over: a round of `restoreCards` and a scan of its scripts added nothing. -/
 def endCardRestore (w : Wallet) : WM Unit :=
@@ -872,6 +946,7 @@ def endCardRestore (w : Wallet) : WM Unit :=
     let candidate := { s with cardRestoreFrom := none }
     w.persist candidate
     w.stateRef.set candidate
+    WM.io w.forgetCardSearchKey
 
 /-- PSBTv2 metadata, a key-path signature per input, finalize, extract. A card's coin carries no BIP371
 origin: its key is not a BIP32 child of the account key. -/

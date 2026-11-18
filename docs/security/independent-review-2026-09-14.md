@@ -159,12 +159,12 @@ not re-established item by item for the Lean app (winnowwallet/winnow-lean,
 0.9.x), which this review never read. Two things are recorded here; neither
 changes a disposition above.
 
-- IR-023: in the Lean app the wallet's Keychain item is
+- IR-023: in the Lean app through 0.9.16 the wallet's Keychain item is
   `WhenUnlockedThisDeviceOnly` and carries no access-control flag, and the app
-  asks for device authentication before each read instead
-  (`LeanApp/WinnowApp/Real/Shell.lean`). The 2026-09-15 note describes the
-  Swift app. For the Lean app this is open again as `SEC-060` in the
-  [findings register](findings.md).
+  asks for device authentication before each read instead. The 2026-09-15 note
+  describes the Swift app. For the Lean app this is `SEC-060` in the
+  [findings register](findings.md), which records the fix and the device
+  evidence it waits for.
 - The [findings register](findings.md) records findings in the Lean app, fixed
   there on 2026-11-13, on ground this review covered: `SEC-042` (no
   median-time-past rule, and a chain held from below the checkpoint; compare
