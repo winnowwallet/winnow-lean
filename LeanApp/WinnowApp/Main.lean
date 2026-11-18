@@ -53,7 +53,7 @@ def e2eVariables : List String :=
   ["WINNOW_E2E", "WINNOW_E2E_ENTROPY", "WINNOW_E2E_RUN", "WINNOW_E2E_PEER",
    "WINNOW_E2E_CHALLENGE", "WINNOW_E2E_RESET", "WINNOW_E2E_CLIPBOARD", "WINNOW_E2E_NETWORK",
    "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
-   "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS"]
+   "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS", "WINNOW_E2E_CLOUD"]
 
 /-- `E2EMode.current` in a Debug build: inactive, active, or — without pinned entropy — a stop, because a
 capture run that generated a real seed would publish it. -/
@@ -170,9 +170,15 @@ def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit
           | .error _ => pure Real.noLedger
         | .error _ => pure Real.noLedger
       | none => pure (Real.openLedger fx.ask)
-    -- automatic iCloud backup through the shell's CloudKit and iCloud Keychain; never in test mode
-    let (b, _, _) ← Backend.realWithCloud deps ledger (Real.shellCloudStore fx.ask) (Real.shellCloudKeys fx.ask)
-      (allows := mode.isNone) (authenticate := authenticateNow fx)
+    -- automatic iCloud backup through the shell's CloudKit and iCloud Keychain; never in test mode, which has
+    -- none, or a directory a journey gives two runs to be two devices of one person (`WINNOW_E2E_CLOUD`)
+    let (b, _, _) ← match mode.bind (·.cloudDirectory) with
+      | some dir =>
+        Backend.realWithCloud deps ledger (Real.directoryCloudStore dir) (Real.directoryCloudKeys dir)
+          (allows := true) (authenticate := authenticateNow fx) (scheduleDelayMs := 1_000) (devicesIntervalMs := 2_000)
+      | none =>
+        Backend.realWithCloud deps ledger (Real.shellCloudStore fx.ask) (Real.shellCloudKeys fx.ask)
+          (allows := mode.isNone) (authenticate := authenticateNow fx)
     -- nearby Ledgers: the radio through the shell; under test mode the simulated Ledger advertises when there
     -- is one, and nothing touches Bluetooth either way
     let b := match mode with

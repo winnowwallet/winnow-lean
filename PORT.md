@@ -288,6 +288,15 @@ Deviations, all forced by the Lean app's shape or the renderer:
 * BackupSection's, the reveal sheet's and the export sheet's footers follow d2ca878 (upstream #184's
   wording, which the earlier port had missed).
 
+**Not upstream's: accounts and signers follow a person between devices** (2026-11-18, the owner's request after
+joining an account on the Mac that the phone could not see). Each device reads the wallet boxes of the other
+backups under the same Apple Account and takes the multisig accounts and signers it lacks; stamps in the backup's
+context (`CloudAppState.sync`) decide renames, removals and a payment awaiting signatures. The rules are
+`Winnow/Wallet/DeviceSync.lean` (pure, with `Stamp.max` proved commutative, associative and idempotent), the app's
+side `Real/DeviceSync.lean`, an arriving account's catch-up `MultisigApp.catchUp` over `FilterSyncIO.scanRange`
+(its first caller in the app). Verified by device-sync-test and backend-test's `devicesFlow`;
+`CloudKit/README.md`, "Your other devices", says what follows, what does not and when.
+
 Needs a real device and iCloud account: CloudKit save/list/load and the iCloud Keychain key (the simulator
 build carries the entitlement and answers that iCloud is unavailable, which the onboarding shows), a
 second device restoring, iOS launching and expiring background tasks (the simulator refuses `bgtask.schedule`;

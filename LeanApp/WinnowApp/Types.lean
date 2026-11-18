@@ -234,6 +234,9 @@ structure CloudStatus where
   busy : Bool := false
   available : List CloudBackupInfo := []
   restoreNotice : Option String := none
+  /-- How keeping accounts and Ledgers in step with the person's other devices stands: when their backups were
+  last read ("Checked 2 min ago"), or why they could not be. None before the first look, and in test mode. -/
+  devicesNote : Option String := none
   deriving Repr, Inhabited, BEq
 
 /-- AppModel's `SyncPhase`. -/
@@ -444,6 +447,18 @@ structure MultisigInfo where
   coins : List MultisigCoin := []
   /-- What a PSBT's review depends on (`TrustedState`: coins and frontiers): a change re-reviews it. -/
   trusted : String := ""
+  /-- No key of the account is this device's (it came from another of the person's devices, whose wallet is a
+  different one): the account shows here, and this device cannot sign for it. -/
+  watchOnly : Bool := false
+  deriving Repr, Inhabited, BEq
+
+/-- An account another of the person's devices has, on its way here: shown by name until this device has
+scanned the blocks between that device's and its own. -/
+structure ArrivingInfo where
+  id : String
+  name : String
+  /-- Why it waits, when it is not only a matter of scanning. -/
+  note : Option String := none
   deriving Repr, Inhabited, BEq
 
 def MultisigInfo.hasRecovery (a : MultisigInfo) : Bool := a.recovery.isSome
@@ -457,6 +472,8 @@ structure SignerInfo where
   keys : List String
   /-- `SignerLabel.keysText`: "5992698d" for a Ledger, "6824f543 · 1a2b3c4d" for saved keys. -/
   keysText : String
+  /-- A Ledger paired on another of the person's devices that has not yet answered on this one. -/
+  elsewhere : Bool := false
   deriving Repr, Inhabited, BEq
 
 /-- `multisigAccounts`, `multisigStorageNotice`, this wallet's key expression (`multisigKeyExpression`),
@@ -469,6 +486,8 @@ structure MultisigOverview where
   ownFingerprint : Option String := none
   signers : List SignerInfo := []
   signerNotice : Option String := none
+  /-- Accounts on their way from another of the person's devices. -/
+  arriving : List ArrivingInfo := []
   deriving Repr, Inhabited, BEq
 
 def MultisigOverview.ledgers (o : MultisigOverview) : List SignerInfo := o.signers.filter (·.isLedger)

@@ -1,5 +1,6 @@
 import WinnowApp.Real.Full
 import WinnowApp.Real.CloudBackup
+import WinnowApp.Real.DeviceSync
 import LeanNative.Native.EffectScope
 
 /-! # AppModel's iCloud backup (the `AppModel` extension in AppModel.swift, upstream d2ca878 :3485–3651)
@@ -20,6 +21,11 @@ wallet can be used:
   signer merges, imports the bundle and, inside the import's commit, applies the context and starts this
   device's own backup record bound to the same account.
 
+* **The person's other devices** (`SyncApp`, `Real/DeviceSync.lean`): every backup says when each of its
+  accounts and signers last changed (`cloudAppState`'s `sync`), and while the scene is active a loop of its
+  own looks, when a look is due, at the other devices' backups and takes what they have that this device
+  lacks (`tick` and `sceneChanged` begin it, the background ends it).
+
 Test mode never uses iCloud (`allowsCloudBackup`). The context's display name is the Model's setting here: a
 restore hands it back (`CloudRestored.context`) for the Model to save. The context's Advanced switch stays in
 the format (shared with the Swift app); this app has one mode, writes it on and applies nothing from it. -/
@@ -36,6 +42,8 @@ structure CloudApp where
   env : Env
   host : RecordsHost
   multisig : MultisigApp
+  /-- Keeping accounts and signers in step with the person's other devices. -/
+  follow : SyncApp
   /-- `allowsCloudBackup`: never in test mode. -/
   allows : Bool
   /-- `authenticateSensitiveAction(reason:)`: device-owner authentication (throws when declined). -/
@@ -56,9 +64,9 @@ structure CloudApp where
 
 namespace CloudApp
 
-def new (controller : CloudBackupController) (env : Env) (host : RecordsHost) (multisig : MultisigApp) (allows : Bool)
-    (authenticate : String → IO Unit) : IO CloudApp := do
-  return { controller, env, host, multisig, allows, authenticate, attempted := ← IO.mkRef [], preparing := ← IO.mkRef none,
+def new (controller : CloudBackupController) (env : Env) (host : RecordsHost) (multisig : MultisigApp) (follow : SyncApp)
+    (allows : Bool) (authenticate : String → IO Unit) : IO CloudApp := do
+  return { controller, env, host, multisig, follow, allows, authenticate, attempted := ← IO.mkRef [], preparing := ← IO.mkRef none,
            preparation := ← LeanNative.Native.EffectScope.new, preparationTask := ← IO.mkRef none, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false }
 
 def directory (a : CloudApp) : IO (Option System.FilePath) := do return (← a.env.get).dir.map System.FilePath.mk
@@ -83,12 +91,15 @@ def cloudAppState (a : CloudApp) (bundle : ImportBundle) : IO CloudAppState := d
   let st ← store.read
   let labels ← store.labelStore st walletID
   let settings := ((← a.env.get).settings).getD {}
+  let sync ← if a.allows then a.follow.publish else pure none
   let state : CloudAppState := {
     network := bundle.network, descriptor := bundle.descriptor, people := ← RM.toIO st.people.backup,
     receiveLabels := ← RM.toIO labels.backup, ownDisplayName := settings.ownDisplayName,
     -- the format (shared with the Swift app) keeps its Advanced switch: this app's one mode has every
     -- feature Advanced had, so a backup says it is on
-    advancedMode := true }
+    advancedMode := true,
+    -- when each account and signer of this bundle last changed, for the person's other devices
+    sync }
   RM.toIO (state.validate bundle)
   return state
 
@@ -199,18 +210,25 @@ def schedulePreparation (a : CloudApp) : IO Unit := do
     if ← a.preparation.isValid token then a.preparing.set none
   a.preparationTask.set (some task)
 
-/-- What `refresh()` asks of the iCloud side: an update of the copy, and a preparation if one is due. -/
+/-- What `refresh()` asks of the iCloud side: an update of the copy, a preparation if one is due, and that the
+other devices' backups are being looked at (a launch straight into the foreground brings no scene change). -/
 def tick (a : CloudApp) : IO Unit := do
   a.scheduleBackup
   a.schedulePreparation
+  a.follow.ensureRunning
 
 /-- `scenePhaseChanged`: a new foreground session may prepare again; the background cancels preparation
 and suspends the controller. -/
 def sceneChanged (a : CloudApp) (active : Bool) : IO Unit := do
   let was ← a.wasActive.modifyGet fun w => (w, active)
   if active then
-    if !was then a.attempted.set []
+    if !was then
+      a.attempted.set []
+      -- back in the foreground: the other devices' backups are looked at now, and then while it stays open
+      a.follow.lastRound.set none
+      a.follow.start
   else
+    a.follow.stop
     discard <| a.preparation.invalidateWithoutWaiting
     a.preparing.set none
     a.controller.suspend
@@ -221,6 +239,7 @@ def walletChanged (a : CloudApp) : IO Unit := do
   discard <| a.preparation.invalidateWithoutWaiting
   a.preparing.set none
   a.controller.configure none none
+  a.follow.reset
 
 /-- `setAutomaticCloudBackup(_:)` (Settings → Backup → iCloud backup). -/
 def setAutomatic (a : CloudApp) (enabled : Bool) : IO Unit := do
@@ -300,8 +319,14 @@ def status (a : CloudApp) : IO CloudStatus := do
   -- `lastSaved` counts from 2001 (Foundation's reference date)
   let lastSavedAgo := s.lastSaved.map fun d => relativeAgo (max 0 (now - (d + 978_307_200))).toUInt64.toNat
   let available ← s.available.toList.mapM fun b => do return ({ id := b.id, savedAtText := ← formatReferenceDate b.savedAt } : CloudBackupInfo)
+  let follow ← a.follow.status.get
+  let devicesNote := if !a.allows || !s.automaticEnabled then none else
+    match follow.message, follow.checkedAt with
+    | some m, _ => some m
+    | none, some t => some s!"Other devices checked {relativeAgo (now.toUInt64.toNat - t)} ago"
+    | none, none => none
   return { automaticEnabled := s.automaticEnabled, enabled := s.enabled, statusTitle := s.statusTitle, lastSavedText, lastSavedAgo,
-           message := s.message, busy := s.busy, available, restoreNotice := ← a.restoreNotice.get }
+           message := s.message, busy := s.busy, available, restoreNotice := ← a.restoreNotice.get, devicesNote }
 
 /-- The backend's iCloud fields over this app (creation and import prepare the backup inside the
 authentication that read the words). -/
@@ -315,6 +340,18 @@ def install (a : CloudApp) (base : Backend) : Backend :=
     importBundle := fun n dir json => do
       importBundle a.env n dir json fun bundle _ => do
         if let some words := bundle.mnemonic then a.prepare words
+    -- the app's own Remove is what removes an account or a signer on the person's other devices
+    removeMultisigAccount := fun id => do
+      let had := (← a.multisig.host.read).records.any (·.id == id)
+      base.removeMultisigAccount id
+      if had then a.follow.noteAccountRemoved id
+    removeSigner := fun id => do
+      let store ← a.multisig.signers.read
+      let key ← match store.records.find? (·.id == id) with
+        | some r => signerKey r store.network
+        | none => pure none
+      base.removeSigner id
+      if let some key := key then a.follow.noteSignerRemoved key
     cloudStatus := a.status
     observeCloud := fun k => a.controller.observers.modify (·.push (do k (← a.status)))
     discoverCloudBackups := a.discover
@@ -333,8 +370,8 @@ end Real
 Keychain on the phone; memory versions in tests). `allows` is false in test mode. -/
 def Backend.realWithCloud (deps : Real.Deps) (ledger : IO Real.LedgerSession := Real.noLedger)
     (store : Real.CloudBackupStore) (keys : Real.CloudBackupKeys) (allows : Bool := true)
-    (authenticate : String → IO Unit := fun _ => pure ()) (scheduleDelayMs : Nat := 5_000) :
-    IO (Backend × Real.Env × Real.CloudApp) := do
+    (authenticate : String → IO Unit := fun _ => pure ()) (scheduleDelayMs : Nat := 5_000)
+    (devicesIntervalMs : Nat := 60_000) : IO (Backend × Real.Env × Real.CloudApp) := do
   let controller ← Real.CloudBackupController.new store keys scheduleDelayMs
   let appRef ← IO.mkRef (none : Option Real.CloudApp)
   let deps := { deps with hooks := { deps.hooks with walletChanged := do
@@ -346,7 +383,9 @@ def Backend.realWithCloud (deps : Real.Deps) (ledger : IO Real.LedgerSession := 
   let ctx := host.ctx env
   let base := multisig.install env (ctx.install env.backend)
   let base := { base with records := host.withStore {} fun _ => ctx.records }
-  let app ← Real.CloudApp.new controller env host multisig allows authenticate
+  let follow ← Real.SyncApp.new controller env multisig allows devicesIntervalMs
+  let app ← Real.CloudApp.new controller env host multisig follow allows authenticate
+  follow.changed.set app.scheduleBackup
   appRef.set (some app)
   return (app.install base, env, app)
 

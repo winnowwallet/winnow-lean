@@ -262,6 +262,36 @@ def remove (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (i
   let next ← s.mutate keys writeData (s.records.filter (·.id != id))
   return { next with ownerMaps := next.ownerMaps.filter (·.id != id) }
 
+/-- An account that arrives whole from another of the person's devices, its coins and history current to
+this phone's own scan (`ArrivingAccount`): validated with the accounts already kept, as a restore's are. -/
+def admit (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (record : MultisigAccountRecord) :
+    RM MultisigStore := do
+  s.requireReadable
+  if s.records.any (·.id == record.id) then throw (.multisig .duplicate)
+  unless s.records.size < maximumAccounts do throw (.multisig .tooMany)
+  let candidate := s.records.push record
+  validate candidate s.network s.ownerMaps
+  s.mutate keys writeData candidate
+
+/-- A name given on another device. -/
+def rename (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (id name : String) : RM MultisigStore := do
+  s.requireReadable
+  let some i := s.records.findIdx? (·.id == id) | invalid "the account is no longer on this phone"
+  unless DisplayName.normalized name == some name && !name.isEmpty do invalid "an account needs a short, single-line name"
+  if s.records[i]!.name == name then return s
+  s.mutate keys writeData (s.records.modify i fun r => { r with name })
+
+/-- Address counters another device has moved further: never back, so two devices do not hand out one address. -/
+def raiseIndices (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (id : String)
+    (receive change : UInt32) : RM MultisigStore := do
+  s.requireReadable
+  let some i := s.records.findIdx? (·.id == id) | invalid "the account is no longer on this phone"
+  let r := s.records[i]!
+  unless receive ≤ maximumNextIndex && change ≤ maximumNextIndex do invalid "account address index is out of range"
+  if receive ≤ r.nextReceiveIndex && change ≤ r.nextChangeIndex then return s
+  s.mutate keys writeData (s.records.set! i
+    { r with nextReceiveIndex := max r.nextReceiveIndex receive, nextChangeIndex := max r.nextChangeIndex change })
+
 /-- The record's owner cache at its watch count: from the cache while the descriptor is the one it was
 built for (extended when the frontier moved on); the store with the cache updated. -/
 def ownerCache (s : MultisigStore) (r : MultisigAccountRecord) : RM (OwnerCache × MultisigStore) := do
@@ -604,19 +634,112 @@ def rewindCoins (fork : UInt32) (coins : Array WalletUTXO) : Array WalletUTXO :=
   let kept := coins.filter fun u => !(u.height > fork && !isPending u)
   kept.map fun u => if u.height > fork then { u with height := 0 } else u
 
+/-- One record to a fork height (`rollBack`'s work on each). -/
+def rewindRecord (fork : UInt32) (r : MultisigAccountRecord) : MultisigAccountRecord :=
+  let r := { r with history := (HistoryLedger.rewind r.history fork).1,
+                    allUtxos := rewindCoins fork (rependSpends fork r.allUtxos) }
+  (pruneDraft r).1
+
 /-- `rollBack(to:)`: coins and history to a fork height, matching `Wallet.rollBack`: spends from fallen blocks
 go back in flight (their entries re-pend, their bytes stay), coins from fallen blocks leave unless a spend
 holds them, and a draft whose coin fell is dropped. A pure function of the fork height (a repeat changes
 nothing); frontiers untouched. -/
 def rollBack (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (fork : UInt32) : RM MultisigStore := do
-  let candidate := s.records.map fun r =>
-    let r := { r with history := (HistoryLedger.rewind r.history fork).1,
-                      allUtxos := rewindCoins fork (rependSpends fork r.allUtxos) }
-    (pruneDraft r).1
+  let candidate := s.records.map (rewindRecord fork)
   if candidate == s.records then return s
   s.mutate keys writeData candidate
 
 end MultisigStore
+
+/-! ## Accounts arriving from another device
+
+An account another of the person's devices has (`Winnow.DeviceSync`) comes with that device's coins and history,
+current to the block that device had scanned. This phone has scanned to a block of its own, so the account is
+kept apart, watched by no forward scan, until the blocks between the two have been scanned for it here (a
+range scan, `FilterSyncIO.scanRange`); then it joins the kept accounts (`MultisigStore.admit`). A phone behind
+the other device waits until its own scan has passed that block. -/
+
+structure ArrivingAccount where
+  record : MultisigAccountRecord
+  /-- The record's coins and history are current to this block. -/
+  scannedThrough : UInt32
+  /-- The first block of the pass under way, and the watch count it began with: a pass that moved the
+  account's frontier is followed by another from the same block, as a restore's range scan is, until one finds
+  no new address. -/
+  passFrom : UInt32
+  passWatch : UInt32
+  /-- Why it waits, when it is not only a matter of scanning. -/
+  note : Option String := none
+  deriving Inhabited, BEq
+
+namespace ArrivingAccount
+
+def storeName : String := "multisig-arriving"
+def fileName : String := "multisig-arriving.json"
+
+def storeSeal (keys : StoreKeyVault) : StoreSeal := { store := storeName, keys }
+
+/-- As it arrives: current to `height`, its first pass from the block after. -/
+def ofSnapshot (record : MultisigAccountRecord) (height : UInt32) : ArrivingAccount :=
+  { record, scannedThrough := height, passFrom := height + 1, passWatch := MultisigStore.watchCount record }
+
+def toJV (a : ArrivingAccount) : JV :=
+  obj [("record", some a.record.toJV), ("scannedThrough", some (ofInt a.scannedThrough.toNat)),
+       ("passFrom", some (ofInt a.passFrom.toNat)), ("passWatch", some (ofInt a.passWatch.toNat)), ("note", a.note.map .str)]
+
+def ofJV (v : JV) : D ArrivingAccount := do
+  let kvs ← asObject v
+  return { record := ← key kvs "record" MultisigAccountRecord.ofJV, scannedThrough := ← key kvs "scannedThrough" asUInt32,
+           passFrom := ← key kvs "passFrom" asUInt32, passWatch := ← key kvs "passWatch" asUInt32,
+           note := ← keyIfPresent kvs "note" asString }
+
+def encode (accounts : Array ArrivingAccount) : ByteArray := (write (.arr (accounts.map toJV))).toUTF8
+
+def decode (payload : ByteArray) : RM (Array ArrivingAccount) := do
+  let some text := String.fromUTF8? payload | throw (.named "dataCorrupted" "The arriving account file is not valid JSON.")
+  RM.lift (fun e => .named e "The arriving account file could not be decoded.") (decodeText text (asArray ofJV))
+
+/-- The file's accounts; a file that cannot be read is no accounts (they arrive again from the other device). -/
+def load (keys : StoreKeyVault) (path : System.FilePath) (network : BitcoinNetwork) : IO (Array ArrivingAccount) := do
+  unless ← fileExists path do return #[]
+  let attempt : RM (Array ArrivingAccount) := do
+    let data ← boundedRead path MultisigStore.maximumFileBytes (.multisig (.invalidState "arriving account file too large"))
+    let (payload, _) ← (storeSeal keys).read data network
+    let decoded ← decode payload
+    for a in decoded do MultisigStore.validate #[a.record] network
+    return decoded
+  match ← attempt.run with
+  | .ok accounts => return accounts
+  | .error _ => return #[]
+
+def save (keys : StoreKeyVault) (writeData : WriteData) (path : System.FilePath) (network : BitcoinNetwork)
+    (accounts : Array ArrivingAccount) : RM Unit :=
+  (storeSeal keys).write (encode accounts) network path writeData
+
+/-- A reorg below `fork`: the record goes back to the fork as a kept account's does, and so does what it is
+current to, so the blocks of the new branch are scanned for it. -/
+def rollBack (a : ArrivingAccount) (fork : UInt32) : ArrivingAccount :=
+  if a.scannedThrough ≤ fork then a else
+    { a with record := MultisigStore.rewindRecord fork a.record, scannedThrough := fork, passFrom := min a.passFrom (fork + 1) }
+
+/-- The scripts a pass looks for: both chains below the record's watch count. -/
+def scripts (a : ArrivingAccount) (caches : MultisigStore) : RM (Array ByteArray × MultisigStore) := do
+  let (cache, caches) ← caches.ownerCache a.record
+  return (cache.scripts.extract 0 (2 * (MultisigStore.watchCount a.record).toNat), caches)
+
+/-- One matched block against the record, as `MultisigStore.applyPaying` does for a kept account. Applying a
+block again changes nothing, which a range scan that stopped and began again relies on. -/
+def applyBlock (a : ArrivingAccount) (m : Net.BlockMatch) (caches : MultisigStore) : RM (ArrivingAccount × MultisigStore) := do
+  let (cache, caches) ← caches.ownerCache a.record
+  let count := MultisigStore.watchCount a.record
+  let mut r := a.record
+  for h : txIndex in [0:m.block.transactions.size] do
+    let (r', _, _) ← MultisigStore.applyTx m.block.transactions[txIndex] txIndex m cache.owner count r
+    r := r'
+  let (r', _, _) := MultisigStore.settle r m.height
+  return ({ a with record := r' }, caches)
+
+end ArrivingAccount
 
 /-! ## The current store -/
 
@@ -627,11 +750,15 @@ structure MultisigHost where
   state : Std.Mutex MultisigStore
   /-- `multisigStorageNotice`: set when `multisig.json` could not be read. -/
   notice : IO.Ref (Option String)
+  /-- The accounts arriving from another device (`ArrivingAccount`), and their file. -/
+  arriving : Std.Mutex (Array ArrivingAccount)
+  arrivingPath : IO.Ref (Option System.FilePath)
 
 namespace MultisigHost
 
 def new (keys : StoreKeyVault) (writeData : WriteData := writeAtomically) : IO MultisigHost := do
-  return { keys, writeData, state := ← Std.Mutex.new {}, notice := ← IO.mkRef none }
+  return { keys, writeData, state := ← Std.Mutex.new {}, notice := ← IO.mkRef none, arriving := ← Std.Mutex.new #[],
+           arrivingPath := ← IO.mkRef none }
 
 def read (h : MultisigHost) : IO MultisigStore := h.state.atomically get
 
@@ -648,6 +775,26 @@ def configure (h : MultisigHost) (network : BitcoinNetwork) (dir : Option System
   let (store, result) ← MultisigStore.configure h.keys (dir.map (· / MultisigStore.fileName)) network
   h.state.atomically (set store)
   h.notice.set (match result with | .damaged m => some m | _ => none)
+  let path := dir.map (· / ArrivingAccount.fileName)
+  h.arrivingPath.set path
+  let arriving ← match path with
+    | some p => ArrivingAccount.load h.keys p network
+    | none => pure #[]
+  -- one that joined the kept accounts before its entry here was cleared (the app stopped between the two)
+  h.arriving.atomically (set (arriving.filter fun a => !store.records.any (·.id == a.record.id)))
+
+def arrivingAccounts (h : MultisigHost) : IO (Array ArrivingAccount) := h.arriving.atomically get
+
+/-- Changes the arriving accounts and writes their file; the list changes only when the write succeeds. -/
+def modifyArriving {α} (h : MultisigHost) (f : Array ArrivingAccount → RM (Array ArrivingAccount × α)) : RM α :=
+  h.arriving.atomically do
+    let current ← get
+    let (next, a) ← (f current : RM _)
+    if next != current then
+      if let some p ← h.arrivingPath.get then
+        ArrivingAccount.save h.keys h.writeData p (← (h.state.atomically get : IO MultisigStore)).network next
+      set next
+    return a
 
 /-- The name a damaged account file is kept under once it is set aside: beside the store, never read again by
 the app, there for whoever can still make something of it. -/

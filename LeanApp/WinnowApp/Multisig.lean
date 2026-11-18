@@ -480,6 +480,23 @@ literal this long the renderer's row leaves the button no room). -/
 def literalRow (m : Model) (key text : String) (id := "") : H :=
   .col [withId id (literal text), .button (if m.copied == some key then "Copied" else "Copy") .plain (some (.copy key text))]
 
+/-- What an account says of itself where this device holds none of its keys. -/
+def watchOnlyText : String := "Watch-only on this device"
+
+/-- An account's row (the home's Accounts, Settings → Security → Multisig accounts): its name and balance, and
+that it is only watched here when this device holds none of its keys. -/
+def accountRow (a : MultisigInfo) : H :=
+  let row : H :=
+    .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
+          Html.tone .secondary (body (satsText a.balance))]
+  if a.watchOnly then .col [row, .identified (Ids.multisigWatchOnly a.id) (caption watchOnlyText)] else row
+
+/-- An account on its way from another of the person's devices: its name, and that it is being caught up. -/
+def arrivingRow (a : ArrivingInfo) : H :=
+  .identified (Ids.multisigArriving a.id)
+    (.col [Html.symbol "icloud.and.arrow.down" (body a.name),
+           caption (a.note.getD "From your other device. Catching up with the blocks since it was saved there.")])
+
 /-- Settings → Security → Multisig accounts. -/
 def multisigSection (m : Model) : H :=
   .section "Multisig" "Accounts that need more than one signature to spend. Pair a Ledger or save other people's keys in Settings → Security → Hardware wallets and keys."
@@ -489,9 +506,7 @@ def multisigSection (m : Model) : H :=
         , caption "While this file is in place Winnow does not sync, so that no payment to these accounts is passed over."
         , .identified Ids.multisigSetAsideButton (.button "Set the damaged file aside" .plain (some (.multisig .askSetAside))) ]
       | none => []) ++
-     (m.multisig.accounts.map fun a =>
-        .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
-              Html.tone .secondary (body (satsText a.balance))]) ++
+     (m.multisig.accounts.map accountRow) ++ m.multisig.arriving.map arrivingRow ++
      [ .col [.identified Ids.multisigBuildButton (navLink "Create an account" (some (.multisig .openBuild)) (symbol := "plus.circle")),
              caption "You choose who signs, then share the account with them."]
      , .col [.identified Ids.multisigAddButton (navLink "Join an account" (some (.multisig .openAdd)) (symbol := "person.badge.plus")),
@@ -640,6 +655,10 @@ def multisigAccountSections (m : Model) (id : String) : List H :=
   | some a =>
     match a.policy with
     | some policy =>
+      (if a.watchOnly then
+        [.section "" "" [.identified Ids.multisigWatchOnlyNote (Html.symbol "eye"
+          (body "Watch-only on this device. Its wallet key is not one of this account's keys, so it shows the account and cannot sign for it. A device that holds one of the keys signs."))]]
+       else []) ++
       [ .section "" ""
           ([.identified Ids.multisigBalance (.labeled "Balance" (satsText a.balance)),
             .identified Ids.multisigPolicy (.labeled "Policy" policy)] ++
@@ -703,6 +722,7 @@ through the account's draft, so leaving the screen loses nothing. -/
 def collectSections (m : Model) (id : String) : List H :=
   let f := m.collect
   let set (g : String → MultisigMsg) : String → Msg := fun s => .multisig (g s)
+  let watchOnly := ((m.multisigInfo? id).map (·.watchOnly)).getD false
   match (m.multisigInfo? id).bind (·.draft) with
   | none =>
     if f.loadingDraft then [.section "" "" [.progress "Opening the payment…"]] else
@@ -729,8 +749,11 @@ def collectSections (m : Model) (id : String) : List H :=
         let onLedger := f.busy && f.ledgerSigning
         [.section (if s.recoveryUsable then "Signing · signers or recovery path" else "Signing")
           (if onLedger then "Check the payment on the Ledger's screen and approve it there. Winnow waits for the Ledger." else p.nextStep)
-          ([ .identified Ids.multisigSignButton (.button "Add this phone's signature" .plain
-              (if f.busy || !p.phoneUnsigned || p.complete then none else some (.multisig (.sign id)))) ] ++
+          ((if watchOnly then
+             [ .identified Ids.multisigWatchOnlyNote (caption "This device holds none of this account's keys, so it cannot sign. Signatures made on your other devices arrive here.") ]
+            else
+             [ .identified Ids.multisigSignButton (.button "Add this phone's signature" .plain
+                 (if f.busy || !p.phoneUnsigned || p.complete then none else some (.multisig (.sign id)))) ]) ++
            (if p.ledgerHolds then
              [.identified Ids.ledgerSignButton
                (.button (if onLedger then "Approve on the Ledger…" else "Sign with Ledger") .plain (if f.busy || !p.ledgerUnsigned || p.complete then none else some (.multisig (.signWithLedger id))))]

@@ -291,6 +291,11 @@ def startPhasePolling (env : Env) (epoch : Nat) : IO Unit := do
 
 /-! ## One sync pass -/
 
+/-- What one run of an arriving account's catch-up may spend before the forward pass goes on: a minute, and
+the filters of about three weeks of mainnet blocks. The next pass takes it up where it stopped. -/
+def arrivingScanLimits : RangeScanLimits :=
+  RangeScanLimits.make (maxScripts := RangeScanLimits.scriptsCeiling) (maxDurationMs := 60_000)
+
 /-- `syncOnce()`: the wallet's and its multisig accounts' scripts in one filter stream (an account is
 just more watched scripts); matched blocks update the wallet and the accounts and confirm pending
 broadcasts; the frontier is recorded either way. -/
@@ -306,6 +311,16 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
     | _, _ => (none, c)
   let some (w, s, f, gen, serial, dir) := claim | return false
   try
+    -- accounts that arrived from another of the person's devices are brought up to this phone's scan first, so
+    -- one that is ready is watched by this very pass. Not in a background check, whose minute is the wallet's.
+    if maxBlocks.isNone then
+      let scanner : RangeScanner := fun fromHeight toHeight scripts onMatch => do
+        match ← (f.scanRange fromHeight toHeight scripts (limits := arrivingScanLimits)
+            (onMatch := fun m => (onMatch m : IO Unit))).attempt with
+        | .ok outcome => return (outcome.scannedThrough, outcome.isComplete)
+        | .error (.range (.rangeBelowChain ..)) => throw (IO.userError waitingForNewerCopyText)
+        | .error e => throw (IO.userError e.description)
+      try env.hooks.multisigCatchUp w.network (← f.nextScanHeight) scanner catch _ => pure ()
     -- the accounts' scripts first, outside the pass: an account file that cannot be read now (a locked phone in
     -- a background launch) stops the pass before anything is scanned, so the scan height stays where the
     -- accounts' payments are, and the next pass reads the file again; it is a transient failure, not the wallet's

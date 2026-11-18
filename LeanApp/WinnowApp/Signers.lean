@@ -104,8 +104,12 @@ def signersSummary (o : MultisigOverview) : String :=
 
 /-- `SignerRow`. -/
 def signerRow (s : SignerInfo) (action : Option Msg) (id : String := (Ids.signerRow (s.id))) : H :=
-  .col [.identified id (navLink s.name action),
-        caption (s.keysText ++ (if s.keys.length > 1 then " · one signer" else ""))]
+  .col ([.identified id (navLink s.name action),
+         caption (s.keysText ++ (if s.keys.length > 1 then " · one signer" else ""))] ++
+        -- it came with the person's other device: this one has not talked to it yet
+        (if s.elsewhere then
+          [.identified (Ids.signerElsewhere s.id) (caption "Paired on another device. The first time you use it here, the Ledger asks to pair with this one.")]
+         else []))
 
 /-- SignersView. -/
 def signersSections (m : Model) : List H :=

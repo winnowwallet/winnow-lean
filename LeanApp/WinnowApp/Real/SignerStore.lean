@@ -200,6 +200,17 @@ def addKeys (s : SignerStore) (keys : StoreKeyVault) (writeData : WriteData) (na
     invalid "a signer has no keys, or too many"
   return (← s.append keys writeData r, r)
 
+/-- A signer another of the person's devices has (`Winnow.DeviceSync`): filed as it is there, under a new id
+when this phone already uses that one. Refused, like any other, when one of its keys is already held. -/
+def adopt (s : SignerStore) (keys : StoreKeyVault) (writeData : WriteData) (r : SignerRecord) (spareID : String) :
+    RM (SignerStore × SignerRecord) := do
+  s.requireReadable
+  let r := if s.records.any (·.id == r.id) || r.id.isEmpty then { r with id := spareID } else r
+  let r := { r with name := ← usableName r.name }
+  unless 1 ≤ r.keys.size && r.keys.size ≤ SignerRecord.maximumKeysPerSigner do invalid "a signer has no keys, or too many"
+  validateKind r s.network
+  return (← s.append keys writeData r, r)
+
 def rename (s : SignerStore) (keys : StoreKeyVault) (writeData : WriteData) (id name : String) : RM SignerStore := do
   s.requireReadable
   let some i := s.records.findIdx? (·.id == id) | fail .unknownSigner

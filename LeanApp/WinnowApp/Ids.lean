@@ -180,6 +180,13 @@ def paymentAccount (txid : String) : String := s!"paymentAccount-{txid}"
 def transactionDraft (txid : String) : String := s!"transactionDraft-{txid}"
 /-- An account on the home's Accounts and Settings → Security → Multisig accounts. -/
 def multisigAccount (id : String) : String := s!"multisigAccount-{id}"
+/-- An account's "Watch-only on this device" line, on its row and its page; an account on its way from another
+of the person's devices; a Ledger's "paired on another device" line; the backup page's line on the other devices. -/
+def multisigWatchOnly (id : String) : String := s!"multisigWatchOnly-{id}"
+def multisigWatchOnlyNote : String := "multisigWatchOnlyNote"
+def multisigArriving (id : String) : String := s!"multisigArriving-{id}"
+def signerElsewhere (id : String) : String := s!"signerElsewhere-{id}"
+def cloudDevicesNote : String := "cloudDevicesNote"
 /-- A member row of an account, and of the builder, by index. -/
 def multisigMember (i : Nat) : String := s!"multisigMember-{i}"
 def multisigBuildMember (i : Nat) : String := s!"multisigBuildMember-{i}"

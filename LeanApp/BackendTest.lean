@@ -1345,6 +1345,168 @@ def segwitFlow (dir : String) (n : Node) : IO Unit := do
   check "segwit account: Core and the phone agree on what the account holds" (theirBalance == change) s!"{theirBalance} vs {change}"
   phone.stopNetworking
 
+/-! ## Two devices of one person (`Real/DeviceSync.lean`)
+
+Device A builds a 2-of-2 and is paid; its iCloud backup is saved; it is closed, and the account is paid again.
+Device B, a different wallet under the same Apple Account (one in-memory iCloud and Keychain between them),
+syncs to the tip and only then comes to the foreground: its own loop reads A's backup, takes the account with
+the first coin, finds the second by scanning the blocks since A's backup itself, and shows the account
+watch-only. Then a payment: A starts and signs it, B receives it through A's backup, the other signer's copy is
+pasted on B, and A, through B's backup, has both signatures, broadcasts, and the node confirms. -/
+
+def devicesFlow (dir : String) (n : Node) : IO Unit := do
+  say "devices: two wallets, one iCloud"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let boot (tag : String) : IO (Backend × Real.CloudApp) := do
+    let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+    let (b, _, app) ← Backend.realWithCloud (deps secrets tag) (store := cloud.store) (keys := cloudKeys)
+      (scheduleDelayMs := 50) (devicesIntervalMs := 300)
+    let d := s!"{dir}/{tag}/BTCSwift/regtest"
+    IO.FS.createDirAll d
+    discard <| b.openWallet .regtest d
+    b.startNetworking settings
+    discard <| b.createWallet .regtest d
+    return (b, app)
+  let publish (app : Real.CloudApp) : IO Unit :=
+    app.controller.update do
+      let bundle ← app.exportedBundle
+      return { bundle, appState := some (← app.cloudAppState bundle).encoded }
+  -- 1. Device A: the account, its first coin, its backup.
+  let (a, appA) ← boot "DevA"
+  let (otherMaster, otherKey) ← testSigner 0xB2
+  let own := (← a.multisigOverview).keyExpression.getD ""
+  let (id, descriptor, _) ← a.createMultisigAccount "Family" 2 [([own], none), ([otherKey], none)] none
+  let account ← match MultisigAccount.parse descriptor .regtest with
+    | .ok acc => pure acc
+    | .error e => throw (IO.userError s!"account: {e.name}")
+  let some first := (account.address 0).toOption | throw (IO.userError "address 0")
+  let some second := (account.address 1).toOption | throw (IO.userError "address 1")
+  let fund1 ← n.wallet #["sendtoaddress", first, "0.5"]
+  discard <| waitUntil 20_000 (do return (← n.mempool).contains fund1)
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let saved ← n.height
+  let credited ← waitUntil 90_000 (do
+    a.syncNow
+    return ((← multisigAccount? a id).map (·.balance)) == some 50_000_000 && (← a.snapshot).1.nextScanHeight > saved)
+  check "devices: the first device sees the account's coin" credited
+  publish appA
+  check "devices: its backup is saved" ((← a.cloudStatus).statusTitle == "Backed up") (← a.cloudStatus).statusTitle
+  check "devices: the saved copy shows neither the descriptor nor a key in the clear" (
+    !(← cloud.records.get).any fun b =>
+      let text := SwiftJSON.write b.toJV
+      (text.splitOn "sortedmulti").length > 1 || (text.splitOn "tpub").length > 1)
+  -- 2. A is closed; the account is paid again, three blocks on.
+  a.stopNetworking
+  let fund2 ← n.wallet #["sendtoaddress", second, "0.25"]
+  discard <| waitUntil 20_000 (do return (← n.mempool).contains fund2)
+  n.mine 3 mineAddr
+  n.waitFilterIndex
+  let tip ← n.height
+  -- 3. Device B: another wallet. It syncs to the tip before it ever looks at iCloud.
+  let (b, appB) ← boot "DevB"
+  let (sb, _) ← syncUntil b 90_000 fun s _ => s.nextScanHeight > tip
+  check "devices: the second device has synced past the first one's backup" (sb.nextScanHeight > saved + 1) s!"{sb.nextScanHeight} vs {saved}"
+  check "devices: before it looks it has no account" ((← b.multisigOverview).accounts.isEmpty && (← b.multisigOverview).arriving.isEmpty)
+  -- the foreground: its loop looks at the other device's backup by itself
+  b.cloudScene true
+  let arrived ← waitUntil 90_000 (do
+    b.syncNow
+    return ((← multisigAccount? b id).map (·.balance)) == some 75_000_000)
+  let overview ← b.multisigOverview
+  check "devices: the account arrives on the second device with both coins" arrived
+    s!"accounts {overview.accounts.map fun x => (x.name, x.balance)}, arriving {overview.arriving.map fun x => (x.name, x.note)}"
+  let some onB ← multisigAccount? b id | throw (IO.userError "the account did not arrive")
+  check "devices: the coin paid after the backup was found by this device's own scan"
+    (onB.coins.length == 2 && onB.coins.any fun c => c.amount == 25_000_000 && (c.line.splitOn s!"receive 1 · block {saved + 1}").length > 1)
+    s!"{onB.coins.map (·.line)}"
+  check "devices: the same account and the same next address" (onB.descriptor == descriptor && onB.name == "Family" &&
+    onB.nextReceiveIndex == 2 && onB.receiveAddress == (account.address 2).toOption)
+  check "devices: watch-only on the device whose wallet is another" onB.watchOnly
+  let arriving := (← journaled "multisig.accountArriving").filter (·.1 == "DevB")
+  check "devices: it arrived current to the first device's block" (arriving.any fun (_, f) => field f "id" == id && field f "height" == toString saved)
+    s!"{arriving.map (·.2)}"
+  check "devices: and joined the watched accounts at this device's own" ((← journaled "multisig.accountArrived").any fun (tag, f) =>
+    tag == "DevB" && field f "id" == id)
+  -- 4. A opens again and catches up by its own scan, as ever.
+  a.startNetworking settings
+  a.cloudScene true
+  let caught ← waitUntil 90_000 (do
+    a.syncNow
+    return ((← multisigAccount? a id).map (·.balance)) == some 75_000_000)
+  check "devices: the first device sees both coins too, and signs for the account" (caught &&
+    ((← multisigAccount? a id).map (·.watchOnly)) == some false)
+  -- 5. A payment: started and signed on A.
+  let dest ← n.wallet #["getnewaddress"]
+  a.createDraft id dest 20_000_000 2.0 false
+  a.signDraft id
+  let reached ← waitUntil 90_000 (do
+    a.cloudTick
+    return (((← multisigAccount? b id).bind (·.draft)).map (·.signatures)) == some "1 of 2")
+  check "devices: a payment awaiting signatures follows to the second device, with the first's signature" reached
+    s!"{((← multisigAccount? b id).bind (·.draft)).map fun d => (d.signatures, d.reviewError)}"
+  let some draftB := (← multisigAccount? b id).bind (·.draft) | throw (IO.userError "no draft on the second device")
+  check "devices: reviewed there from that device's own coins" ((draftB.screen.map fun s =>
+    s.outputs.any (fun o => !o.owned && o.address == dest && o.amount == 20_000_000) && s.inputTotal ≥ 20_000_000) == some true)
+  check "devices: which cannot sign it" ((draftB.screen.map (·.progress.phoneHolds)) == some false)
+  check "devices: nor does its own signature get asked for" (← (do
+    match ← attempt (b.signDraft id) with
+    | .ok () => return (((← multisigAccount? b id).bind (·.draft)).map (·.signatures)) == some "1 of 2"
+    | .error _ => return true))
+  -- the other signer's copy is pasted on B
+  let recordB ← Real.record appB.multisig id
+  let unsigned ← match PSBT.ofBase64 draftB.psbt with
+    | .ok p => pure p
+    | .error _ => throw (IO.userError "psbt")
+  let theirs ← match account.sign unsigned otherMaster recordB.utxos (Real.ownedCoordinates recordB) (← n.height).toUInt32
+      (← IO.getRandomBytes 32) with
+    | .ok p => pure p
+    | .error e => throw (IO.userError s!"other signer: {e.name}")
+  let some theirText := theirs.base64V0.toOption | throw (IO.userError "v0")
+  b.adoptDraft id theirText
+  check "devices: combined on the second device, enough signatures verify there"
+    ((((← multisigAccount? b id).bind (·.draft)).bind (·.screen)).map (·.progress.complete) == some true)
+  -- …and reach A through B's backup
+  let complete ← waitUntil 90_000 (do
+    b.cloudTick
+    return ((((← multisigAccount? a id).bind (·.draft)).bind (·.screen)).map (·.progress.complete)) == some true)
+  check "devices: signatures made on two devices add up on the first" complete
+    s!"{((← multisigAccount? a id).bind (·.draft)).map (·.signatures)}"
+  let txid ← a.broadcastDraft id
+  check "devices: the first device broadcasts, the node's mempool holds the spend" (← waitUntil 20_000 (do return (← n.mempool).contains txid))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let settled ← waitUntil 90_000 (do
+    a.syncNow
+    b.syncNow
+    a.cloudTick
+    b.cloudTick
+    let onA ← multisigAccount? a id
+    let onB ← multisigAccount? b id
+    return (onA.map (·.balance)) == (onB.map (·.balance)) && (onA.map (·.draft.isNone)) == some true &&
+      (onB.map (·.draft.isNone)) == some true && (onA.map (decide <| ·.balance < 55_000_000)) == some true)
+  check "devices: confirmed, both show the same balance and no payment waiting" settled
+    s!"A {(← multisigAccount? a id).map fun x => (x.balance, x.draft.isSome)}, B {(← multisigAccount? b id).map fun x => (x.balance, x.draft.isSome)}"
+  -- left open, they stay in step: nothing is taken twice, and nothing goes back and forth
+  let before ← cloud.saves.get
+  for _ in [0:10] do
+    a.cloudTick
+    b.cloudTick
+    IO.sleep 150
+  let after ← cloud.saves.get
+  for _ in [0:10] do
+    a.cloudTick
+    b.cloudTick
+    IO.sleep 150
+  check "devices: in step, the backups stop changing" ((← cloud.saves.get) == after) s!"{before} → {after} → {← cloud.saves.get}"
+  a.cloudScene false
+  b.cloudScene false
+  a.stopNetworking
+  b.stopNetworking
+
 /-- What `openWallet` found, for a check's detail. -/
 def bootText : BootResult → String
   | .opened id => s!"opened {id}" | .missing => "missing" | .damaged m => s!"damaged: {m}"
@@ -1874,5 +2036,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; segwitFlow dir n; peopleFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; peopleFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()
