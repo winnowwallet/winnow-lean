@@ -1,6 +1,7 @@
 import Winnow
 import SecpCt.Schnorr
 import SecpCt.Ecdsa
+import SecpCt.Keys
 
 /-! Temporary: what the curve operations cost, before and after the wallet runs on one implementation.
 `secp-bench [rounds]` prints microseconds per operation. Deleted with the old arithmetic. -/
@@ -51,5 +52,13 @@ def main (args : List String) : IO UInt32 := do
   timed "k·G (ladder and affine)" rounds fun i =>
     lastByte (SecpCt.Point.mulGenerator (SecpCt.Sc.ofBytes (Secp.toBE32 (scalarAt i)))).affine.1.bytes
   timed "BIP340 sign" rounds fun i => match SecpCt.sign (Secp.toBE32 (scalarAt i)) message (Secp.toBE32 0) with | some s => lastByte s | none => 0
+  let some q := SecpCt.parseCompressed compressed | return 1
+  let sc (i : Nat) := SecpCt.Sc.ofBytes (Secp.toBE32 (scalarAt i))
+  timed "t·G, public" rounds fun i => match SecpCt.generatorMul (sc i) with | some r => lastByte r.xBytes | none => 0
+  timed "k·P, constant time" rounds fun i => match SecpCt.pointMul (sc i) q with | some r => lastByte r.xBytes | none => 0
+  timed "t·G + P, public" rounds fun i => match SecpCt.pointAdd q (sc i) with | some r => lastByte r.xBytes | none => 0
+  timed "lift_x" rounds fun i => match (SecpCt.Fe.ofBytes? (Secp.toBE32 (scalarAt i % Secp.P))).bind SecpCt.liftX? with | some r => lastByte r.y.bytes | none => 1
+  timed "BIP340 verify" rounds fun i => if SecpCt.verify signature (if i % 2 == 0 then message else sha256 message) xonly then 1 else 0
+  timed "ECDSA verify" rounds fun i => if SecpCt.Ecdsa.verify ecdsa (if i % 2 == 0 then message else sha256 message) compressed then 1 else 0
   timed "ECDSA sign" rounds fun i => match SecpCt.Ecdsa.sign (Secp.toBE32 (scalarAt i)) message (Secp.toBE32 0) with | some s => lastByte s | none => 0
   return 0

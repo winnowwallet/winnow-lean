@@ -1,5 +1,6 @@
 import SecpCt.Schnorr
 import SecpCt.Ecdsa
+import SecpCt.Keys
 import Secp.Ecdsa
 import TestKit.Check
 import TestKit.SecpAnswers
@@ -85,9 +86,102 @@ def walletCurve : TestKit.SecpAnswers.Curve :=
       | .ok true => true
       | _ => false }
 
+/-- `SecpCt` alone, as the known answers see it: no other curve code is reached from here. -/
+def constantTimeCurve : TestKit.SecpAnswers.Curve :=
+  let point (b : ByteArray) : Option Affine :=
+    if b.size == 33 then parseCompressed b else if b.size == 65 then parseUncompressed b else none
+  let key (b : ByteArray) : Option Sc := if b.size == 32 && Sc.isKey b == 1 then some (Sc.ofBytes b) else none
+  let nonzero (s : Sc) : Option ByteArray := if s.isZero == 1 then none else some s.bytes
+  { publicKey := fun secret => (publicKey secret).map fun (x, odd) => ByteArray.mk #[if odd == 1 then 3 else 2] ++ x
+    liftX := fun x => ((Fe.ofBytes? x).bind liftX?).map (·.y.bytes)
+    parse := fun b => (point b).map fun q => (q.x.bytes, q.y.bytes)
+    pointAdd := fun p t => do (← pointAdd (← point p) (← scalar? t)).compressed
+    xonlyAdd := fun x t => do
+      let sum ← pointAdd (← parseXOnly x) (← scalar? t)
+      return (sum.xBytes, sum.isOdd)
+    pointMul := fun p t => do (← pointMul (← key t) (← point p)).compressed
+    combine := fun points => do (← combine (← points.toList.mapM point)).compressed
+    secretAdd := fun d t => do nonzero (Sc.add (← key d) (← scalar? t))
+    secretAddXOnly := fun d t => do nonzero (Sc.add (evenKey (← key d)) (← scalar? t))
+    bip340Sign := signVerified
+    bip340Verify := fun key m signature => verify signature m key
+    ecdsaSign := Ecdsa.signVerified
+    ecdsaVerify := fun key digest signature => Ecdsa.verify signature digest key }
+
+/-- Two implementations on the same stream of inputs: every operation must give the same bytes or refuse
+alike. The inputs are made so that both sorts happen: an x taken at random is the x of a point about half
+the time, and the edges of each range are tried first. -/
+def agree (a b : TestKit.SecpAnswers.Curve) (rounds : Nat) : IO Unit := do
+  let same (x y : Option ByteArray) : Bool := match x, y with
+    | some x, some y => x.data == y.data
+    | none, none => true
+    | _, _ => false
+  let both (name : String) (x y : Option ByteArray) : IO Unit :=
+    TestKit.check name (same x y) s!"{(x.map hex).getD "refused"} and {(y.map hex).getD "refused"}"
+  let edges : List ByteArray :=
+    [0, 1, 2, Secp.Spec.N - 1, Secp.Spec.N, Secp.Spec.N + 1, Secp.P - 1, Secp.P, Secp.P + 1, 2 ^ 256 - 1].map toBytes32
+  let mut state : UInt64 := 0xD1B54A32D192ED03
+  let mut answered := 0
+  for round in [0:rounds + edges.length] do
+    let (d, s) := if h : round < edges.length then (edges[round], state) else next32 state
+    let (t, s) := if round % 7 == 3 then (edges[round % edges.length]!, s) else next32 s
+    let (m, s) := next32 s
+    let (aux, s) := next32 s
+    state := s
+    let key := a.publicKey d
+    both s!"agree: public key {round}" key (b.publicKey d)
+    both s!"agree: lift_x {round}" (a.liftX m) (b.liftX m)
+    -- a point that is one (t·G) and 33 bytes that are one about half the time
+    let made := (a.publicKey t).getD (ByteArray.mk #[2] ++ t)
+    let maybe := ByteArray.mk #[if round % 2 == 0 then 2 else 3] ++ m
+    for point in [made, maybe] do
+      let parsed := a.parse point
+      both s!"agree: parse {round}" (parsed.map fun (x, y) => x ++ y) ((b.parse point).map fun (x, y) => x ++ y)
+      if let some (x, y) := parsed then
+        answered := answered + 1
+        let whole := ByteArray.mk #[4] ++ x ++ y
+        both s!"agree: parse uncompressed {round}" ((a.parse whole).map (·.1)) ((b.parse whole).map (·.1))
+        -- the hybrid form, with the first byte right and wrong
+        for first in [6, 7] do
+          let hybrid := ByteArray.mk #[first] ++ x ++ y
+          both s!"agree: parse hybrid {round}" ((a.parse hybrid).map (·.2)) ((b.parse hybrid).map (·.2))
+      both s!"agree: t·G + P {round}" (a.pointAdd point t) (b.pointAdd point t)
+      both s!"agree: k·P {round}" (a.pointMul point d) (b.pointMul point d)
+      both s!"agree: sum {round}" (a.combine #[point, made, key.getD made]) (b.combine #[point, made, key.getD made])
+    -- a point and its negation: the sum is the point at infinity
+    if let some k := key then
+      let negated := ByteArray.mk #[if k[0]! == 2 then 3 else 2] ++ k.extract 1 33
+      both s!"agree: a point and its negation {round}" (a.combine #[k, negated]) (b.combine #[k, negated])
+    let x1 := (a.xonlyAdd m t).map fun (x, odd) => x.push (if odd then 1 else 0)
+    let x2 := (b.xonlyAdd m t).map fun (x, odd) => x.push (if odd then 1 else 0)
+    both s!"agree: x-only tweak {round}" x1 x2
+    both s!"agree: secret add {round}" (a.secretAdd d t) (b.secretAdd d t)
+    both s!"agree: secret add, even key {round}" (a.secretAddXOnly d t) (b.secretAddXOnly d t)
+    let signed := a.bip340Sign d m aux
+    both s!"agree: BIP 340 signature {round}" signed (b.bip340Sign d m aux)
+    let ecdsa := a.ecdsaSign d m aux
+    both s!"agree: ECDSA signature {round}" ecdsa (b.ecdsaSign d m aux)
+    if let (some k, some signature, some other) := (key, signed, ecdsa) then
+      let x := k.extract 1 33
+      -- each signature as made, with one bit of it turned, under another message, and with s out of range
+      let turned (sig : ByteArray) := sig.set! (round % 64) (sig[round % 64]! ^^^ (1 <<< (round % 8).toUInt8))
+      let high (sig : ByteArray) := sig.extract 0 32 ++ toBytes32 (Secp.Spec.N - fromBytes (sig.extract 32 64))
+      for sig in [signature, turned signature, high signature, signature.extract 0 63, signature ++ aux] do
+        TestKit.check s!"agree: BIP 340 verify {round}" (a.bip340Verify x m sig == b.bip340Verify x m sig)
+        TestKit.check s!"agree: BIP 340 verify, another message {round}" (a.bip340Verify x aux sig == b.bip340Verify x aux sig)
+      for sig in [other, turned other, high other, other.extract 0 63, other ++ aux] do
+        TestKit.check s!"agree: ECDSA verify {round}" (a.ecdsaVerify k m sig == b.ecdsaVerify k m sig)
+        TestKit.check s!"agree: ECDSA verify, another digest {round}" (a.ecdsaVerify k aux sig == b.ecdsaVerify k aux sig)
+      TestKit.check s!"agree: both accept the BIP 340 signature {round}" (a.bip340Verify x m signature && b.bip340Verify x m signature)
+      TestKit.check s!"agree: both accept the ECDSA signature {round}" (a.ecdsaVerify k m other && b.ecdsaVerify k m other)
+      TestKit.check s!"agree: both refuse a high s {round}" (!a.ecdsaVerify k m (high other) && !b.ecdsaVerify k m (high other))
+  TestKit.check "agree: points were read as well as refused" (answered ≥ rounds / 2 && answered < 2 * (rounds + edges.length))
+
 def main (args : List String) : IO UInt32 := TestKit.runMain "secpct-test" do
   TestKit.SecpAnswers.check walletCurve
+  TestKit.SecpAnswers.check constantTimeCurve
   let rounds := (args.head?.bind String.toNat?).getD 200
+  agree walletCurve constantTimeCurve rounds
   let check (name : String) (holds : Bool) : IO Unit := TestKit.check name holds
   -- The field and the scalars against plain arithmetic on naturals.
   let mut state : UInt64 := 0x9E3779B97F4A7C15

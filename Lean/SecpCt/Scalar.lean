@@ -154,6 +154,9 @@ def isHigh (a : Sc) : UInt64 :=
   let (_, b) := sbb half3 a.a3 b
   b
 
+/-- Whether two scalars are the same four words. For values that are not secret. -/
+def same (a b : Sc) : Bool := a.a0 == b.a0 && a.a1 == b.a1 && a.a2 == b.a2 && a.a3 == b.a3
+
 /-- Bit `i` of the scalar (1 or 0), for a position that is not a secret. -/
 @[inline] def bit (a : Sc) (i : Nat) : UInt64 :=
   let word := if i < 64 then a.a0 else if i < 128 then a.a1 else if i < 192 then a.a2 else a.a3

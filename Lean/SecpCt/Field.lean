@@ -128,6 +128,26 @@ def inv (a : Fe) : Fe :=
 /-- The element 32 bytes stand for, most significant first, reduced modulo P. -/
 def ofBytes (b : ByteArray) : Fe := canon (wordAt b 24) (wordAt b 16) (wordAt b 8) (wordAt b 0)
 
+/-! ## For values that are not secret
+
+What follows branches on what it is given. It is for public data: a public key's coordinates, a signature
+someone else made. -/
+
+/-- Whether two elements are the same four words. -/
+def same (a b : Fe) : Bool := a.a0 == b.a0 && a.a1 == b.a1 && a.a2 == b.a2 && a.a3 == b.a3
+
+/-- The element 32 bytes spell, most significant first, if that number is below P. -/
+def ofBytes? (b : ByteArray) : Option Fe :=
+  if b.size != 32 then none else
+  let reduced := ofBytes b
+  if same reduced ⟨wordAt b 24, wordAt b 16, wordAt b 8, wordAt b 0⟩ then some reduced else none
+
+/-- A square root of `a`, if it has one: `a` to the power (P + 1)/4, which is a root whenever there is one
+(P is 3 modulo 4), kept only if it squares back to `a`. -/
+def sqrt? (a : Fe) : Option Fe :=
+  let root := power a 0xFFFFFFFFBFFFFF0C 0xFFFFFFFFFFFFFFFF 0xFFFFFFFFFFFFFFFF 0x3FFFFFFFFFFFFFFF
+  if same (sqr root) a then some root else none
+
 /-- The element as 32 bytes, most significant first. -/
 def bytes (a : Fe) : ByteArray :=
   pushWord (pushWord (pushWord (pushWord (ByteArray.emptyWithCapacity 32) a.a3) a.a2) a.a1) a.a0

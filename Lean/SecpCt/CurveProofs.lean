@@ -95,7 +95,22 @@ theorem add_formulas (p q : Point) (hpx : p.x.Valid) (hpy : p.y.Valid) (hpz : p.
 theorem valid_point_add (p q : Point) : (Point.add p q).x.Valid ∧ (Point.add p q).y.Valid ∧ (Point.add p q).z.Valid := by
   simp only [Point.add, valid_add, valid_sub, valid_mul, and_self]
 
-/-! ## Multiplying the generator -/
+/-- `Point.double` computes the complete doubling formulas, in the field the specification is written over. -/
+theorem double_formulas (p : Point) :
+    (Point.double p).x.toF = 2 * p.x.toF * p.y.toF * (p.y.toF * p.y.toF - 63 * p.z.toF * p.z.toF)
+    ∧ (Point.double p).y.toF = (p.y.toF * p.y.toF - 63 * p.z.toF * p.z.toF) * (p.y.toF * p.y.toF + 21 * p.z.toF * p.z.toF)
+        + 168 * p.y.toF * p.y.toF * p.z.toF * p.z.toF
+    ∧ (Point.double p).z.toF = 8 * p.y.toF * p.y.toF * p.y.toF * p.z.toF := by
+  simp only [Point.double]
+  simp (maxDischargeDepth := 8) only [toF_add, toF_sub, toF_mul, toF_b3, valid_add, valid_mul]
+  refine ⟨?_, ?_, ?_⟩ <;> grind
+
+/-- Whatever is doubled, the coordinates of the result are below P. -/
+theorem valid_point_double (p : Point) :
+    (Point.double p).x.Valid ∧ (Point.double p).y.Valid ∧ (Point.double p).z.Valid := by
+  simp (maxDischargeDepth := 8) only [Point.double, valid_add, valid_mul, and_self]
+
+/-! ## Multiplying a point -/
 
 /-- `choose` takes the first point under a mask from a bit of 1, the second from a bit of 0. -/
 theorem Point.choose_one (p q : Point) : Point.choose (mask 1) p q = p := by
@@ -111,23 +126,35 @@ theorem Sc.bit_cases (k : Sc) (i : Nat) : k.bit i = 0 ∨ k.bit i = 1 := by
     >>> (i % 64).toUInt64) = x
   exact and_one_cases x
 
-/-- What one bit of the scalar does: double, and add the generator if the bit is set. -/
-def ladderStep (k : Sc) (acc : Point) (i : Nat) : Point :=
-  if k.bit (255 - i) = 1 then Point.add (Point.add acc acc) Point.generator else Point.add acc acc
+/-- What one bit of the scalar does: double, and add the point if the bit is set. -/
+def ladderStep (k : Sc) (p : Point) (acc : Point) (i : Nat) : Point :=
+  if k.bit (255 - i) = 1 then Point.add (Point.double acc) p else Point.double acc
 
-/-- `mulGenerator` is the double-and-add ladder over the scalar's 256 bits, most significant first. The
-choice by mask is the choice by the bit. -/
-theorem mulGenerator_ladder (k : Sc) :
-    Point.mulGenerator k = (List.range' 0 256).foldl (ladderStep k) Point.infinity := by
+/-- `mul` is the double-and-add ladder over the scalar's 256 bits, most significant first. The choice by mask
+is the choice by the bit. -/
+theorem mul_ladder (k : Sc) (p : Point) :
+    Point.mul k p = (List.range' 0 256).foldl (ladderStep k p) Point.infinity := by
   have body : (fun (i : Nat) (acc : Point) => (pure (ForInStep.yield
-      (Point.choose (mask (k.bit (255 - i))) (Point.add (Point.add acc acc) Point.generator) (Point.add acc acc)))
-        : Id (ForInStep Point))) = fun i acc => pure (ForInStep.yield (ladderStep k acc i)) := by
+      (Point.choose (mask (k.bit (255 - i))) (Point.add (Point.double acc) p) (Point.double acc)))
+        : Id (ForInStep Point))) = fun i acc => pure (ForInStep.yield (ladderStep k p acc i)) := by
     funext i acc
     simp only [ladderStep]
     rcases Sc.bit_cases k (255 - i) with h | h <;> rw [h]
     · rw [Point.choose_zero]; rfl
     · rw [Point.choose_one]; rfl
-  simp only [Point.mulGenerator]
+  simp only [Point.mul]
+  simp [-List.foldl_cons, body]
+
+/-- `mulPublic` is the same ladder: it leaves out exactly the additions the mask would have thrown away. -/
+theorem mulPublic_ladder (k : Sc) (p : Point) :
+    Point.mulPublic k p = (List.range' 0 256).foldl (ladderStep k p) Point.infinity := by
+  have body : (fun (i : Nat) (acc : Point) => (if k.bit (255 - i) = 1 then
+        pure (ForInStep.yield (Point.add (Point.double acc) p)) else pure (ForInStep.yield (Point.double acc))
+        : Id (ForInStep Point))) = fun i acc => pure (ForInStep.yield (ladderStep k p acc i)) := by
+    funext i acc
+    simp only [ladderStep]
+    split <;> rfl
+  simp only [Point.mulPublic]
   simp [-List.foldl_cons, body]
 
 /-! ## The formulas add points -/
@@ -381,6 +408,40 @@ theorem rep_add [FieldP] [OddOrder] {p q : Point} {a b : Spec.Point} (ha : OnCur
   rw [fx, fy, fz]
   exact formulas_add ha hb rp rq
 
+/-- A point that stands for a point of the curve satisfies the curve's equation in its three coordinates:
+Y²Z = X³ + 7Z³. -/
+theorem repF_curve [FieldP] {X Y Z : F} {a : Spec.Point} (ha : OnCurve a) (r : RepF X Y Z a) :
+    Y * Y * Z = X * X * X + 7 * Z * Z * Z := by
+  match a, ha, r with
+  | .inf, _, ⟨hx, hz, _⟩ =>
+    rw [hx, hz]
+    simp only [Fin.mul_zero, Fin.add_zero]
+  | .pt x y, ha, ⟨w, hw, hx, hy⟩ =>
+    have curve : y * y = x * x * x + 7 := ha
+    subst hx hy
+    grind
+
+/-- On the curve, the doubling formulas are the addition formulas for a point and itself. -/
+theorem double_is_add (X Y Z : F) (h : Y * Y * Z = X * X * X + 7 * Z * Z * Z) :
+    2 * X * Y * (Y * Y - 63 * Z * Z) = RX X Y Z X Y Z
+    ∧ (Y * Y - 63 * Z * Z) * (Y * Y + 21 * Z * Z) + 168 * Y * Y * Z * Z = RY X Y Z X Y Z
+    ∧ 8 * Y * Y * Y * Z = RZ X Y Z X Y Z := by
+  have cube : X * X * X = Y * Y * Z - 7 * Z * Z * Z := by grind
+  simp only [RX, RY, RZ]
+  refine ⟨?_, ?_, ?_⟩ <;> grind
+
+/-- `Point.double` doubles: on a point that stands for a point of the curve, it gives a point that stands for
+that point added to itself. -/
+theorem rep_double [FieldP] [OddOrder] {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
+    Rep (Point.double p) (Spec.add a a) := by
+  obtain ⟨_, _, _, rp⟩ := hp
+  obtain ⟨vx, vy, vz⟩ := valid_point_double p
+  obtain ⟨fx, fy, fz⟩ := double_formulas p
+  obtain ⟨ex, ey, ez⟩ := double_is_add _ _ _ (repF_curve ha rp)
+  refine ⟨vx, vy, vz, ?_⟩
+  rw [fx, fy, fz, ex, ey, ez]
+  exact formulas_add ha ha rp rp
+
 theorem zero_toNat : Fe.zero.toNat = 0 := by
   simp only [Fe.zero, Fe.toNat, value, show (0 : UInt64).toNat = 0 from rfl]
 
@@ -458,32 +519,76 @@ theorem Sc.bit_testBit (k : Sc) (j : Nat) (hj : j < 256) : (k.bit j = 1) ↔ k.t
         rw [show j % 64 = j - 64 - 64 - 64 by omega]
         exact word_bit _ _ (by omega)
 
-/-- Along the scalar's bits, the running point keeps standing for the specification's running point. -/
-theorem ladder_rep [FieldP] [OddOrder] (k : Sc) (l : List Nat) (acc : Point) (r : Spec.Point)
-    (hr : OnCurve r) (h : Rep acc r) :
-    Rep (l.foldl (ladderStep k) acc)
-      (l.foldl (fun r i => if k.toNat.testBit (255 - i) then Spec.add (Spec.add r r) Spec.G else Spec.add r r) r) := by
+/-- Along the scalar's bits, the running point keeps standing for the specification's running point, for any
+point of the curve being multiplied. -/
+theorem ladder_rep [FieldP] [OddOrder] (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a)
+    (l : List Nat) (acc : Point) (r : Spec.Point) (hr : OnCurve r) (h : Rep acc r) :
+    Rep (l.foldl (ladderStep k p) acc)
+      (l.foldl (fun r i => if k.toNat.testBit (255 - i) then Spec.add (Spec.add r r) a else Spec.add r r) r) := by
   induction l generalizing acc r with
   | nil => exact h
   | cons i l ih =>
     rw [List.foldl_cons, List.foldl_cons]
-    have doubled := rep_add hr hr h h
+    have doubled := rep_double hr h
     have onDoubled := Spec.add_onCurve hr hr
     by_cases bit : k.toNat.testBit (255 - i) = true
     · have set := (Sc.bit_testBit k (255 - i) (by omega)).mpr bit
       simp only [ladderStep, set, bit, ↓reduceIte]
-      exact ih _ _ (Spec.add_onCurve onDoubled Spec.G_onCurve) (rep_add onDoubled Spec.G_onCurve doubled rep_generator)
+      exact ih _ _ (Spec.add_onCurve onDoubled ha) (rep_add onDoubled ha doubled hp)
     · have clear : ¬ (k.bit (255 - i) = 1) := fun e => bit ((Sc.bit_testBit k (255 - i) (by omega)).mp e)
       simp only [ladderStep, clear, bit, ↓reduceIte]
       exact ih _ _ onDoubled doubled
 
+/-- The 256 bits, most significant first, as the specification lists them and as the code counts them. -/
+theorem ladder_bits : (List.range 256).reverse = (List.range' 0 256).map (fun i => 255 - i) := by decide +kernel
+
+/-- **Multiplying a point.** For a point that stands for a point `a` of the curve, what `mul` returns stands
+for `k · a` as the specification defines it. -/
+theorem mul_rep [FieldP] [OddOrder] (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
+    Rep (Point.mul k p) (Spec.smul k.toNat a) := by
+  rw [mul_ladder, Spec.smul, ladder_bits, List.foldl_map]
+  exact ladder_rep k ha hp _ _ _ trivial rep_infinity
+
+/-- The same for the multiplication that is for scalars that are not secret. -/
+theorem mulPublic_rep [FieldP] [OddOrder] (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
+    Rep (Point.mulPublic k p) (Spec.smul k.toNat a) := by
+  rw [mulPublic_ladder, Spec.smul, ladder_bits, List.foldl_map]
+  exact ladder_rep k ha hp _ _ _ trivial rep_infinity
+
 /-- Multiplying the generator: the point `mulGenerator` returns stands for `k · G` as the specification
 defines it. -/
 theorem mulGenerator_rep [FieldP] [OddOrder] (k : Sc) :
-    Rep (Point.mulGenerator k) (Spec.smul k.toNat Spec.G) := by
-  have lists : (List.range 256).reverse = (List.range' 0 256).map (fun i => 255 - i) := by decide +kernel
-  rw [mulGenerator_ladder, Spec.smul, lists, List.foldl_map]
-  exact ladder_rep k _ _ _ trivial rep_infinity
+    Rep (Point.mulGenerator k) (Spec.smul k.toNat Spec.G) :=
+  mul_rep k Spec.G_onCurve rep_generator
+
+/-! ## A point from two coordinates, and a point negated -/
+
+/-- Two coordinates below P, with 1 for the third, stand for the point they name. -/
+theorem rep_ofAffine {x y : Fe} (hx : x.Valid) (hy : y.Valid) : Rep (Point.ofAffine x y) (.pt x.toF y.toF) := by
+  refine ⟨hx, hy, one_valid, 1, ?_, ?_, ?_⟩
+  · show Fe.one.toF * 1 = 1
+    rw [one_toF]
+    decide
+  · show x.toF = x.toF * 1
+    grind
+  · show y.toF = y.toF * 1
+    grind
+
+theorem toF_neg (a : Fe) (ha : a.Valid) : (Fe.neg a).toF = -a.toF := by
+  rw [Fe.neg, toF_sub _ _ zero_valid ha, zero_toF]
+  grind
+
+theorem valid_neg (a : Fe) (ha : a.Valid) : (Fe.neg a).Valid := valid_sub _ _ zero_valid ha
+
+/-- `Point.neg` negates: it gives the point that stands for the specification's negation. -/
+theorem rep_neg [FieldP] {p : Point} {a : Spec.Point} (hp : Rep p a) : Rep (Point.neg p) (Spec.neg a) := by
+  obtain ⟨px, py, pz, rp⟩ := hp
+  refine ⟨px, valid_neg _ py, pz, ?_⟩
+  show RepF p.x.toF (Fe.neg p.y).toF p.z.toF (Spec.neg a)
+  rw [toF_neg _ py]
+  match a, rp with
+  | .inf, ⟨hx, hz, hy⟩ => exact ⟨hx, hz, by grind⟩
+  | .pt x y, ⟨w, hw, hx, hy⟩ => exact ⟨w, hw, hx, by simp only [hy]; grind⟩
 
 /-! ## From three coordinates to two -/
 
@@ -629,5 +734,17 @@ theorem public_point [Fermat] (k : Sc) {x y : F} (h : Spec.smul k.toNat Spec.G =
   rw [h] at rep
   obtain ⟨hx, hy, flag, _, _⟩ := affine_point rep
   exact ⟨hx, hy, flag⟩
+
+/-- From three coordinates back to the specification: what a point stands for can be read off what `affine`
+returns. Either it says the point at infinity, and that is what the point stands for; or it gives two
+coordinates below P, and the point stands for the point they name. -/
+theorem affine_spec [Fermat] {p : Point} {c : Spec.Point} (h : Rep p c) :
+    (p.affine.2.2 = 1 ∧ c = .inf)
+    ∨ (p.affine.2.2 = 0 ∧ c = .pt p.affine.1.toF p.affine.2.1.toF ∧ p.affine.1.Valid ∧ p.affine.2.1.Valid) := by
+  cases c with
+  | inf => exact Or.inl ⟨affine_infinity h, rfl⟩
+  | pt x y =>
+    obtain ⟨hx, hy, flag, vx, vy⟩ := affine_point h
+    exact Or.inr ⟨flag, by rw [hx, hy], vx, vy⟩
 
 end SecpCt

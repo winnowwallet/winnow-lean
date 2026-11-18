@@ -1,5 +1,5 @@
 import Secp.Sha256
-import SecpCt.Schnorr
+import SecpCt.Keys
 
 /-! # Signing (ECDSA), without the key showing in how it is done
 
@@ -25,8 +25,8 @@ that depends on what it hashes.
 Whether the 32 bytes given are a key at all, and whether `k`, `r` or `s` came out zero (which does not
 happen), are the only questions answered by branching, and only after all the work is done.
 
-This file signs; it does not verify. The caller checks the signature afterwards with code that has nothing
-to hide (`Secp.Ecdsa.verify`, `Secp/Ecdsa.lean`).
+`sign` does not check what it made. The caller puts the signature to `verify`, below, which has nothing to
+hide and is written plainly.
 
 `Ecdsa.sign_eq` (`SecpCt/EcdsaProofs.lean`): what this returns is what the reference in `Secp/Ecdsa.lean`
 returns, byte for byte. -/
@@ -58,5 +58,41 @@ def sign (secret digest aux : ByteArray) : Option ByteArray :=
   if secret.size != 32 || digest.size != 32 || aux.size != 32 then none else
   let (signature, ok) := signRaw secret digest aux
   if ok == 1 then some signature else none
+
+/-! ## Checking a signature
+
+Nothing here is secret: a signature, the digest it is for and a public key. For a signature `(r, s)`, a
+digest `z` and a public key `Q`:
+
+    w = 1/s modulo N,   the point (z·w)·G + (r·w)·Q is a point, and its x modulo N is r.
+
+`s` must be in the lower half, as Bitcoin relays it (BIP 146). The division is the same power the signing
+code divides by (`Sc.inv`), and its answer is kept only if it multiplies back to one, so the check does not
+rest on N being prime. What accepting means on the curve as specified is `Ecdsa.verify_sound`
+(`SecpCt/KeySpecs.lean`).
+
+For the digest of all zeros the equation has only `(r·w)·Q` in it, whose x is the same for `Q` and for
+`−Q`: a signature of that digest verifies under a key and under its negation alike. That is ECDSA's own, not
+this verifier's; no transaction's digest is zero. -/
+
+/-- Whether the 64 bytes `signature` (`r` then `s`) are an ECDSA signature of the 32-byte `digest` under the
+33-byte public key `key`, with `s` in the lower half. -/
+def verify (signature digest key : ByteArray) : Bool :=
+  let (rBytes, sBytes) := (signature.extract 0 32, signature.extract 32 64)
+  let (r, s) := (Sc.ofBytes rBytes, Sc.ofBytes sBytes)
+  let w := Sc.inv s
+  signature.size == 64 && digest.size == 32 &&
+  -- r and s from 1 to N − 1, s in the lower half, and the division checked
+  Sc.isKey rBytes == 1 && Sc.isKey sBytes == 1 && Sc.isHigh s == 0 && Sc.same (Sc.mul s w) Sc.one &&
+  ((parseCompressed key).bind fun q =>
+    (Point.add (Point.mulPublic (Sc.mul (Sc.ofBytes digest) w) Point.generator)
+        (Point.mulPublic (Sc.mul r w) q.point)).toAffine?.filter fun sum =>
+      -- the sum's x is below P, which is below 2N: one subtraction of N brings it below N
+      Sc.same (Sc.reduceOnce sum.x.a0 sum.x.a1 sum.x.a2 sum.x.a3 0) r).isSome
+
+/-- The signature `sign` makes, checked under the signer's own public key before it is returned. -/
+def signVerified (secret digest aux : ByteArray) : Option ByteArray :=
+  (sign secret digest aux).filter fun signature =>
+    (publicPoint (Sc.ofBytes secret)).any fun key => verify signature digest key.compressed
 
 end SecpCt.Ecdsa
