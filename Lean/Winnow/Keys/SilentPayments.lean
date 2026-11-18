@@ -8,7 +8,7 @@ A recipient publishes one reusable code (`sp1…`, or `tsp1…` on test networks
 on a fresh Taproot output that only the two parties can tie to the code. Winnow sends to codes and does
 not receive at one. Here: the address codec, which inputs count, the sum of their keys, the input hash
 over the smallest outpoint, the shared secret with the scan key, and the output keys tweaked from the
-spend key. The curve work is `Secp256k1` (the proven `Secp`); errors and their order are Swift's.
+spend key. The curve work is `Secp256k1` (on `SecpCt`); errors and their order are Swift's.
 
 The code (`SilentPaymentAddress`) lives in `Winnow`: wallet records name the code a history output was
 paid to and are validated with `parse`. Differences: Swift's `SegwitAddress.convertBits` throws its own

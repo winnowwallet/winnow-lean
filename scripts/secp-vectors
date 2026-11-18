@@ -2,6 +2,7 @@
 """Writes Lean/Vectors/secp-known-answers.json: what every curve operation the wallet uses must answer.
 
   scripts/secp-vectors > Lean/Vectors/secp-known-answers.json
+  scripts/secp-vectors --check     fail unless the file is what this writes (CI runs this)
 
 The wallet has one implementation of secp256k1 (Lean/SecpCt), proved against the specification in
 Lean/Secp/Curve/Spec.lean. Nothing else in the tree computes on the curve, so there is nothing in Lean to
@@ -23,13 +24,14 @@ Each kind of record is what one operation is given and what it must return, `nul
   secretAddXOnly   the same after negating d when d·G has an odd y (BIP341's key tweak)
   bip340Sign       BIP340 signing with the auxiliary randomness given
   bip340Verify     BIP340 verification
-  ecdsaSign        ECDSA with the nonce made as Lean/Secp/Bip340.lean makes it, s in the lower half
+  ecdsaSign        ECDSA with the nonce made as Lean/Secp/Signing.lean makes it, s in the lower half
   ecdsaVerify      ECDSA verification, s in the lower half only
 
 The output is the same on every run.
 """
 import hashlib
 import json
+import pathlib
 import sys
 
 P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
@@ -335,8 +337,14 @@ def main():
             return [convert(v) for v in value]
         return hexed(value)
 
-    json.dump(convert(out), sys.stdout, indent=1)
-    print()
+    text = json.dumps(convert(out), indent=1) + "\n"
+    if sys.argv[1:] == ["--check"]:
+        kept = pathlib.Path(__file__).resolve().parent.parent / "Lean" / "Vectors" / "secp-known-answers.json"
+        if kept.read_text() != text:
+            sys.exit(f"secp-vectors: {kept} is not what this script writes; run it again and commit the file")
+        print(f"secp-vectors: {kept.name} is what this script writes")
+        return
+    sys.stdout.write(text)
 
 
 if __name__ == "__main__":

@@ -17,9 +17,9 @@ account itself and its review (`Wallet/SegwitSpendReview.lean`, in the core libr
     extracts the transaction.
 
 Signatures are made by `SecpCt.Ecdsa.sign`, which does the same work whatever the key is and is proved to
-return what the reference returns (`SecpCt.Ecdsa.sign_eq`), and every one is put to `Secp.Ecdsa.verify`
+return what the reference returns (`SecpCt.Ecdsa.sign_eq`), and every one is put to `SecpCt.Ecdsa.verify`
 before it is written into the PSBT: a signature that leaves here satisfies ECDSA's equation for the key it
-is filed under (`Secp.Ecdsa.verify_sound`). Signatures commit to every input and output (SIGHASH_ALL); no
+is filed under (`SecpCt.Ecdsa.verify_sound`). Signatures commit to every input and output (SIGHASH_ALL); no
 other kind is made or counted. A signature by someone else is counted only if it is strict DER (BIP66) with
 `s` in the lower half (BIP146), as Bitcoin Core's relay rules want it.
 

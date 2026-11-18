@@ -44,8 +44,14 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   each one an input spends from, must hash to its txid, so the server is trusted for nothing. crypto-test holds
   `FundingSources.revelation` to them.
 - [ecdsa-vectors](ecdsa-vectors) writes `Lean/Vectors/openssl-ecdsa-secp256k1.json`: 64 ECDSA signatures over
-  secp256k1 that OpenSSL made and verified, with their keys, which segwit-test holds the verifier and the DER
-  reader of `Lean/Secp/Ecdsa.lean` to. OpenSSL signs with its own randomness, so the file is one run, kept.
+  secp256k1 that OpenSSL made and verified, with their keys, which segwit-test holds the verifier
+  (`Lean/SecpCt/Ecdsa.lean`) and the DER reader (`Lean/Secp/Der.lean`) to. OpenSSL signs with its own randomness,
+  so the file is one run, kept.
+- [secp-vectors](secp-vectors) writes `Lean/Vectors/secp-known-answers.json`: what every curve operation the
+  wallet uses must answer, and where it must refuse, computed on Python integers with none of the wallet's code.
+  The wallet has one implementation of secp256k1 (`Lean/SecpCt`), so this is what its compiled code is compared
+  with; secpct-test holds it to every record. The output is the same on every run, and `--check` (CI runs it)
+  fails if the kept file is not it.
 - [gen-scalar-mul-proofs](gen-scalar-mul-proofs) writes `Lean/SecpCt/ScalarMulProofs.lean`, the proofs about the
   constant-time scalar multiplication, which are too long to write by hand; Lean checks what it writes like any
   other proof. `--check` (CI) fails unless the file in the repository is what the script writes.

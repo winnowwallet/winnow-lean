@@ -1,9 +1,9 @@
 /-! # Words: arithmetic that does the same thing whatever the numbers are
 
-`Secp` is correct by proof and takes no care over timing (`Secp/Keys.lean`). `SecpCt` is the same signing for
-where a key must not show in how long signing takes, or in which memory it touches: a signer that someone
-else can ask for signatures as often as they like, timing every one. So nothing in `SecpCt` may branch on a
-secret or use one to pick where to read. This file is the vocabulary that makes that possible.
+`SecpCt` is secp256k1 for where a key must not show in how long the work takes, or in which memory it
+touches: a signer that someone else can ask for signatures as often as they like, timing every one. So
+nothing in `SecpCt` may branch on a secret or use one to pick where to read. This file is the vocabulary that
+makes that possible.
 
 A secret is only ever held in `UInt64`s, which compile to machine words, and only ever meets `+ - * &&& |||
 ^^^ ~~~` and shifts by amounts that are not secret. A carry is computed from the top bits of the operands,

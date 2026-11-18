@@ -12,8 +12,8 @@ does not happen), are the only questions answered by branching, and only after a
 
 The hashing is winnow's SHA-256, which works in 32-bit words with no step that depends on what is hashed.
 
-This file signs and gives the public key; it does not verify. The caller checks the signature afterwards
-with code that has nothing to hide (winnow's), as BIP 340 recommends. -/
+This file signs and gives the public key; it does not verify. `signVerified` (`SecpCt/Keys.lean`) checks the
+signature afterwards with code that has nothing to hide, as BIP 340 recommends. -/
 
 namespace SecpCt
 

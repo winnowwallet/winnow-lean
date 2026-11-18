@@ -18,8 +18,8 @@ BIP340 signing against BIP340's own vectors.
   200f9b26fe0a2f235a2af8b30c4be9f12f6bc9cb, `bip-0340/test-vectors.csv`, SHA-256
   34c9d1d9c3a88d524bc80778540dc43f8306ec249a7485293063c376db851c2d). Where a vector has a secret key, the
   x-only key derived from it and the signature `schnorrSign` makes with its `aux_rand` must be the
-  vector's exactly, so the nonce derivation is checked, not only that signatures verify (`sign_verifies`
-  proves that much). Every vector's verification result must be the vector's. Then one message signed
+  vector's exactly, so the nonce derivation is checked, not only that signatures verify (`schnorrSign`
+  checks that much itself before it returns one). Every vector's verification result must be the vector's. Then one message signed
   twice with `Signer.randomAuxiliaryRand` gives two different signatures that both verify.
 * `Vectors/swift-utf8-decoding.json`: what Swift's `String(decoding:as: UTF8.self)` makes of well-formed text,
   truncated sequences, overlongs, surrogates, code points past U+10FFFF, lone continuation bytes and seeded

@@ -3,9 +3,10 @@ import SecpCt.Word
 /-! # The field: numbers modulo P = 2²⁵⁶ − 2³² − 977
 
 An element is four words, least significant first, and always the one representative below P. Every operation
-does the same sequence of word operations whatever the element is.
+does the same sequence of word operations whatever the element is: where a reduction depends on a carry, the
+carry becomes a mask and never an `if`.
 
-The reductions follow winnow's `Secp/Fast.lean`, with each `if` on a carry replaced by a mask. -/
+`sqrt?` and `ofBytes?` answer with or without a value, so they are for elements that are not secret. -/
 
 namespace SecpCt
 

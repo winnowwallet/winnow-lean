@@ -16,7 +16,7 @@ import SecpCt.SignProofs
 import SecpCt.EcdsaProofs
 import SecpCt.KeySpecs
 
-/-! # The gate for `SecpCt`: what it returns is what the reference returns
+/-! # The gate for `SecpCt`: what it computes is what the specification says
 
 Imported by the library root, so `lake build` fails if any of these depends on a `sorry` or on any axiom
 beyond the standard three. That P is prime is a hypothesis of the theorems that need it (`[Fermat]`), never an

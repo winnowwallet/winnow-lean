@@ -513,9 +513,10 @@ private def ledgerCommands : Target := {
 
 The same harness on code that is not a parser of a peer's bytes but takes bytes all the same: a signature in
 DER from another signer, a signature to verify, a key to sign with, a pasted descriptor, a PSBT someone else
-made. The signing targets are differential: the constant-time code (`SecpCt`) and the reference (`Secp`) must
-give the same answer for every input, which the proofs say of the definitions (`SecpCt/Gate.lean`) and this
-says of the compiled code, on the inputs tried. -/
+made. The signing targets are differential: the curve code (`SecpCt`) and the signing references
+(`Secp/Signing.lean`, run over `k·G` on plain numbers, `TestKit/CurveOracle.lean`) must give the same answer
+for every input, which the proofs say of the definitions (`SecpCt/Gate.lean`) and this says of the compiled
+code, on the inputs tried. -/
 
 private def beNat (b : ByteArray) : Nat := Secp.fromBE b
 private def field32 (data : ByteArray) (k : Nat) : ByteArray :=

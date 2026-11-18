@@ -398,7 +398,7 @@ Each module is done when its lockstep run against the Swift original passes and 
 | 1. Bytes | hex, little/big-endian, CompactSize, readers/writers | **done** (`Lean/Winnow/Bytes.lean`) |
 | 2. Hashes | SHA-256, SHA-512, HMAC, PBKDF2-HMAC-SHA512, RIPEMD-160, SipHash, tagged hash | **done**: lockstep `a_crypto` OK, seeds 1–5 (3,169 requests per seed at 300 cases) |
 | 3. Encodings | Base58(check), Bech32/Bech32m, segwit addresses (GCS filters moved to Net) | **done**: same lockstep |
-| 4. Curves | **done**: secp256k1 as WalletCore uses P256K (on the proven `Secp`), BIP340, MuSig2 (BIP327), Ed25519 (RFC 8032) + census signatures — lockstep `b_p256k b_musig b_ed25519` OK seeds 1–3 |
+| 4. Curves | **done**: secp256k1 as WalletCore uses P256K (on `SecpCt`, proved against the curve as specified in `Secp`), BIP340, MuSig2 (BIP327), Ed25519 (RFC 8032) + census signatures — lockstep `b_p256k b_musig b_ed25519` OK seeds 1–3 |
 | 5. Keys | **done**: BIP32, BIP39 (+ Foundation-exact NFKD), BIP86, Taproot, KeyStore + in-memory store — lockstep `b_bip32 b_bip39 b_bip86 b_taproot b_keystore` OK seeds 1–3; Keychain store becomes the shell's keychain capability |
 | 6. Script, Transactions | wire, transactions, scripts, multisig, addresses, sighash (BIP341), builder, funding sources | **done**: lockstep `c_wire c_transaction c_script c_address c_sighash c_builder c_funding` OK seeds 1–3; BIP341 vectors (23 sighashes) match |
 | 7. Descriptors, PSBT | **done**: PSBT format (`c_psbt`), descriptors (`e_descriptor`), Signer + PSBT roles incl. MuSig2 rounds (`e_psbtroles`, whole flows compared step by step) — OK seeds 1–3 |
@@ -439,6 +439,6 @@ Rules:
   published vectors Winnow's tests use (`Tests/**/Vectors`, BIP vectors). A module is done when its
   generator passes for several seeds with both successes and refusals exercised.
 * **Lean style**: ordinary Lean 4 (v4.35, no Mathlib); `ByteArray` for bytes, `Except` for failures,
-  `Winnow.Reader` for parsing. Reuse `Secp` (proven secp256k1: field, curve, BIP340, tweaks) instead of
+  `Winnow.Reader` for parsing. Reuse `SecpCt` (secp256k1, proved against the specification in `Secp`: field, curve, BIP340, tweaks) instead of
   re-implementing curve arithmetic. Proofs are welcome but not required for a port.
 * **Scope** (during the port): an area touched only its own files above, never `Package.swift` or `Sources/`.

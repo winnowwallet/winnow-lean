@@ -8,18 +8,22 @@ import TestKit.SecpAnswers
 import TestKit.CurveOracle
 import Winnow.Keys.Secp256k1
 
-/-! # The constant-time signing code against the reference
+/-! # The curve code, as compiled
 
-`SecpCt` is held to `Secp`, whose definitions are the ones its proofs are about: the same public key for the
-same secret, and the same signature, byte for byte, for the same key, message and randomness. BIP 340 signing
-is a function, so there is exactly one right answer to compare with.
+`SecpCt` is the only secp256k1 the wallet runs. Its proofs (`SecpCt/Gate.lean`) are about the source; this
+is what holds the compiled code to the same, on the inputs tried, with nothing here that shares code with
+it:
 
-ECDSA is held the same way to the reference in `Secp/Ecdsa.lean`, and every signature is put to the verifier
-and through DER and back. The verifier, the DER writer and the DER reader are held to a signature OpenSSL
-made, so that they are not only checked against code written beside them.
-
-Before any of that, every curve operation the wallet uses is held to `Vectors/secp-known-answers.json`: answers
-computed by `scripts/secp-vectors` with none of the wallet's code (`TestKit/SecpAnswers.lean`).
+  - every curve operation the wallet uses against `Vectors/secp-known-answers.json`, answers computed by
+    `scripts/secp-vectors` with none of the wallet's code (`TestKit/SecpAnswers.lean`): once for `SecpCt`
+    alone and once as the wallet calls it (`Winnow/Keys/Secp256k1.lean`), and then the two beside each
+    other on a stream of inputs, so that the wallet's wrapper adds and loses nothing;
+  - the field and the scalars against plain arithmetic on naturals;
+  - public keys and BIP 340 and ECDSA signatures, byte for byte, against the signing references
+    (`Secp/Signing.lean`) run over `k·G` on plain numbers (`TestKit/CurveOracle.lean`). Signing is a
+    function, so there is exactly one right answer to compare with. Every signature is put to the verifier,
+    and an ECDSA one through DER and back;
+  - the ECDSA verifier, the DER writer and the DER reader against a signature OpenSSL made.
 
 The proofs say all of this for every input (`SecpCt/Gate.lean`); this runs the compiled code, which the
 proofs do not reach, on the inputs tried. Inputs are a fixed stream of pseudo-random bytes, the same on every
@@ -104,8 +108,8 @@ def constantTimeCurve : TestKit.SecpAnswers.Curve :=
     ecdsaSign := Ecdsa.signVerified
     ecdsaVerify := fun key digest signature => Ecdsa.verify signature digest key }
 
-/-- Two implementations on the same stream of inputs: every operation must give the same bytes or refuse
-alike. The inputs are made so that both sorts happen: an x taken at random is the x of a point about half
+/-- Two ways to the curve on the same stream of inputs (`SecpCt` alone, and as the wallet calls it): every
+operation must give the same bytes or refuse alike. The inputs are made so that both sorts happen: an x taken at random is the x of a point about half
 the time, and the edges of each range are tried first. -/
 def agree (a b : TestKit.SecpAnswers.Curve) (rounds : Nat) : IO Unit := do
   let same (x y : Option ByteArray) : Bool := match x, y with

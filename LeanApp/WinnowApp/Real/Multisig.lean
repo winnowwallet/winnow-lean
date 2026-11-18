@@ -202,7 +202,7 @@ def chainTip (env : Env) : IO UInt32 := do
 /-- The wallet's BIP86 account key (the `tr(KEY)` of its descriptor): this phone's key in every multisig
 account it is in, of either kind. In a Taproot account its children sign with BIP340, in a SegWit v0 account
 with ECDSA; a key may sign both ways because the two signatures' nonces are made under different tags
-(`Lean/Secp/Ecdsa.lean`), so no nonce is ever shared between them. A key of its own for SegWit v0 accounts
+(`Lean/Secp/Signing.lean`), so no nonce is ever shared between them. A key of its own for SegWit v0 accounts
 (BIP48's `m/48'/coin'/0'/2'`) would need the wallet to keep and back up a second account key. -/
 def walletAccountKey? (w : Wallet) : Option Keys.HDKey :=
   match w.descriptor.expression with

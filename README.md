@@ -5,8 +5,8 @@ Mac as an iPad app. It receives and sends bitcoin and saves recipients. This
 build signs with this phone's key, alone or as one signer of a k-of-n multisig
 account. It is written in Lean 4: the wallet, the networking and the app's
 model, update and view, compiled to C and rendered by LeanNative's generic native
-shell; the curve arithmetic behind every signature is the proven secp256k1 in
-`Lean/Secp`.
+shell; the curve arithmetic behind every key and signature is one secp256k1,
+`Lean/SecpCt`, proved against the curve as specified in `Lean/Secp`.
 
 [App Store](https://apps.apple.com/app/id6801502501) ·
 [TestFlight](https://testflight.apple.com/join/83djpNE7) ·
@@ -89,8 +89,9 @@ well. The
 
 - `Lean/`: the wallet in Lean 4 (`Winnow/`): keys, transactions, PSBTs, descriptors, k-of-n
   multisig accounts, silent payments, the Ledger signer, the wallet, compact-filter sync, peers, mempool windows and the broadcaster, over libuv TCP.
-  `Secp/` is the proven secp256k1, with ECDSA beside BIP340; `SecpCt/` is the same signing on machine words,
-  doing the same work whatever the key is and proved to return what `Secp/` returns. `IOTest.lean` (`io-test`) runs the network layer against a disposable
+  `SecpCt/` is secp256k1 as it runs, the only implementation: field, points, keys, tweaks, BIP340 and ECDSA on
+  machine words, doing the same work whatever a secret is. `Secp/` is what it is proved against: the curve as
+  specified and signing as the BIPs give it, with bytes, SHA-256 and DER beside them. `IOTest.lean` (`io-test`) runs the network layer against a disposable
   regtest bitcoind.
 - `LeanApp/`: the app: `WinnowApp/` holds the model, update, views and commands (Elm-style, LeanNative),
   `WinnowApp/Real/` the backend, `WinnowApp/E2E.lean` the Debug-only test mode, `WinnowApp/Project.lean`

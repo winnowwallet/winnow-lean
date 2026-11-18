@@ -25,10 +25,10 @@ that depends on what it hashes.
 Whether the 32 bytes given are a key at all, and whether `k`, `r` or `s` came out zero (which does not
 happen), are the only questions answered by branching, and only after all the work is done.
 
-`sign` does not check what it made. The caller puts the signature to `verify`, below, which has nothing to
-hide and is written plainly.
+`sign` does not check what it made. `signVerified` does: it puts the signature to `verify`, below, which has
+nothing to hide and is written plainly.
 
-`Ecdsa.sign_eq` (`SecpCt/EcdsaProofs.lean`): what this returns is what the reference in `Secp/Ecdsa.lean`
+`Ecdsa.sign_eq` (`SecpCt/EcdsaProofs.lean`): what this returns is what the reference in `Secp/Signing.lean`
 returns, byte for byte. -/
 
 namespace SecpCt.Ecdsa
