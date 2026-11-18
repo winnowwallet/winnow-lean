@@ -2,6 +2,8 @@ import SecpCt.Schnorr
 import SecpCt.Ecdsa
 import Secp.Ecdsa
 import TestKit.Check
+import TestKit.SecpAnswers
+import Winnow.Keys.Secp256k1
 
 /-! # The constant-time signing code against the reference
 
@@ -12,6 +14,9 @@ is a function, so there is exactly one right answer to compare with.
 ECDSA is held the same way to the reference in `Secp/Ecdsa.lean`, and every signature is put to the verifier
 and through DER and back. The verifier, the DER writer and the DER reader are held to a signature OpenSSL
 made, so that they are not only checked against code written beside them.
+
+Before any of that, every curve operation the wallet uses is held to `Vectors/secp-known-answers.json`: answers
+computed by `scripts/secp-vectors` with none of the wallet's code (`TestKit/SecpAnswers.lean`).
 
 The proofs say all of this for every input (`SecpCt/Gate.lean`); this runs the compiled code, which the
 proofs do not reach, on the inputs tried. Inputs are a fixed stream of pseudo-random bytes, the same on every
@@ -47,7 +52,41 @@ def compressedOf (secret : ByteArray) : Option ByteArray :=
 
 def fromBytes (b : ByteArray) : Nat := b.foldl (fun acc x => acc * 256 + x.toNat) 0
 
+/-- The curve the wallet runs today, as the known answers see it. -/
+def walletCurve : TestKit.SecpAnswers.Curve :=
+  let point (b : ByteArray) : Option Winnow.Keys.Point :=
+    if b.size == 33 then (Winnow.Keys.parsePublicKey b (compressed := true)).toOption
+    else if b.size == 65 then (Winnow.Keys.parsePublicKey b (compressed := false)).toOption else none
+  { publicKey := fun secret => (Winnow.Keys.publicKeyOf secret).toOption
+    liftX := fun x => if x.size == 32 then (Secp.liftX? (Secp.fromBE x)).map (fun q => Secp.toBE32 q.2.toNat) else none
+    parse := fun b => (point b).map fun q => (Secp.toBE32 q.1.toNat, Secp.toBE32 q.2.toNat)
+    pointAdd := fun p t => do
+      let q ← point p
+      (Winnow.Keys.publicAdd q t).toOption.map Winnow.Keys.serializeCompressed
+    xonlyAdd := fun x t => (Winnow.Keys.xonlyAdd x t).toOption
+    pointMul := fun p t => do
+      let q ← point p
+      (Winnow.Keys.publicMultiply q t).toOption.map Winnow.Keys.serializeCompressed
+    combine := fun points => do
+      let qs ← points.toList.mapM point
+      (Winnow.Keys.combine qs).toOption.map Winnow.Keys.serializeCompressed
+    secretAdd := fun d t => do
+      let secret ← (Winnow.Keys.secretOf d).toOption
+      (Winnow.Keys.privateAdd secret t).toOption.map Secp.toBE32
+    secretAddXOnly := fun d t => do
+      let secret ← (Winnow.Keys.secretOf d).toOption
+      (Winnow.Keys.keypairXonlyAdd secret t).toOption.map Secp.toBE32
+    bip340Sign := fun d m aux => do
+      let secret ← (Winnow.Keys.secretOf d).toOption
+      (Winnow.Keys.schnorrSign secret m aux).toOption
+    bip340Verify := fun key m signature => (Winnow.Keys.schnorrVerify key m signature).toOption == some true
+    ecdsaSign := fun d digest aux => (Secp.Ecdsa.sign digest (Secp.fromBE d) aux).toOption
+    ecdsaVerify := fun key digest signature => match Secp.Ecdsa.verify signature digest key with
+      | .ok true => true
+      | _ => false }
+
 def main (args : List String) : IO UInt32 := TestKit.runMain "secpct-test" do
+  TestKit.SecpAnswers.check walletCurve
   let rounds := (args.head?.bind String.toNat?).getD 200
   let check (name : String) (holds : Bool) : IO Unit := TestKit.check name holds
   -- The field and the scalars against plain arithmetic on naturals.

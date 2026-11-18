@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""Writes Lean/Vectors/secp-known-answers.json: what every curve operation the wallet uses must answer.
+
+  scripts/secp-vectors > Lean/Vectors/secp-known-answers.json
+
+The wallet has one implementation of secp256k1 (Lean/SecpCt), proved against the specification in
+Lean/Secp/Curve/Spec.lean. Nothing else in the tree computes on the curve, so there is nothing in Lean to
+compare its compiled code with. This is that comparison: the curve in the plainest form there is (affine
+points, Python integers, the textbook chord and tangent rules), written with none of the wallet's code and
+only the Python standard library, and the answers it gives for a fixed set of inputs: the edges of each
+operation and a seeded stream. `secpct-test` holds the Lean code to every record.
+
+Each kind of record is what one operation is given and what it must return, `null` where it must refuse:
+
+  publicKey        a 32-byte secret, its compressed public key (refused for 0 and for N and above)
+  liftX            32 bytes as x, the even y on the curve (refused for x ≥ P and where there is none)
+  parse            33 or 65 bytes as a public key (02/03, 04, and the hybrid 06/07), its x and y
+  pointAdd         t·G + P for a 32-byte t below N (refused for t ≥ N and when the sum is no point)
+  xonlyAdd         t·G + lift_x(x), as x and whether y is odd (BIP341's output key)
+  pointMul         t·P for t from 1 to N − 1
+  combine          the sum of several points (refused when it is no point)
+  secretAdd        (d + t) mod N (refused for t ≥ N and a sum of zero)
+  secretAddXOnly   the same after negating d when d·G has an odd y (BIP341's key tweak)
+  bip340Sign       BIP340 signing with the auxiliary randomness given
+  bip340Verify     BIP340 verification
+  ecdsaSign        ECDSA with the nonce made as Lean/Secp/Bip340.lean makes it, s in the lower half
+  ecdsaVerify      ECDSA verification, s in the lower half only
+
+The output is the same on every run.
+"""
+import hashlib
+import json
+import sys
+
+P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+     0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def add(a, b):
+    """The group law on affine points; None is the point at infinity."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    (x1, y1), (x2, y2) = a, b
+    if x1 == x2:
+        if (y1 + y2) % P == 0:
+            return None
+        slope = 3 * x1 * x1 * pow(2 * y1, -1, P) % P
+    else:
+        slope = (y2 - y1) * pow(x2 - x1, -1, P) % P
+    x3 = (slope * slope - x1 - x2) % P
+    return (x3, (slope * (x1 - x3) - y1) % P)
+
+
+def mul(k, point):
+    result = None
+    for bit in bin(k)[2:] if k else "":
+        result = add(result, result)
+        if bit == "1":
+            result = add(result, point)
+    return result
+
+
+def neg(point):
+    return None if point is None else (point[0], (P - point[1]) % P)
+
+
+def lift_x(x):
+    if x >= P:
+        return None
+    c = (pow(x, 3, P) + 7) % P
+    y = pow(c, (P + 1) // 4, P)
+    if y * y % P != c:
+        return None
+    return (x, y if y % 2 == 0 else P - y)
+
+
+def b32(n):
+    return n.to_bytes(32, "big")
+
+
+def num(b):
+    return int.from_bytes(b, "big")
+
+
+def compressed(point):
+    return bytes([2 + (point[1] & 1)]) + b32(point[0])
+
+
+def parse(b):
+    if len(b) == 33 and b[0] in (2, 3):
+        point = lift_x(num(b[1:]))
+        if point is None:
+            return None
+        return point if (point[1] & 1) == (b[0] & 1) else neg(point)
+    if len(b) == 65 and b[0] in (4, 6, 7):
+        x, y = num(b[1:33]), num(b[33:])
+        if x >= P or y >= P or (y * y - x * x * x - 7) % P != 0:
+            return None
+        if b[0] != 4 and (y & 1) != (b[0] & 1):
+            return None
+        return (x, y)
+    return None
+
+
+def tagged(tag, data):
+    t = hashlib.sha256(tag.encode()).digest()
+    return hashlib.sha256(t + t + data).digest()
+
+
+def xor(a, b):
+    return bytes(x ^ y for x, y in zip(a, b))
+
+
+def public_key(secret):
+    d = num(secret)
+    return None if d == 0 or d >= N else mul(d, G)
+
+
+def bip340_sign(secret, message, aux):
+    point = public_key(secret)
+    if point is None or len(aux) != 32:
+        return None
+    d = num(secret) if point[1] % 2 == 0 else N - num(secret)
+    px = b32(point[0])
+    t = xor(b32(d), tagged("BIP0340/aux", aux))
+    k0 = num(tagged("BIP0340/nonce", t + px + message)) % N
+    if k0 == 0:
+        return None
+    r = mul(k0, G)
+    k = k0 if r[1] % 2 == 0 else N - k0
+    e = num(tagged("BIP0340/challenge", b32(r[0]) + px + message)) % N
+    return b32(r[0]) + b32((k + e * d) % N)
+
+
+def bip340_verify(key, message, signature):
+    if len(key) != 32 or len(signature) != 64:
+        return False
+    point = lift_x(num(key))
+    r, s = num(signature[:32]), num(signature[32:])
+    if point is None or r >= P or s >= N:
+        return False
+    e = num(tagged("BIP0340/challenge", signature[:32] + key + message)) % N
+    result = add(mul(s, G), neg(mul(e, point)))
+    return result is not None and result[1] % 2 == 0 and result[0] == r
+
+
+def ecdsa_sign(secret, digest, aux):
+    d = num(secret)
+    if d == 0 or d >= N or len(digest) != 32 or len(aux) != 32:
+        return None
+    t = xor(b32(d), tagged("winnow/ecdsa/aux", aux))
+    k = num(tagged("winnow/ecdsa/nonce", t + digest)) % N
+    if k == 0:
+        return None
+    r = mul(k, G)[0] % N
+    s = pow(k, -1, N) * (num(digest) + r * d) % N
+    if r == 0 or s == 0:
+        return None
+    return b32(r) + b32(N - s if s > N // 2 else s)
+
+
+def ecdsa_verify(key, digest, signature):
+    point = parse(key) if len(key) == 33 else None
+    if point is None or len(digest) != 32 or len(signature) != 64:
+        return False
+    r, s = num(signature[:32]), num(signature[32:])
+    if r == 0 or r >= N or s == 0 or s > N // 2:
+        return False
+    w = pow(s, -1, N)
+    result = add(mul(num(digest) % N * w % N, G), mul(r * w % N, point))
+    return result is not None and result[0] % N == r
+
+
+class Stream:
+    """A fixed stream of 32-byte strings."""
+
+    def __init__(self, seed):
+        self.state = hashlib.sha256(seed.encode()).digest()
+
+    def next(self):
+        self.state = hashlib.sha256(self.state).digest()
+        return self.state
+
+    def scalar(self):
+        return b32(num(self.next()) % (N - 1) + 1)
+
+
+def hexed(value):
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, list):
+        return [hexed(v) for v in value]
+    return value.hex()
+
+
+def main():
+    stream = Stream("winnow secp-vectors")
+    edge_scalars = [0, 1, 2, 3, N - 2, N - 1, N, N + 1, (N - 1) // 2, (N + 1) // 2, 2**255, 2**256 - 1, P, P - 1, 2**128, 2**64 - 1]
+    edge_secrets = [b32(v) for v in edge_scalars]
+    secrets = edge_secrets + [stream.scalar() for _ in range(24)]
+    points = [mul(num(s), G) for s in [b32(1), b32(2), b32(N - 1)] + [stream.scalar() for _ in range(8)]]
+    out = {"source": "scripts/secp-vectors: affine points on Python integers, none of the wallet's code"}
+
+    out["publicKey"] = [{"secret": s, "public": (lambda q: None if q is None else compressed(q))(public_key(s))} for s in secrets]
+
+    xs = [b32(v) for v in (0, 1, 2, 5, P - 1, P, P + 1, 2**256 - 1, G[0])] + [stream.next() for _ in range(40)]
+    out["liftX"] = [{"x": x, "y": (lambda q: None if q is None else b32(q[1]))(lift_x(num(x)))} for x in xs]
+
+    encodings = []
+    for q in points[:6]:
+        x, y = b32(q[0]), b32(q[1])
+        odd = q[1] & 1
+        encodings += [compressed(q), bytes([4]) + x + y, bytes([6 + odd]) + x + y, bytes([7 - odd]) + x + y,
+                      bytes([4]) + x + b32((q[1] + 1) % P), bytes([5]) + x + y, bytes([4]) + x]
+    encodings += [bytes([2]) + b32(5), bytes([3]) + b32(5), bytes([2]) + b32(P), bytes([2]) + b32(P + 1), bytes([0]) + b32(1),
+                  bytes([4]) + b32(1), bytes([2]) + b32(1)[:31], b"", bytes([4]) + b32(P) + b32(1)]
+    encodings += [bytes([2 + (i & 1)]) + stream.next() for i in range(16)]
+    out["parse"] = [{"bytes": e, "x": (lambda q: None if q is None else b32(q[0]))(parse(e)),
+                     "y": (lambda q: None if q is None else b32(q[1]))(parse(e))} for e in encodings]
+
+    tweaks = [b32(v) for v in (0, 1, 2, N - 1, N, N + 1, 2**256 - 1)] + [stream.scalar() for _ in range(6)]
+    cases = [(q, t) for q in points[:5] for t in tweaks]
+    # t·G = −P: the sum is the point at infinity
+    cases += [(mul(num(t), G), b32(N - num(t))) for t in (b32(1), b32(7), stream.scalar())]
+    # t·G = P: the sum is a doubling
+    cases += [(mul(num(t), G), t) for t in (b32(1), b32(9), stream.scalar())]
+
+    def point_add(q, t):
+        if num(t) >= N:
+            return None
+        return add(mul(num(t), G), q)
+
+    out["pointAdd"] = [{"point": compressed(q), "tweak": t,
+                        "result": (lambda r: None if r is None else compressed(r))(point_add(q, t))} for q, t in cases]
+
+    def xonly_add(x, t):
+        q = lift_x(num(x))
+        if q is None or num(t) >= N:
+            return None
+        return add(mul(num(t), G), q)
+
+    xonly_cases = [(b32(q[0]), t) for q in points[:5] for t in tweaks] + [(b32(5), b32(1)), (b32(P), b32(1))]
+    xonly_cases += [(b32(mul(num(t), G)[0]), b32(N - num(t)) if mul(num(t), G)[1] % 2 == 0 else t) for t in (b32(3), stream.scalar())]
+    out["xonlyAdd"] = []
+    for x, t in xonly_cases:
+        r = xonly_add(x, t)
+        out["xonlyAdd"].append({"x": x, "tweak": t, "result": None if r is None else b32(r[0]),
+                                "odd": False if r is None else bool(r[1] & 1)})
+
+    def point_mul(q, t):
+        k = num(t)
+        return None if k == 0 or k >= N else mul(k, q)
+
+    out["pointMul"] = [{"point": compressed(q), "scalar": t,
+                        "result": (lambda r: None if r is None else compressed(r))(point_mul(q, t))}
+                       for q in points[:5] for t in tweaks]
+
+    sums = [[points[0], points[1]], [points[0], points[0]], [points[3], neg(points[3])], [points[2], points[4], points[5]],
+            [points[1]], [points[6], neg(points[6]), points[7]], [points[0], points[2]], points[:6]]
+
+    def total(qs):
+        acc = None
+        for q in qs:
+            acc = add(acc, q)
+        return acc
+
+    out["combine"] = [{"points": [compressed(q) for q in qs],
+                       "result": (lambda r: None if r is None else compressed(r))(total(qs))} for qs in sums]
+
+    def secret_add(d, t):
+        if num(d) == 0 or num(d) >= N or num(t) >= N:
+            return None
+        s = (num(d) + num(t)) % N
+        return None if s == 0 else b32(s)
+
+    def secret_add_xonly(d, t):
+        q = public_key(d)
+        if q is None or num(t) >= N:
+            return None
+        s = ((num(d) if q[1] % 2 == 0 else N - num(d)) + num(t)) % N
+        return None if s == 0 else b32(s)
+
+    pairs = [(d, t) for d in secrets[:20] for t in tweaks[:9]]
+    pairs += [(d, b32(N - num(d))) for d in secrets[16:20]]
+    out["secretAdd"] = [{"secret": d, "tweak": t, "result": secret_add(d, t)} for d, t in pairs]
+    xonly_pairs = pairs + [(d, b32(num(d)) if public_key(d)[1] % 2 else b32(N - num(d))) for d in secrets[16:22]]
+    out["secretAddXOnly"] = [{"secret": d, "tweak": t, "result": secret_add_xonly(d, t)} for d, t in xonly_pairs]
+
+    out["bip340Sign"], out["bip340Verify"] = [], []
+    for i, secret in enumerate(secrets):
+        message = stream.next() if i % 5 else stream.next() + stream.next()[:i % 7]
+        aux = b32(0) if i % 4 == 0 else stream.next()
+        signature = bip340_sign(secret, message, aux)
+        out["bip340Sign"].append({"secret": secret, "message": message, "aux": aux, "signature": signature})
+        if signature is None:
+            continue
+        key = b32(public_key(secret)[0])
+        flipped = bytearray(signature)
+        flipped[i % 64] ^= 1 << (i % 8)
+        wrong_key = b32(mul((num(secret) % (N - 2)) + 2, G)[0])
+        for k, m, s in [(key, message, signature), (key, message, bytes(flipped)), (key, message + b"\x00", signature),
+                        (wrong_key, message, signature), (key, message, signature[:32] + b32(N)),
+                        (key, message, b32(P) + signature[32:]), (b32(5), message, signature), (key, message, signature[:63])]:
+            out["bip340Verify"].append({"key": k, "message": m, "signature": s, "valid": bip340_verify(k, m, s)})
+
+    out["ecdsaSign"], out["ecdsaVerify"] = [], []
+    digests = [b32(0), b32(1), b32(N), b32(2**256 - 1)]
+    for i, secret in enumerate(secrets):
+        digest = digests[i] if i < len(digests) else stream.next()
+        aux = b32(0) if i % 4 == 0 else stream.next()
+        signature = ecdsa_sign(secret, digest, aux)
+        out["ecdsaSign"].append({"secret": secret, "digest": digest, "aux": aux, "signature": signature})
+        if signature is None:
+            continue
+        key = compressed(public_key(secret))
+        r, s = signature[:32], signature[32:]
+        flipped = bytearray(signature)
+        flipped[i % 64] ^= 1 << (i % 8)
+        other = bytearray(digest)
+        other[31] ^= 1
+        negated = bytes([key[0] ^ 1]) + key[1:]
+        for k, z, sig in [(key, digest, signature), (key, digest, bytes(flipped)), (key, bytes(other), signature),
+                          (key, digest, r + b32(N - num(s))), (negated, digest, signature), (key, digest, b32(0) + s),
+                          (key, digest, r + b32(0)), (key, digest, b32(N) + s), (bytes([2]) + b32(5), digest, signature)]:
+            out["ecdsaVerify"].append({"key": k, "digest": z, "signature": sig, "valid": ecdsa_verify(k, z, sig)})
+
+    def convert(value):
+        if isinstance(value, dict):
+            return {k: convert(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [convert(v) for v in value]
+        return hexed(value)
+
+    json.dump(convert(out), sys.stdout, indent=1)
+    print()
+
+
+if __name__ == "__main__":
+    main()

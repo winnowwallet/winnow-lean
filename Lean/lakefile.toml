@@ -79,6 +79,11 @@ root = "SegwitRegtest"
 name = "secpct-test"
 root = "SecpCtTest"
 
+# Temporary: the cost of each curve operation, before and after the wallet runs on one implementation.
+[[lean_exe]]
+name = "secp-bench"
+root = "SecpBench"
+
 # Deterministic fuzzing of every parser that reads bytes the wallet did not write (TestKit/Fuzz.lean, the harness,
 # and Fuzz.lean, the targets). Run from Lean/; CI runs it with a seed from the commit.
 [[lean_exe]]
