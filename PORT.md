@@ -355,6 +355,11 @@ Upstream's Swift tests, UI tests and workflows went with the Swift code; their L
 
 * **Lean tests**: multisig-test, ledger-test, records-test, multisig-app-test, ledger-transport-test, and
   against a regtest bitcoind io-test, backend-test and multisig-differential (Bitcoin Core as the oracle).
+  Not ported from upstream, which had neither: segwit-test and segwit-regtest for SegWit v0 multisig accounts
+  (`wsh(sortedmulti(k, KEY, …))`, `Lean/Winnow/Wallet/Segwit*.lean`) and the ECDSA under them, and secpct-test
+  for the constant-time signing code (`Lean/SecpCt`). In the app: a SegWit v0 account joined through "Join an
+  account" and a pasted payment signed (multisig-app-test), and the same against a regtest Bitcoin Core that
+  builds and co-signs the payment (backend-test's `segwitFlow`).
 * **UI tests**: Lean journeys on the Mac (`LeanApp/Journeys.lean`, LeanNative.Journey), each step carried
   out by LeanNative's one generic XCUITest (LNDriver), driving the app in test mode against
   `backend-test --fixture`. Controls are found by id: LeanNative's
@@ -444,7 +449,7 @@ Each module is done when its lockstep run against the Swift original passes and 
 | 1. Bytes | hex, little/big-endian, CompactSize, readers/writers | **done** (`Lean/Winnow/Bytes.lean`) |
 | 2. Hashes | SHA-256, SHA-512, HMAC, PBKDF2-HMAC-SHA512, RIPEMD-160, SipHash, tagged hash | **done**: lockstep `a_crypto` OK, seeds 1–5 (3,169 requests per seed at 300 cases) |
 | 3. Encodings | Base58(check), Bech32/Bech32m, segwit addresses (GCS filters moved to Net) | **done**: same lockstep |
-| 4. Curves | **done**: secp256k1 as WalletCore uses P256K (on the proven `Secp`), BIP340, MuSig2 (BIP327), Ed25519 (RFC 8032) + census signatures — lockstep `b_p256k b_musig b_ed25519` OK seeds 1–3 |
+| 4. Curves | **done**: secp256k1 as WalletCore uses P256K (on `SecpCt`, proved against the curve as specified in `Secp`), BIP340, MuSig2 (BIP327), Ed25519 (RFC 8032) + census signatures — lockstep `b_p256k b_musig b_ed25519` OK seeds 1–3 |
 | 5. Keys | **done**: BIP32, BIP39 (+ Foundation-exact NFKD), BIP86, Taproot, KeyStore + in-memory store — lockstep `b_bip32 b_bip39 b_bip86 b_taproot b_keystore` OK seeds 1–3; Keychain store becomes the shell's keychain capability |
 | 6. Script, Transactions | wire, transactions, scripts, multisig, addresses, sighash (BIP341), builder, funding sources | **done**: lockstep `c_wire c_transaction c_script c_address c_sighash c_builder c_funding` OK seeds 1–3; BIP341 vectors (23 sighashes) match |
 | 7. Descriptors, PSBT | **done**: PSBT format (`c_psbt`), descriptors (`e_descriptor`), Signer + PSBT roles incl. MuSig2 rounds (`e_psbtroles`, whole flows compared step by step) — OK seeds 1–3 |
@@ -485,6 +490,6 @@ Rules:
   published vectors Winnow's tests use (`Tests/**/Vectors`, BIP vectors). A module is done when its
   generator passes for several seeds with both successes and refusals exercised.
 * **Lean style**: ordinary Lean 4 (v4.35, no Mathlib); `ByteArray` for bytes, `Except` for failures,
-  `Winnow.Reader` for parsing. Reuse `Secp` (proven secp256k1: field, curve, BIP340, tweaks) instead of
+  `Winnow.Reader` for parsing. Reuse `SecpCt` (secp256k1, proved against the specification in `Secp`: field, curve, BIP340, tweaks) instead of
   re-implementing curve arithmetic. Proofs are welcome but not required for a port.
 * **Scope** (during the port): an area touched only its own files above, never `Package.swift` or `Sources/`.

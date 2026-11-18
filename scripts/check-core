@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Holds the core library's import closure to the allowed list below, so it does not grow back (issue #112).
+
+WinnowCore (Lean/WinnowCore.lean) is what a project that only reviews transactions requires: no seed phrases,
+Unicode tables, coin selection, wallet naming or I/O. This reads the `import` lines of Lean/WinnowCore.lean
+and of every module it reaches under Lean/, and fails if the closure has a module the list does not, or the
+list one the closure no longer has. A module that belongs in the core goes in the list in the same change.
+
+  scripts/check-core                    check the core (CI runs this)
+  scripts/check-core --measure MOD...   print the module count and non-blank lines of MOD...'s closure
+                                        (modules under Lean/; Std and the like are not counted)
+"""
+import pathlib
+import re
+import sys
+
+LEAN = pathlib.Path(__file__).resolve().parent.parent / "Lean"
+ROOT = "WinnowCore"
+
+ALLOWED = """
+WinnowCore
+Secp.Bytes Secp.Sha256
+SecpCt.Field SecpCt.Keys SecpCt.Point SecpCt.Scalar SecpCt.Schnorr SecpCt.Word
+Winnow.Bytes Winnow.Text.UTF8
+Winnow.Crypto Winnow.Crypto.AES Winnow.Crypto.AESGCM Winnow.Crypto.Base58 Winnow.Crypto.Bech32
+Winnow.Crypto.Ripemd160 Winnow.Crypto.Sha2 Winnow.Crypto.SipHash
+Winnow.Keys.BIP32 Winnow.Keys.Secp256k1 Winnow.Keys.SilentPaymentPairing Winnow.Keys.SilentPayments Winnow.Keys.Taproot
+Winnow.Tx Winnow.Tx.AddressDecoder Winnow.Tx.Base64 Winnow.Tx.FundingSources Winnow.Tx.Multisig Winnow.Tx.PSBT
+Winnow.Tx.Script Winnow.Tx.SighashBIP143 Winnow.Tx.SighashBIP341 Winnow.Tx.Taproot Winnow.Tx.Transaction Winnow.Tx.TransactionBuilder
+Winnow.Tx.Wire
+Winnow.Wallet.Descriptor Winnow.Wallet.SegwitSpendReview Winnow.Wallet.SpendReview Winnow.Wallet.SwiftDouble Winnow.Wallet.SwiftJSON
+Winnow.Wallet.Types
+Winnow.Net.Header Winnow.Net.HeaderChain Winnow.Net.Params Winnow.Net.UInt256 Winnow.Net.Wire
+Std.Data.HashMap Std.Data.HashSet
+""".split()
+
+
+def path(module):
+    return LEAN / (module.replace(".", "/") + ".lean")
+
+
+def imports(module):
+    """The modules `module` imports, or None for one that is not under Lean/ (Std, Init, Lean)."""
+    p = path(module)
+    if not p.is_file():
+        return None
+    found = []
+    for line in p.read_text().splitlines():
+        m = re.match(r"\s*(?:public\s+)?import\s+(.*)", line)
+        if m:
+            found += [w for w in m.group(1).split("--")[0].split() if w != "all"]
+    return found
+
+
+def closure(roots):
+    """(modules under Lean/, modules outside it) reached from `roots`."""
+    local, outside, todo = set(), set(), list(roots)
+    while todo:
+        module = todo.pop()
+        if module in local or module in outside:
+            continue
+        found = imports(module)
+        if found is None:
+            outside.add(module)
+        else:
+            local.add(module)
+            todo += found
+    return local, outside
+
+
+def lines(modules):
+    return sum(1 for m in modules for line in path(m).read_text().splitlines() if line.strip())
+
+
+def main(argv):
+    if argv[:1] == ["--measure"]:
+        local, _ = closure(argv[1:])
+        print(f"{len(local)} modules, {lines(local)} non-blank lines")
+        return 0
+    if not path(ROOT).is_file():
+        print(f"check-core: {path(ROOT)} is missing", file=sys.stderr)
+        return 1
+    local, outside = closure([ROOT])
+    reached = local | outside
+    extra = sorted(reached - set(ALLOWED))
+    stale = sorted(set(ALLOWED) - reached)
+    for m in extra:
+        print(f"check-core: {m} is in WinnowCore's import closure but not in scripts/check-core's list", file=sys.stderr)
+    for m in stale:
+        print(f"check-core: {m} is in scripts/check-core's list but WinnowCore no longer imports it", file=sys.stderr)
+    if extra or stale:
+        return 1
+    print(f"check-core: WinnowCore is {len(local)} modules, {lines(local)} non-blank lines, all on the list")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

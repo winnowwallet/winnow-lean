@@ -5,8 +5,8 @@ Mac as an iPad app. It receives and sends bitcoin and saves recipients. This
 build signs with this phone's key, alone or as one signer of a k-of-n multisig
 account. It is written in Lean 4: the wallet, the networking and the app's
 model, update and view, compiled to C and rendered by LeanNative's generic native
-shell; the curve arithmetic behind every signature is the proven secp256k1 in
-`Lean/Secp`.
+shell; the curve arithmetic behind every key and signature is one secp256k1,
+`Lean/SecpCt`, proved against the curve as specified in `Lean/Secp`.
 
 [App Store](https://apps.apple.com/app/id6801502501) ·
 [TestFlight](https://testflight.apple.com/join/83djpNE7) ·
@@ -47,6 +47,13 @@ fewer of the same signers, or by a separate recovery key. A Ledger (Bitcoin
 app 2.1.2 or later; 2.2.1 for a recovery path) can be a signer: Winnow pairs with it
 over Bluetooth, registers the account on it, and asks it to sign after it shows
 the payment on its own screen ([Ledger signer](Lean/Winnow/Ledger)).
+"Join an account" also takes a SegWit v0 account, `wsh(sortedmulti(k, KEY, …))`: the
+kind for a wallet one of whose keys is a single fixed public key that signs only
+with ECDSA and derives nothing (a key held in a cloud key service), the others
+extended keys like this phone's. Winnow shows its addresses, finds its coins, and
+checks and signs a PSBT pasted from whoever builds its payments, then broadcasts
+once enough signatures verify. It builds no payment from such an account itself,
+and a Ledger cannot sign for one from Winnow.
 There are no MuSig2 accounts, cosigner cards or shared-savings screens. A backup carrying a MuSig2
 account from the shared-account Winnow is refused rather than restored without
 those funds.
@@ -82,7 +89,9 @@ well. The
 
 - `Lean/`: the wallet in Lean 4 (`Winnow/`): keys, transactions, PSBTs, descriptors, k-of-n
   multisig accounts, silent payments, the Ledger signer, the wallet, compact-filter sync, peers, mempool windows and the broadcaster, over libuv TCP.
-  `Secp/` is the proven secp256k1. `IOTest.lean` (`io-test`) runs the network layer against a disposable
+  `SecpCt/` is secp256k1 as it runs, the only implementation: field, points, keys, tweaks, BIP340 and ECDSA on
+  machine words, doing the same work whatever a secret is. `Secp/` is what it is proved against: the curve as
+  specified and signing as the BIPs give it, with bytes, SHA-256 and DER beside them. `IOTest.lean` (`io-test`) runs the network layer against a disposable
   regtest bitcoind.
 - `LeanApp/`: the app: `WinnowApp/` holds the model, update, views and commands (Elm-style, LeanNative),
   `WinnowApp/Real/` the backend, `WinnowApp/E2E.lean` the Debug-only test mode, `WinnowApp/Project.lean`
@@ -162,7 +171,7 @@ goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s four suites as four lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested) and card-regtest; and the ten journeys headless (LeanNative's `wire-journey`) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test, segwit-test, secpct-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested), card-regtest and segwit-regtest; and the ten journeys headless (LeanNative's `wire-journey`) |
 | `app` (two at once) | the same build and census import; Debug for the simulator, checked for Swift; the six UI journeys split across the two (`ui-journey-shards`; `scripts/ui-fixture` as the hooks) |
 | `media` | once both parts pass, the website's media from their evidence (LeanNative's `journey-media`: one video, the journeys in order) |
 | `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |

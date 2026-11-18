@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Writes Lean/Vectors/openssl-ecdsa-secp256k1.json: ECDSA signatures OpenSSL made, for segwit-test.
+
+  scripts/ecdsa-vectors [count] > Lean/Vectors/openssl-ecdsa-secp256k1.json
+
+The verifier (Lean/Secp/Ecdsa.lean) and the DER reader beside it are otherwise only checked against code
+written with them. Here an implementation that shares nothing with them makes the keys and the signatures:
+for each vector OpenSSL generates a secp256k1 key, signs 32 bytes (`openssl pkeyutl -sign`), and verifies its
+own signature. The file records the compressed public key, the 32 bytes and the signature in DER as OpenSSL
+wrote it.
+
+OpenSSL does not keep `s` in the lower half, as Bitcoin's relay rules do (BIP146), so about half of these
+have `s` in the upper half. The test wants the verifier to refuse those as they are and accept them with `s`
+replaced by N − s, and to accept the others unchanged.
+
+The signatures are made with OpenSSL's own randomness, so a second run writes different vectors; the file in
+the repository is one run, kept. Needs `openssl` (3 or later) on the PATH; nothing else.
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+
+def run(*args, data=None):
+    return subprocess.run(args, input=data, check=True, capture_output=True).stdout
+
+
+def main(argv):
+    count = int(argv[0]) if argv else 64
+    version = run("openssl", "version").decode().strip()
+    vectors = []
+    with tempfile.TemporaryDirectory() as d:
+        key, public, digest_path, signature = (os.path.join(d, n) for n in ("key.pem", "pub.pem", "digest", "sig"))
+        for i in range(count):
+            run("openssl", "ecparam", "-name", "secp256k1", "-genkey", "-noout", "-out", key)
+            run("openssl", "ec", "-in", key, "-pubout", "-conv_form", "compressed", "-out", public)
+            compressed = run("openssl", "ec", "-pubin", "-in", public, "-outform", "DER", "-conv_form", "compressed")[-33:]
+            # the edges of a digest among random ones: zero, all ones, one bit
+            digest = {0: bytes(32), 1: b"\xff" * 32, 2: bytes(31) + b"\x01"}.get(i, os.urandom(32))
+            with open(digest_path, "wb") as f:
+                f.write(digest)
+            run("openssl", "pkeyutl", "-sign", "-inkey", key, "-in", digest_path, "-out", signature)
+            run("openssl", "pkeyutl", "-verify", "-pubin", "-inkey", public, "-in", digest_path, "-sigfile", signature)
+            with open(signature, "rb") as f:
+                der = f.read()
+            assert compressed[0] in (2, 3) and len(compressed) == 33
+            vectors.append({"publicKey": compressed.hex(), "digest": digest.hex(), "der": der.hex()})
+    json.dump({"source": f"scripts/ecdsa-vectors, {version}", "vectors": vectors}, sys.stdout, indent=1)
+    print()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

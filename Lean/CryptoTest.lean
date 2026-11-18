@@ -18,8 +18,8 @@ BIP340 signing against BIP340's own vectors.
   200f9b26fe0a2f235a2af8b30c4be9f12f6bc9cb, `bip-0340/test-vectors.csv`, SHA-256
   34c9d1d9c3a88d524bc80778540dc43f8306ec249a7485293063c376db851c2d). Where a vector has a secret key, the
   x-only key derived from it and the signature `schnorrSign` makes with its `aux_rand` must be the
-  vector's exactly, so the nonce derivation is checked, not only that signatures verify (`sign_verifies`
-  proves that much). Every vector's verification result must be the vector's. Then one message signed
+  vector's exactly, so the nonce derivation is checked, not only that signatures verify (`schnorrSign`
+  checks that much itself before it returns one). Every vector's verification result must be the vector's. Then one message signed
   twice with `Signer.randomAuxiliaryRand` gives two different signatures that both verify.
 * `Vectors/swift-utf8-decoding.json`: what Swift's `String(decoding:as: UTF8.self)` makes of well-formed text,
   truncated sequences, overlongs, surrogates, code points past U+10FFFF, lone continuation bytes and seeded
@@ -37,11 +37,6 @@ BIP340 signing against BIP340's own vectors.
   transaction that made it has it, or nothing for the bare key. Then the same pushes re-encoded with
   `OP_PUSHDATA1/2/4` must reveal the same scripts, and truncated pushes and non-push opcodes must be
   `unrecognized`.
-* The fast curve (`Secp.Fast`), which compiled code runs in place of the proved scalar multiplication,
-  lift_x and point addition (`@[implemented_by]`): each `…Fast` function against the proved code it stands in
-  for (`Secp.smul?`, `smulJ`, `Fq.sqrt?`), over edge scalars, seeded random ones and the points they give.
-  The BIP340 vectors above already run through it.
-
 * Error names (#69): one sample of every case of the errors other modules carry by name (`Bech32Error`,
   `BIP32Error`, `GCSError`, `KeyStoreError`, `TaprootError`, `MultisigError`, `SighashError`, `DescriptorFailure`,
   `SignerError`, `SignFailure`, `FeeBumpError`, `Base58Error`, `HDKeyParseError`, `P256KError`, `PersonCardError`)
@@ -160,7 +155,8 @@ def bip340 : IO Unit := do
       let ok := (schnorrVerify (hx pk) (hx msg) (hx sig)).toOption.getD false
       check s!"bip340 {i}: verifies {result}" (ok == (result == "TRUE"))
     | _ => check s!"bip340: row {row.take 8}" false "fewer than 7 fields"
-  let d := 0xB7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF
+  let some d := (secretOf (ofHex! "b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef")).toOption
+    | check "bip340: fresh aux key" false; return
   let msg := ofHex! "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89"
   let some p := (pointOfSecret d).toOption | check "bip340: fresh aux key" false; return
   match schnorrSign d msg (← Signer.randomAuxiliaryRand), schnorrSign d msg (← Signer.randomAuxiliaryRand) with
@@ -190,8 +186,6 @@ def roundTrips : IO Unit := do
   check "constant-time compare" (AESGCM.constantTimeEqual "abc".toUTF8 "abc".toUTF8 &&
     !AESGCM.constantTimeEqual "abc".toUTF8 "abd".toUTF8 && !AESGCM.constantTimeEqual "abc".toUTF8 "ab".toUTF8)
 
-/-! ## The fast curve against the proved one -/
-
 def utf8 : IO Unit := do
   let j ← IO.ofExcept (Json.parse (← IO.FS.readFile "Vectors/swift-utf8-decoding.json"))
   let vectors ← IO.ofExcept (j.getObjValAs? (Array Json) "vectors")
@@ -207,76 +201,6 @@ def utf8 : IO Unit := do
       check s!"utf8: {name}, read as a var string" (read == some want) s!"{read}"
       wire := wire + 1
   IO.println s!"  utf8: {vectors.size} vectors from Swift, {wire} also read off the wire"
-
-section FastCurve
-open Secp
-
-def pointText : APoint → String
-  | .inf => "infinity"
-  | .pt x y => s!"({x.toNat}, {y.toNat})"
-
-def resultText {ε} : Except ε APoint → String
-  | .ok p => pointText p
-  | .error _ => "error"
-
-def optionText : Keys.PK (Option Keys.Point) → String
-  | .ok (some (x, y)) => s!"({x.toNat}, {y.toNat})"
-  | .ok none => "infinity"
-  | .error _ => "error"
-
-def liftedText : Option (Fq × Fq) → String
-  | some (x, y) => s!"({x.toNat}, {y.toNat})"
-  | none => "none"
-
-/-- The proved `lift_x` (`Secp.liftX?`'s body: compiled code runs `liftXFast?` for the name itself). -/
-def provedLiftX? (x : Nat) : Option (Fq × Fq) :=
-  if x < P then
-    let fx := Fq.ofNat x
-    match (fx * fx * fx + 7).sqrt? with
-    | some y => some (fx, if y.isOdd then -y else y)
-    | none => none
-  else none
-
-def fastCurve : IO Unit := do
-  let n := Secp.Spec.N
-  -- edges, then seeded random scalars (an LCG, so a failure names a scalar that reproduces it)
-  let mut ks : Array Nat := #[0, 1, 2, 3, 15, 16, 17, 255, 256, n - 2, n - 1, n, n + 1, n / 2, 2^128 + 1, 2^255,
-    2^256 - 1]
-  let mut seed := 0x243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89
-  for _ in [0:60] do
-    seed := (seed * 6364136223846793005 + 1442695040888963407) % 2^256
-    ks := ks.push seed
-  let points : Array APoint := (ks.extract 1 9).filterMap (smul? · Secp.Gpt) |>.push .inf
-  let mut bad : Array String := #[]
-  for k in ks do
-    let proved := match smul? k Secp.Gpt with | some q => pointText q | none => "error"
-    if resultText (Secp.mulGFast k) != proved then bad := bad.push s!"mulG {k}"
-    let provedGen := optionText (Keys.affine (smulJ k Secp.Gpt))
-    if optionText (Keys.mulGenFast k) != provedGen then bad := bad.push s!"mulGen {k}"
-  for h : i in [0:ks.size] do
-    let k := ks[i]
-    let pt := points[i % points.size]?.getD .inf
-    let provedPt := match smul? k pt with | some q => pointText q | none => "error"
-    if resultText (Secp.mulPtFast k pt) != provedPt then bad := bad.push s!"mulPt {k} {pointText pt}"
-    let provedAdd := match ((smulJ k Secp.Gpt).add pt).toAffine? with | some q => pointText q | none => "error"
-    if resultText (Secp.mulGAddFast k pt) != provedAdd then bad := bad.push s!"mulGAdd {k} {pointText pt}"
-    if let .pt x y := pt then
-      let provedMul := optionText (Keys.affine (smulJ k (.pt x y)))
-      if k % n != 0 && optionText (Keys.mulOptFast k (x, y)) != provedMul then bad := bad.push s!"mulOpt {k}"
-      for other in [points[(i + 1) % points.size]?.getD .inf, .inf, .pt x (-y), pt] do
-        let b : Option Keys.Point := match other with | .pt u v => some (u, v) | .inf => none
-        let provedSum := optionText (Keys.affine ((Jac.inf.add (.pt x y)).add (Keys.toA b)))
-        if optionText (Keys.addOptFast (some (x, y)) b) != provedSum then
-          bad := bad.push s!"addOpt {pointText pt} {pointText other}"
-  -- lift_x: every point's x, x + 1 (often not on the curve), 0, P - 1 and values past P
-  let xs := points.toList.filterMap (fun | .pt x _ => some x.toNat | .inf => none)
-  let edges : List Nat := [0, 1, Secp.P - 1, Secp.P, Secp.P + 1, 2^256 - 1]
-  for x in xs ++ xs.map (· + 1) ++ edges do
-    if liftedText (Secp.liftXFast? x) != liftedText (provedLiftX? x) then bad := bad.push s!"liftX {x}"
-  check "the fast curve agrees with the proved one" bad.isEmpty s!"{bad.size} disagreements, first {bad[0]?}"
-  IO.println s!"  fast curve: {ks.size} scalars, {points.size} points, {bad.size} disagreements"
-
-end FastCurve
 
 /-- `Text.parseJson`'s bound: what the wallet reads still parses, the exponents that stop it do not (SEC-040), and
 a string that looks like one is only a string. -/
@@ -903,7 +827,6 @@ def main : IO UInt32 := runMain "crypto-test" do
   wycheproof
   cryptokit
   bip340
-  fastCurve
   roundTrips
   bip32
   utf8

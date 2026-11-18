@@ -8,8 +8,12 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 
 - [build-ios](build-ios) builds the Lean app from a clean checkout with LeanNative's `build-ios`, after the census
   list (`build-ios <Debug|Release> [iossim|ios]`; `PREPARE_ONLY=1` stops before xcodebuild).
-- [ci-regtest](ci-regtest) runs io-test, backend-test, multisig-differential and card-regtest against a disposable
-  regtest bitcoind (CI's `lean` job runs each as its own line).
+- [check-core](check-core) holds the core library's import closure (`WinnowCore`, `Lean/WinnowCore.lean`:
+  transaction review without seed phrases, Unicode tables, coin selection, wallet naming or I/O) to the list of
+  modules it allows, so the core does not grow back; CI runs it. `--measure MOD...` prints a closure's module
+  count and non-blank lines.
+- [ci-regtest](ci-regtest) runs io-test, backend-test, multisig-differential, card-regtest and
+  segwit-regtest against a disposable regtest bitcoind (CI's `lean` job).
 - [install-bitcoin](install-bitcoin) downloads the pinned Bitcoin Core release (31.1) from bitcoincore.org, checks
   its SHA-256 and prints its bin directory; `ci-regtest` and `ui-fixture` run against it, never a bitcoind
   found on the PATH.
@@ -44,6 +48,18 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   computed with the
   Python standard library alone (BIP32, secp256k1, tagged hashes, bech32m) and none of the wallet's code.
   `card-keys-test` holds `Winnow.Keys.SilentPaymentPairing` to them.
+- [ecdsa-vectors](ecdsa-vectors) writes `Lean/Vectors/openssl-ecdsa-secp256k1.json`: 64 ECDSA signatures over
+  secp256k1 that OpenSSL made and verified, with their keys, which segwit-test holds the verifier
+  (`Lean/SecpCt/Ecdsa.lean`) and the DER reader (`Lean/Secp/Der.lean`) to. OpenSSL signs with its own randomness,
+  so the file is one run, kept.
+- [secp-vectors](secp-vectors) writes `Lean/Vectors/secp-known-answers.json`: what every curve operation the
+  wallet uses must answer, and where it must refuse, computed on Python integers with none of the wallet's code.
+  The wallet has one implementation of secp256k1 (`Lean/SecpCt`), so this is what its compiled code is compared
+  with; secpct-test holds it to every record. The output is the same on every run, and `--check` (CI runs it)
+  fails if the kept file is not it.
+- [gen-scalar-mul-proofs](gen-scalar-mul-proofs) writes `Lean/SecpCt/ScalarMulProofs.lean`, the proofs about the
+  constant-time scalar multiplication, which are too long to write by hand; Lean checks what it writes like any
+  other proof. `--check` (CI) fails unless the file in the repository is what the script writes.
 - [swift-utf8-vectors](swift-utf8-vectors) writes `Lean/Vectors/swift-utf8-decoding.json`, Swift's own
   `String(decoding:as: UTF8.self)` over well-formed and ill-formed UTF-8, which `crypto-test` holds
   `Winnow.Text.decodeUTF8Lossy` to. It needs Xcode's Swift and feeds the program to `xcrun swift` on stdin, so

@@ -19,7 +19,7 @@ Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s four suites as four lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested) and `card-regtest`; and the ten journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested), `card-regtest` and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the ten journeys headless against the app itself (LeanNative's `wire-journey`). |
 | `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump and Retry on one runner; Ledger, census, silent payments and spent-elsewhere on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
@@ -132,9 +132,10 @@ app's `Tools/Fuzz`. It runs in the `lean` job on every run, with a seed taken fr
 the commit, so each commit tries new inputs and a failure replays from the line it
 prints. There is no separate job and no schedule.
 
-It mutates known-good inputs for 23 targets: the fifteen upstream had, the same
-address and silent payment rules past their checksums, and the files and Ledger
-replies upstream's harness could not reach. A check parses the input and holds what
+It mutates known-good inputs for 30 targets: the fifteen upstream had, the same
+address and silent payment rules past their checksums, the files and Ledger
+replies upstream's harness could not reach, and seven for ECDSA and SegWit v0
+multisig accounts (below). A check parses the input and holds what
 parsed to what the wallet relies on, mostly that the canonical form parses back to
 the same value. A refusal is not a finding. These are:
 
@@ -149,6 +150,35 @@ it. So the transaction, block, filter and control block targets, and every messa
 but `version`, also require the canonical form to be the input's own bytes, and the
 binary targets splice in CompactSizes written wider than their value. A PSBT can't
 be held to that: its canonical form is version 2, whatever arrived.
+
+The seven for ECDSA and SegWit v0 multisig accounts are not all parsers:
+
+- `ecdsa-der` reads a signature in DER strictly (BIP66) and requires what it took
+  to be written back as the same bytes;
+- `ecdsa-verify` takes a signature, a digest and a key. A signature the verifier
+  accepts must be in range, must satisfy ECDSA's equation on plain numbers
+  (`Lean/TestKit/CurveOracle.lean`, which shares no code with the verifier) and
+  must be refused with `s` in the upper half; one refusal in eight is put to the
+  same equation as well;
+- `ecdsa-sign` and `schnorr-sign` take a key, a digest and randomness and are
+  differential: the curve code (`SecpCt`) and the signing reference
+  (`Lean/Secp/Signing.lean`, run over `k·G` on plain numbers) must return the same
+  signature and the same public key, the signature must verify, and one flipped
+  bit must stop it verifying;
+- `secpct-arithmetic` holds `SecpCt`'s field and scalar operations to plain
+  arithmetic on naturals;
+- `segwit-descriptor` reads a `wsh(sortedmulti(…))` descriptor and holds the
+  account to its own bounds, its canonical text and a P2WSH address at a random
+  index;
+- `segwit-spend` reads a PSBT and puts it to a fixed account's review, signature
+  count, signing and finalizer: a reviewed spend's fee is what is left and at most
+  a tenth, a finalized witness is an empty item, exactly the threshold of
+  signatures that each verify under a later key of the script, and the script,
+  and neither signing nor finalizing changes the transaction.
+
+The proofs say the curve code equals the reference for every input
+(`Lean/SecpCt/Gate.lean`); the differential targets say it of the compiled code on
+the inputs tried, which the proofs do not reach.
 
 An out-of-bounds `ByteArray` `[i]!` is not caught as a crash. It reads 0 without
 panicking, so only a target's invariant can notice it.

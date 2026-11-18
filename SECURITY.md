@@ -14,23 +14,43 @@ their disposition. What the wallet claims, and what it does not, is in
 
 ## Timing side channels
 
-Winnow's cryptography is written in Lean and is not constant-time. The
-secp256k1 code (`Lean/Secp`, used for BIP340 signing, Taproot tweaks
-and BIP32 key derivation) computes with Lean's `Nat`, which is backed by GMP and
-takes time that depends on the numbers, and its scalar multiplication picks a
-precomputed multiple for each 4-bit window of the scalar, so it branches on and
-indexes by the scalar's bits. The AES code behind backup encryption
-(`Lean/Winnow/Crypto/AES.lean`, `AESGCM.lean`) looks up tables by secret bytes.
-All of it is checked by proofs, published test vectors and lockstep tests against
-libsecp256k1 and CryptoKit, so its answers are right; only its timing can leak.
+Winnow's cryptography is written in Lean.
 
-One part is checked by tests rather than proofs: the scalar multiplication,
-lift_x and point addition the app runs (`Lean/Secp/Fast.lean`, four unboxed
-limbs and window tables). The proofs are about the slower definitions they stand
-in for (`@[implemented_by]` in `Lean/Secp/Keys.lean` and
-`Lean/Winnow/Keys/Secp256k1.lean`); `crypto-test` compares the two on edge and
-random inputs, and BIP340's vectors and every other test run through the fast
-path.
+Its secp256k1 code is one implementation, `Lean/SecpCt`: the field, scalars,
+points, reading keys, tweaks, BIP340 and ECDSA, on machine words. Everything the
+app does on the curve runs on it: signing, deriving keys (BIP32), Taproot
+tweaks, sending silent payments and checking signatures. It is written so that
+what is done with a secret is the same work whatever the secret is. The
+multiplication of a key or a nonce, the sums and negations of keys and the
+arithmetic of a signature have no branch on a secret and no table looked up by
+one. What is public (the tweak of a public derivation, a signature being
+checked) is handled plainly. The rest of the wallet reaches it through
+`Lean/Winnow/Keys/Secp256k1.lean`, where a secret key is a type that is never a
+`Nat` and cannot be printed or compared.
+
+Each operation is proved against the curve as specified
+(`Lean/SecpCt/Gate.lean`: 605 theorems, no axiom beyond Lean's three, assuming
+only that P is prime). The proofs are about the source. The compiled code is
+held to answers computed without it (`Lean/Vectors/secp-known-answers.json`, by
+`scripts/secp-vectors`; the vectors of BIP340, BIP32, BIP341 and BIP352;
+signatures OpenSSL made) and to Bitcoin Core on regtest. Nothing that ships is a
+second implementation to compare with. A signature is still verified before it
+leaves, by code that shares the field and point arithmetic with the signing it
+checks; what that check accepting means is itself proved (`verify_sound`,
+`Ecdsa.verify_sound`).
+
+What the proofs and tests say is that the answers are right. That the timing
+does not depend on a key is a property of compiled code, and it has been checked
+only for another build of this source (Linux on x86-64, under Valgrind with the
+key marked as unknown), not for the builds this app ships (arm64, with Lean's
+own runtime, whose byte arrays and reference counts the code uses). So the app
+does not rely on it, and the list below is what it relies on for every
+signature.
+
+The AES code behind backup encryption (`Lean/Winnow/Crypto/AES.lean`,
+`AESGCM.lean`) is not constant-time: it looks up tables by secret bytes. It is
+checked by published test vectors and against CryptoKit, so its answers are
+right; only its timing can leak.
 
 That is an acceptable risk for this app because of how it is used:
 
@@ -42,7 +62,9 @@ That is an acceptable risk for this app because of how it is used:
   sends silent payments but does not scan for them).
 - BIP340 nonces are derived from the key, the message and fresh auxiliary
   randomness for each signature, so even signing the same message again does not
-  repeat a nonce.
+  repeat a nonce. ECDSA nonces are made the same way under tags of their own
+  (`Lean/Secp/Signing.lean`), not by RFC 6979, so a key used for both kinds of
+  signature never has one nonce in both.
 - The app runs sandboxed on the user's own device (iOS's app sandbox; the App
   Sandbox on the Mac). Another app cannot run code in its process, and code that
   can measure its cache timing closely enough is already past the sandbox.

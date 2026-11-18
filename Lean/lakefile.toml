@@ -1,9 +1,23 @@
 # Winnow in Lean: the port of Sources/WalletCore and Sources/WinnowApp (see ../PORT.md).
 name = "winnow"
-defaultTargets = ["Secp", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
+defaultTargets = ["Secp", "SecpCt", "WinnowCore", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
 
+# What the curve code is proved against, and the plain pieces around it: the curve as specified, signing as
+# BIP 340 and ECDSA give it, bytes, SHA-256, DER (Secp/Proofs/Gate.lean).
 [[lean_lib]]
 name = "Secp"
+
+# secp256k1 as it runs, the only implementation: field, scalars, points, keys, tweaks, BIP 340 and ECDSA on
+# machine words, doing the same work whatever a secret is (SecpCt/Word.lean), each proved against Secp's
+# specification (SecpCt/Gate.lean).
+[[lean_lib]]
+name = "SecpCt"
+
+# The core (WinnowCore.lean): transaction review without seed phrases, Unicode tables, coin selection, wallet
+# naming or I/O, for a project that requires this package for that alone. Winnow imports it; scripts/check-core
+# holds its import closure to an allowed list.
+[[lean_lib]]
+name = "WinnowCore"
 
 [[lean_lib]]
 name = "Winnow"
@@ -59,6 +73,28 @@ root = "CardRegtest"
 [[lean_exe]]
 name = "crypto-test"
 root = "CryptoTest"
+
+# SegWit v0 multisig accounts, wsh(sortedmulti(k, KEY, …)), and the ECDSA under them (SecpCt/Ecdsa.lean,
+# Secp/Der.lean, Winnow/Wallet/Segwit*.lean): signatures OpenSSL made, BIP143's and BIP67's vectors, the descriptor, the review's
+# refusals, signing and finalizing. Run from Lean/; CI runs it.
+[[lean_exe]]
+name = "segwit-test"
+root = "SegwitTest"
+
+# SegWit v0 multisig accounts against a regtest Bitcoin Core: the same addresses, and spends signed by Core's
+# wallets and this one together that Core's chain confirms. Run from Lean/ with bitcoind on hand
+# (scripts/ci-regtest segwit uses the pinned release); CI runs it.
+[[lean_exe]]
+name = "segwit-regtest"
+root = "SegwitRegtest"
+
+# The curve code (SecpCt/) as compiled: every operation against answers computed without it
+# (Vectors/secp-known-answers.json), field and scalar arithmetic against plain numbers, and BIP340 and ECDSA
+# signatures byte for byte against the references it is proved equal to (Secp/Signing.lean).
+# `secpct-test N` tries N keys. CI runs it.
+[[lean_exe]]
+name = "secpct-test"
+root = "SecpCtTest"
 
 # Deterministic fuzzing of every parser that reads bytes the wallet did not write (TestKit/Fuzz.lean, the harness,
 # and Fuzz.lean, the targets). Run from Lean/; CI runs it with a seed from the commit.

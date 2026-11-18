@@ -159,7 +159,7 @@ def xonlyOfSecret (secret : ByteArray) : RM ByteArray :=
   | .error _ => perr (.malformed "invalid private key")
 
 /-- One leaf signature by `secret`, whose x-only key is `xonly`, or `none` when that is not a leaf key.
-`Secp.sign` verifies every signature under the signer's key before returning it. -/
+`Keys.schnorrSign` verifies every signature under the signer's key before returning it. -/
 def selfVerifiedLeafSignature (secret xonly : ByteArray) (k : Nat) (leaf : TapLeafScript) (leafKeys : Array ByteArray)
     (tx : Transaction) (spent : Array SighashBIP341.SpentOutput) (hashType : SighashBIP341.HashType)
     (aux : ByteArray) : RM (Option (TapScriptSignatureID × ByteArray)) := do

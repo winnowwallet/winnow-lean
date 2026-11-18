@@ -208,12 +208,12 @@ def codeSpendSecret (spend : ByteArray) (label : Option ByteArray) (c : CardCode
     | some l => match privateAdd b l with
       | .ok d => pure d
       | .error _ => throw .invalidTweak
-  match publicKeyOf (Secp.toBE32 d) with
-  | .ok k => unless k == c.spendKey do throw .keyMismatch
+  match pointOfSecret d with
+  | .ok k => unless serializeCompressed k == c.spendKey do throw .keyMismatch
   | .error _ => throw .invalidPrivateKey
   let t ← codeOutputTweak c i
   match privateAdd d t with
-  | .ok p => pure (Secp.toBE32 p)
+  | .ok p => pure p.bytes
   | .error _ => throw .invalidTweak
 
 /-- `t_i` of a 0.9.12 card. -/

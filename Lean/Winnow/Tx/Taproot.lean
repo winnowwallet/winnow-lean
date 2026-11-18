@@ -1,4 +1,4 @@
-import Secp.Keys
+import SecpCt.Keys
 import Winnow.Crypto
 import Winnow.Tx.Script
 
@@ -56,12 +56,9 @@ tweak). -/
 def tweakedOutputKey (internalKey : ByteArray) (merkleRoot : Option ByteArray := none) :
     Option (ByteArray × Bool) :=
   if internalKey.size != 32 then none
-  else
-    match Secp.parseXOnly internalKey with
-    | .error _ => none
-    | .ok (x, y) =>
-      match Secp.xonlyAdd x y (tweak internalKey merkleRoot) with
-      | .ok (qx, qy) => some (Secp.toBE32 qx.toNat, qy.isOdd)
-      | .error _ => none
+  else do
+    let key ← SecpCt.parseXOnly internalKey
+    let output ← SecpCt.pointAdd key (← SecpCt.scalar? (tweak internalKey merkleRoot))
+    return (output.xBytes, output.isOdd)
 
 end Winnow.Tx.Taproot

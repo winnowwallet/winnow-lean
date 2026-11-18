@@ -142,7 +142,8 @@ def pickerAccountText (a : MultisigInfo) (eligible : Bool) : String :=
 
 /-- Whether the picker can take the account: not nested, and (joining a member) one whose keys all sign. -/
 def pickerAccountEligible (a : MultisigInfo) (wholeMember : Bool) : Bool :=
-  a.policy.isSome && !a.isNested && (wholeMember || a.threshold ≥ a.signerCount)
+  -- an account with no signer expressions to offer (a SegWit v0 one, whose keys are not all extended) is no member
+  a.policy.isSome && !a.isNested && !a.signerExpressions.isEmpty && (wholeMember || a.threshold ≥ a.signerCount)
 
 /-- LedgerPairView's Pair button: a usable display name (what this phone calls the Ledger). -/
 def LedgerPairForm.nameIsUsable (f : LedgerPairForm) : Bool :=
@@ -295,6 +296,8 @@ def stepMultisigAccount (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
     | some .setAsideMultisig => ({ m with confirm := none }, [.setAsideMultisig g])
     | _ => (m, [])
   | .sendFrom id =>
+    -- an account this phone builds no payments for has no Send (its page offers none)
+    if ((m.multisigInfo? id).map (·.buildsPayments)) == some false then (m, []) else
     -- the Send sheet with this account under From; a payment being signed and broadcast stays as it is
     let m' := if m.hasSheet .send then m else m.present .send
     if m.send.sending then (m', []) else
@@ -526,7 +529,7 @@ def multisigAddSections (m : Model) : List H :=
                   literalRow m s!"multisig.share.{l.id}" (key ++ "\n" ++ l.keys.headD "") s!"multisigMemberShareCopy-{l.id}"])
        | none => [caption "This wallet has no shareable account key."])
   , .section "Account" "Winnow finds coins sent to it from now on."
-      ([ .identified Ids.multisigDescriptorField (.input .multiline "" "Paste the account (tr(…))" f.descriptor (set .setDescriptor) none)
+      ([ .identified Ids.multisigDescriptorField (.input .multiline "" "Paste the account (tr(…) or wsh(…))" f.descriptor (set .setDescriptor) none)
        , .identified Ids.multisigDescriptorPasteButton (.button "Paste" .plain (some (.multisig .pasteDescriptor))) ] ++
        (match f.validation with
         | some (.ok c) =>
@@ -668,8 +671,13 @@ def multisigAccountSections (m : Model) (id : String) : List H :=
           (if a.draft.isSome then
             [.identified Ids.multisigDraftButton (.button "Payment awaiting signatures" .plain (some (.multisig (.openPSBT a.id))))]
            else
-            [ .identified Ids.multisigSendButton (.button "Send from this account" .plain (some (.multisig (.sendFrom a.id))))
-            , .identified Ids.multisigPastePSBTButton
+            -- a SegWit v0 account's payments are built by whoever holds its fixed key: here they are pasted
+            (if a.buildsPayments then
+              [.identified Ids.multisigSendButton (.button "Send from this account" .plain (some (.multisig (.sendFrom a.id))))]
+             else
+              [.identified Ids.multisigPaymentsElsewhere
+                (caption "Payments from this account are made by whoever holds its fixed key. Paste the PSBT they send you to check and sign it.")]) ++
+            [ .identified Ids.multisigPastePSBTButton
                 (.button (if m.collect.busy then "Reading the PSBT…" else "Paste a PSBT from a co-signer") .plain
                   (if m.collect.busy then none else some (.multisig (.pasteForAccount a.id)))) ] ++
             (match m.collect.error with

@@ -1204,7 +1204,7 @@ def aSilentPaymentFromACardCoin : TM Unit := do
   let label ← needE "label" (·.name) (SilentPaymentPairing.labelAt scanNode.privateKey.get! 1)
   let tweak ← needE "tweak" (·.name) (SilentPaymentPairing.codeOutputTweak card 4)
   let secret ← needE "sum" (·.name)
-    (do return Secp.toBE32 (← privateAdd (← privateAdd (← secretOf node.privateKey.get!) label) tweak))
+    (do return (← privateAdd (← privateAdd (← secretOf node.privateKey.get!) label) tweak).bytes)
   let input : SilentPaymentSending.Input := { txid := paid.txid, vout := 0, prevoutScriptPubKey := script, privateKey := secret }
   let expected ← needE "derive" (·.name) (SilentPaymentSending.outputScripts [input] [address])
   check "card: a silent payment from a card's coin pays the script BIP352 derives from that coin's key"

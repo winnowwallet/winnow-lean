@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Writes Lean/SecpCt/ScalarMulProofs.lean, the proofs about scalar multiplication.
+
+  scripts/gen-scalar-mul-proofs > Lean/SecpCt/ScalarMulProofs.lean
+  scripts/gen-scalar-mul-proofs --check     fails unless the file in the repository is what this writes (CI)
+
+`Sc.mul` is loops over arrays of words. For the sizes it uses, each loop is a fixed list of word operations:
+sixteen for the product, and up to nineteen for each fold. A proof has to name the result of every one of them
+in the order the loop does them, and say that they add up. Nobody should write that by hand or read it, so it
+is written here: this script runs the same loops over names and writes down what it did.
+
+What the script writes is checked by Lean like any other proof; a mistake here can make the file fail to
+build, never make a false theorem pass.
+"""
+import io
+import pathlib
+import sys
+
+class Script:
+    def __init__(self):
+        self.lines = []   # tactic lines for the theorem about words
+        self.muls = []    # (a, b, c, d, hi, lo, fact)
+        self.adds = []    # (x, y, carry, sum, carry out, fact, bound)
+        self.n = 0
+    def fresh(self, stem):
+        self.n += 1
+        return f"{stem}{self.n}"
+    def mul_words(self, a, b):
+        """Names for the words of a·b, as `Sc.mulWords` computes them."""
+        out = ["0"] * (len(a) + len(b))
+        for i in range(len(a)):
+            carry = "0"
+            for j in range(len(b)):
+                call = f"mulAdd {a[i]} {b[j]} {out[i + j]} {carry}"
+                hi, lo, e = self.fresh("h"), self.fresh("l"), self.fresh("e")
+                self.lines += [f"  have {e} := mulAdd_spec {a[i]} {b[j]} {out[i + j]} {carry}",
+                               f"  generalize ({call}).1 = {hi} at *",
+                               f"  generalize ({call}).2 = {lo} at *"]
+                self.muls.append((a[i], b[j], out[i + j], carry, hi, lo, e))
+                out[i + j] = lo
+                carry = hi
+            out[i + len(b)] = carry
+        return out
+    def add_words(self, a, b, size):
+        """Names for the words of a + b to `size` words, as `Sc.addWords` computes them, and the last carry."""
+        out, carry, bound = [], "0", "(by decide)"
+        for i in range(size):
+            x = a[i] if i < len(a) else "0"
+            y = b[i] if i < len(b) else "0"
+            call = f"adc {x} {y} {carry}"
+            s, k, e, hk = self.fresh("s"), self.fresh("k"), self.fresh("e"), self.fresh("hk")
+            self.lines += [f"  obtain ⟨{e}, {hk}⟩ := adc_spec {x} {y} {carry} {bound}",
+                           f"  generalize ({call}).1 = {s} at *",
+                           f"  generalize ({call}).2 = {k} at *"]
+            self.adds.append((x, y, carry, s, k, e, hk))
+            out.append(s)
+            carry, bound = k, f"(by simpa [UInt64.le_iff_toNat_le] using {hk})"
+        return out, carry
+    def text(self):
+        return "\n".join(self.lines)
+
+def horner(ws):
+    """The number the words stand for, written the way `digits` unfolds."""
+    return "0" if not ws else f"{ws[0]} + 2 ^ 64 * ({horner(ws[1:])})"
+
+class Numbers:
+    """A lemma about plain numbers: constants become variables with an equation saying what they are, so that
+    the facts about words fit its hypotheses exactly as they come."""
+    def __init__(self, constants):
+        self.constants = constants   # literal -> variable name
+        self.vars, self.hyps = [], []
+    def name(self, w):
+        v = self.constants.get(w, w)
+        if v not in self.vars: self.vars.append(v)
+        return v
+    def mul_fact(self, m):
+        a, b, c, d, hi, lo, e = m
+        n = self.name
+        self.hyps.append((e, f"{n(hi)} * 2 ^ 64 + {n(lo)} = {n(a)} * {n(b)} + {n(c)} + {n(d)}"))
+    def add_fact(self, m):
+        x, y, carry, s, k, e, hk = m
+        n = self.name
+        self.hyps.append((e, f"{n(s)} + {n(k)} * 2 ^ 64 = {n(x)} + {n(y)} + {n(carry)}"))
+    def lemma(self, name, doc, conclusion, extra=(), simp="N, Nat.reducePow, Nat.reduceSub"):
+        consts = [(v, lit) for lit, v in self.constants.items() if v in self.vars]
+        binders = " ".join(self.vars)
+        hyps = "".join(f"\n    (is_{v} : {v} = {lit})" for v, lit in consts)
+        hyps += "".join(f"\n    ({e} : {t})" for e, t in list(self.hyps) + list(extra))
+        subst = " ".join(f"is_{v}" for v, _ in consts)
+        return f'''/-- {doc} -/
+theorem {name} ({binders} : Nat){hyps} :
+    {conclusion} := by
+  subst {subst}
+  simp only [{simp}] at *
+  omega
+'''
+    def apply(self, name, extra=()):
+        consts = [(v, lit) for lit, v in self.constants.items() if v in self.vars]
+        args = " ".join(["rfl"] * len(consts) + [e for e, _ in self.hyps] + list(extra))
+        return f"{name} {' '.join(['_'] * len(self.vars))} {args}"
+
+
+C0, C1, C2 = "4624529908474429119", "4994812053365940164", "1"
+COMP = [C0, C1, C2]
+CONSTANTS = {"0": "z0", C0: "c0", C1: "c1", C2: "c2"}
+
+FINISH = '''/-- One word is the number it stands for. -/
+theorem digits_one (w : UInt64) : digits [w] = w.toNat := by
+  simp only [digits, Nat.mul_zero, Nat.add_zero]
+
+/-- Four words are the number `value` gives them. -/
+theorem digits_four (u0 u1 u2 u3 : UInt64) : digits [u0, u1, u2, u3] = value u0 u1 u2 u3 := by
+  rw [digits_split, show digits [] = 0 from rfl, Nat.mul_zero, Nat.add_zero]
+
+/-- After the first fold, what is above the low four words is below 2¹³⁰. -/
+theorem first_fold_high (F1 L0 H0 L1 H1 : Nat) (vB : F1 = L0 + H0 * (2 ^ 256 - N)) (sF : F1 = L1 + 2 ^ 256 * H1)
+    (bL0 : L0 < 2 ^ 256) (bH0 : H0 < 2 ^ 256) : H1 < 2 ^ 130 := by
+  simp only [N, Nat.reducePow, Nat.reduceSub] at *
+  omega
+
+/-- The three folds as numbers. Each takes a multiple of N away, so what is left is the product less a
+multiple of N; and it is below 2N, with a fifth word of 0 or 1, which is what `reduceOnce` asks for. -/
+theorem folds_finish (AB T L0 H0 F1 L1 H1 F2 L2 G4 F3 Q Q4 : Nat)
+    (vA : T = AB) (sT : T = L0 + 2 ^ 256 * H0)
+    (vB : F1 = L0 + H0 * (2 ^ 256 - N)) (sF : F1 = L1 + 2 ^ 256 * H1)
+    (vC : F2 = L1 + H1 * (2 ^ 256 - N)) (sG : F2 = L2 + 2 ^ 256 * G4)
+    (vD : F3 = L2 + G4 * (2 ^ 256 - N)) (sQ : F3 = Q + 2 ^ 256 * Q4)
+    (bL0 : L0 < 2 ^ 256) (bH0 : H0 < 2 ^ 256) (bL1 : L1 < 2 ^ 256) (bL2 : L2 < 2 ^ 256) (bQ : Q < 2 ^ 256) :
+    Q4 ≤ 1 ∧ Q + Q4 * 2 ^ 256 < 2 * N ∧ AB = Q + Q4 * 2 ^ 256 + N * (H0 + H1 + G4) := by
+  simp only [N, Nat.reducePow, Nat.reduceSub, Nat.reduceMul] at *
+  omega
+
+/-- `a · b` modulo N, for any two scalars. -/
+theorem Sc.mul_spec (a b : Sc) : (Sc.mul a b).toNat = (a.toNat * b.toNat) % N := by
+  obtain ⟨t0, t1, t2, t3, t4, t5, t6, t7, hA, vA⟩ := mulWords_spec a.a0 a.a1 a.a2 a.a3 b.a0 b.a1 b.a2 b.a3
+  obtain ⟨f0, f1, f2, f3, f4, f5, f6, hB, vB⟩ := fold_eight t0 t1 t2 t3 t4 t5 t6 t7
+  have sT := digits_split t0 t1 t2 t3 [t4, t5, t6, t7]
+  have sF := digits_split f0 f1 f2 f3 [f4, f5, f6]
+  rw [digits_four] at vB
+  have bL0 := value_lt t0 t1 t2 t3
+  have bH0 : digits [t4, t5, t6, t7] < 2 ^ 256 := by
+    rw [digits_four]
+    exact value_lt t4 t5 t6 t7
+  have high := first_fold_high _ _ _ _ _ vB sF bL0 bH0
+  obtain ⟨g0, g1, g2, g3, g4, hC, vC⟩ := fold_seven f0 f1 f2 f3 f4 f5 f6 high
+  obtain ⟨q0, q1, q2, q3, q4, hD, vD⟩ := fold_five g0 g1 g2 g3 g4
+  have sG := digits_split g0 g1 g2 g3 [g4]
+  have sQ := digits_split q0 q1 q2 q3 [q4]
+  rw [digits_four] at vC vD
+  rw [digits_one] at vD sG sQ
+  obtain ⟨carry, small, whole⟩ := folds_finish _ _ _ _ _ _ _ _ _ _ _ _ _ vA sT vB sF vC sG vD sQ bL0 bH0
+    (value_lt f0 f1 f2 f3) (value_lt g0 g1 g2 g3) (value_lt q0 q1 q2 q3)
+  have reduced := reduceOnce_spec q0 q1 q2 q3 q4 carry small
+  simp only [Sc.mul, Sc.reduceWide, hA, hB, hC, hD]
+  simp only [Sc.toNat] at reduced ⊢
+  rw [whole, Nat.add_mul_mod_self_left]
+  exact reduced
+
+/-- A product of scalars is below N whatever was multiplied. -/
+theorem Sc.mul_lt (a b : Sc) : (Sc.mul a b).toNat < N := by
+  rw [Sc.mul_spec]
+  exact Nat.mod_lt _ (by decide)
+
+end SecpCt'''
+
+def names(stem, n): return [f"{stem}{i}" for i in range(n)]
+def arr(ws): return "#[" + ", ".join(ws) + "]"
+def lst(ws): return "[" + ", ".join(ws) + "]"
+
+def fold(name, doc, n_in, size, extra_hyp, high_bound):
+    s = Script()
+    t = names("t", n_in); f = names("f", size)
+    low, high = t[:4], t[4:]
+    p = s.mul_words(high, COMP)
+    out, carry = s.add_words(low, p, size)
+    hyp = f" {extra_hyp}" if extra_hyp else ""
+    rfls = ", ".join(["rfl"] * size)
+    holes = ", ".join(["_"] * size)
+    replicates = ", ".join(f"show Array.replicate {n} (0 : UInt64) = {arr(['0'] * n)} from rfl"
+                           for n in sorted({len(t) - 4 + 3, size}))
+
+    product = Numbers(CONSTANTS)
+    for m in s.muls: product.mul_fact(m)
+    product_lemma = product.lemma(f"{name}_product", "The words of the high part times `2²⁵⁶ − N` are that product.",
+        f"{horner(p)} = ({horner(high)}) * (2 ^ 256 - N)")
+
+    total = Numbers(CONSTANTS)
+    for m in s.adds: total.add_fact(m)
+    total.name(carry)
+    total_lemma = total.lemma(f"{name}_sum", "The words of the sum, and its carry out, are the sum.",
+        f"{horner(out)} + {carry} * 2 ^ {64 * size} = {horner(low)} + ({horner(p[:size])})", simp="Nat.reducePow")
+
+    # what is left once the words are numbers: nothing was dropped
+    dropped = p[size:]
+    last_hyps = [("product", f"P = H * (2 ^ 256 - N)"),
+                 ("sum", f"S + k * 2 ^ {64 * size} = L + Pl"),
+                 ("lowBound", "L < 2 ^ 256"), ("highBound", f"H < {high_bound}"), ("carry", "k ≤ 1")]
+    if dropped: last_hyps.append(("whole", f"P = Pl + 2 ^ {64 * size} * D"))
+    else: last_hyps.append(("whole", "P = Pl"))
+    last = "".join(f"\n    ({n} : {t})" for n, t in last_hyps)
+    last_lemma = f'''/-- With the words read as numbers: the sum has no carry out and nothing of the product was left out. -/
+theorem {name}_fits (P Pl {"D " if dropped else ""}S L H k : Nat){last} :
+    S = L + H * (2 ^ 256 - N) := by
+  simp only [N, Nat.reducePow, Nat.reduceSub] at *
+  omega
+'''
+    whole = (f"  have whole : digits {lst(p)} = digits {lst(p[:size])} + 2 ^ {64 * size} * digits {lst(dropped)} := by\n"
+             f"    simp only [digits, Nat.reducePow]\n    omega\n") if dropped else (
+             f"  have whole : digits {lst(p)} = digits {lst(p[:size])} := rfl\n")
+    low_bounds = "\n".join(f"    have := {w}.toNat_lt" for w in low)
+    high_bounds = "\n".join(f"    have := {w}.toNat_lt" for w in high)
+    return f'''set_option exponentiation.threshold 512 in
+{product_lemma}
+set_option exponentiation.threshold 512 in
+{total_lemma}
+set_option exponentiation.threshold 512 in
+{last_lemma}
+set_option exponentiation.threshold 512 in
+/-- {doc} -/
+theorem {name} ({" ".join(t)} : UInt64){hyp} :
+    ∃ {" ".join(f)}, Sc.fold {arr(t)} {size} = {arr(f)}
+      ∧ digits {lst(f)} = digits {lst(low)} + digits {lst(high)} * (2 ^ 256 - N) := by
+  simp only [Sc.fold, Sc.mulWords, Sc.addWords, Sc.complement]
+  simp [List.range'_succ, {replicates}]
+  refine ⟨{holes}, ⟨{rfls}⟩, ?_⟩
+{s.text()}
+  have product : digits {lst(p)} = digits {lst(high)} * (2 ^ 256 - N) := by
+    simp only [digits]
+    exact {product.apply(f"{name}_product")}
+  have sum : digits {lst(out)} + {carry}.toNat * 2 ^ {64 * size} = digits {lst(low)} + digits {lst(p[:size])} := by
+    simp only [digits]
+    exact {total.apply(f"{name}_sum")}
+{whole}  have lowBound : digits {lst(low)} < 2 ^ 256 := by
+{low_bounds}
+    simp only [digits, Nat.reducePow]
+    omega
+  have highBound : digits {lst(high)} < {high_bound} := by
+{high_bounds}
+    simp only [digits, Nat.reducePow] at *
+    omega
+  exact {name}_fits _ _ {"(digits " + lst(dropped) + ") " if dropped else ""}_ _ _ _ product sum lowBound highBound {s.adds[-1][6]} whole
+'''
+
+CHECK = sys.argv[1:] == ["--check"]
+written, terminal = io.StringIO(), sys.stdout
+if CHECK:
+    sys.stdout = written
+
+print('''import SecpCt.ScalarProofs
+
+/-! # Scalar multiplication
+
+`Sc.mul` multiplies two four-word numbers into eight words and brings them below N in three folds and one
+last subtraction. Its loops run over arrays, but every size in them is fixed by the code, so for the sizes
+that occur each loop is a fixed list of word operations. The proofs below unroll each loop for its size and
+then argue about numbers, as the field's proofs do.
+
+Most of this file is written by a script and is not meant to be read line by line: the long middle of each
+proof names the result of every word operation in the order the loop does them, and the lemmas with many
+variables say that those operations add up. What each theorem about `Sc` says is short, and is meant to be
+read. -/
+
+namespace SecpCt
+
+/-- The number a list of words stands for, least significant first. -/
+def digits : List UInt64 → Nat
+  | [] => 0
+  | w :: ws => w.toNat + 2 ^ 64 * digits ws
+
+/-- Four words and then the rest: the rest counts 2²⁵⁶ times. -/
+theorem digits_split (u0 u1 u2 u3 : UInt64) (rest : List UInt64) :
+    digits (u0 :: u1 :: u2 :: u3 :: rest) = value u0 u1 u2 u3 + 2 ^ 256 * digits rest := by
+  simp only [digits, value, Nat.reducePow]
+  omega
+''')
+
+sA = Script()
+out = sA.mul_words(names("a", 4), names("b", 4))
+print(f'''/-- The eight words `mulWords` makes of two four-word numbers are their product. -/
+theorem mulWords_spec (a0 a1 a2 a3 b0 b1 b2 b3 : UInt64) :
+    ∃ t0 t1 t2 t3 t4 t5 t6 t7, Sc.mulWords #[a0, a1, a2, a3] #[b0, b1, b2, b3] = #[t0, t1, t2, t3, t4, t5, t6, t7]
+      ∧ digits [t0, t1, t2, t3, t4, t5, t6, t7] = value a0 a1 a2 a3 * value b0 b1 b2 b3 := by
+  simp only [Sc.mulWords]
+  simp [List.range'_succ, show Array.replicate 8 (0 : UInt64) = #[0, 0, 0, 0, 0, 0, 0, 0] from rfl]
+  refine ⟨_, _, _, _, _, _, _, _, ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩, ?_⟩
+{sA.text()}
+  have expand := product_by_words a0.toNat a1.toNat a2.toNat a3.toNat b0.toNat b1.toNat b2.toNat b3.toNat (2 ^ 64)
+  simp only [digits, value, show (0 : UInt64).toNat = 0 from rfl, Nat.reducePow, Nat.add_zero, Nat.mul_zero] at *
+  rw [expand]
+  omega
+''')
+print(fold("fold_eight", "The first fold: eight words to seven, the high four folded in as `2²⁵⁶ − N` times themselves. Nothing is dropped, because the sum is below 2³⁸⁶.",
+           8, 7, "", "2 ^ 256"))
+print(fold("fold_seven", "The second fold: seven words to five. The sum fits when the high three words are below 2¹³⁰, which they are after the first fold.",
+           7, 5, "(high : digits [t4, t5, t6] < 2 ^ 130)", "2 ^ 130"))
+print(fold("fold_five", "The third fold: five words to five, the fifth folded in. It always fits.",
+           5, 5, "", "2 ^ 64"))
+print(FINISH)
+
+if CHECK:
+    sys.stdout = terminal
+    target = pathlib.Path(__file__).resolve().parent.parent / "Lean" / "SecpCt" / "ScalarMulProofs.lean"
+    if target.read_text() != written.getvalue():
+        print(f"gen-scalar-mul-proofs: {target} is not what this script writes", file=sys.stderr)
+        sys.exit(1)
+    print("gen-scalar-mul-proofs: Lean/SecpCt/ScalarMulProofs.lean is what this script writes")

@@ -3,6 +3,7 @@ import Std.Sync.Mutex
 import Std.Data.HashSet
 import WinnowApp.Real.RecordsStores
 import Winnow.Ledger.Multisig
+import Winnow.Wallet.AnyMultisigAccount
 
 /-! # The multisig account store (port of `Sources/WinnowApp/MultisigStore.swift`, upstream d2ca878)
 
@@ -35,8 +36,8 @@ open Tx (BitcoinNetwork)
 abbrev OwnerMap := Std.HashMap ByteArray (Nat × UInt32)
 
 /-- A record's watched scripts for one descriptor, indices `0 ..< count` (both choices, index-major) and
-the owner map over them. Deriving one index costs a BIP32 step per key and a Taproot tweak, so the cache
-grows with the frontier instead of being rebuilt. -/
+the owner map over them. Deriving one index costs a BIP32 step per key and a Taproot tweak (or, for a SegWit v0
+account, a hash of its witness script), so the cache grows with the frontier instead of being rebuilt. -/
 structure OwnerCache where
   id : String
   descriptor : String
@@ -95,12 +96,16 @@ def watchCount (r : MultisigAccountRecord) : UInt32 := max r.nextReceiveIndex r.
 
 /-- A usable name, a canonical descriptor whose checksum is the record's id, a supported account on this
 network, and indices in range. -/
-def validatedShape (r : MultisigAccountRecord) (network : BitcoinNetwork) : RM MultisigAccount := do
+def validatedShape (r : MultisigAccountRecord) (network : BitcoinNetwork) : RM AnyMultisigAccount := do
   unless DisplayName.normalized r.name == some r.name && !r.name.isEmpty do invalid "an account has no usable name"
-  let account ← liftAccount network (MultisigAccount.parse r.descriptor network)
-  unless account.descriptor.serialized == r.descriptor && account.id == r.id do
+  let account ← liftAccount network (AnyMultisigAccount.parse r.descriptor network)
+  unless account.serialized == r.descriptor && account.id == r.id do
     invalid "account descriptor identifier does not match"
-  unless (r.checkLedgerRegistration account).toOption.isSome do
+  -- a Ledger registers a Taproot account's policy; a SegWit v0 account has none to have registered
+  let registrationHolds := match account.taproot? with
+    | some taproot => (r.checkLedgerRegistration taproot).toOption.isSome
+    | none => r.ledger.isNone
+  unless registrationHolds do
     invalid "an account's Ledger registration does not match it"
   unless r.nextReceiveIndex ≤ maximumNextIndex && r.nextChangeIndex ≤ maximumNextIndex do
     invalid "account address index is out of range"
@@ -108,7 +113,7 @@ def validatedShape (r : MultisigAccountRecord) (network : BitcoinNetwork) : RM M
 
 /-- One coin re-derived below its frontier, never repeated across the store, with the live total kept
 inside Bitcoin's range. -/
-def validateCoin (u : WalletUTXO) (r : MultisigAccountRecord) (account : MultisigAccount) (network : BitcoinNetwork)
+def validateCoin (u : WalletUTXO) (r : MultisigAccountRecord) (account : AnyMultisigAccount) (network : BitcoinNetwork)
     (cache : Option OwnerCache) (outpoints : Std.HashSet String) (total : Int) : RM (Std.HashSet String × Int) := do
   unless u.txid.size == 32 && u.amount > 0 && u.amount.toInt ≤ maximumMoney &&
       (u.spent.all (·.spentBy.size == 32)) do
@@ -240,7 +245,7 @@ def restore (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (
   s.mutate keys writeData restored
 
 /-- `add(name:account:createdAtHeight:)`. -/
-def add (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (name : String) (account : MultisigAccount)
+def add (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (name : String) (account : AnyMultisigAccount)
     (createdAtHeight : UInt32) : RM (MultisigStore × MultisigAccountRecord) := do
   s.requireReadable
   unless DisplayName.normalized name == some name && !name.isEmpty do
@@ -249,7 +254,7 @@ def add (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (name
   if s.records.any (·.id == account.id) then throw (.multisig .duplicate)
   unless s.records.size < maximumAccounts do throw (.multisig .tooMany)
   let record : MultisigAccountRecord :=
-    { id := account.id, name, descriptor := account.descriptor.serialized, createdAtHeight }
+    { id := account.id, name, descriptor := account.serialized, createdAtHeight }
   return (← s.mutate keys writeData (s.records.push record), record)
 
 def remove (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (id : String) : RM MultisigStore := do
@@ -265,10 +270,10 @@ def ownerCache (s : MultisigStore) (r : MultisigAccountRecord) : RM (OwnerCache 
     | some c => c
     | none => { id := r.id, descriptor := r.descriptor, count := 0, scripts := #[], owner := {} }
   if start.count ≥ count then return (start, s)
-  let account ← liftAccount s.network (MultisigAccount.parse r.descriptor s.network)
+  let account ← liftAccount s.network (AnyMultisigAccount.parse r.descriptor s.network)
   let mut c := start
   for index in [start.count.toNat:count.toNat] do
-    let outputs ← liftAccount s.network (MultisigAccount.lift (·.name) (account.descriptor.derived index.toUInt32 s.network))
+    let outputs ← liftAccount s.network (account.derivedOutputs index.toUInt32)
     for h : choice in [0:outputs.size] do
       if choice < 2 then
         c := { c with scripts := c.scripts.push outputs[choice].scriptPubKey,
@@ -498,12 +503,13 @@ def setLedger (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData)
   s.requireReadable
   let some i := s.records.findIdx? (·.id == id) | invalid "the account is no longer on this phone"
   let updated := { s.records[i]! with ledger := some registration }
-  let account ← liftAccount s.network (MultisigAccount.parse updated.descriptor s.network)
-  liftAccount s.network (updated.checkLedgerRegistration account)
+  let account ← liftAccount s.network (AnyMultisigAccount.parse updated.descriptor s.network)
+  let some taproot := account.taproot? | invalid "a Ledger cannot sign for this kind of account"
+  liftAccount s.network (updated.checkLedgerRegistration taproot)
   s.mutate keys writeData (s.records.set! i updated)
 
 /-- The spend's one output to the account's change address at `changeIndex`, as a pending coin. -/
-def pendingChange (tx : Transaction) (account : MultisigAccount) (changeIndex : UInt32) (network : BitcoinNetwork) :
+def pendingChange (tx : Transaction) (account : AnyMultisigAccount) (changeIndex : UInt32) (network : BitcoinNetwork) :
     RM WalletUTXO := do
   unless changeIndex ≤ maximumNextIndex do invalid "change address index is out of range"
   let changeScript ← liftAccount network (account.scriptPubKey changeIndex AddressChain.change.rawValue)
@@ -525,7 +531,7 @@ def recordSpend (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteDat
   s.requireReadable
   let some i := s.records.findIdx? (·.id == id) | return (s, false)
   let mut r := s.records[i]!
-  let account ← liftAccount s.network (MultisigAccount.parse r.descriptor s.network)
+  let account ← liftAccount s.network (AnyMultisigAccount.parse r.descriptor s.network)
   let txid := tx.txid
   let mut spent : Int64 := 0
   let mut reserved := 0

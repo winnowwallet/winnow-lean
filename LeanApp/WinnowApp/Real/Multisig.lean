@@ -34,6 +34,13 @@ def accountHoldsCoinsText : String :=
 def spendNotRecordedText (txid reason : String) : String :=
   s!"Sent as {txid}, but the account could not be updated: {reason} Do not spend from it again until it syncs."
 
+/-- What a SegWit v0 account, `wsh(sortedmulti(…))`, is not asked to do: build a payment (whoever holds its
+fixed key does that, and this phone reviews and signs the PSBT), or have a Ledger sign for it from here. -/
+def paymentsMadeElsewhereText : String :=
+  "Winnow does not build payments from this kind of account. Whoever holds its fixed key makes the payment: paste its PSBT here to check and sign it."
+def noLedgerForAccountText : String :=
+  "Winnow cannot have a Ledger sign for this kind of account."
+
 /-- `LedgerActionError` (the cases the account builder throws without a Ledger). -/
 def invalidNameText : String :=
   "Use a name of 1 to 64 plain letters, digits and punctuation: the Ledger shows it on its screen."
@@ -192,7 +199,11 @@ def chainTip (env : Env) : IO UInt32 := do
   | some s => s.chain.height
   | none => return 0
 
-/-- The wallet's BIP86 account key (the `tr(KEY)` of its descriptor). -/
+/-- The wallet's BIP86 account key (the `tr(KEY)` of its descriptor): this phone's key in every multisig
+account it is in, of either kind. In a Taproot account its children sign with BIP340, in a SegWit v0 account
+with ECDSA; a key may sign both ways because the two signatures' nonces are made under different tags
+(`Lean/Secp/Signing.lean`), so no nonce is ever shared between them. A key of its own for SegWit v0 accounts
+(BIP48's `m/48'/coin'/0'/2'`) would need the wallet to keep and back up a second account key. -/
 def walletAccountKey? (w : Wallet) : Option Keys.HDKey :=
   match w.descriptor.expression with
   | .tr key => match key.base with
@@ -205,14 +216,20 @@ def multisigKeyExpression (env : Env) : IO String := do
   RM.toIO (ownKeyExpression (← needWallet env) true)
 
 /-- `multisigAccount(validating:)`: the supported shape, this network, and one key that is this wallet's. -/
-def multisigAccountValidating (w : Wallet) (text : String) : IO MultisigAccount := do
-  let account ← runMAM (MultisigAccount.parse (Wire.trimWhitespace text) w.network)
+def multisigAccountValidating (w : Wallet) (text : String) : IO AnyMultisigAccount := do
+  let account ← runMAM (AnyMultisigAccount.parse (Wire.trimWhitespace text) w.network)
   let some key := walletAccountKey? w | failText notASignerText
   unless account.includes key do failText notASignerText
   return account
 
-def accountOf (r : MultisigAccountRecord) (network : Tx.BitcoinNetwork) : IO MultisigAccount :=
-  runMAM (MultisigAccount.parse r.descriptor network)
+def accountOf (r : MultisigAccountRecord) (network : Tx.BitcoinNetwork) : IO AnyMultisigAccount :=
+  runMAM (AnyMultisigAccount.parse r.descriptor network)
+
+/-- The account as the Taproot one it must be for what only that kind does, else `refusal`. -/
+def taprootAccount (account : AnyMultisigAccount) (refusal : String) : IO MultisigAccount :=
+  match account.taproot? with
+  | some taproot => pure taproot
+  | none => failText refusal
 
 def record (a : MultisigApp) (id : String) : IO MultisigAccountRecord := do
   let some r := (← a.host.read).record? id | failText "This multisig account is no longer on this phone."
@@ -244,19 +261,36 @@ def setAsideDamagedMultisig (a : MultisigApp) : IO Unit := do
 def newMultisigReceiveAddress (a : MultisigApp) (id : String) : IO Unit :=
   a.withStore fun s => do return (← s.advanceReceiveIndex a.host.keys a.host.writeData id, ())
 
-/-- `multisigOwnedCoordinates(for:)`: every coin's own, plus the next receive and change slots. -/
+/-- How many addresses past each frontier a spend someone else built may pay back to: a SegWit v0 account's
+payments are built by whoever holds its fixed key, whose wallet chooses the change address, and it need not
+be this phone's next one. The addresses the scan already watches past the frontier (`Wallet.gapLimit`). A
+Taproot account's spends are built here, to the next slot. -/
+def returnWindow (r : MultisigAccountRecord) : Nat :=
+  if SegwitMultisigAccount.isDescriptor r.descriptor then Wallet.gapLimit.toNat else 1
+
+/-- `multisigOwnedCoordinates(for:)`: every coin's own, plus the next receive and change slots (for a SegWit v0
+account, `returnWindow` of each). -/
 def ownedCoordinates (r : MultisigAccountRecord) : Array OutputCoordinate :=
   r.utxos.map (fun u => { choice := u.chain.rawValue, index := u.index }) ++
-    #[{ choice := AddressChain.receive.rawValue, index := r.nextReceiveIndex },
-      { choice := AddressChain.change.rawValue, index := r.nextChangeIndex }]
+    (Array.range (returnWindow r)).flatMap fun offset =>
+      #[{ choice := AddressChain.receive.rawValue, index := r.nextReceiveIndex + offset.toUInt32 },
+        { choice := AddressChain.change.rawValue, index := r.nextChangeIndex + offset.toUInt32 }]
+
+/-- The change address a spend pays, among the account's next ones (`returnWindow`): its index. -/
+def changeIndexOf (account : AnyMultisigAccount) (r : MultisigAccountRecord) (tx : Transaction) : IO (Option UInt32) := do
+  for offset in [0:returnWindow r] do
+    let index := r.nextChangeIndex + offset.toUInt32
+    let script ← runMAM (account.scriptPubKey index AddressChain.change.rawValue)
+    if tx.outputs.any (·.scriptPubKey == script) then return some index
+  return none
 
 /-- `reviewMultisigSpend(_:record:)`. -/
-def reviewSpend (env : Env) (r : MultisigAccountRecord) (account : MultisigAccount) (psbt : PSBT) :
+def reviewSpend (env : Env) (r : MultisigAccountRecord) (account : AnyMultisigAccount) (psbt : PSBT) :
     IO MultisigAccount.SpendReview := do
   runMAM (account.reviewSpend psbt r.utxos (ownedCoordinates r) (← chainTip env))
 
 /-- `multisigOwnSignerPositions(_:path:)`. -/
-def ownSignerPositions (w : Wallet) (account : MultisigAccount) (path : SpendPath) : Array Nat :=
+def ownSignerPositions (w : Wallet) (account : AnyMultisigAccount) (path : SpendPath) : Array Nat :=
   match walletAccountKey? w with
   | none => #[]
   | some key =>
@@ -266,7 +300,7 @@ def ownSignerPositions (w : Wallet) (account : MultisigAccount) (path : SpendPat
       | none => false
 
 /-- `multisigApprovals(_:record:path:)`. -/
-def approvals (r : MultisigAccountRecord) (account : MultisigAccount) (psbt : PSBT) (path : SpendPath) : Array Nat :=
+def approvals (r : MultisigAccountRecord) (account : AnyMultisigAccount) (psbt : PSBT) (path : SpendPath) : Array Nat :=
   (account.approvals psbt r.utxos path).toOption.getD #[]
 
 /-- `multisigLedgerPosition`: the paired Ledger among `keys`, by its origin. -/
@@ -278,9 +312,9 @@ def ledgerPosition (r : MultisigAccountRecord) (keys : Array Descriptor.SingleKe
 
 /-- `MultisigSigningScreen.signaturesTitle`: a nested account names its groups, on the recovery path too
 when that has a leaf per group. -/
-def signaturesTitle (path : SpendPath) (account : MultisigAccount) : String :=
+def signaturesTitle (path : SpendPath) (account : AnyMultisigAccount) : String :=
   match path.recoveryLeaf with
-  | some leaf => if account.recoveryLeaves.size > 1 then s!"Recovery group {leaf + 1} signatures" else "Recovery signatures"
+  | some leaf => if account.recoveryPaths.size > 1 then s!"Recovery group {leaf + 1} signatures" else "Recovery signatures"
   | none => if account.isNested then s!"Group {path.signersLeaf.getD 0 + 1} signatures" else "Signatures"
 
 /-- `MultisigSigningScreen.signatureCountIdentifier`. -/
@@ -351,7 +385,7 @@ def createMultisigSpend (env : Env) (a : MultisigApp) (id address : String) (amo
     | .error e => failText (addressErrorText e)
   -- the first thing coin selection refuses (its other errors reach here by name only)
   unless amount > 0 do failText (CoinSelectionError.invalidAmount (Int64.ofInt amount)).description
-  let account ← accountOf r network
+  let account ← taprootAccount (← accountOf r network) paymentsMadeElsewhereText
   let draws := (← env.deps.random.draw, ← env.deps.random.draw)
   let position ← env.deps.random.changePosition 1
   let psbt ← runMAM (account.createSpend r.utxos #[payment] r.nextChangeIndex feeRate (← chainTip env)
@@ -418,11 +452,10 @@ def broadcastMultisigSpend (env : Env) (a : MultisigApp) (id text : String) : IO
   let psbt ← parsePSBT text
   let (_, tx) ← runMAM (account.finalizeSpend psbt r.utxos (ownedCoordinates r) (← chainTip env))
   let txid ← broadcastTx env tx (feeRateOf tx r.utxos)
-  let changeScript ← runMAM (account.scriptPubKey r.nextChangeIndex AddressChain.change.rawValue)
-  let hasChange := tx.outputs.any (·.scriptPubKey == changeScript)
+  let changeIndex ← changeIndexOf account r tx
   try
     a.withStore fun s => do
-      let (s', _) ← s.recordSpend a.host.keys a.host.writeData r.id tx (if hasChange then some r.nextChangeIndex else none)
+      let (s', _) ← s.recordSpend a.host.keys a.host.writeData r.id tx changeIndex
         (← RM.io (chainTip env))
       return (s', ())
   catch e =>
@@ -515,6 +548,13 @@ def removeSigner (a : MultisigApp) (id : String) : IO Unit :=
 def pairedLedgers (signers : Array SignerRecord) (account : MultisigAccount) : Array SignerRecord :=
   signers.filter fun r => r.isLedger && (r.masterFingerprint.any (Ledger.Multisig.hasLedgerSigner account ·))
 
+/-- `pairedLedgers` for an account of either kind: none for a SegWit v0 account, which no Ledger signs for
+from here. -/
+def pairedLedgersOf (signers : Array SignerRecord) (account : AnyMultisigAccount) : Array SignerRecord :=
+  match account.taproot? with
+  | some taproot => pairedLedgers signers taproot
+  | none => #[]
+
 /-- `signerNames(for:)`: what to call each key of an account, by fingerprint: a paired Ledger's or a saved
 signer's name, or "Ledger" for the registered device when it is not in the list. -/
 def signerNames (signers : Array SignerRecord) (r : MultisigAccountRecord) (network : Tx.BitcoinNetwork) :
@@ -550,7 +590,8 @@ def createMultisigAccount (env : Env) (a : MultisigApp) (name : String) (thresho
   let w ← needWallet env
   let descriptor ← runMAM (MultisigAccount.makeNestedDescriptor (builderMembers members) threshold
     (recovery.map recoveryPlan) w.network)
-  let account ← multisigAccountValidating w descriptor.serialized
+  -- the builder makes Taproot accounts only
+  let account ← taprootAccount (← multisigAccountValidating w descriptor.serialized) noLedgerForAccountText
   -- a Ledger shows the name and registers the policy, whoever's Ledger it is
   if Ledger.Multisig.namesALedgerKey account then
     unless Ledger.WalletPolicy.isValidName name do failText invalidNameText
@@ -564,7 +605,7 @@ address. -/
 def registerLedger (env : Env) (a : MultisigApp) (id : String) : IO MultisigAccountRecord := do
   let r ← record a id
   unless Ledger.WalletPolicy.isValidName r.name do failText invalidNameText
-  let account ← accountOf r (← currentNetwork env)
+  let account ← taprootAccount (← accountOf r (← currentNetwork env)) noLedgerForAccountText
   let registration ← a.withSession fun session => do
     let fingerprint ← runOn session Ledger.Client.masterFingerprint
     runOn session (Ledger.Multisig.register account r.name fingerprint)
@@ -577,7 +618,7 @@ Ledger when one holds a key of it; none when no paired Ledger is in the account 
 def registerPairedLedger (env : Env) (a : MultisigApp) (id : String) : IO (Option MultisigAccountRecord) := do
   let r ← record a id
   let account ← accountOf r (← currentNetwork env)
-  if r.ledger.isSome || (pairedLedgers (← a.signers.all) account).isEmpty then return none
+  if r.ledger.isSome || (pairedLedgersOf (← a.signers.all) account).isEmpty then return none
   return some (← registerLedger env a id)
 
 /-- The builder's and Join's Ledger step: the paired Ledger's name and the registration's outcome (its
@@ -585,7 +626,7 @@ failure as the text the screen shows); none when no paired Ledger holds a key of
 def registerAfterSaving (env : Env) (a : MultisigApp) (r : MultisigAccountRecord) :
     IO (Option (Except String String)) := do
   let account ← accountOf r (← currentNetwork env)
-  let some ledger := (pairedLedgers (← a.signers.all) account)[0]? | return none
+  let some ledger := (pairedLedgersOf (← a.signers.all) account)[0]? | return none
   if r.ledger.isSome then return none
   try
     discard <| registerPairedLedger env a r.id
@@ -597,7 +638,7 @@ one this phone derives. -/
 def verifyLedgerAddress (env : Env) (a : MultisigApp) (id : String) (index : Nat) : IO String := do
   let r ← record a id
   let some registration := r.ledger | failText notPairedText
-  let account ← accountOf r (← currentNetwork env)
+  let account ← taprootAccount (← accountOf r (← currentNetwork env)) noLedgerForAccountText
   a.withSession fun session => runOn session (Ledger.Multisig.displayAddress account registration 0 index.toUInt32)
 
 def signErrorText : Ledger.SignError → String
@@ -611,10 +652,11 @@ def signMultisigSpendWithLedger (env : Env) (a : MultisigApp) (id text : String)
   let r ← record a id
   let some registration := r.ledger | failText notPairedText
   let account ← accountOf r (← currentNetwork env)
+  let taproot ← taprootAccount account noLedgerForAccountText
   let psbt ← parsePSBT text
   discard <| reviewSpend env r account psbt
   let signed ← a.withSession fun session => do
-    match ← runOn session (Ledger.Multisig.sign psbt account registration) with
+    match ← runOn session (Ledger.Multisig.sign psbt taproot registration) with
     | .ok (signed, _) => pure signed
     | .error e => failText (signErrorText e)
   discard <| reviewSpend env r account signed
@@ -646,8 +688,8 @@ def checkMultisigDescriptor (env : Env) (a : MultisigApp) (text : String) : IO M
   let account ← multisigAccountValidating w text
   let signs := (walletAccountKey? w).any account.signs
   return { policy := account.policySummary, firstAddress := (account.address 0).toOption,
-           ledgerName := (pairedLedgers (← a.signers.all) account)[0]?.map (·.name),
-           recovery := account.recovery.map (recoveryText · account),
+           ledgerName := (pairedLedgersOf (← a.signers.all) account)[0]?.map (·.name),
+           recovery := account.taproot?.bind fun taproot => taproot.recovery.map (recoveryText · taproot),
            warning := if signs then none else some recoveryOnlyText }
 
 /-! ## Drafts: a spend collecting signatures (AppModel.swift d2ca878, "Drafts") -/
@@ -703,7 +745,7 @@ def newSpendPSBT (env : Env) (r : MultisigAccountRecord) (address : String) (amo
     | .ok p => pure p
     | .error e => failText (addressErrorText e)
   unless amount > 0 do failText (CoinSelectionError.invalidAmount (Int64.ofInt amount)).description
-  let account ← accountOf r network
+  let account ← taprootAccount (← accountOf r network) paymentsMadeElsewhereText
   let draws := (← env.deps.random.draw, ← env.deps.random.draw)
   let position ← env.deps.random.changePosition 1
   let psbt ← runMAM (account.createSpend r.utxos #[payment] r.nextChangeIndex feeRate (← chainTip env)
@@ -983,27 +1025,32 @@ def info (r : MultisigAccountRecord) (network : Tx.BitcoinNetwork) (signers : Ar
       nextReceiveIndex := r.nextReceiveIndex.toNat,
       trusted := ",".intercalate (r.utxos.toList.map fun u => s!"{hex u.txid}:{u.vout}@{u.height}") ++
         s!"|{r.nextReceiveIndex}|{r.nextChangeIndex}" }
-  match MultisigAccount.parse r.descriptor network with
+  match AnyMultisigAccount.parse r.descriptor network with
   | .error _ => base
   | .ok account =>
     let names := signerNames signers r network
-    let (membersHeader, memberLines) := groupsSection account ownKey names
+    let taproot := account.taproot?
+    let (membersHeader, memberLines) := match taproot with
+      | some taproot => groupsSection taproot ownKey names
+      | none => (none, [])
     { base with
       policy := some account.policySummary
-      recovery := account.recovery.map (recoveryText · account)
+      recovery := taproot.bind fun taproot => taproot.recovery.map (recoveryText · taproot)
+      buildsPayments := taproot.isSome
       ledgerFingerprint := r.ledger.map (Wallet.hex8 ·.masterFingerprint)
       ledgerName := r.ledger.map fun l =>
         let fp := Wallet.hex8 l.masterFingerprint
         match names.lookup l.masterFingerprint with
         | some n => s!"{n} · {fp}"
         | none => fp
-      needsLedgerRegistration := r.ledger.isNone && Ledger.Multisig.namesALedgerKey account
+      needsLedgerRegistration := r.ledger.isNone && taproot.any Ledger.Multisig.namesALedgerKey
       isNested := account.isNested, membersHeader, memberLines
-      signerExpressions := account.signerExpressions.toList
+      signerExpressions := (taproot.map (·.signerExpressions.toList)).getD []
       threshold := account.threshold.toNat, signerCount := account.signers.size
       receiveAddress := (account.address r.nextReceiveIndex).toOption
       coins := r.utxos.toList.map fun u =>
-        { amount := natOf u.amount, line := coinLine u, recoveryFrom := (account.recoveryUnlockHeight u).map (·.toNat) } }
+        { amount := natOf u.amount, line := coinLine u,
+          recoveryFrom := (taproot.bind (·.recoveryUnlockHeight u)).map (·.toNat) } }
 
 /-- `multisigAccounts`, `multisigStorageNotice` and `multisigKeyExpression()`, recomputed only when they
 changed (every account's receive address is a derivation). -/

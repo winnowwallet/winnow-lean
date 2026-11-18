@@ -25,7 +25,11 @@ interrupted rollback replayed from its marker on the next start → reopen from
 disk → delete. Then `peopleFlow`, on two phones of its own: a person saved from a contact card and paid twice,
 the review's four warnings, a fake explorer, a fake peer ahead of the wallet. Then `refusalsFlow`, on a phone of its
 own: what the wallet refuses (addresses, amounts, fee bumps, the Keychain), each in the words the app shows. One
-`ok`/`FAIL` line per check; the exit code is the verdict. -/
+`ok`/`FAIL` line per check; the exit code is the verdict.
+
+After `flow`, `segwitFlow` on a phone of its own: a SegWit v0 account with a fixed key among its signers,
+`wsh(sortedmulti(2, FIXED, the phone, another key))`, joined from the pasted descriptor, with Bitcoin Core
+building each payment and signing with the fixed key, and the phone checking, signing and broadcasting. -/
 
 /-- Every `Deps.journal` line of the run: which backend (A, B, C), the event, its fields. -/
 initialize journalEvents : IO.Ref (Array (String × String × List (String × String))) ← IO.mkRef #[]
@@ -349,11 +353,11 @@ def receiverScript (n : Node) (tx : Json) (scanSecret spendKey : ByteArray) : IO
   let sumA ← IO.ofExcept ((Keys.combine keys.toList).mapError (·.name))
   let smallest := outpoints.foldl (fun m o => if Keys.SilentPaymentSending.bytesLess o m then o else m) outpoints[0]!
   let inputHash := taggedHash "BIP0352/Inputs" (smallest ++ Keys.serializeCompressed sumA)
-  let scalar := (Secp.fromBE inputHash * Secp.fromBE scanSecret) % Keys.groupN
-  let shared ← IO.ofExcept ((Keys.publicMultiply sumA (Secp.toBE32 scalar)).mapError (·.name))
+  let scalar ← IO.ofExcept ((do return (← (← Keys.secretOf inputHash).multiply (← Keys.secretOf scanSecret)).bytes : Keys.PK ByteArray).mapError (·.name))
+  let shared ← IO.ofExcept ((Keys.publicMultiply sumA scalar).mapError (·.name))
   let t0 := taggedHash "BIP0352/SharedSecret" (Keys.serializeCompressed shared ++ ByteArray.mk #[0, 0, 0, 0])
   let spend ← IO.ofExcept ((Keys.parsePublicKey spendKey).mapError (·.name))
-  let p ← IO.ofExcept (((do Keys.combine [spend, ← Keys.pointOfSecret (Secp.fromBE t0)] : Keys.PK Keys.Point)).mapError (·.name))
+  let p ← IO.ofExcept (((do Keys.combine [spend, ← Keys.pointOfSecret (← Keys.secretOf t0)] : Keys.PK Keys.Point)).mapError (·.name))
   return ByteArray.mk #[0x51, 0x20] ++ Keys.xonlyBytes p
 
 /-- The test receiver's keys: fixed, so the UI journey can ask for its code and its expected output. -/
@@ -1444,6 +1448,134 @@ def paymentRaceFlow (dir : String) (n : Node) : IO Unit := do
   check "payment race, Erased: the new wallet shows nothing of the old payment" (history? s sent).isNone
   b.stopNetworking
 
+/-! ## A SegWit v0 account whose payments Bitcoin Core builds -/
+
+/-- A BTC amount (8 decimals) as exact sats. -/
+def satsOfJson (j : Json) : IO Nat := do
+  let .num n := j | throw (IO.userError "amount")
+  unless n.exponent ≤ 8 && n.mantissa ≥ 0 do throw (IO.userError "amount precision")
+  return (n.mantissa * 10 ^ (8 - n.exponent)).toNat
+
+/-- A blank Core wallet holding `descriptor`, receive and change, twenty addresses of each (the node keeps a
+key pool of one). -/
+def coreDescriptorWallet (n : Node) (name descriptor : String) (privateKeys : Bool) : IO Unit := do
+  discard <| n.cli #["-named", "createwallet", s!"wallet_name={name}", "blank=true", s!"disable_private_keys={!privateKeys}"]
+  let checksum := ((← n.json #["getdescriptorinfo", descriptor]).getObjValAs? String "checksum").toOption.getD ""
+  let request := Json.arr #[Json.mkObj [("desc", .str s!"{descriptor}#{checksum}"), ("active", .bool true),
+    ("timestamp", .str "now"), ("range", Json.arr #[(0 : Nat), (19 : Nat)])]]
+  let result ← n.walletJson #["importdescriptors", request.compress] name
+  let imported := match result with
+    | .arr rows => rows.all fun row => (row.getObjValAs? Bool "success").toOption == some true
+    | _ => false
+  unless imported do throw (IO.userError s!"Core did not import the descriptor into {name}: {result.compress}")
+
+/-- `wsh(sortedmulti(2, FIXED, the phone, another key))` on a phone of its own. FIXED is one public key whose
+private half is in a Bitcoin Core wallet, where a key service's would be in the service; a second Core wallet
+with no private key builds the payment, as whoever runs the account's node does. The phone joins from the
+pasted descriptor, shows the address Core derives, finds the coin through the node's filters, checks the PSBT
+Core built and signed (the fee is Core's), adds its signature and broadcasts; the node's chain confirms. -/
+def segwitFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (phone, _, ms) ← Backend.realWithMultisig (deps secrets "Wsh")
+  let home := s!"{dir}/Wsh/BTCSwift/regtest"
+  IO.FS.createDirAll home
+  discard <| phone.openWallet .regtest home
+  phone.startNetworking settings
+  discard <| phone.createWallet .regtest home
+  let phoneKey := (← phone.multisigOverview).keyExpression.getD ""
+  let (_, otherKey) ← testSigner 0xB2
+  -- a regtest key, written here on purpose: it has never held anything and must never be used for anything else
+  let fixedSecret := sha256 "winnow backend-test fixed key".toUTF8
+  let some fixedPublic := (Keys.publicKeyOf fixedSecret).toOption | throw (IO.userError "the fixed key")
+  let wif := Base58Check.encode ((ByteArray.mk #[0xEF] ++ fixedSecret).push 0x01)
+  let descriptorWith (fixed : String) := s!"wsh(sortedmulti(2,{fixed},{phoneKey},{otherKey}))"
+  let descriptor := descriptorWith (hex fixedPublic)
+  coreDescriptorWallet n "wsh-watch" descriptor (privateKeys := false)
+  coreDescriptorWallet n "wsh-service" (descriptorWith wif) (privateKeys := true)
+  -- 1. Join from the pasted descriptor.
+  let checked ← attempt (phone.checkMultisigDescriptor descriptor)
+  check "segwit account: the pasted descriptor checks as 2 of 3 for this phone" (match checked with
+    | .ok c => c.policy == "2 of 3" && c.recovery.isNone && c.warning.isNone | .error _ => false)
+  let (id, _) ← phone.addMultisigAccount "Exchange" descriptor
+  let some joined ← multisigAccount? phone id | throw (IO.userError "the account is not listed")
+  check "segwit account: listed as 2 of 3, with no payments built here" (joined.policy == some "2 of 3" && !joined.buildsPayments && joined.balance == 0)
+  let some address := joined.receiveAddress | throw (IO.userError "no receive address")
+  let single := descriptor.replace "<0;1>" "0"
+  let singleChecksum := ((← n.json #["getdescriptorinfo", single]).getObjValAs? String "checksum").toOption.getD ""
+  let theirs := match ← n.json #["deriveaddresses", s!"{single}#{singleChecksum}", "[0,0]"] with
+    | .arr #[.str a] => some a
+    | _ => none
+  check "segwit account: the receive address is the one Core derives" (theirs == some address && address.startsWith "bcrt1q") address
+  -- 2. Receive: the sync finds the coin through the node's filters.
+  discard <| n.wallet #["sendtoaddress", address, "0.4"]
+  n.mine 1 mineAddr
+  let fundHeight ← n.height
+  n.waitFilterIndex
+  let credited ← waitUntil 90_000 (do
+    phone.syncNow
+    return ((← multisigAccount? phone id).map (·.balance)) == some 40_000_000)
+  let some funded ← multisigAccount? phone id | throw (IO.userError "account gone")
+  check "segwit account: the sync credits the coin" (credited && funded.coins.any fun c =>
+    c.amount == 40_000_000 && (c.line.splitOn s!"receive 0 · block {fundHeight}").length > 1) s!"{funded.balance}, {funded.coins.map (·.line)}"
+  let refusedSend ← attempt (phone.previewSend
+    { destination := ← n.wallet #["getnewaddress"], amount := "1000000", network := .regtest, accountID := some id })
+  check "segwit account: Send builds nothing from it" (match refusedSend with
+    | .error e => e == Real.paymentsMadeElsewhereText | .ok _ => false)
+  -- 3. Core builds the payment and signs it with the fixed key.
+  let dest ← n.wallet #["getnewaddress", "", "bech32m"]
+  let outputs := Json.arr #[Json.mkObj [(dest, .str "0.10000000")]]
+  let options := Json.mkObj [("fee_rate", (2 : Nat)), ("changePosition", (1 : Nat))]
+  let built ← n.walletJson #["walletcreatefundedpsbt", "[]", outputs.compress, "0", options.compress] "wsh-watch"
+  let coreFee ← satsOfJson ((built.getObjVal? "fee").toOption.getD Json.null)
+  let some unsignedText := (built.getObjValAs? String "psbt").toOption | throw (IO.userError "Core's PSBT")
+  let processed ← n.walletJson #["walletprocesspsbt", unsignedText, "true", "DEFAULT", "true", "false"] "wsh-service"
+  let some coreSigned := (processed.getObjValAs? String "psbt").toOption | throw (IO.userError "Core's signed PSBT")
+  -- 4. The phone checks it, signs and broadcasts.
+  phone.adoptDraft id coreSigned
+  let screen : IO (Option MultisigScreen) := do return ((← multisigAccount? phone id).bind (·.draft)).bind (·.screen)
+  let some shown ← screen | throw (IO.userError s!"the draft does not review: {((← multisigAccount? phone id).bind (·.draft)).bind (·.reviewError)}")
+  let change := 40_000_000 - 10_000_000 - coreFee
+  check "segwit account: the review of Core's PSBT: pays the node, the rest back to the account, Core's fee"
+    (shown.outputs.map (fun o => (o.owned, o.amount)) == [(false, 10_000_000), (true, change)] &&
+      shown.outputs.any (fun o => o.address == dest) && shown.inputTotal == 40_000_000 && shown.fee == coreFee)
+    s!"{shown.outputs.map fun o => (o.owned, o.amount)}, fee {shown.fee} vs {coreFee}"
+  check "segwit account: Core's signature with the fixed key verifies: 1 of 2, and this phone's is wanted"
+    (shown.signatures == [(false, 1, 2)] && shown.progress.phoneUnsigned && !shown.progress.complete)
+  let early ← attempt (phone.broadcastDraft id)
+  check "segwit account: one signature cannot be finalized" (early matches .error _)
+  phone.signDraft id
+  let some signed ← screen | throw (IO.userError "the signed draft does not review")
+  check "segwit account: signed here: 2 of 2" (signed.signatures == [(false, 2, 2)] && signed.progress.complete)
+  let txid ← phone.broadcastDraft id
+  let inMempool ← waitUntil 20_000 (do return (← n.mempool).contains txid)
+  check "segwit account: the node's mempool holds the spend" inMempool txid
+  let some pending ← multisigAccount? phone id | throw (IO.userError "account gone")
+  check "segwit account: the change waits as a pending coin, the draft gone, the spend in flight"
+    (pending.balance == change && pending.draft.isNone && pending.inFlight == [txid] &&
+      pending.coins.any fun c => (c.line.splitOn "pending").length > 1 && (c.line.splitOn "change").length > 1)
+    s!"{pending.balance} vs {change}, {pending.coins.map (·.line)}"
+  -- 5. Confirm.
+  n.mine 1 mineAddr
+  let spendHeight ← n.height
+  n.waitFilterIndex
+  let confirmed ← waitUntil 90_000 (do
+    phone.syncNow
+    let r ← Real.record ms id
+    return r.allUtxos.any fun u => u.spent.any (·.height == some spendHeight.toUInt32))
+  let final ← Real.record ms id
+  check "segwit account: the spend and its change confirmed in the node's block" (confirmed && final.utxos.size == 1 &&
+    final.utxos.all (fun u => u.height == spendHeight.toUInt32 && u.chain == .change) && final.balance.toInt == change)
+  let theirTx ← n.walletJson #["gettransaction", txid] "wsh-watch"
+  check "segwit account: Core's watching wallet has it confirmed too" ((theirTx.getObjValAs? Nat "confirmations").toOption.getD 0 ≥ 1)
+  let unspent ← n.walletJson #["listunspent"] "wsh-watch"
+  let theirBalance ← match unspent with
+    | .arr rows => rows.foldlM (fun total row => do return total + (← satsOfJson ((row.getObjVal? "amount").toOption.getD Json.null))) 0
+    | _ => pure 0
+  check "segwit account: Core and the phone agree on what the account holds" (theirBalance == change) s!"{theirBalance} vs {change}"
+  phone.stopNetworking
+
 /-- What `openWallet` found, for a check's detail. -/
 def bootText : BootResult → String
   | .opened id => s!"opened {id}" | .missing => "missing" | .damaged m => s!"damaged: {m}"
@@ -1982,5 +2114,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; segwitFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

@@ -1,6 +1,15 @@
 Winnow: the same wallet, rewritten in Lean
 
-New since 0.9.11
+New since 0.9.15
+
+Join an account also takes a SegWit v0 account, wsh(sortedmulti(…)), for a wallet where one signer is a single fixed key that signs only ECDSA. Whoever holds that key builds its payments. On signet, with Bitcoin Core holding the other keys:
+1. Join an account: paste the descriptor. Policy must say "2 of 3" and the first address must be Core's.
+2. Pay that address: the coin appears on the account page, which has no "Send from this account".
+3. Have Core build and sign a payment. "Paste a PSBT from a co-signer", check the amounts and fee, "Add this phone's signature", "Finalize and broadcast".
+
+Keys, addresses and signatures run on new curve code: after updating, check the balance is the same and send once.
+
+Since 0.9.11
 
 A card for one person: they pay you at a new address each time, with nothing more to send them. It holds a code made for them and none of your wallet's keys, plus an ordinary address for payers without Winnow. Receive is now one page. Cards from 0.9.12 still work. On two phones:
 1. Receiving phone: tap Receive. Under "From one person" type the payer's name and tap the button (Face ID). It shows "An address for …" and "A card for …".
@@ -10,11 +19,8 @@ A card for one person: they pay you at a new address each time, with nothing mor
 5. Cards for two people must share nothing after "winnowcard1p".
 
 One home: Simple and Advanced mode are gone, and the home has everything Advanced had:
-1. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger"; from 0.5 BTC, "Build an account with other people's keys". "Don't show again" hides a card for good.
+1. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger"; from 0.5 BTC, "Build an account with other people's keys".
 2. With Bluetooth on and no Ledger paired, unlock a Ledger nearby: a card pairs it, builds a 2-of-2 of this phone and the Ledger, and shows the first address, which must match the Ledger's.
-3. In Airplane Mode the home shows "Offline" in orange words. Tap it, then Network settings: Sync shows the last error and Retry.
-4. A backup file with the recovery phrase asks for Face ID or the passcode first. Join an account shows the recovery path under Policy, and says when this phone is only the recovery key.
-5. If Winnow could not read its multisig accounts, Settings → Security → Multisig accounts now offers "Set the damaged file aside".
 
 This build is Winnow rewritten in Lean 4: the wallet and the app are compiled to native code and drawn with standard iOS controls, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Security → Hardware wallets and keys. Please try it on a phone whose wallet you could restore from its recovery words, and report anything that differs from the Swift app.
 
@@ -22,7 +28,6 @@ Install over the current app
 
 1. With the App Store's Winnow holding a wallet, install this build from TestFlight. The same wallet, balance and Activity must appear, and it must sync to "Up to date".
 2. Settings → Backup: iCloud backup should show "Backed up" with a time after it updates. On a second device signed into the same Apple Account, a fresh install should offer "Restore your iCloud wallet" and restore the same wallet.
-3. Settings → Security → Hardware wallets and keys → Pair a Ledger works.
 
 One Send
 
@@ -30,7 +35,5 @@ One Send
 2. Every payment, from the wallet or from an account, starts in Send: pick the account under From. With a recovery path, Send offers "Signers now / Recovery path".
 3. Sign and continue, then collect signatures (phone, Ledger, a pasted copy) and finalize. The PSBT to share is BIP174 v0, readable by Bitcoin Core.
 4. A payment between the wallet and one of your accounts is one row in Activity.
-
-Also new: Tor and I2P peers under Settings → Network → Peers and routing, background chain checks, and the iPad layout. Macs with Apple silicon can run the iPad version.
 
 Report bugs at https://github.com/winnowwallet/winnow-lean/issues with app version, device, Ledger model, network and steps. Never include recovery words, private keys or backup files.

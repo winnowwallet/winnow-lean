@@ -1,16 +1,23 @@
-import Secp.Field.Ops
-
 /-! # The specification: secp256k1 over the integers modulo P
 
 Points are affine pairs over `F := Fin P` or the point at infinity, added by the textbook chord
 and tangent rules with field division. Scalar multiplication is left-to-right double-and-add over
-the 256 bits of the scalar. Nothing here is executed; it is what `Secp.Curve.Jacobian` is proven
-to compute.
+the 256 bits of the scalar. Nothing here is executed; it is what the curve code is proven to compute.
+This file imports nothing: it is the definition everything else is held to.
 
 **The one assumption.** Division needs every non-zero element to be invertible, which is the
 statement that `P` is prime. It is not proven here (a Pratt certificate needs factors of `P - 1`
 that are out of reach for this repository's tooling), so it enters as the class `FieldP`, taken
 as a hypothesis by every theorem that needs it, never as an axiom. -/
+
+namespace Secp
+
+/-- The field's modulus, 2²⁵⁶ − 2³² − 977. -/
+def P : Nat := 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+
+instance : NeZero P := ⟨by decide⟩
+
+end Secp
 
 namespace Secp.Spec
 

@@ -153,7 +153,7 @@ def cardChecks (n : Node) : IO Unit := do
   let some spendSecret := node.privateKey | throw (IO.userError "no private key")
   let (allowed, reason) ← mempoolVerdict n (← signedBy spendSecret)
   check "signed with the spend private key alone: Core refuses it" (!allowed) reason
-  let unlabelled ← needE "sum" (·.name) (do return Secp.toBE32 (← privateAdd (← secretOf spendSecret) outputTweak))
+  let unlabelled ← needE "sum" (·.name) (do return (← privateAdd (← secretOf spendSecret) outputTweak).bytes)
   let (allowed, reason) ← mempoolVerdict n (← signedBy unlabelled)
   check "signed with the spend private key plus the output's tweak, without the card's label: Core refuses it" (!allowed) reason
   -- the card's label, from the phrase too: BIP352's label 1 of the scan private key
@@ -161,7 +161,7 @@ def cardChecks (n : Node) : IO Unit := do
   let some scanSecret := scanNode.privateKey | throw (IO.userError "no scan private key")
   let label ← needE "label" (·.name) (SilentPaymentPairing.labelAt scanSecret 1)
   let issuerSecret ← needE "sum" (·.name)
-    (do return Secp.toBE32 (← privateAdd (← privateAdd (← secretOf spendSecret) label) outputTweak))
+    (do return (← privateAdd (← privateAdd (← secretOf spendSecret) label) outputTweak).bytes)
   let (allowed, reason) ← mempoolVerdict n (← signedBy issuerSecret)
   check "signed with the spend private key plus the card's label plus the output's tweak: Core takes it" allowed reason
 

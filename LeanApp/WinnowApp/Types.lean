@@ -429,6 +429,10 @@ structure MultisigInfo where
   /-- A nested account's members section: its header and one line per member (or per leaf). -/
   membersHeader : Option String := none
   memberLines : List String := []
+  /-- Whether this phone builds the account's payments (Send's "From", the account's "Send from this
+  account"). Not for a SegWit v0 account, `wsh(sortedmulti(…))`: whoever holds its fixed key builds them, and
+  this phone checks and signs the PSBT. -/
+  buildsPayments : Bool := true
   /-- `signerExpressions`, `threshold`, `signers.count`: the builder's picker offers the account as one member. -/
   signerExpressions : List String := []
   threshold : Nat := 0
