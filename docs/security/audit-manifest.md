@@ -1,7 +1,9 @@
 # Winnow security audit manifest
 
 > Historical audit boundary, not a current source inventory or CI checklist.
-> For today’s checks and release process use the [CI runbook](../../.github/internal/ci-release.md);
+> It describes the Swift app (winnowwallet/winnow); see the 2026-11-17 scope
+> note below. For today’s checks use the [testing guide](../testing.md), and for
+> the release process the [CI runbook](../../.github/internal/ci-release.md);
 > [security notes](README.md) explain changes since these snapshots.
 
 This file freezes the source and evidence boundary for the security work. A
@@ -46,6 +48,35 @@ bundles the census list current when it was built (`scripts/import-census`), so 
 census refresh egress in the frozen table below and the census I2P mirror row
 above are gone, routed HTTP carries explorer requests only, and I2P-only
 routing makes no HTTP request at all.
+
+Scope note (2026-11-17, the Lean app). Winnow 0.9.x is written in Lean 4 and
+lives in winnowwallet/winnow-lean. Both frozen targets below are commits of
+winnowwallet/winnow, and neither is an object in this repository. The source
+inventory lists Swift files, none of which is in this tree; the package,
+toolchain, file-count and CI rows describe the Swift build. **No audit target
+has been frozen for the Lean code**, and nothing below was re-derived for it.
+[The testing guide](../testing.md), [SECURITY.md](../../SECURITY.md) and
+[PORT.md](../../PORT.md) describe the Lean app.
+
+The egress tables above and below also predate two things the Lean app does.
+The Swift app had the iCloud backup by 0.8.13 and the Ledger on its
+`ledger-on-main` branch (winnow#255); no table here was updated for either:
+
+| Egress | Transport | Carries | When |
+|---|---|---|---|
+| Automatic iCloud backup | CloudKit's private database, through the shell's `cloudkit.*` capability (`LeanApp/WinnowApp/Real/CloudBackup.lean`) | An encrypted wallet backup, one record per device's backup; [CloudKit/README.md](../../CloudKit/README.md) lists its contents, the recovery phrase among them | Automatically when iCloud is available; on by default |
+| Backup wrapping key | A synchronizable iCloud Keychain item per backup id (`shellCloudKeys` in the same file), kept apart from the wallet's own device-only Keychain item | The 32-byte key that wraps that backup | With the backup |
+| Ledger | Bluetooth LE, through the shell's `ble.*` capability (`LeanApp/WinnowApp/Real/LedgerTransport.lean`) | The Ledger client's exchanges with a paired device | When the user pairs or signs with a Ledger; a scan for Ledgers advertising nearby is also made there |
+
+The rows that still apply are carried by Lean code: peer connections over
+Lean's TCP, directly or through a gateway's SOCKS5 port; DNS seeds by
+DNS-over-HTTPS with the system resolver as the fallback
+(`Lean/Winnow/IO/Seeds.lean`); the gateway lookup and probe
+(`Lean/Winnow/IO/Gateways.lean`); the explorer's sender lookup over the
+shell's `http.get` (`lookupSender`, `LeanApp/WinnowApp/Real/Records.lean`); and
+the explorer link the shell opens. The app checks no
+census signature; `scripts/import-census` verifies it when a build imports
+the list. This note is not a regenerated inventory.
 
 ## Frozen target, 2026-09-14
 
@@ -261,6 +292,10 @@ README and lockfile; the census publisher (winnowwallet/census) consumes
   2026-09-15.
 
 ## Change control
+
+Note of 2026-11-17: the frozen commit named here is the Swift app's. The Lean
+app has no frozen comparison base, and the changes made to it since
+2026-10-31 have no rows in the findings register's validation record.
 
 The frozen commit remains the comparison base. Each bounded security change
 must name the invariant, tests, residual risk, and rollback. Unrelated

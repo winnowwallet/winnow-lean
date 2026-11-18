@@ -2,7 +2,8 @@
 
 Winnow 0.9.x is written in Lean 4. This guide describes how this repository's
 app is tested and what its journey media show. The Swift app's suites
-(WalletCoreTests, AppTests, the single signet journey) ended with 0.8.13; their
+(WalletCoreTests, AppTests, the single signet journey) ended with the Swift app,
+whose main stopped at 0.8.13 and whose tags on branches ran to v0.8.21; their
 history stays in [winnowwallet/winnow](https://github.com/winnowwallet/winnow).
 [PORT.md](../PORT.md) lists how each ported part is verified, and the
 [script index](../scripts/README.md) describes the helpers named below.
@@ -15,12 +16,15 @@ Every pull request that is ready for review and changes more than the docs (`*.m
 and so does main: on every push, and by hand (after a push whose run failed, or
 a force-push, which starts no run, before tagging). Every run is the same full run, and
 `release.yml` looks for one on the tag's tree that is not a pull request's.
+While the repository variable `MACOS_RUNNER` is set, this repository's own
+branches run on that label (a self-hosted Mac) instead; a fork's pull request
+always runs on GitHub's.
 Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested), `card-regtest` and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the ten journeys headless against the app itself (LeanNative's `wire-journey`). |
-| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump and Retry on one runner; Ledger, census, silent payments and spent-elsewhere on the other). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `scripts/check-core` (the core library's imports held to their list), `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested), `card-regtest` and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the ten journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two, five each (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump, Retry and the card for one person on one runner; the two Ledger journeys, census, silent payments and spent-elsewhere on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
 
@@ -34,9 +38,9 @@ into its ordinary storage.
 The UI journeys are Lean (`LeanApp/Journeys.lean`), run on the Mac. Each step
 is one command to LeanNative's journey driver, the one XCUITest in the app's UI
 test target; each check is Lean, against the node. Each journey launches the
-app in test mode on an iPhone Duo simulator against a regtest node, finds
-controls by the identifiers the views give them, and checks the app's results
-against the node.
+app in test mode in a simulator against a regtest node, finds controls by the
+identifiers the views give them, and checks the app's results against the node.
+CI's simulator is an iPhone 17 Pro (`ci.yml`'s `ui-device-type`).
 
 - `createReceiveSendConfirm`: create a wallet, receive from the node,
   review and send a payment the node accepts, see it confirm.

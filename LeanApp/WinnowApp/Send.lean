@@ -187,7 +187,7 @@ def sendReview (m : Model) (p : Preview) : List H :=
   , paymentAmounts p ] ++
   (match p.account with
    | some a =>
-     [.section "" "Sign and continue adds this phone's signature and keeps the payment under Transactions until the other signers have signed."
+     [.section "" "Sign and continue adds this phone's signature and keeps the payment under Activity until the other signers have signed."
        ([ .labeled "From" a.name ] ++
         (if a.recovery then [.identified Ids.reviewSpendPath (.labeled "Spend with" "Recovery path")]
          else [.identified Ids.reviewSignatures (.labeled "Signatures" s!"needs {a.threshold} of {a.signerCount}")]))]

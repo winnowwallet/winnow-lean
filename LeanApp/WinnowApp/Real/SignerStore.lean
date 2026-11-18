@@ -7,7 +7,7 @@ import Winnow.Ledger.Multisig
 
 /-! # The signers a phone knows (port of `Sources/WinnowApp/SignerStore.swift`, upstream d2ca878)
 
-The list under Settings → Signers, from which the multisig builder takes its members and the Join
+The list under Settings → Security → Hardware wallets and keys, from which the multisig builder takes its members and the Join
 screen its member share: a Ledger the phone paired, or keys other people sent (`SignerRecord`). One
 sealed JSON file per network, `signers.json`, read under the same seal as the other stores (store name
 `signers`) and carried in every backup. Public keys only, so the file is not a wallet's: it survives

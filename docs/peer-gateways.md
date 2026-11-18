@@ -59,7 +59,7 @@ reproduces the gateway VMs the project ran.
 
 ## Validation
 
-`io-test` (`Lean/IOTest.lean`, run by `scripts/ci-regtest` in CI's `extra`
+`io-test` (`Lean/IOTest.lean`, run by `scripts/ci-regtest` in CI's `lean`
 job) checks gateway configuration and
 address parsing, MagicDNS answers, discovery, SOCKS5 greetings, routed HTTP
 (I2P alone makes no request; Tor alone fetches through its gateway by host

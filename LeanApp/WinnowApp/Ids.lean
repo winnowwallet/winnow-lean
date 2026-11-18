@@ -195,7 +195,7 @@ def multisigMember (i : Nat) : String := s!"multisigMember-{i}"
 def multisigBuildMember (i : Nat) : String := s!"multisigBuildMember-{i}"
 def multisigBuildMemberAddKey (i : Nat) : String := s!"multisigBuildMemberAddKey-{i}"
 def multisigBuildMemberRemove (i : Nat) : String := s!"multisigBuildMemberRemove-{i}"
-/-- A signer's row under Settings → Signers. -/
+/-- A signer's row under Settings → Security → Hardware wallets and keys. -/
 def signerRow (id : String) : String := s!"signerRow-{id}"
 /-- An account offered by the signer picker. -/
 def signerPickAccount (id : String) : String := s!"signerPickAccount-{id}"

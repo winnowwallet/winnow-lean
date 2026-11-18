@@ -1,9 +1,14 @@
 # Retired mainnet launch-recording plan
 
-The original August launch plan is retired. Current automated integration and
-website media use the [single private-signet journey](../../UITests/README.md),
+The original August launch plan is retired. When this note was written, automated
+integration and website media used the Swift app's single private-signet journey
+(`UITests/README.md`, not in this repository),
 with automatically mined confirmations and disposable test keys. No real-money
 recording or physical-device measurement is required by that workflow.
+
+Note of 2026-11-17: integration and website media now come from the Lean app's
+ten journeys against a disposable regtest node; see
+[docs/testing.md](../../docs/testing.md).
 
 The old plan assumed one particular development node, promised unconfirmed
 payment timings, and overstated recovery from words alone. Those instructions

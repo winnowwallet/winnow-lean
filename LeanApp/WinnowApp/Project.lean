@@ -17,8 +17,8 @@ def manifest : Manifest where
   name := "WinnowLean"
   displayName := "Winnow"
   -- the Swift app's identity, which this app replaces on TestFlight: the same bundle identifier and team,
-  -- meant to let an update keep an installed wallet's Keychain items and files (not yet tried over an
-  -- installed Swift build)
+  -- meant to let an update keep an installed wallet's Keychain items and files (0.9.0 (1) ran over an
+  -- installed Swift build: PORT.md, layer 10)
   bundleId := "com.btcswift.app"
   team := some "2858MX5336"
   -- release.yml sets both from the tag, as xcodebuild arguments

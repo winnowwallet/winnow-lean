@@ -1,7 +1,12 @@
 # Security invariant and evidence matrix
 
-For current selectors corresponding to historical evidence, see the
-[test-suite map](test-suite-map.md). Dated runs retain their original names.
+For where a Swift suite named below is carried in the Lean tree, see the
+[suite map](test-suite-map.md). Dated runs retain their original names.
+
+Note of 2026-11-17: this matrix was written for the Swift app
+(winnowwallet/winnow), and its hashes, paths, suite names and issue numbers are
+that repository's. It was not re-derived for the Lean app; the paragraph
+“The Lean app (0.9.x)” below says what is known to differ.
 
 Historical scope note (2026-09-07): the unused `BlockchainBackend` module and
 its four client-only tests have been removed. The S11 client/tweak-index
@@ -9,16 +14,19 @@ references below describe earlier review evidence. The September 14 [egress inve
 also records the later opt-in sender lookup; it is a dated snapshot.
 
 This is an August 2026 audit record. References to Silent Payments and its tweak
-index describe the implementation reviewed then; those features have since been
-removed. Historical findings and their evidence are retained below.
+index describe the implementation reviewed then. The tweak index and receiving
+were removed and have not returned; sending to a silent payment code was
+reinstated in October 2026 (corrected 2026-11-17 from “those features have
+since been removed”; see the [findings register](findings.md)). Historical
+findings and their evidence are retained below.
 
 Scope note (2026-09-15, 0.7.1): the opt-in Tor route and its embedded Arti
 client were removed (see the [audit manifest](audit-manifest.md)). S11's
 egress inventory loses its Arti row and its "through Tor" alternatives;
 `SEC-029`'s "Tor flag" default is cleared once at launch and no longer stored.
 
-Scope note (2026-09-29): #179 restored an unauthenticated SOCKS5 path in
-`PeerConnection.swift` for external gateways, and #181 routes peers, census
+Scope note (2026-09-29): winnow#179 restored an unauthenticated SOCKS5 path in
+`PeerConnection.swift` for external gateways, and winnow#181 routes peers, census
 downloads and explorer lookups through the user's own Tailscale Tor and I2P
 gateways. S11's egress inventory regains gateway rows; the current list is in
 the [audit manifest](audit-manifest.md)'s 2026-09-29 note.
@@ -43,7 +51,9 @@ Status vocabulary:
 - **Blocked release:** an acceptance requirement for a mainnet beta remains
   open; this does not assert that an exploitable vulnerability is known.
 
-**Native build.** The shared-account Winnow's vault and MuSig2 code was
+**The Swift app's native build (0.8.x).** This paragraph describes the Swift
+app after its vaults were removed (relabelled 2026-11-17 from “Native build”;
+“this build” and “here” in it mean that Swift build, not the Lean app). The shared-account Winnow's vault and MuSig2 code was
 removed with the suites that evidenced it (`VaultFlowTests`,
 `VaultCosignerIdentityTests`, `VaultDraftIdentityTests`,
 `VaultSignerIndependenceTests`, `MuSig2SessionSafetyTests`,
@@ -52,7 +62,8 @@ Raw k-of-n script-path multisig accounts were then ported back onto the
 native curve module (`MultisigAccount`), with their admission rules
 (SEC-009, SEC-019, SEC-020) and spend review (SEC-004) evidenced by
 `MultisigAccountTests`, the BIP387 and BIP341 script-path vectors, and the UI
-journey's 2-of-2 spend that Bitcoin Core co-signs, accepts and mines. SEC-020
+journey's spend that Bitcoin Core co-signs, accepts and mines (a 2-of-2 when
+this was written; since `SEC-034` a 2-of-3 with two Bitcoin Core wallets). SEC-020
 admits two unspendable internal keys: the bare NUMS point, and an xpub with no
 origin on it, which BIP388 signers need (`MultisigAccountTests` refuses a real
 key, an origin, another suffix and another network). A Ledger signer is
@@ -61,7 +72,7 @@ vectors and a device simulator: its registration must return the policy's own
 id and derive the phone's first address, a shown address must equal the
 phone's, and its signatures are kept only after they verify. No test runs a
 real Ledger; on 2026-10-26 the owner's Nano X co-signed a mainnet spend from a
-2-of-2 account ([evidence](evidence/ledger-mainnet-2026-10-26.md)). A timelocked
+2-of-2 account, with the Swift app's build 0.8.14 ([evidence](evidence/ledger-mainnet-2026-10-26.md)). A timelocked
 recovery leaf is admitted only beside the signers' leaf, with a lock of 1 to
 65535 blocks, distinct keys, and a reused signer only on its `/<2;3>/*` path
 (`TimelockedMultisigTests`, checked against Bitcoin Core's descriptor answers);
@@ -72,12 +83,64 @@ a zero-value output is not a coin, so it cannot stall the shared scan
 change and any spend of that change (`SEC-031`); the lookahead is the
 wallet's gap limit, because every signer's phone hands out addresses (`SEC-032`);
 and a reorg puts a spend from a fallen block back in flight, its inputs still
-reserved, as the wallet does since #157 (`SEC-033`).
+reserved, as the wallet does since winnow#157 (`SEC-033`).
 S4 has
 no subject in this build, and `ImportBundle` refuses a backup carrying a
-MuSig2 record. S8's remaining subject is that script-path account; its row
+MuSig2 record. S8's remaining subject is that script-path account (in the
+Lean app there is a second: SegWit v0 accounts, below); its row
 and the vault clauses of S2, S3, S6, S7 and S9 below still record the evidence
 as it stood in the shared-account Winnow, including tests not ported here.
+
+**The Lean app (0.9.x), note of 2026-11-17.** What the paragraph above names
+is carried in the Lean tree under the same names: the account and its
+admission rules (`Lean/Winnow/Wallet/MultisigAccount.lean`,
+`Lean/Winnow/Wallet/SpendReview.lean`), `MultisigAccountTests` and
+`TimelockedMultisigTests` in `multisig-test`, `LedgerTests` in `ledger-test`,
+`MultisigStoreTests` in `multisig-app-test`, and the journey as
+`multisigTwoOfThreeWithRecovery` on regtest; a backup carrying a MuSig2
+account is still refused (`Lean/Winnow/Wallet/ImportBundle.lean`). The
+[suite map](test-suite-map.md) has the rest, including the suites with no
+Lean counterpart. No physical Ledger run of the Lean client is recorded here.
+
+The Lean app has surfaces this matrix has no row or clause for. They are
+checked as follows ([the testing guide](../testing.md) says what CI runs):
+
+- **SegWit v0 multisig accounts**, `wsh(sortedmulti(k, …))`, signed with ECDSA
+  (#115 in this repository): `Lean/Winnow/Wallet/SegwitMultisigAccount.lean`
+  and `SegwitSpendReview.lean`. `segwit-test`; `segwit-regtest` against a
+  regtest Bitcoin Core; the SegWit v0 section of `multisig-app-test`;
+  `backend-test`; the `fuzz` targets `segwit-descriptor`, `segwit-spend`,
+  `ecdsa-der`, `ecdsa-verify` and `ecdsa-sign`.
+- **A card for one person** (#94 in this repository):
+  `Lean/Winnow/Keys/SilentPaymentPairing.lean`. `card-keys-test` against
+  `Lean/Vectors/card-keys-vectors.json`, which `scripts/card-keys-vectors`
+  writes; `card-regtest` with Bitcoin Core as the payer; the card section of
+  `multisig-test`; `records-test`; `backend-test`; the journey
+  `cardForOnePerson`.
+- **The curve.** One secp256k1, `Lean/SecpCt`, proved against the
+  specification in `Lean/Secp`. The gates `Lean/SecpCt/Gate.lean` and
+  `Lean/Secp/Proofs/Gate.lean` fail the build on a `sorry` or on an axiom
+  beyond Lean's standard three. The compiled code is held by `secpct-test` to
+  `Lean/Vectors/secp-known-answers.json` (`scripts/secp-vectors --check`), and
+  CI runs `scripts/gen-scalar-mul-proofs --check`.
+  [SECURITY.md](../../SECURITY.md) says what is and is not claimed about timing.
+- **The core library**, `Lean/WinnowCore.lean`: `scripts/check-core` holds its
+  import closure to an allowed list, and CI runs it.
+- **Automatic iCloud backup and the Ledger over Bluetooth**: see the
+  2026-11-17 note in the [audit manifest](audit-manifest.md). `cloud-backup-test`
+  and `ledger-transport-test` run them against stand-ins for iCloud and for the
+  peripheral.
+
+S1 and IR-023 in the Lean app: the wallet's Keychain item is
+`WhenUnlockedThisDeviceOnly` and carries no access-control flag, and the app
+asks for device authentication before each read instead
+(`LeanApp/WinnowApp/Real/Shell.lean`). The S1 row's sentences about a
+`.userPresence` access control and its in-place upgrade describe the Swift app
+from 2026-09-15. Here no key store of the app overrides
+`KeyStore.upgradeProtection`, whose default changes nothing
+(`Lean/Winnow/Keys/KeyStore.lean`). `KeychainAttributeTests` has no Lean
+counterpart. This is open as `SEC-060` in the
+[findings register](findings.md).
 
 | ID | Invariant | Recorded deterministic evidence | Recorded negative/manual evidence and gaps | Historical status |
 |---|---|---|---|---|

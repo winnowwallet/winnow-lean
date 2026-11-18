@@ -17,7 +17,7 @@ import TestKit.Fixtures
   recovery path), a co-signer's spend signed on two phones with BIP326 sequences, the recovery path's age
   check, through `Backend.realWithMultisig` (`Real/Multisig.lean`) on wallets opened from
   disk with no network;
-* Settings → Signers as a person uses it: a signer saved from pasted keys, opened, renamed and removed (one an
+* Settings → Security → Hardware wallets and keys as a person uses it: a signer saved from pasted keys, opened, renamed and removed (one an
   account still uses among them), through the app's own `perform` on that backend;
 * an account's own screens the same way: removal refused until every spend is in a block, joining from a pasted
   descriptor, a new address, the collection page and Discard, and removing members and keys in the builder.
@@ -1806,7 +1806,7 @@ def testAnswersFinishAcrossTheBackground : IO Unit := do
   let (other, _) := onHost (.multisigCreated g "id1" "tr(…)" none) { other with multisigBuild := building.multisigBuild }
   check "another network's wallet drops it" other.multisigBuild.created.isNone
 
-/-! ## Settings → Signers, as a person uses it (#46)
+/-! ## Settings → Security → Hardware wallets and keys, as a person uses it (#46)
 
 The Model gets what a tap sends (`step`), the commands run through the app's own `perform` against a phone's
 real backend, and every answer comes back through `onHost` (the signer answers through `onSignerHost`); the

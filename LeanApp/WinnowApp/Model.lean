@@ -74,9 +74,9 @@ inductive Route where
   build, an account, its PSBT screen. -/
   | multisigAdd
   | multisigBuild
-  /-- LedgerPairView (Settings → Signers → "Pair a Ledger"). -/
+  /-- LedgerPairView (Settings → Security → Hardware wallets and keys → "Pair a Ledger"). -/
   | ledgerPair
-  /-- SignersView, SignerDetailView, SignerKeysAddView (Settings → Signers). -/
+  /-- SignersView, SignerDetailView, SignerKeysAddView (Settings → Security → Hardware wallets and keys). -/
   | signers
   | signer (id : String)
   | signerKeysAdd

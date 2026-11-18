@@ -1,7 +1,7 @@
 # Bug and security reports
 
 Report bugs, including security vulnerabilities, in a
-[public GitHub issue](https://github.com/winnowwallet/winnow/issues/new).
+[public GitHub issue](https://github.com/winnowwallet/winnow-lean/issues/new).
 Include the affected version, steps to reproduce, expected and actual behavior,
 and relevant logs or a minimal example.
 
@@ -9,8 +9,10 @@ Do not include recovery words, private keys, credentials, or personal wallet dat
 
 Reports and fixes are tracked publicly. The
 [findings register](docs/security/findings.md) records security findings and
-their disposition. What the wallet claims, and what it does not, is in
-[docs/security](docs/security/README.md).
+their disposition; its entries from SEC-039 on are the Lean app's. The other
+files in [docs/security](docs/security/README.md) are dated records of the Swift
+app's audits. What the Lean app is checked by is in
+[docs/testing.md](docs/testing.md) and [PORT.md](PORT.md).
 
 ## Timing side channels
 
