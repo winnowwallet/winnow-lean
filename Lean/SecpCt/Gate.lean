@@ -34,12 +34,12 @@ axiom. No proof here uses `bv_decide` or `native_decide`, which would each add a
 #assert_axioms SecpCt.Sc.mul_spec
 #assert_axioms SecpCt.Sc.inv_spec
 #assert_axioms SecpCt.Sc.isHigh_spec
--- keys and BIP 340: the public key and the signature are the reference's
+-- keys and BIP 340: the public key is the specification's, the signature the reference's (`Secp.Bip340.signWith`)
 #assert_axioms SecpCt.publicKey_spec
 #assert_axioms SecpCt.addRaw_spec
 #assert_axioms SecpCt.signRaw_eq
 #assert_axioms SecpCt.sign_eq
--- ECDSA: the signature is the reference's (`Secp.Ecdsa.signRaw`)
+-- ECDSA: the signature is the reference's (`Secp.Ecdsa.signWith`)
 #assert_axioms SecpCt.Ecdsa.signRaw_eq
 #assert_axioms SecpCt.Ecdsa.sign_eq
 -- the curve: multiplying any point of it, doubling, and reading a result off, are the specification's

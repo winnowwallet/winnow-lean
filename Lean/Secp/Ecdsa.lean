@@ -38,22 +38,6 @@ open Secp.Spec (N)
 
 /-! ## Signing -/
 
-/-- What one bit of an exponent does to a running power modulo `m`: square, and multiply if the bit is set. -/
-def powerStep (a m : Nat) (acc : Nat) (bit : Bool) : Nat :=
-  if bit then acc * acc % m * a % m else acc * acc % m
-
-/-- `k` to the power N − 2, modulo N, by squaring: `1/k` modulo N. -/
-def inverse (k : Nat) : Nat :=
-  ((List.range 256).reverse.map (fun i => (N - 2).testBit i)).foldl (powerStep k N) 1
-
-/-- The secret number a signature of `digest` under `d` is made with, given 32 bytes `aux` of randomness. -/
-def nonce (d : Nat) (digest aux : ByteArray) : Nat :=
-  Secp.hashMod (Sha256.tagged "winnow/ecdsa/nonce"
-    (Secp.xorBytes (toBE32 d) (Sha256.tagged "winnow/ecdsa/aux" aux) ++ digest))
-
-/-- `s`, or `N − s` if `s` is in the upper half. -/
-def lowS (s : Nat) : Nat := if s > N / 2 then N - s else s
-
 /-- The ECDSA signature of a 32-byte `digest` under the key `d`, before the final self-check: `r` and `s`. -/
 def signRaw (digest : ByteArray) (d : Nat) (aux : ByteArray) : Secp.R (Nat × Nat) :=
   if d = 0 ∨ d ≥ N then .error .invalidPrivateKey else
@@ -69,9 +53,6 @@ def signRaw (digest : ByteArray) (d : Nat) (aux : ByteArray) : Secp.R (Nat × Na
     let s := inverse k * ((fromBE digest % N + r * d % N) % N) % N
     if s = 0 then .error .signingFailed else
     .ok (r, lowS s)
-
-/-- A signature as 64 bytes: `r` then `s`. -/
-def encode (signature : Nat × Nat) : ByteArray := toBE32 signature.1 ++ toBE32 signature.2
 
 /-! ## Checking -/
 

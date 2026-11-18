@@ -1,6 +1,7 @@
 import Secp.Curve.Jacobian
 import Secp.Sha256
 import Secp.Fast
+import Secp.Signing
 
 /-! # Keys, tweaks and BIP340, as NativeSecp256k1 exposes them
 
@@ -76,8 +77,6 @@ def scalar? (b : ByteArray) : Option Nat :=
 def tweak (b : ByteArray) : R Nat :=
   match scalar? b with | some t => pure t | none => throw .invalidTweak
 
-def negN (d : Nat) : Nat := (N - d) % N
-
 def pubOf (d : Nat) : R (Fq × Fq) := do
   match ← mulG d with
   | .pt x y => pure (x, y)
@@ -147,13 +146,6 @@ def xonlyAdd (x y : Fq) (tb : ByteArray) : R (Fq × Fq) := do
   match ← mulGAdd t (.pt x even) with
   | .pt x' y' => pure (x', y')
   | .inf => throw .invalidResult
-
-def xorBytes (a b : ByteArray) : ByteArray :=
-  ⟨(a.toList.zip b.toList).toArray.map fun (u, v) => u ^^^ v⟩
-
-def hashMod (b : ByteArray) : Nat := fromBE b % N
-
-def challenge (rx px m : ByteArray) : Nat := hashMod (Sha256.tagged "BIP0340/challenge" (rx ++ px ++ m))
 
 def negPt : APoint → APoint
   | .inf => .inf

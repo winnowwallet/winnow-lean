@@ -4,6 +4,7 @@ import SecpCt.Keys
 import Secp.Ecdsa
 import TestKit.Check
 import TestKit.SecpAnswers
+import TestKit.CurveOracle
 import Winnow.Keys.Secp256k1
 
 /-! # The constant-time signing code against the reference
@@ -226,13 +227,16 @@ def main (args : List String) : IO UInt32 := TestKit.runMain "secpct-test" do
     if d == 0 || d ≥ Secp.Spec.N then
       check s!"not a key {round}" ((sign secret message aux).isNone && (publicKey secret).isNone)
     else
-      match Secp.pubOf d, publicKey secret with
-      | .ok (px, py), some (x, odd) =>
-        check s!"public key {round}" (x == Secp.toBE32 px.toNat && (odd == 1) == py.isOdd)
+      match TestKit.CurveOracle.mulG d, publicKey secret with
+      | some (px, py), some (x, odd) =>
+        check s!"public key {round}" (x == Secp.toBE32 px && (odd == 1) == (py % 2 == 1))
       | _, _ => check s!"public key {round} could not be computed" false
-      match Secp.sign message d aux, sign secret message aux with
-      | .ok reference, some signature =>
+      match Secp.Bip340.signWith TestKit.CurveOracle.mulG message d aux, sign secret message aux with
+      | some (reference, key), some signature =>
         check s!"signature {round} for key {hex secret}" (signature == reference)
+        check s!"signature {round} verifies under the reference's key" (verify signature message key)
+        check s!"signature {round} is what is returned once it has been checked"
+          (signVerified secret message aux == some signature)
       | _, _ => check s!"signature {round} could not be made" false
   check "zero is not a key" ((sign (toBytes32 0) (toBytes32 5) (toBytes32 6)).isNone)
   check "N is not a key" ((sign (toBytes32 Secp.Spec.N) (toBytes32 5) (toBytes32 6)).isNone)
@@ -240,8 +244,9 @@ def main (args : List String) : IO UInt32 := TestKit.runMain "secpct-test" do
   check "a key is 32 bytes" ((sign (ByteArray.mk #[1]) (toBytes32 5) (toBytes32 6)).isNone)
   -- A message of another length, which BIP 340 allows.
   let long := ByteArray.mk (Array.replicate 100 0x5a)
-  match Secp.sign long 7 (toBytes32 9), sign (toBytes32 7) long (toBytes32 9) with
-  | .ok reference, some signature => check "a message of 100 bytes" (signature == reference)
+  match Secp.Bip340.signWith TestKit.CurveOracle.mulG long 7 (toBytes32 9), sign (toBytes32 7) long (toBytes32 9) with
+  | some (reference, key), some signature =>
+    check "a message of 100 bytes" (signature == reference && verify signature long key)
   | _, _ => check "a message of 100 bytes could not be signed" false
   -- ECDSA: the scalars it adds, then signatures against the reference and through the verifier.
   let n := Secp.Spec.N
@@ -267,20 +272,21 @@ def main (args : List String) : IO UInt32 := TestKit.runMain "secpct-test" do
     if d == 0 || d ≥ n then
       check s!"ECDSA: not a key {round}" (Ecdsa.sign secret digest aux).isNone
     else
-      match (Secp.Ecdsa.signRaw digest d aux).map Secp.Ecdsa.encode, Ecdsa.sign secret digest aux, compressedOf secret with
-      | .ok reference, some signature, some key =>
+      match (Secp.Ecdsa.signWith TestKit.CurveOracle.mulG digest d aux).map Secp.Ecdsa.encode,
+          Ecdsa.sign secret digest aux, compressedOf secret with
+      | some reference, some signature, some key =>
         check s!"ECDSA signature {round} for key {hex secret}" (signature == reference)
-        check s!"ECDSA signature {round} verifies" (accepts (Secp.Ecdsa.verify signature digest key))
-        check s!"ECDSA signature {round} is what the reference returns once it has checked it"
-          ((Secp.Ecdsa.sign digest d aux).toOption == some signature)
+        check s!"ECDSA signature {round} verifies" (Ecdsa.verify signature digest key)
+        check s!"ECDSA signature {round} is what is returned once it has been checked"
+          (Ecdsa.signVerified secret digest aux == some signature)
         check s!"ECDSA signature {round} reads back from DER"
           (Secp.Ecdsa.parseDer (Secp.Ecdsa.der signature) == some signature)
         check s!"ECDSA signature {round} has s in the lower half" (fromBytes (signature.extract 32 64) ≤ n / 2)
         let other := digest.set! 31 (digest[31]! ^^^ 1)
-        check s!"ECDSA signature {round} is of that digest only" (rejects (Secp.Ecdsa.verify signature other key))
+        check s!"ECDSA signature {round} is of that digest only" (!Ecdsa.verify signature other key)
         let flipped := toBytes32 (n - fromBytes (signature.extract 32 64))
         check s!"ECDSA signature {round} with s in the upper half is refused"
-          (rejects (Secp.Ecdsa.verify (signature.extract 0 32 ++ flipped) digest key))
+          (!Ecdsa.verify (signature.extract 0 32 ++ flipped) digest key)
       | _, _, _ => check s!"ECDSA signature {round} could not be made" false
   check "ECDSA: zero is not a key" ((Ecdsa.sign (toBytes32 0) (toBytes32 5) (toBytes32 6)).isNone)
   check "ECDSA: N is not a key" ((Ecdsa.sign (toBytes32 n) (toBytes32 5) (toBytes32 6)).isNone)
@@ -291,9 +297,9 @@ def main (args : List String) : IO UInt32 := TestKit.runMain "secpct-test" do
   let theirDigest := unhex "a9b39aa2f942395c700296208d1e67041e6f4bba05a43573d96440f319839f23"
   let theirs := unhex "3caf7674ca36b3c124c490b5e066d5e186ce1a7444ea5916af3dfe4df0c2a81c2810eaf82d3fc578719cc13a678afa152b85d1daa3d8f875a4789a4ee2e43786"
   let theirDer := unhex "304402203caf7674ca36b3c124c490b5e066d5e186ce1a7444ea5916af3dfe4df0c2a81c02202810eaf82d3fc578719cc13a678afa152b85d1daa3d8f875a4789a4ee2e43786"
-  check "OpenSSL's signature verifies" (accepts (Secp.Ecdsa.verify theirs theirDigest theirKey))
-  check "and not under another key" (rejects (Secp.Ecdsa.verify theirs theirDigest (theirKey.set! 0 2)))
-  check "and not with r changed" (rejects (Secp.Ecdsa.verify (theirs.set! 5 0) theirDigest theirKey))
+  check "OpenSSL's signature verifies" (Ecdsa.verify theirs theirDigest theirKey)
+  check "and not under another key" (!Ecdsa.verify theirs theirDigest (theirKey.set! 0 2))
+  check "and not with r changed" (!Ecdsa.verify (theirs.set! 5 0) theirDigest theirKey)
   check "DER as OpenSSL writes it" (Secp.Ecdsa.der theirs == theirDer)
   check "DER as OpenSSL writes it reads back" (Secp.Ecdsa.parseDer theirDer == some theirs)
   check "DER: a byte after the end is refused" ((Secp.Ecdsa.parseDer (theirDer.push 0)).isNone)

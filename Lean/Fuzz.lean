@@ -2,6 +2,7 @@ import Winnow
 import SecpCt.Schnorr
 import SecpCt.Ecdsa
 import TestKit.Fuzz
+import TestKit.CurveOracle
 open Winnow Winnow.Net Winnow.IO Lean
 open TestKit.Fuzz
 
@@ -577,10 +578,11 @@ private def ecdsaVerify : Target := {
       require (Secp.Ecdsa.verify upper digest key matches .ok false) "accepted with s in the upper half"
       return true }
 
-/-- A point on the proved curve code as the constant-time code returns a public key: x, and whether y is odd. -/
+/-- `d·G` on plain numbers (`TestKit/CurveOracle.lean`) as the constant-time code returns a public key: x,
+and whether y is odd. -/
 private def publicKeysAgree (secret : ByteArray) : Bool :=
-  match Secp.pubOf (beNat secret), SecpCt.publicKey secret with
-  | .ok (x, y), some (bytes, odd) => bytes == Secp.toBE32 x.toNat && (odd == 1) == y.isOdd
+  match TestKit.CurveOracle.mulG (beNat secret), SecpCt.publicKey secret with
+  | some (x, y), some (bytes, odd) => bytes == Secp.toBE32 x && (odd == 1) == (y % 2 == 1)
   | _, _ => false
 
 private def edgeKeys : Array ByteArray :=
@@ -594,28 +596,28 @@ private def ecdsaSign : Target := {
   check := fun rng data => do
     let (secret, digest, aux) := (field32 data 0, field32 data 1, field32 data 2)
     let d := beNat secret
-    let reference := (Secp.Ecdsa.signRaw digest d aux).map Secp.Ecdsa.encode
+    let reference := (Secp.Ecdsa.signWith TestKit.CurveOracle.mulG digest d aux).map Secp.Ecdsa.encode
     match SecpCt.Ecdsa.sign secret digest aux, reference with
-    | none, .error _ =>
+    | none, none =>
       require (d == 0 || d ≥ Secp.Spec.N) "neither signer signs for a valid key"
       return false
-    | some signature, .ok expected =>
+    | some signature, some expected =>
       require (signature == expected) "the constant-time ECDSA signature is not the reference's"
       require (publicKeysAgree secret) "the constant-time public key is not the reference's"
       let some (x, odd) := SecpCt.publicKey secret | throw (IO.userError "no public key for a key that signs")
       let key := ByteArray.mk #[if odd == 1 then 3 else 2] ++ x
-      require (Secp.Ecdsa.verify signature digest key matches .ok true) "a signature made here does not verify"
-      require (Secp.Ecdsa.sign digest d aux matches .ok _) "the reference's own check refuses its signature"
+      require (SecpCt.Ecdsa.verify signature digest key) "a signature made here does not verify"
+      require (SecpCt.Ecdsa.signVerified secret digest aux == some signature) "the checked signature is another"
       require (beNat (signature.extract 32 64) ≤ Secp.Spec.N / 2) "a signature with s in the upper half"
       -- one bit of the signature or the digest changed: no longer a signature of it
       let bit ← index rng (96 * 8)
       let flip (b : ByteArray) (i : Nat) := b.set! (i / 8) (b[i / 8]! ^^^ (1 <<< (i % 8)).toUInt8)
-      let changed := if bit < 64 * 8 then Secp.Ecdsa.verify (flip signature bit) digest key
-        else Secp.Ecdsa.verify signature (flip digest (bit - 64 * 8)) key
-      require (changed matches .ok false) "a signature with one bit changed still verifies"
+      let changed := if bit < 64 * 8 then SecpCt.Ecdsa.verify (flip signature bit) digest key
+        else SecpCt.Ecdsa.verify signature (flip digest (bit - 64 * 8)) key
+      require (!changed) "a signature with one bit changed still verifies"
       return true
-    | some _, .error _ => throw (IO.userError "the constant-time code signs where the reference refuses")
-    | none, .ok _ => throw (IO.userError "the reference signs where the constant-time code refuses") }
+    | some _, none => throw (IO.userError "the constant-time code signs where the reference refuses")
+    | none, some _ => throw (IO.userError "the reference signs where the constant-time code refuses") }
 
 private def schnorrSign : Target := {
   name := "schnorr-sign"
@@ -624,21 +626,22 @@ private def schnorrSign : Target := {
     let (secret, message, aux) := (field32 data 0, field32 data 1, field32 data 2)
     let d := beNat secret
     -- The reference takes its key as a number and signs for any but a multiple of N, reading a larger one
-    -- modulo N (its callers hand it a key already checked, `Keys.secretOf`). The constant-time code takes
-    -- bytes and refuses any that are not a key as they stand. So they are compared where the bytes are a key.
-    match SecpCt.sign secret message aux, Secp.sign message d aux with
+    -- modulo N. The constant-time code takes bytes and refuses any that are not a key as they stand. So they
+    -- are compared where the bytes are a key.
+    match SecpCt.sign secret message aux, Secp.Bip340.signWith TestKit.CurveOracle.mulG message d aux with
     | none, reference =>
       require (d == 0 || d ≥ Secp.Spec.N) "the constant-time code refuses a valid key"
-      require (d != 0 || !reference.isOk) "the reference signs with the key zero"
+      require (d != 0 || reference.isNone) "the reference signs with the key zero"
       return false
-    | some signature, .ok expected =>
+    | some signature, some (expected, key) =>
       require (0 < d && d < Secp.Spec.N) "the constant-time code signs with bytes that are not a key"
       require (signature == expected) "the constant-time BIP340 signature is not the reference's"
       require (publicKeysAgree secret) "the constant-time public key is not the reference's"
-      let xOnly := ((SecpCt.publicKey secret).map (·.1)).getD .empty
-      require (Secp.verify signature message xOnly matches .ok true) "a BIP340 signature made here does not verify"
+      require (((SecpCt.publicKey secret).map (·.1)) == some key) "the reference signs under another key"
+      require (SecpCt.verify signature message key) "a BIP340 signature made here does not verify"
+      require (SecpCt.signVerified secret message aux == some signature) "the checked signature is another"
       return true
-    | some _, .error _ => throw (IO.userError "the constant-time code signs where the reference refuses") }
+    | some _, none => throw (IO.userError "the constant-time code signs where the reference refuses") }
 
 private def constantTimeArithmetic : Target := {
   name := "secpct-arithmetic"

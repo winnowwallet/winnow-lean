@@ -1,13 +1,13 @@
 import SecpCt.SignProofs
 import SecpCt.Ecdsa
-import Secp.Proofs.Ecdsa
 
 /-! # ECDSA
 
-`Ecdsa.signRaw_eq` and `Ecdsa.sign_eq`: whenever the reference (`Secp.Ecdsa.signRaw`, `Secp/Ecdsa.lean`) gives
-a signature for a key, a digest and 32 bytes of randomness, the constant-time code gives the same sixty-four
-bytes. The reference is the textbook steps on plain numbers; the constant-time code is what handles the key;
-this says the two agree on every input, where a test says so for the inputs tried.
+`Ecdsa.signRaw_eq` and `Ecdsa.sign_eq`: whenever the reference (`Secp.Ecdsa.signWith`, `Secp/Signing.lean`,
+over the specification's own `k·G`) gives a signature for a key, a digest and 32 bytes of randomness, the
+constant-time code gives the same sixty-four bytes. The reference is the textbook steps on plain numbers and
+is not something that runs; the constant-time code is what handles the key; this says it comes to the same
+bytes on every input.
 
 It follows the steps in order: the key as a number, the secret number the signature is made with, its
 point's x reduced modulo N, the division, the sum, and the choice of the lower half. What is new beside the
@@ -18,9 +18,10 @@ shown to say whether a number is above N/2 (`Sc.isHigh_spec`).
 One thing is assumed, as a hypothesis and never as an axiom: that P is prime, as Fermat's little theorem for
 P (`SecpCt/CurveProofs.lean`), since the point's x is found by a division modulo P.
 
-What is not proved: that a signature the reference gives is one the verifier accepts (see
-`Secp/Proofs/Ecdsa.lean`). So that step is checked each time instead of once: whoever signs with this puts
-the signature to `Secp.Ecdsa.verify` before letting it out.
+What is not proved: that a signature the reference gives is one the verifier accepts. That needs the curve's
+group law and N to be prime, neither of which is proved. So that step is checked each time instead of once:
+`Ecdsa.signVerified` puts the signature to `Ecdsa.verify` before letting it out, and what that accepting
+means is `Ecdsa.verify_sound` (`SecpCt/KeySpecs.lean`).
 
 Nothing that runs imports this file; `SecpCt/Gate.lean` does. -/
 
@@ -136,9 +137,9 @@ theorem lower_half (s : Nat) (below : s < N) : (N - s) % N = if s = 0 then 0 els
 thirty-two bytes of secret spell, `signRaw` gives the same `r` and `s`, as bytes, and says they are a
 signature. -/
 theorem Ecdsa.signRaw_eq [Fermat] (secret digest aux : ByteArray) (size : secret.size = 32) {r s : Nat}
-    (h : Secp.Ecdsa.signRaw digest (Secp.fromBE secret) aux = .ok (r, s)) :
+    (h : Secp.Ecdsa.signWith Spec.mulG digest (Secp.fromBE secret) aux = some (r, s)) :
     SecpCt.Ecdsa.signRaw secret digest aux = (Secp.toBE32 r ++ Secp.toBE32 s, 1) := by
-  unfold Secp.Ecdsa.signRaw at h
+  unfold Secp.Ecdsa.signWith at h
   rw [← N_eq] at h
   by_cases hd : Secp.fromBE secret = 0 ∨ Secp.fromBE secret ≥ N
   · simp [hd] at h
@@ -157,15 +158,14 @@ theorem Ecdsa.signRaw_eq [Fermat] (secret digest aux : ByteArray) (size : secret
   by_cases hz : k = 0
   · simp [hz] at h
   simp only [hz, ↓reduceIte] at h
-  cases hg : mulG k with
-  | error e => rw [hg] at h; cases h
-  | ok q =>
+  cases hg : Spec.mulG k with
+  | none => rw [hg] at h; cases h
+  | some q =>
     rw [hg] at h
     cases q with
-    | inf => cases h
-    | pt rx ry =>
+    | mk rx ry =>
       simp only at h
-      generalize hr : rx.toNat % N = r0 at h
+      generalize hr : rx % N = r0 at h
       by_cases hr0 : r0 = 0
       · simp [hr0] at h
       simp only [hr0, ↓reduceIte] at h
@@ -173,7 +173,7 @@ theorem Ecdsa.signRaw_eq [Fermat] (secret digest aux : ByteArray) (size : secret
         = s0 at h
       by_cases hs00 : s0 = 0
       · simp [hs00] at h
-      simp only [hs00, ↓reduceIte, Except.ok.injEq, Prod.mk.injEq] at h
+      simp only [hs00, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
       obtain ⟨rfl, rfl⟩ := h
       simp only [SecpCt.Ecdsa.signRaw]
       -- the key's bytes are winnow's, and so the number the signature is made with
@@ -188,7 +188,7 @@ theorem Ecdsa.signRaw_eq [Fermat] (secret digest aux : ByteArray) (size : secret
       rw [hk] at nonce
       generalize Sc.ofBytes (Sha256.tagged "winnow/ecdsa/nonce" _) = ks at *
       -- its point's x, modulo N
-      obtain ⟨hrx, _⟩ := affine_of_smul ks rx ry (by rw [nonce]; exact (mulG_spec hg).symm)
+      obtain ⟨hrx, _⟩ := affine_of_smul ks rx ry (by rw [nonce]; exact hg)
       have rNumber : (Sc.reduceOnce (Point.mulGenerator ks).affine.1.a0 (Point.mulGenerator ks).affine.1.a1
           (Point.mulGenerator ks).affine.1.a2 (Point.mulGenerator ks).affine.1.a3 0).toNat = r0 := by
         rw [reduceOnce_mod]
@@ -231,17 +231,18 @@ theorem Ecdsa.signRaw_eq [Fermat] (secret digest aux : ByteArray) (size : secret
 /-- **`Ecdsa.sign` returns the reference's signature.** Whenever the reference gives an ECDSA signature for
 the number thirty-two bytes of secret spell, `Ecdsa.sign` returns it: `r` then `s`, sixty-four bytes. -/
 theorem Ecdsa.sign_eq [Fermat] (secret digest aux : ByteArray) (size : secret.size = 32) {signature : ByteArray}
-    (h : (Secp.Ecdsa.signRaw digest (Secp.fromBE secret) aux).map Secp.Ecdsa.encode = .ok signature) :
+    (h : (Secp.Ecdsa.signWith Spec.mulG digest (Secp.fromBE secret) aux).map Secp.Ecdsa.encode = some signature) :
     SecpCt.Ecdsa.sign secret digest aux = some signature := by
-    cases hr : Secp.Ecdsa.signRaw digest (Secp.fromBE secret) aux with
-  | error e => rw [hr] at h; cases h
-  | ok pair =>
+  cases hr : Secp.Ecdsa.signWith Spec.mulG digest (Secp.fromBE secret) aux with
+  | none => rw [hr] at h; cases h
+  | some pair =>
     obtain ⟨r, s⟩ := pair
     rw [hr] at h
-    cases h
+    simp only [Option.map_some, Option.some.injEq] at h
+    subst h
     have raw := Ecdsa.signRaw_eq secret digest aux size hr
     have sizes : aux.size = 32 ∧ digest.size = 32 := by
-      unfold Secp.Ecdsa.signRaw at hr
+      unfold Secp.Ecdsa.signWith at hr
       by_cases hd : Secp.fromBE secret = 0 ∨ Secp.fromBE secret ≥ Spec.N
       · simp [hd] at hr
       by_cases hs : aux.size ≠ 32 ∨ digest.size ≠ 32
