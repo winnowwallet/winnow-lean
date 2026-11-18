@@ -85,6 +85,8 @@ structure OverviewKey where
   signerNotice : Option String
   key : Option String
   tip : UInt32
+  arriving : Array ArrivingAccount := #[]
+  elsewhere : Array UInt32 := #[]
   deriving BEq
 
 /-- The store and a cache of the overview the screens poll (each address costs a derivation). -/
@@ -100,6 +102,11 @@ structure MultisigApp where
   /-- `ledgerConnector`: opens one Ledger connection (Bluetooth through the shell, or test mode's
   simulated device); swappable, as Swift's `var ledgerConnector` is. -/
   ledger : IO.Ref (IO LedgerSession)
+  /-- Ledgers (master fingerprints) that came from another of the person's devices and have not answered on
+  this one, as the list under Settings says of them; and those that have answered since that was last filed
+  (`SyncApp` keeps both). -/
+  elsewhere : IO.Ref (Array UInt32)
+  answered : IO.Ref (Array UInt32)
 
 /-- Without a connector, every Ledger operation fails as a Ledger the phone cannot reach. -/
 def noLedger : IO LedgerSession :=
@@ -107,7 +114,8 @@ def noLedger : IO LedgerSession :=
 
 def MultisigApp.new (keys : StoreKeyVault) (ledger : IO LedgerSession := noLedger) : IO MultisigApp := do
   return { host := ← MultisigHost.new keys, signers := ← SignerHost.new keys, overviewCache := ← IO.mkRef none,
-           env := ← IO.mkRef none, draftCache := ← IO.mkRef #[], ledger := ← IO.mkRef ledger }
+           env := ← IO.mkRef none, draftCache := ← IO.mkRef #[], ledger := ← IO.mkRef ledger,
+           elsewhere := ← IO.mkRef #[], answered := ← IO.mkRef #[] }
 
 namespace MultisigApp
 
@@ -150,13 +158,73 @@ def applyMatchPaying (a : MultisigApp) (advance : String → UInt32 → IO Unit)
       env.journal "person.paid" [("personID", person), ("paymentIndex", toString index), ("confirmedAt", toString m.height)]
   return discarded
 
-def rollBack (a : MultisigApp) (fork : UInt32) : IO Unit :=
+def rollBack (a : MultisigApp) (fork : UInt32) : IO Unit := do
   a.withStore fun s => do return (← s.rollBack a.host.keys a.host.writeData fork, ())
+  -- the accounts on their way from another device hold blocks too
+  RM.toIO (a.host.modifyArriving fun all => pure (all.map (·.rollBack fork), ()))
 
 def restore (a : MultisigApp) (records : Array MultisigAccountRecord) : IO Unit :=
   a.withStore fun s => do return (← s.restore a.host.keys a.host.writeData records, ())
 
 def backup (a : MultisigApp) : IO (Array MultisigAccountRecord) := do RM.toIO (← a.host.read).backupRecords
+
+/-- One arriving account brought toward block `target`, the last one this phone's forward scan has done: the
+blocks after the one the account is current to are scanned for its scripts and applied to it; a pass that
+moved its frontier is followed by another from where the first began; and once a pass ends at `target` having
+found no new address, the account joins the kept ones. A run that stops early (its minute, its bytes, a peer)
+leaves the account current to where it got. -/
+def catchUpOne (a : MultisigApp) (id : String) (target : UInt32) (scan : RangeScanner) : IO Unit := do
+  let caches ← IO.mkRef ({ network := (← a.host.read).network } : MultisigStore)
+  let current : IO (Option ArrivingAccount) := do return (← a.host.arrivingAccounts).find? (·.record.id == id)
+  let update (f : ArrivingAccount → RM ArrivingAccount) : IO Unit :=
+    RM.toIO (a.host.modifyArriving fun all => do
+      let some i := all.findIdx? (·.record.id == id) | return (all, ())
+      return (all.set! i (← f all[i]!), ()))
+  for _ in [0:8] do
+    let some entry ← current | return
+    -- this phone's own scan has not reached the block the account is current to
+    if entry.scannedThrough > target then return
+    if entry.scannedThrough == target then
+      let watch := MultisigStore.watchCount entry.record
+      if watch > entry.passWatch && entry.passFrom ≤ target then
+        update fun e => pure { e with scannedThrough := e.passFrom - 1, passWatch := watch }
+        continue
+      -- (one already among the kept accounts only leaves the arriving ones)
+      unless (← a.host.read).records.any (·.id == id) do
+        a.withStore fun s => do return (← s.admit a.host.keys a.host.writeData entry.record, ())
+      RM.toIO (a.host.modifyArriving fun all => pure (all.filter (·.record.id != id), ()))
+      if let some env ← a.env.get then
+        env.journal "multisig.accountArrived" [("id", id), ("height", toString target)]
+      return
+    let (scripts, next) ← RM.toIO (entry.scripts (← caches.get))
+    caches.set next
+    let (through, complete) ← scan (entry.scannedThrough + 1) target scripts fun m => do
+      let (applied, next) ← RM.toIO do
+        let some e := (← a.host.arrivingAccounts).find? (·.record.id == id)
+          | throw (.multisig (.invalidState "the arriving account is gone"))
+        e.applyBlock m (← caches.get)
+      caches.set next
+      update fun _ => pure applied
+    -- only the copy this run began with is current to where the run got: one replaced meanwhile (a later copy
+    -- from the other device, a reorg) starts from its own block
+    let same ← IO.mkRef false
+    update fun e => do
+      if e.scannedThrough == entry.scannedThrough && e.passFrom == entry.passFrom then
+        same.set true
+        pure { e with scannedThrough := max e.scannedThrough (through.getD e.scannedThrough), note := none }
+      else pure e
+    unless complete && (← same.get) do return
+
+/-- The `multisigCatchUp` hook: every arriving account, one after another; one that cannot go on says why in
+its note and waits for the next pass. -/
+def catchUp (a : MultisigApp) (_network : Tx.BitcoinNetwork) (frontier : UInt32) (scan : RangeScanner) : IO Unit := do
+  if frontier == 0 then return
+  for entry in ← a.host.arrivingAccounts do
+    try a.catchUpOne entry.record.id (frontier - 1) scan
+    catch e =>
+      let note := toString e
+      discard <| (a.host.modifyArriving fun all =>
+        pure (all.map fun e => if e.record.id == entry.record.id then { e with note := some note } else e, ())).run
 
 /-- `ownedMultisigScripts`: the scripts the accounts watch, on the store's network. -/
 def ownedScripts (a : MultisigApp) : IO (Array ByteArray) := do
@@ -171,6 +239,7 @@ def hooks (a : MultisigApp) (base : Hooks) : Hooks :=
       return r
     multisigWatchScripts := a.watchScripts
     multisigApply := a.applyMatchPaying base.advancePersonIndex
+    multisigCatchUp := a.catchUp
     multisigRollBack := a.rollBack
     multisigValidate := fun rs n => RM.toIO (MultisigStore.validate rs n)
     multisigRestore := a.restore
@@ -481,6 +550,10 @@ def runOn {α} (session : LedgerSession) (p : Ledger.Program α) : IO α := do
   | .ok v => pure v
   | .error e => failText e.description
 
+/-- The Ledger with this master fingerprint answered on this device. -/
+def MultisigApp.ledgerAnswered (a : MultisigApp) (fingerprint : UInt32) : IO Unit :=
+  a.answered.modify fun seen => if seen.contains fingerprint then seen else seen.push fingerprint
+
 /-- `setLedger(id:registration:)` through the store. -/
 def setLedger (a : MultisigApp) (id : String) (registration : LedgerRegistration) : IO Unit :=
   a.withStore fun s => do return (← s.setLedger a.host.keys a.host.writeData id registration, ())
@@ -505,8 +578,9 @@ def signerFingerprint (key : String) (network : Tx.BitcoinNetwork) : String :=
 def signerKeysText (r : SignerRecord) (network : Tx.BitcoinNetwork) : String :=
   " · ".intercalate (r.keys.toList.map (signerFingerprint · network))
 
-def signerInfo (r : SignerRecord) (network : Tx.BitcoinNetwork) : SignerInfo :=
-  { id := r.id, isLedger := r.isLedger, name := r.name, keys := r.keys.toList, keysText := signerKeysText r network }
+def signerInfo (r : SignerRecord) (network : Tx.BitcoinNetwork) (elsewhere : Array UInt32 := #[]) : SignerInfo :=
+  { id := r.id, isLedger := r.isLedger, name := r.name, keys := r.keys.toList, keysText := signerKeysText r network,
+    elsewhere := r.isLedger && r.masterFingerprint.any elsewhere.contains }
 
 /-- `text.split(whereSeparator: \.isWhitespace)`: the keys of a pasted share. -/
 def splitKeys (text : String) : List String :=
@@ -523,6 +597,7 @@ def pairLedger (env : Env) (a : MultisigApp) (name : String) : IO SignerRecord :
   let (expression, fingerprint) ← a.withSession fun session => runOn session (Ledger.Multisig.signerExpression network)
   let id ← uuidString
   let addedAt ← referenceDateNow
+  a.ledgerAnswered fingerprint
   let record ← a.withSigners fun s => s.addLedger a.signers.keys a.signers.writeData name expression fingerprint id addedAt
   env.journal "signer.ledgerPaired" [("id", record.id), ("fingerprint", Wallet.hex8 fingerprint)]
   return record
@@ -609,6 +684,7 @@ def registerLedger (env : Env) (a : MultisigApp) (id : String) : IO MultisigAcco
   let registration ← a.withSession fun session => do
     let fingerprint ← runOn session Ledger.Client.masterFingerprint
     runOn session (Ledger.Multisig.register account r.name fingerprint)
+  a.ledgerAnswered registration.masterFingerprint
   setLedger a r.id registration
   env.journal "multisig.ledgerRegistered" [("id", r.id)]
   record a id
@@ -639,7 +715,9 @@ def verifyLedgerAddress (env : Env) (a : MultisigApp) (id : String) (index : Nat
   let r ← record a id
   let some registration := r.ledger | failText notPairedText
   let account ← taprootAccount (← accountOf r (← currentNetwork env)) noLedgerForAccountText
-  a.withSession fun session => runOn session (Ledger.Multisig.displayAddress account registration 0 index.toUInt32)
+  let address ← a.withSession fun session => runOn session (Ledger.Multisig.displayAddress account registration 0 index.toUInt32)
+  a.ledgerAnswered registration.masterFingerprint
+  return address
 
 def signErrorText : Ledger.SignError → String
   | .ledger e => e.description
@@ -659,6 +737,7 @@ def signMultisigSpendWithLedger (env : Env) (a : MultisigApp) (id text : String)
     match ← runOn session (Ledger.Multisig.sign psbt taproot registration) with
     | .ok (signed, _) => pure signed
     | .error e => failText (signErrorText e)
+  a.ledgerAnswered registration.masterFingerprint
   discard <| reviewSpend env r account signed
   journalPSBT env "multisig-ledger-signed" signed
   present env r signed
@@ -1059,19 +1138,29 @@ def overview (env : Env) (a : MultisigApp) : IO MultisigOverview := do
     | some w => pure (((← (ownKeyExpression w true).run).toOption))
     | none => pure none
   let ownKey := (← env.get).wallet.bind walletAccountKey? |>.map (·.publicKey)
+  let walletKey := (← env.get).wallet.bind walletAccountKey?
+  let answered ← a.answered.get
   let k : OverviewKey :=
     { records := store.records, signers := signers.records, notice := ← a.host.notice.get,
-      signerNotice := ← a.signers.notice.get, key, tip := ← chainTip env }
+      signerNotice := ← a.signers.notice.get, key, tip := ← chainTip env, arriving := ← a.host.arrivingAccounts,
+      elsewhere := (← a.elsewhere.get).filter (!answered.contains ·) }
+  -- an account none of whose keys is this wallet's: it came from another device, and is only watched here
+  let watchOnly (r : MultisigAccountRecord) : Bool :=
+    match walletKey, AnyMultisigAccount.parse r.descriptor store.network with
+    | some own, .ok account => !account.includes own
+    | _, _ => false
   if let some (k', o) ← a.overviewCache.get then
     if k' == k then return o
   let o : MultisigOverview :=
     { accounts := ← store.records.toList.mapM fun r => do
         return { info r store.network signers.records ownKey with
                  draft := (← draftDetails env a r).map (·.info),
-                 inFlight := r.inFlight.toList.map (Winnow.displayHex ·.txid) },
+                 inFlight := r.inFlight.toList.map (Winnow.displayHex ·.txid),
+                 watchOnly := watchOnly r },
       notice := k.notice, keyExpression := key,
       ownFingerprint := key.map (signerFingerprint · store.network),
-      signers := signers.records.toList.map (signerInfo · store.network), signerNotice := k.signerNotice }
+      signers := signers.records.toList.map (signerInfo · store.network k.elsewhere), signerNotice := k.signerNotice,
+      arriving := k.arriving.toList.map fun e => { id := e.record.id, name := e.record.name, note := e.note } }
   a.overviewCache.set (some (k, o))
   return o
 

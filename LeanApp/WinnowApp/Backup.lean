@@ -95,6 +95,10 @@ def cloudBackupSheet (m : Model) (inner : List H) : H :=
           , .identified Ids.cloudBackupStatus (.labeled "Status" (cloudRowStatus c)) ] ++
           (match c.lastSavedText with | some t => [.labeled "Last saved to iCloud" t] | none => []) ++
           (match c.message with | some t => [caption t] | none => []))
+     , .section "Your other devices" "Multisig accounts and paired Ledgers follow you: each device reads the others’ backups while Winnow is open and takes what it lacks. A device with a different wallet shows an account as watch-only. Keys and recovery words never travel this way."
+         (match c.devicesNote with
+          | some t => [.identified Ids.cloudDevicesNote (caption t)]
+          | none => [.identified Ids.cloudDevicesNote (caption (if c.automaticEnabled then "Not checked yet." else "Off while automatic backup is off."))])
      , .section "" ""
          [ body "Restore using the same Apple Account with iCloud and Passwords & Keychain enabled. Access to the cloud backup and its synchronized key can restore spending access."
          , body "Turning this off leaves existing copies in iCloud. Keep a backup file too." ] ] inner (largeTitle := true)

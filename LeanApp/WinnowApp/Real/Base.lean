@@ -35,6 +35,16 @@ def Network.net : WinnowApp.Network → Net.BitcoinNetwork
 
 /-! ## The seam for the records half -/
 
+/-- What an arriving account's row says while the blocks it needs are older than the headers this phone holds:
+no scan from here reaches them, and only a later copy from the other device can be caught up from. -/
+def waitingForNewerCopyText : String :=
+  "Waiting for a newer copy from your other device. Open Winnow there and let it sync."
+
+/-- One run of a bounded scan of blocks `fromHeight … toHeight` for `scripts`, each matched block handed over in
+order (`FilterSyncIO.scanRange`, which never moves the forward scan): the last block it reached, and whether
+that was the range's end. -/
+abbrev RangeScanner := (fromHeight toHeight : UInt32) → Array ByteArray → (Net.BlockMatch → IO Unit) → IO (Option UInt32 × Bool)
+
 /-- What the core needs from people and labels (the records half plugs these in). -/
 structure Hooks where
   /-- `configurePeople` (and the receive labels) for the network's directory: `some message` when a
@@ -52,6 +62,9 @@ structure Hooks where
   multisigWatchScripts : Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ => pure #[]
   /-- `multisigStore.apply(match:network:)`: the in-flight spends a conflict in the block beat. -/
   multisigApply : Net.BlockMatch → Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ _ => pure #[]
+  /-- Before a forward pass from block `frontier`: accounts that arrived from another of the person's devices
+  are brought from the block that device had scanned to this phone's own, and then join the watched ones. -/
+  multisigCatchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → IO Unit := fun _ _ _ => pure ()
   /-- `multisigStore.rollBack(to:)`. -/
   multisigRollBack : UInt32 → IO Unit := fun _ => pure ()
   /-- `MultisigStore.validate(_:network:)` of a bundle's accounts, before anything is written. -/

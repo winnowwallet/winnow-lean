@@ -472,6 +472,49 @@ def shellCloudKeys (ask : Ask) : CloudBackupKeys :=
       | .ok () => return key
       | .error e => failText (keychainError e).errorDescription }
 
+/-! ## Test mode's iCloud: a directory (`WINNOW_E2E_CLOUD`)
+
+Two launches of the app in test mode, with different storage and different seeds, are two devices; a directory
+both are given is the iCloud they share: each backup a file, and beside it the wrapping key iCloud Keychain
+would carry. Only test mode builds these (a Debug build launched for a test), and only a UI journey uses them:
+a key beside its ciphertext protects nothing. -/
+
+def directoryCloudAccount : String := "test-mode-account"
+
+def directoryCloudStore (dir : System.FilePath) : CloudBackupStore :=
+  let path (id : String) : System.FilePath := dir / s!"{id}.backup"
+  let read (file : System.FilePath) : IO (Option CloudWalletBackup) := do
+    try
+      let data ← IO.FS.readBinFile file
+      return (← (CloudWalletBackup.decode data).run).toOption
+    catch _ => return none
+  { account := pure directoryCloudAccount
+    list := fun network => do
+      let mut found : Array CloudBackupSummary := #[]
+      for entry in ← (try dir.readDir catch _ => pure #[]) do
+        unless entry.fileName.endsWith ".backup" do continue
+        let some b ← read entry.path | continue
+        if b.network == network then found := found.push { id := b.id, network, savedAt := b.savedAt }
+      return found.qsort (·.savedAt > ·.savedAt)
+    save := fun backup _ => do
+      IO.FS.createDirAll dir
+      Winnow.IO.writeAtomic (path backup.id) (← runWM backup.encoded)
+    load := fun id _ => do
+      match ← read (path id) with
+      | some b => pure b
+      | none => CloudBackupError.invalidBackup.throw }
+
+def directoryCloudKeys (dir : System.FilePath) : CloudBackupKeys :=
+  let path (id : String) : System.FilePath := dir / s!"{id}.key"
+  { load := fun id => do
+      let key ← try IO.FS.readBinFile (path id) catch _ => CloudBackupError.keyUnavailable.throw
+      if key.size == 32 then pure key else CloudBackupError.invalidBackup.throw
+    create := fun id => do
+      let key ← IO.getRandomBytes 32
+      IO.FS.createDirAll dir
+      Winnow.IO.writeAtomic (path id) key
+      return key }
+
 /-- Memory versions for tests (`MemoryCloudBackups`, `MemoryCloudKeys`). -/
 structure MemoryCloud where
   records : IO.Ref (Array CloudWalletBackup)

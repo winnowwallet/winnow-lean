@@ -56,6 +56,13 @@ root = "MultisigAppTest"
 name = "cloud-backup-test"
 root = "CloudBackupTest"
 
+# Multisig accounts and signers that follow a person between devices (Winnow/Wallet/DeviceSync.lean, the rules;
+# WinnowApp/Real/DeviceSync.lean, the app's side): the rules case by case, then two and three phones over one
+# in-memory iCloud. Run from LeanApp/.
+[[lean_exe]]
+name = "device-sync-test"
+root = "DeviceSyncTest"
+
 # The UI journeys: Journeys.lean (the six, as named steps) over Journeys/Screens.lean (what a person does on
 # each screen) and Journeys/Host.lean (the fixture's node and Core as a co-signer); run on the Mac by
 # LeanNative's ui-tests as UI_JOURNEY (scripts/journeys; CI: ios-app.yml's ui-journey) and headless by

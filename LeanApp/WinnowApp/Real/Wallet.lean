@@ -183,7 +183,7 @@ def adopt (env : Env) (w : Wallet) (startSync : Bool) : IO Unit := do
   let some dir := dir | failWith .noWallet
   env.hooks.walletChanged
   if let some s := stack then s.broadcaster.shutdown
-  for name in ["filters.json", "broadcast.json", "vaults.json", "multisig.json", "receive-labels.json", "cloud-backup.json"] do
+  for name in ["filters.json", "broadcast.json", "vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json"] do
     removeQuietly (dirFile dir name)
   if let some n := n then
     if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
@@ -374,7 +374,7 @@ def deleteWallet (env : Env) : IO Unit := do
     { (c.withWallet none) with lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                reviews := #[], bumps := #[] }
   if let some dir := c.dir then
-    for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "receive-labels.json", "cloud-backup.json"] do
+    for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json"] do
       removeQuietly (dirFile dir name)
   if let (some n, some dir) := (c.network, c.dir) then
     if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)

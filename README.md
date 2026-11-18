@@ -85,6 +85,18 @@ successful save date confirms an upload. Keep the manual file and words as
 well. The
 [backup guide](docs/import.html) explains the formats and their limits.
 
+Multisig accounts and paired Ledgers follow you between your devices through
+those backups. While Winnow is open, each device reads the encrypted backups
+your other devices keep under the same Apple Account and takes what it lacks: an
+account joined on the Mac appears on the phone, with its name, its addresses and
+a payment awaiting signatures; a Ledger paired on one is listed on the other. A
+removal travels too, except to a device that still sees coins in the account,
+which keeps it and puts it back. No key or recovery phrase travels this way: a
+device whose wallet is a different one shows the account as watch-only, and a
+device restored from the same iCloud backup signs. It needs automatic iCloud
+backup on; with it off, or iCloud away, the app works as before. See
+[how devices keep in step](CloudKit/README.md#your-other-devices).
+
 ## Layout
 
 - `Lean/`: the wallet in Lean 4 (`Winnow/`): keys, transactions, PSBTs, descriptors, k-of-n
@@ -148,7 +160,10 @@ what was on screen, and the log shows each step's time:
 - `silentPaymentSend`: pay a BIP352 code; the node's transaction pays the one output backend-test's
   receiver (written from the BIP's receiving side) finds, and the receipt shows its address;
 - `feeBumpReplaceConfirm`: send at a low rate, then bump the fee from the unconfirmed payment's screen;
-  Core checks that the replacement spends the same coins, pays more fee, and is the one that confirms.
+  Core checks that the replacement spends the same coins, pays more fee, and is the one that confirms;
+- `accountFollowsDevices`: two launches with two seeds and one directory standing in for iCloud are two
+  devices of one person; an account built and paid on the first shows on the second by itself, watch-only,
+  with the balance its own scan confirms.
 
 They run two ways, both LeanNative's runners with `scripts/ui-fixture` as their hooks. `scripts/journeys --wire`
 (LeanNative's `wire-journeys`) runs them against the app itself, headless: the journeys executable
@@ -171,7 +186,7 @@ goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, segwit-test, secpct-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, and `scripts/ci-regtest`'s four suites as four lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested) and segwit-regtest; and the six journeys headless (LeanNative's `wire-journey`) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, crypto-test, segwit-test, secpct-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, device-sync-test, and `scripts/ci-regtest`'s four suites as four lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested) and segwit-regtest; and the six journeys headless (LeanNative's `wire-journey`) |
 | `app` (two at once) | the same build and census import; Debug for the simulator, checked for Swift; the six UI journeys split across the two (`ui-journey-shards`; `scripts/ui-fixture` as the hooks) |
 | `media` | once both parts pass, the website's media from their evidence (LeanNative's `journey-media`: one video, the journeys in order) |
 | `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |
