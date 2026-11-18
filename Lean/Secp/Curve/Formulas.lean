@@ -1,4 +1,5 @@
 import Secp.Curve.Spec
+import Secp.Field.Ops
 
 /-! # The Jacobian formulas, once, over any `+ - *`
 

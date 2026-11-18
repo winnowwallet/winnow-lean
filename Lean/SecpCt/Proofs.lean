@@ -1,4 +1,3 @@
-import Secp.Field.Limbs
 import SecpCt.Word
 import SecpCt.Field
 
@@ -10,7 +9,7 @@ are meant to.
 A carry is worked out from the top bits of the operands and of the sum, and a borrow likewise. That those
 formulas give the carry and the borrow is shown from what the top bit of a word is (`carry_top`,
 `borrow_top`), with nothing left to a solver: every proof here is checked by Lean's kernel. The wide product
-is winnow's, operation for operation, and takes winnow's proof (`Secp/Field/Limbs.lean`).
+of two words is four 32-bit products put together (`mulWide_spec`).
 
 Of the field, addition, subtraction, negation, multiplication and the final reduction are proved (`add_spec`,
 `sub_spec`, `neg_spec`, `mul_spec`, `canon_spec`): each gives the right number modulo P, and a result below P.
@@ -115,13 +114,34 @@ theorem sbb_spec (a b k : UInt64) (hk : k ≤ 1) :
     (sbb a b k).1.toNat + b.toNat + k.toNat = a.toNat + (sbb a b k).2.toNat * 2 ^ 64 ∧ (sbb a b k).2.toNat ≤ 1 :=
   sbb_toNat a b k (by simpa [UInt64.le_iff_toNat_le] using hk)
 
-/-- The wide product is winnow's, operation for operation. -/
-theorem mulWide_eq (a b : UInt64) : mulWide a b = Secp.mulWide a b := rfl
+/-- Keeping the low half of a word is taking it modulo 2³². -/
+theorem toNat_and_low32 (x : UInt64) : (x &&& low32).toNat = x.toNat % 2 ^ 32 := by
+  simp [low32, UInt64.toNat_and]
+  rw [show (4294967295 : Nat) = 2 ^ 32 - 1 by rfl, Nat.and_two_pow_sub_one_eq_mod]
 
-/-- The two words of `mulWide` are the product. -/
+/-- The two words of `mulWide` are the product: the four 32-bit products, put together, lose nothing. -/
 theorem mulWide_spec (a b : UInt64) : (mulWide a b).1.toNat * 2 ^ 64 + (mulWide a b).2.toNat = a.toNat * b.toNat := by
-  rw [mulWide_eq]
-  exact Secp.mulWide_spec a b
+  simp only [mulWide, UInt64.toNat_add, UInt64.toNat_mul, UInt64.toNat_shiftRight,
+    UInt64.toNat_shiftLeft, toNat_and_low32, Nat.shiftRight_eq_div_pow, Nat.shiftLeft_eq]
+  have ha := a.toNat_lt; have hb := b.toNat_lt
+  generalize a.toNat = A at *; generalize b.toNat = B at *
+  simp only [show (32 : UInt64).toNat % 64 = 32 by rfl]
+  have hA : A = (A / 2^32) * 2^32 + A % 2^32 := by omega
+  have hB : B = (B / 2^32) * 2^32 + B % 2^32 := by omega
+  have h0 : A % 2^32 < 2^32 := Nat.mod_lt _ (by decide)
+  have h1 : A / 2^32 < 2^32 := by omega
+  have h2 : B % 2^32 < 2^32 := Nat.mod_lt _ (by decide)
+  have h3 : B / 2^32 < 2^32 := by omega
+  have m (x y : Nat) (hx : x < 2^32) (hy : y < 2^32) : x * y % 2^64 = x * y :=
+    Nat.mod_eq_of_lt (by have := Nat.mul_lt_mul'' hx hy; simpa using this)
+  have mb (x y : Nat) (hx : x < 2^32) (hy : y < 2^32) : x * y ≤ (2^32 - 1) * (2^32 - 1) :=
+    Nat.mul_le_mul (by omega) (by omega)
+  rw [m _ _ h0 h2, m _ _ h0 h3, m _ _ h1 h2, m _ _ h1 h3]
+  have := mb _ _ h0 h2; have := mb _ _ h0 h3; have := mb _ _ h1 h2; have := mb _ _ h1 h3
+  generalize A / 2^32 = a1 at *; generalize A % 2^32 = a0 at *
+  generalize B / 2^32 = b1 at *; generalize B % 2^32 = b0 at *
+  subst hA hB
+  grind
 
 /-- `a · b + c + d` is exactly the two words `mulAdd` returns: nothing is lost to a carry. This is the step
 every multi-word product and reduction in `SecpCt` is a chain of. -/

@@ -1,4 +1,5 @@
 import Secp.Field.Multi
+import Secp.Curve.Spec
 
 /-! # The field of integers modulo p
 
@@ -11,16 +12,12 @@ Inversion and square roots are not proven to succeed; they check their own answe
 
 namespace Secp
 
-def P : Nat := 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-
 /-- `2^256 - P`. -/
 def C : Nat := 0x1000003D1
 
 theorem P_add_C : P + C = 2^256 := by decide
 theorem P_lt : P < 2^256 := by decide
 theorem P_gt : 2^255 < P := by decide
-
-instance : NeZero P := ⟨by decide⟩
 
 /-- `P` as limbs. -/
 def pL : List UInt64 := [0xFFFFFFFEFFFFFC2F, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF]
