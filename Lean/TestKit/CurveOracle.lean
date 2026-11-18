@@ -48,16 +48,35 @@ private def add (p : Point) (gx gy : Nat) : Point :=
   let x' := sub (sub (r * r) (hh * h)) (2 * x * hh)
   (x', sub (r * sub (x * hh) x') (y * hh * h), z * h % P)
 
-/-- `k` times the generator, for `k` below 2²⁵⁶: its two coordinates, or nothing for the point at infinity. -/
-def mulG : Secp.MulG := fun k => Id.run do
-  let (gx, gy) := (Secp.Spec.Gx.val, Secp.Spec.Gy.val)
+private def affine (p : Point) : Option (Nat × Nat) :=
+  let (x, y, z) := p
+  if z == 0 then none else
+  let inverse := power z (P - 2)
+  some (x * inverse % P * inverse % P, y * inverse % P * inverse % P * inverse % P)
+
+/-- `k` times the point `(x, y)`, for `k` below 2²⁵⁶: its two coordinates, or nothing for the point at
+infinity. -/
+def mul (k : Nat) (point : Nat × Nat) : Option (Nat × Nat) := Id.run do
   let mut sum := infinity
   for i in [0:256] do
     sum := double sum
-    if k.testBit (255 - i) then sum := add sum gx gy
-  let (x, y, z) := sum
-  if z == 0 then return none
-  let inverse := power z (P - 2)
-  return some (x * inverse % P * inverse % P, y * inverse % P * inverse % P * inverse % P)
+    if k.testBit (255 - i) then sum := add sum point.1 point.2
+  return affine sum
+
+/-- `k` times the generator. -/
+def mulG : Secp.MulG := fun k => mul k (Secp.Spec.Gx.val, Secp.Spec.Gy.val)
+
+/-- The sum of two points, either of which may be the point at infinity. -/
+def sum (a b : Option (Nat × Nat)) : Option (Nat × Nat) :=
+  match a, b with
+  | none, other | other, none => other
+  | some (x, y), some (u, v) => affine (add (x, y, 1) u v)
+
+/-- The point with this x and a y that is odd or even as asked, if x is below P and there is one. -/
+def lift (x : Nat) (odd : Bool) : Option (Nat × Nat) :=
+  let cubic := (x * x % P * x + 7) % P
+  let y := power cubic ((P + 1) / 4)
+  if x ≥ P || y * y % P != cubic then none
+  else some (x, if (y % 2 == 1) == odd then y else (P - y) % P)
 
 end TestKit.CurveOracle

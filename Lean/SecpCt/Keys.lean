@@ -39,8 +39,9 @@ def neg (p : Affine) : Affine := ⟨p.x, Fe.neg p.y⟩
 /-- The point in the three coordinates the arithmetic uses. -/
 def point (p : Affine) : Point := Point.ofAffine p.x p.y
 
-/-- 33 bytes: 02 or 03 for an even or odd y, then x. -/
-def compressed (p : Affine) : ByteArray := ByteArray.mk #[if p.isOdd then 3 else 2] ++ p.x.bytes
+/-- 33 bytes: 02 or 03 for an even or odd y, then x. The first byte is computed, not chosen: a point may be
+one nobody else should learn (a shared secret). -/
+def compressed (p : Affine) : ByteArray := ByteArray.mk #[(2 ||| p.y.isOdd).toUInt8] ++ p.x.bytes
 
 /-- 65 bytes: 04, x, y. -/
 def uncompressed (p : Affine) : ByteArray := ByteArray.mk #[4] ++ p.x.bytes ++ p.y.bytes

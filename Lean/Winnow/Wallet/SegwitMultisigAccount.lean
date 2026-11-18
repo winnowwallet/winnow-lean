@@ -1,6 +1,6 @@
 import Winnow.Wallet.SegwitSpendReview
 import Winnow.Wallet.MultisigAccount
-import Secp.Ecdsa
+import Secp.Der
 import SecpCt.Ecdsa
 
 /-! # SegWit v0 multisig accounts: signing, counting signatures, finalizing
@@ -45,9 +45,8 @@ def signingContext (a : SegwitMultisigAccount) (tx : Transaction) (k : Nat) (coi
 Checked under the public key it will be filed under before it is returned. -/
 def partialSignature (secret publicKey digest auxiliaryRand : ByteArray) : MAM ByteArray := do
   let some signature := SecpCt.Ecdsa.sign secret digest auxiliaryRand | throw (.named "signingFailed")
-  match Secp.Ecdsa.verify signature digest publicKey with
-  | .ok true => return (Secp.Ecdsa.der signature).push SighashBIP143.hashTypeAll
-  | _ => throw (.named "signingFailed")
+  unless SecpCt.Ecdsa.verify signature digest publicKey do throw (.named "signingFailed")
+  return (Secp.Ecdsa.der signature).push SighashBIP143.hashTypeAll
 
 /-- Reviews the spend, then adds a signature to every input for each of the account's keys that `signingKey`
 holds (a master, or an account key itself); `noSignerKey` when an input has none. The PSBT is replaced only
@@ -88,7 +87,7 @@ def verifiedSignatures (psbt : PSBT) (k : Nat) (resolved : Resolved) (digest : B
   psbt.inputs[k]!.partialSignatures.filter fun (publicKey, partialSig) =>
     resolved.keys.contains publicKey &&
       match countedSignature? partialSig with
-      | some signature => (Secp.Ecdsa.verify signature digest publicKey).toOption == some true
+      | some signature => SecpCt.Ecdsa.verify signature digest publicKey
       | none => false
 
 /-- Which of the account's keys (by position in `keys`) have a verified signature on every input, judged by

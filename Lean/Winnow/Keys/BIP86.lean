@@ -23,7 +23,7 @@ def tweakedPrivateKey (secret : ByteArray) : Except P256KError ByteArray := do
   let d ← secretOf secret
   let p ← pointOfSecret d
   let t := taggedHash "TapTweak" (xonlyBytes p)
-  return Secp.toBE32 (← keypairXonlyAdd d t)
+  return (← keypairXonlyAdd d t).bytes
 
 end BIP86
 end Winnow.Keys

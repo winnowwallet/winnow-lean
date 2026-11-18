@@ -2,6 +2,7 @@ import Winnow
 import Lean.Data.Json
 import TestKit.Check
 import TestKit.Fixtures
+import Secp.Curve.Spec
 
 /-! # SegWit v0 multisig accounts: `wsh(sortedmulti(k, KEY, …))` and the ECDSA under them
 
@@ -34,8 +35,8 @@ def listOf (j : Json) (k : String) : Array Json := (j.getObjValAs? (Array Json) 
 
 def readJson (path : String) : IO Json := do IO.ofExcept (Json.parse (← IO.FS.readFile path))
 
-def accepts (r : Secp.R Bool) : Bool := match r with | .ok true => true | _ => false
-def rejects (r : Secp.R Bool) : Bool := match r with | .ok false => true | _ => false
+def accepts (verified : Bool) : Bool := verified
+def rejects (verified : Bool) : Bool := !verified
 
 /-- Whether a failure is the account's own, with `reason` somewhere in its text. -/
 def says (reason : String) : MultisigFailure → Bool
@@ -59,14 +60,14 @@ def opensslSignatures : TM Unit := do
     let lower := signature.extract 0 32 ++ Secp.toBE32 (if s > n / 2 then n - s else s)
     if s > n / 2 then
       high := high + 1
-      check s!"OpenSSL {i}: s in the upper half is refused" (rejects (Secp.Ecdsa.verify signature digest key))
-    check s!"OpenSSL {i}: verifies with s in the lower half" (accepts (Secp.Ecdsa.verify lower digest key))
+      check s!"OpenSSL {i}: s in the upper half is refused" (rejects (SecpCt.Ecdsa.verify signature digest key))
+    check s!"OpenSSL {i}: verifies with s in the lower half" (accepts (SecpCt.Ecdsa.verify lower digest key))
     check s!"OpenSSL {i}: not of another digest"
-      (rejects (Secp.Ecdsa.verify lower (digest.set! 0 (digest[0]! ^^^ 0x80)) key))
-    check s!"OpenSSL {i}: not with r changed" (rejects (Secp.Ecdsa.verify (lower.set! 31 (lower[31]! ^^^ 1)) digest key))
+      (rejects (SecpCt.Ecdsa.verify lower (digest.set! 0 (digest[0]! ^^^ 0x80)) key))
+    check s!"OpenSSL {i}: not with r changed" (rejects (SecpCt.Ecdsa.verify (lower.set! 31 (lower[31]! ^^^ 1)) digest key))
     -- The same key with the other y is another key, unless the digest is zero: ECDSA's equation then has
     -- only (r/s)·Q in it, whose x is the same for Q and for −Q. The first vector is that digest, on purpose.
-    let negated := Secp.Ecdsa.verify lower digest (key.set! 0 (key[0]! ^^^ 1))
+    let negated := SecpCt.Ecdsa.verify lower digest (key.set! 0 (key[0]! ^^^ 1))
     check s!"OpenSSL {i}: not under the key's negation, but for the zero digest"
       (if digest.toList.all (· == 0) then accepts negated else rejects negated)
     -- every proper prefix, and the whole with a byte after it, is not a signature in DER
@@ -91,14 +92,14 @@ def publishedVectors : TM Unit := do
   let theirs := SegwitMultisigAccount.countedSignature? (bytesOf b "signature")
   check "BIP143: the signature it prints is DER and SIGHASH_ALL" theirs.isSome
   check "BIP143: the signature it prints verifies under the key it names"
-    (accepts (Secp.Ecdsa.verify (theirs.getD .empty) (bytesOf b "sighashAll") (bytesOf b "publicKey")))
+    (accepts (SecpCt.Ecdsa.verify (theirs.getD .empty) (bytesOf b "sighashAll") (bytesOf b "publicKey")))
   -- the BIP's private key, signing here: the public key is the BIP's, and the signature verifies
   check "BIP143: its private key is its public key" ((publicKeyOf (bytesOf b "privateKey")).toOption == some (bytesOf b "publicKey"))
   let ours ← need "BIP143: signing with its key"
     (SegwitMultisigAccount.partialSignature (bytesOf b "privateKey") (bytesOf b "publicKey") (bytesOf b "sighashAll") aux0)
   check "BIP143: a signature made here with its key is counted and verifies"
     (match SegwitMultisigAccount.countedSignature? ours with
-      | some signature => accepts (Secp.Ecdsa.verify signature (bytesOf b "sighashAll") (bytesOf b "publicKey"))
+      | some signature => accepts (SecpCt.Ecdsa.verify signature (bytesOf b "sighashAll") (bytesOf b "publicKey"))
       | none => false)
   let vectors := listOf file "bip67"
   check "BIP67 has four vectors" (vectors.size == 4)
@@ -409,7 +410,7 @@ def signing : TM Unit := do
     let sorted := sortBytes (fun key => key) resolved.keys
     let signer (signature : ByteArray) : Option Nat :=
       (SegwitMultisigAccount.countedSignature? signature).bind fun rs =>
-        (List.range sorted.size).find? fun position => accepts (Secp.Ecdsa.verify rs digest sorted[position]!)
+        (List.range sorted.size).find? fun position => accepts (SecpCt.Ecdsa.verify rs digest sorted[position]!)
     check s!"input {k + 1}: the signatures verify, in the order of their keys in the script"
       (match signer witness[1]!, signer witness[2]! with | some first, some second => first < second | _, _ => false)
     check s!"input {k + 1}: nothing of the signing is left in the finalized PSBT"

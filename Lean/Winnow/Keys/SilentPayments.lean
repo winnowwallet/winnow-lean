@@ -164,18 +164,23 @@ def publicKeyPoint (s : ByteArray) : SP ByteArray :=
 def scalarAdd (a b : ByteArray) : SP ByteArray :=
   if a == scalarZero then pure b
   else if b == scalarZero then pure a
-  else if !isValidScalar a || !isValidScalar b then throw .invalidPrivateKey
-  else
-    let s := (Secp.fromBE a + Secp.fromBE b) % groupN
-    pure (if s == 0 then scalarZero else Secp.toBE32 s)
+  else match secretOf a, secretOf b with
+    | .ok x, .ok y => pure (match x.add y with
+      | .ok sum => sum.bytes
+      | .error _ => scalarZero)
+    | _, _ => throw .invalidPrivateKey
 
 def scalarMultiply (a b : ByteArray) : SP ByteArray :=
-  if !isValidScalar a || !isValidScalar b then throw .invalidPrivateKey
-  else pure (Secp.toBE32 ((Secp.fromBE a * Secp.fromBE b) % groupN))
+  match secretOf a, secretOf b with
+  | .ok x, .ok y => match x.multiply y with
+    | .ok product => pure product.bytes
+    | .error _ => throw .invalidPrivateKey
+  | _, _ => throw .invalidPrivateKey
 
 def negate (s : ByteArray) : SP ByteArray :=
-  if !isValidScalar s then throw .invalidPrivateKey
-  else pure (Secp.toBE32 (privateNegate (Secp.fromBE s)))
+  match secretOf s with
+  | .ok d => pure (privateNegate d).bytes
+  | .error _ => throw .invalidPrivateKey
 
 /-! ## Which inputs count -/
 
@@ -274,7 +279,7 @@ def outputScript (secret spendKey : ByteArray) (k : UInt32) : SP ByteArray := do
   let kBytes := ByteArray.mk #[(k >>> 24).toUInt8, (k >>> 16).toUInt8, (k >>> 8).toUInt8, k.toUInt8]
   let tweak := taggedHash "BIP0352/SharedSecret" (secret ++ kBytes)
   if !isValidScalar tweak then throw .invalidTweak
-  let out ← match pointOfSecret (Secp.fromBE tweak) >>= fun t => combine [spend, t] with
+  let out ← match secretOf tweak >>= pointOfSecret >>= fun t => combine [spend, t] with
     | .ok p => pure p
     | .error _ => throw .invalidRecipientKey
   return ByteArray.mk #[0x51, 0x20] ++ xonlyBytes out

@@ -1,4 +1,6 @@
 import Winnow
+import Secp.Keys
+import Secp.Ecdsa
 import SecpCt.Schnorr
 import SecpCt.Ecdsa
 import SecpCt.Keys

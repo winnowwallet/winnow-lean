@@ -95,10 +95,9 @@ def child (k : HDKey) (index : UInt32) : Except BIP32Error HDKey := do
     match k.privateKey with
     | some sk =>
       let s ← privateAdd (← secretOf sk) tw
-      let childSecret := toBE32' s
       return { depth := k.depth + 1, parentFingerprint := k.fingerprint, childIndex := index,
-               chainCode := childChain, privateKey := some childSecret,
-               publicKey := ← publicKeyOf childSecret }
+               chainCode := childChain, privateKey := some s.bytes,
+               publicKey := serializeCompressed (← pointOfSecret s) }
     | none =>
       let p ← publicAdd (← parsePublicKey k.publicKey) tw
       return { depth := k.depth + 1, parentFingerprint := k.fingerprint, childIndex := index,
@@ -106,7 +105,6 @@ def child (k : HDKey) (index : UInt32) : Except BIP32Error HDKey := do
   match derived with
   | .ok c => pure c
   | .error _ => throw .derivationFailed
-where toBE32' (s : Nat) : ByteArray := Secp.toBE32 s
 
 /-- Swift's `UInt32(String)`: an optional `+` or `-` sign and ASCII digits; `-` only for zero. -/
 def parseUInt32 (s : String) : Option UInt32 :=

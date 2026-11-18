@@ -353,11 +353,11 @@ def receiverScript (n : Node) (tx : Json) (scanSecret spendKey : ByteArray) : IO
   let sumA ← IO.ofExcept ((Keys.combine keys.toList).mapError (·.name))
   let smallest := outpoints.foldl (fun m o => if Keys.SilentPaymentSending.bytesLess o m then o else m) outpoints[0]!
   let inputHash := taggedHash "BIP0352/Inputs" (smallest ++ Keys.serializeCompressed sumA)
-  let scalar := (Secp.fromBE inputHash * Secp.fromBE scanSecret) % Keys.groupN
-  let shared ← IO.ofExcept ((Keys.publicMultiply sumA (Secp.toBE32 scalar)).mapError (·.name))
+  let scalar ← IO.ofExcept ((do return (← (← Keys.secretOf inputHash).multiply (← Keys.secretOf scanSecret)).bytes : Keys.PK ByteArray).mapError (·.name))
+  let shared ← IO.ofExcept ((Keys.publicMultiply sumA scalar).mapError (·.name))
   let t0 := taggedHash "BIP0352/SharedSecret" (Keys.serializeCompressed shared ++ ByteArray.mk #[0, 0, 0, 0])
   let spend ← IO.ofExcept ((Keys.parsePublicKey spendKey).mapError (·.name))
-  let p ← IO.ofExcept (((do Keys.combine [spend, ← Keys.pointOfSecret (Secp.fromBE t0)] : Keys.PK Keys.Point)).mapError (·.name))
+  let p ← IO.ofExcept (((do Keys.combine [spend, ← Keys.pointOfSecret (← Keys.secretOf t0)] : Keys.PK Keys.Point)).mapError (·.name))
   return ByteArray.mk #[0x51, 0x20] ++ Keys.xonlyBytes p
 
 /-- The test receiver's keys: fixed, so the UI journey can ask for its code and its expected output. -/

@@ -79,7 +79,7 @@ def requireKey (key : Descriptor.SingleKey) (network : BitcoinNetwork) : MAM Uni
   | .publicKey data => do
     unless data.size == 33 do invalid "a key given by itself must be a compressed public key of 33 bytes"
     unless key.derivation.elements.isEmpty do invalid "a key given by itself derives nothing"
-    match Secp.parseCompressed data with
+    match Keys.parsePublicKey data with
     | .ok _ => pure ()
     | .error _ => invalid "a key given by itself is not a point of the curve"
   | .extended extended _ => do

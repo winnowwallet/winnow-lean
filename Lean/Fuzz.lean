@@ -3,6 +3,7 @@ import SecpCt.Schnorr
 import SecpCt.Ecdsa
 import TestKit.Fuzz
 import TestKit.CurveOracle
+import Secp.Der
 open Winnow Winnow.Net Winnow.IO Lean
 open TestKit.Fuzz
 
@@ -541,17 +542,22 @@ private def ecdsaDer : Target := {
     require (Secp.Ecdsa.der signature == data) "DER that reads but is not written back the same"
     return true }
 
-/-- The verifier's equation again on the proved curve code, which compiled code otherwise replaces with
-`Secp.Fast`: `(z/s)·G + (r/s)·Q` has x = r modulo N. -/
-private def provedEquation (signature digest key : ByteArray) : Bool := Id.run do
+/-- A compressed public key on plain numbers (`TestKit/CurveOracle.lean`). -/
+private def plainKey (key : ByteArray) : Option (Nat × Nat) :=
+  if key.size == 33 && (key[0]! == 2 || key[0]! == 3) then TestKit.CurveOracle.lift (beNat (key.extract 1 33)) (key[0]! == 3)
+  else none
+
+/-- The verifier's equation again on plain numbers, with none of the code under test: `(z/s)·G + (r/s)·Q`
+has x = r modulo N. -/
+private def plainEquation (signature digest key : ByteArray) : Bool := Id.run do
   let n := Secp.Spec.N
-  let .ok (qx, qy) := Secp.parseCompressed key | return false
+  let some q := plainKey key | return false
   let (r, s) := (beNat (signature.extract 0 32), beNat (signature.extract 32 64))
-  let some w := Secp.Ecdsa.inverse? s | return false
-  let some rQ := Secp.smul? (r * w % n) (.pt qx qy) | return false
-  match ((Secp.smulJ (beNat digest % n * w % n) Secp.Gpt).add rQ).toAffine? with
-  | some (.pt x _) => return x.toNat % n == r
-  | _ => return false
+  let w := Secp.Ecdsa.inverse s
+  if s * w % n != 1 then return false
+  match TestKit.CurveOracle.sum (TestKit.CurveOracle.mulG (beNat digest % n * w % n)) (TestKit.CurveOracle.mul (r * w % n) q) with
+  | some (x, _) => return x % n == r
+  | none => return false
 
 private def ecdsaVerify : Target := {
   name := "ecdsa-verify"
@@ -561,22 +567,21 @@ private def ecdsaVerify : Target := {
     let n := Secp.Spec.N
     let (r, s) := (beNat (signature.extract 0 32), beNat (signature.extract 32 64))
     -- whether the verifier has an equation to evaluate: sizes, a key that is a point, r and s in range
-    let evaluated := signature.size == 64 && digest.size == 32 && (Secp.parseCompressed key).isOk &&
+    require ((plainKey key).isSome == (Keys.parsePublicKey key).isOk) "a key read here and not on plain numbers, or the reverse"
+    let evaluated := signature.size == 64 && digest.size == 32 && (plainKey key).isSome &&
       0 < r && r < n && 0 < s && s ≤ n / 2
-    match Secp.Ecdsa.verify signature digest key with
-    | .error _ => throw (IO.userError "the verifier failed inside: a division or a point that did not check")
-    | .ok false =>
-      -- one refusal in eight is put to the proved curve code too (it is slow, which is why not every one)
-      if evaluated && (← index rng 8) == 0 then
-        require (!provedEquation signature digest key) "the verifier refused a signature the proved code accepts"
-      return evaluated
-    | .ok true =>
+    if SecpCt.Ecdsa.verify signature digest key then
       require evaluated "an accepted signature out of range, or under a key that is not a point"
-      require (provedEquation signature digest key) "an accepted signature the proved code refuses"
+      require (plainEquation signature digest key) "an accepted signature the equation on plain numbers refuses"
       require (Secp.Ecdsa.parseDer (Secp.Ecdsa.der signature) == some signature) "an accepted signature DER changes"
       let upper := signature.extract 0 32 ++ Secp.toBE32 (n - s)
-      require (Secp.Ecdsa.verify upper digest key matches .ok false) "accepted with s in the upper half"
-      return true }
+      require (!SecpCt.Ecdsa.verify upper digest key) "accepted with s in the upper half"
+      return true
+    else
+      -- one refusal in eight is put to the equation on plain numbers too (it is slow, which is why not every one)
+      if evaluated && (← index rng 8) == 0 then
+        require (!plainEquation signature digest key) "the verifier refused a signature the equation on plain numbers accepts"
+      return evaluated }
 
 /-- `d·G` on plain numbers (`TestKit/CurveOracle.lean`) as the constant-time code returns a public key: x,
 and whether y is odd. -/
@@ -768,7 +773,7 @@ private def segwitSpend : Target := {
         for signature in witness.extract 1 (witness.size - 1) do
           let some rs := SegwitMultisigAccount.countedSignature? signature | throw (IO.userError "a witness signature that is not counted")
           let found := (List.range sorted.size).find? fun position =>
-            position ≥ next && (Secp.Ecdsa.verify rs digest sorted[position]! matches .ok true)
+            position ≥ next && SecpCt.Ecdsa.verify rs digest sorted[position]!
           let some position := found | throw (IO.userError "a witness signature that verifies under no later key of the script")
           next := position + 1
     -- signing a reviewed spend adds this key's approval and leaves the transaction alone

@@ -19,8 +19,8 @@ ROOT = "WinnowCore"
 
 ALLOWED = """
 WinnowCore
-Secp.Bytes Secp.Curve.Formulas Secp.Curve.Jacobian Secp.Curve.Spec Secp.Fast
-Secp.Field.Fp Secp.Field.Limbs Secp.Field.Multi Secp.Field.Ops Secp.Keys Secp.Sha256
+Secp.Bytes Secp.Sha256
+SecpCt.Field SecpCt.Keys SecpCt.Point SecpCt.Scalar SecpCt.Schnorr SecpCt.Word
 Winnow.Bytes Winnow.Text.UTF8
 Winnow.Crypto Winnow.Crypto.AES Winnow.Crypto.AESGCM Winnow.Crypto.Base58 Winnow.Crypto.Bech32
 Winnow.Crypto.Ripemd160 Winnow.Crypto.Sha2 Winnow.Crypto.SipHash

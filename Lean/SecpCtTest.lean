@@ -1,7 +1,8 @@
 import SecpCt.Schnorr
 import SecpCt.Ecdsa
 import SecpCt.Keys
-import Secp.Ecdsa
+import Secp.Der
+import Secp.Signing
 import TestKit.Check
 import TestKit.SecpAnswers
 import TestKit.CurveOracle
@@ -42,10 +43,6 @@ def next32 (state : UInt64) : ByteArray × UInt64 := Id.run do
 
 def toBytes32 (n : Nat) : ByteArray := Secp.toBE32 n
 
-/-- Whether the verifier said yes; an error counts as neither yes nor no. -/
-def accepts (r : Secp.R Bool) : Bool := match r with | .ok true => true | _ => false
-def rejects (r : Secp.R Bool) : Bool := match r with | .ok false => true | _ => false
-
 def unhex (s : String) : ByteArray := (Secp.ofHex? s).getD ByteArray.empty
 
 /-- The 33-byte public key for a secret key, from the constant-time code. -/
@@ -54,14 +51,14 @@ def compressedOf (secret : ByteArray) : Option ByteArray :=
 
 def fromBytes (b : ByteArray) : Nat := b.foldl (fun acc x => acc * 256 + x.toNat) 0
 
-/-- The curve the wallet runs today, as the known answers see it. -/
+/-- The curve as the wallet calls it (`Winnow/Keys/Secp256k1.lean`), as the known answers see it. -/
 def walletCurve : TestKit.SecpAnswers.Curve :=
   let point (b : ByteArray) : Option Winnow.Keys.Point :=
     if b.size == 33 then (Winnow.Keys.parsePublicKey b (compressed := true)).toOption
     else if b.size == 65 then (Winnow.Keys.parsePublicKey b (compressed := false)).toOption else none
   { publicKey := fun secret => (Winnow.Keys.publicKeyOf secret).toOption
-    liftX := fun x => if x.size == 32 then (Secp.liftX? (Secp.fromBE x)).map (fun q => Secp.toBE32 q.2.toNat) else none
-    parse := fun b => (point b).map fun q => (Secp.toBE32 q.1.toNat, Secp.toBE32 q.2.toNat)
+    liftX := fun x => if x.size == 32 then (Winnow.Keys.parseXonly x).toOption.map (·.y.bytes) else none
+    parse := fun b => (point b).map fun q => (q.x.bytes, q.y.bytes)
     pointAdd := fun p t => do
       let q ← point p
       (Winnow.Keys.publicAdd q t).toOption.map Winnow.Keys.serializeCompressed
@@ -74,18 +71,16 @@ def walletCurve : TestKit.SecpAnswers.Curve :=
       (Winnow.Keys.combine qs).toOption.map Winnow.Keys.serializeCompressed
     secretAdd := fun d t => do
       let secret ← (Winnow.Keys.secretOf d).toOption
-      (Winnow.Keys.privateAdd secret t).toOption.map Secp.toBE32
+      (Winnow.Keys.privateAdd secret t).toOption.map (·.bytes)
     secretAddXOnly := fun d t => do
       let secret ← (Winnow.Keys.secretOf d).toOption
-      (Winnow.Keys.keypairXonlyAdd secret t).toOption.map Secp.toBE32
+      (Winnow.Keys.keypairXonlyAdd secret t).toOption.map (·.bytes)
     bip340Sign := fun d m aux => do
       let secret ← (Winnow.Keys.secretOf d).toOption
       (Winnow.Keys.schnorrSign secret m aux).toOption
     bip340Verify := fun key m signature => (Winnow.Keys.schnorrVerify key m signature).toOption == some true
-    ecdsaSign := fun d digest aux => (Secp.Ecdsa.sign digest (Secp.fromBE d) aux).toOption
-    ecdsaVerify := fun key digest signature => match Secp.Ecdsa.verify signature digest key with
-      | .ok true => true
-      | _ => false }
+    ecdsaSign := Ecdsa.signVerified
+    ecdsaVerify := fun key digest signature => Ecdsa.verify signature digest key }
 
 /-- `SecpCt` alone, as the known answers see it: no other curve code is reached from here. -/
 def constantTimeCurve : TestKit.SecpAnswers.Curve :=
