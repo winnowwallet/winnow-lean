@@ -336,6 +336,130 @@ def relaunch (s : Settings) : Settings :=
   | .ok s' => s'
   | .error _ => {}
 
+/-- A Tailscale exit node as the route of direct connections: what the home and Settings say of Mullvad's, of
+one Mullvad does not confirm and of one that is gone; and the backend's part with the route given to it
+(`Deps.exitRoute`), since no test has a tailnet: Mullvad is not asked when a gateway answers, the route is
+watched, an HTTP request is refused once it is gone, and the next generation looks again. -/
+def exitRouteModel : IO Unit := do
+  let source : Winnow.IO.TunnelSource := { v4 := "100.68.170.77", v6 := some "fd7a:115c:a1e0::9a01:aa4d" }
+  let mullvad : Winnow.IO.ExitRoute := .mullvad source (some "se-sto-wg-001")
+  let own : Winnow.IO.ExitRoute := .exitNode source
+  let tor : Winnow.Net.PeerEndpoint := { host := "100.75.175.127", port := 9050 }
+  let state (mode : String) (c : Winnow.IO.PeerGatewayConfiguration) (exit : Winnow.IO.ExitRoute) (dropped := false) :=
+    PeerRoutingState.current mode c false exit dropped
+  check "route: Mullvad, under Automatic that found no gateway and under Direct only"
+    (state "automatic" {} mullvad == .mullvad && state "direct" {} mullvad == .mullvad)
+  check "route: a gateway that answers is the route, whatever the exit node"
+    (state "automatic" { networks := [.tor], torProxy := some tor } mullvad == .overlay true false)
+  check "route: Manual with clearnet and Tor through Mullvad shows no peer the phone's address"
+    (state "manual" { networks := [.clearnet, .tor], torProxy := some tor } mullvad == .mullvad)
+  check "route: an exit node Mullvad does not confirm" (state "automatic" {} own == .exitNode)
+  check "route: gone" (state "automatic" {} mullvad true == .held true && state "automatic" {} own true == .held false)
+  check "route: invalid settings are offline, and checking is checking, whatever the exit node"
+    (state "manual" { networks := [] } mullvad == .offline && PeerRoutingState.current "automatic" {} true mullvad == .checking)
+  check "Mullvad: no warning, no lock, and the line does not say private"
+    (!PeerRoutingState.mullvad.warns && PeerRoutingState.mullvad.symbol != (PeerRoutingState.overlay true false).symbol &&
+     PeerRoutingState.mullvad.message == "Mullvad exit node: peers see Mullvad's address, not yours" &&
+     !contains PeerRoutingState.mullvad.message "Private")
+  check "an exit node of one's own warns that peers see its address"
+    (PeerRoutingState.exitNode.warns && PeerRoutingState.exitNode.shortLabel == "Peers see your exit node's IP" &&
+     contains PeerRoutingState.exitNode.message "Mullvad does not confirm it" && contains PeerRoutingState.exitNode.message "identifies you")
+  check "an exit node that is gone warns that peers wait and nothing is sent directly"
+    ((PeerRoutingState.held true).warns && (PeerRoutingState.held true).shortLabel == "Mullvad route dropped" &&
+     (PeerRoutingState.held false).shortLabel == "Exit node dropped" && contains (PeerRoutingState.held true).message "Nothing is sent directly" &&
+     (PeerRoutingState.held true).alertTitle == "Peers are waiting for the exit node")
+  check "no gateway found: the alert also suggests a Mullvad exit node"
+    (contains (PeerRoutingState.direct true).message "A Mullvad exit node chosen in Tailscale" &&
+     !contains (PeerRoutingState.direct false).message "Mullvad")
+  -- the home
+  let m : Model := { stage := .ready, settings := { network := .mainnet } }
+  let home (s : Status) : String := (LeanNative.Html.toWire (.list (homeSections { m with status := s }) : H)).toJson.compress
+  check "home: Mullvad is a line, not a warning"
+    (contains (home { exitRoute := mullvad }) "Mullvad exit node: peers see Mullvad's address, not yours" &&
+     !contains (home { exitRoute := mullvad }) "Peers see your")
+  check "home: an exit node of one's own, in a few words" (contains (home { exitRoute := own }) "Peers see your exit node's IP" &&
+    !contains (home { exitRoute := own }) "identifies you")
+  check "home: gone" (contains (home { exitRoute := mullvad, exitDropped := true }) "Mullvad route dropped")
+  let alert (s : Status) : String :=
+    String.intercalate "\n" ((overlays { m with status := s, confirm := some (.homeWarning .routing) }).map fun h =>
+      (LeanNative.Html.toWire h).toJson.compress)
+  check "home: the alert of an exit node of one's own has the whole message and leads to Peers and routing"
+    (contains (alert { exitRoute := own }) "Peers can see your exit node's address" && contains (alert { exitRoute := own }) "identifies you" &&
+     contains (alert { exitRoute := own }) "Peers and routing")
+  -- Settings → Network → Peers and routing
+  let rows (s : Status) : String := (LeanNative.Html.toWire (peerGatewaysSection { m with status := s })).toJson.compress
+  check "settings: the active exit node, Mullvad's by its server"
+    (contains (rows { exitRoute := mullvad }) "Active exit node" && contains (rows { exitRoute := mullvad }) "Mullvad · se-sto-wg-001" &&
+     contains (rows { exitRoute := mullvad }) "Using clearnet peers through Mullvad.")
+  check "settings: an exit node Mullvad does not confirm is not called Mullvad's"
+    (contains (rows { exitRoute := own }) "Tailscale, not confirmed as Mullvad's" && contains (rows { exitRoute := own }) "through your exit node")
+  check "settings: gone" (contains (rows { exitRoute := mullvad, exitDropped := true }) "Nothing is sent directly")
+  check "settings: no exit node, no line" (!contains (rows {}) "Active exit node" && contains (rows {}) "Using clearnet peers.")
+  check "settings: behind a gateway the exit node is not the route and is not shown"
+    (!contains (rows { exitRoute := .direct, activeGateways := { networks := [.tor], torProxy := some tor } }) "Active exit node")
+  check "peers: what a clearnet peer sees"
+    (peerNetworkLabel .clearnet == "Clearnet · sees your IP" && peerNetworkLabel .clearnet mullvad == "Clearnet · sees Mullvad's address" &&
+     peerNetworkLabel .clearnet own == "Clearnet · sees your exit node's IP" && peerNetworkLabel .tor mullvad == "Tor")
+  -- the backend, the route given to it
+  let route ← IO.mkRef mullvad
+  let looked ← IO.mkRef 0
+  let carried ← IO.mkRef true
+  let fetched ← IO.mkRef 0
+  let backend (discover : Option (IO Winnow.IO.PeerGatewayConfiguration)) : IO Real.Env := do
+    let ks := Winnow.inMemoryKeyStore (← IO.mkRef {})
+    Real.Env.new { keyStore := ks, discoverGateways := discover,
+                   fetch := fun _ => do fetched.modify (· + 1); throw (.other "offline"),
+                   exitRoute := some (do looked.modify (· + 1); route.get), tunnelCarries := fun _ => carried.get, exitWatchMs := 20 }
+  let request (env : Real.Env) : IO Bool := do
+    -- whether the request reached the fetch (which fails: there is no network here)
+    let before ← fetched.get
+    discard <| ((← env.get).http.get "https://example.com/" 16).attempt
+    return (← fetched.get) > before
+  let env ← backend (some (pure { networks := [.tor], torProxy := some tor }))
+  env.modify (·.withSettings {})
+  Real.preparePeerGateways env
+  check "backend: a gateway answers, so the exit node is not looked at and Mullvad is not asked"
+    ((← looked.get) == 0 && (← env.get).exitRoute == .direct && (← env.get).activeGateways.networks == [.tor])
+  let env ← backend (some (pure {}))
+  env.modify (·.withSettings {})
+  Real.preparePeerGateways env
+  Real.preparePeerGateways env
+  let c ← env.get
+  check "backend: no gateway, so the route is looked at once for the generation, and is Mullvad"
+    ((← looked.get) == 1 && c.exitRoute == mullvad && c.activeGateways == {} && !c.exitDropped && !c.discoveringGateways)
+  check "backend: requests are made while the exit node is the route" (← request env)
+  carried.set false
+  check "backend: the exit node gone is noticed" (← waitUntil 2_000 (every := 5) do return (← env.get).exitDropped)
+  check "backend: no request is made once it is gone" (!(← request env))
+  route.set own
+  carried.set true
+  check "backend: back, Mullvad is asked again whose it is"
+    ((← waitUntil 2_000 (every := 5) do return !(← env.get).exitDropped) && (← env.get).exitRoute == own && (← looked.get) == 2)
+  carried.set false
+  discard <| waitUntil 2_000 (every := 5) do return (← env.get).exitDropped
+  route.set (.mullvad { v4 := "100.99.1.1" } none)
+  carried.set true
+  IO.sleep 200
+  check "backend: another exit address is another route, which waits for a reconnect"
+    ((← env.get).exitDropped && (← env.get).exitRoute == own)
+  route.set .direct
+  Real.stopNetworking env
+  Real.preparePeerGateways env
+  check "backend: the next generation looks again, and direct is direct"
+    ((← env.get).exitRoute == .direct && !(← env.get).exitDropped && (← request env))
+  check "backend: the watch ends with its generation" (← waitUntil 2_000 (every := 5) do return (← env.diagnostics).liveLoops == 0)
+  let env ← backend none
+  route.set mullvad
+  env.modify (·.withSettings { peerGatewaySettings := { mode := "direct" } })
+  Real.preparePeerGateways env
+  check "backend: Direct only through an exit node is through it" ((← env.get).exitRoute == mullvad)
+  Real.stopNetworking env
+  let env ← backend none
+  env.modify (·.withSettings { peerGatewaySettings := { mode := "manual", manual := { networks := [.tor], torProxy := some tor } } })
+  let before ← looked.get
+  Real.preparePeerGateways env
+  check "backend: Manual without clearnet does not look" ((← looked.get) == before && (← env.get).exitRoute == .direct)
+
 open Winnow.IO in
 def peerGatewayModel : IO Unit := do
   -- testAutomaticDefaultAndManualOverridePersistAcrossModes
@@ -461,11 +585,24 @@ def peerGatewayModel : IO Unit := do
   let torGw : Winnow.Net.PeerEndpoint := { host := "100.64.0.1", port := 9050 }
   let i2pGw : Winnow.Net.PeerEndpoint := { host := "100.64.0.2", port := 4447 }
   let overlay : PeerGatewayConfiguration := { networks := [.tor, .i2p], torProxy := some torGw, i2pProxy := some i2pGw }
-  check "background: no direct connection after the foreground used gateways" (!backgroundRoutingAllowed "automatic" {} true)
-  check "background: through the gateways found" (backgroundRoutingAllowed "automatic" overlay true)
-  check "background: direct when the foreground was direct too" (backgroundRoutingAllowed "automatic" {} false)
-  check "background: Direct only as chosen" (backgroundRoutingAllowed "direct" {} true)
-  check "background: Manual as chosen" (backgroundRoutingAllowed "manual" overlay true)
+  check "background: no direct connection after the foreground used gateways" (!backgroundRoutingAllowed "automatic" {} .gateways)
+  check "background: through the gateways found" (backgroundRoutingAllowed "automatic" overlay .gateways)
+  check "background: direct when the foreground was direct too" (backgroundRoutingAllowed "automatic" {} .direct)
+  check "background: Direct only as chosen" (backgroundRoutingAllowed "direct" {} .gateways)
+  check "background: Manual as chosen" (backgroundRoutingAllowed "manual" overlay .gateways)
+  let viaMullvad : ExitRoute := .mullvad { v4 := "100.68.170.77" } none
+  let viaOwn : ExitRoute := .exitNode { v4 := "100.68.170.77" }
+  check "background: Mullvad after Mullvad, and after a direct foreground"
+    (backgroundRoutingAllowed "automatic" {} .mullvad viaMullvad && backgroundRoutingAllowed "automatic" {} .direct viaMullvad)
+  check "background: not Mullvad after the foreground used gateways" (!backgroundRoutingAllowed "automatic" {} .gateways viaMullvad)
+  check "background: not directly, nor by an exit node of one's own, after Mullvad"
+    (!backgroundRoutingAllowed "automatic" {} .mullvad && !backgroundRoutingAllowed "automatic" {} .mullvad viaOwn)
+  check "background: the gateways found after Mullvad" (backgroundRoutingAllowed "automatic" overlay .mullvad)
+  check "the foreground's route is kept as it was before Mullvad, with Mullvad between"
+    (RouteRank.gateways.rawValue == "true" && RouteRank.direct.rawValue == "false" &&
+     [RouteRank.direct, .mullvad, .gateways].all (fun r => RouteRank.ofRaw r.rawValue == r) && RouteRank.ofRaw "" == .direct &&
+     RouteRank.of overlay viaMullvad == .gateways && RouteRank.of {} viaMullvad == .mullvad && RouteRank.of {} viaOwn == .direct)
+  exitRouteModel
 
 /-- The home keeps a warning to one short line and explains it in an alert, which leads to the Settings page
 with the details (and, for the network, Retry). -/
@@ -1959,6 +2096,19 @@ def testModeSeed : IO Unit := do
       matches .missingPinnedEntropy)
   check "test mode: entropy that is not hex pins nothing" (resolve [("WINNOW_E2E_ENTROPY", "abandon")] matches .missingPinnedEntropy)
   check "test mode: nothing set pins nothing" (resolve [] matches .missingPinnedEntropy)
+  let entropy := ("WINNOW_E2E_ENTROPY", "000102030405060708090a0b0c0d0e0f")
+  let exitRoute (value : Option String) := match resolve (entropy :: (value.map fun v => [("WINNOW_E2E_EXIT_ROUTE", v)]).getD []) with
+    | .active m => m.exitRoute
+    | _ => none
+  check "test mode: WINNOW_E2E_EXIT_ROUTE=mullvad is an exit node Mullvad names, at an address no device has"
+    (match exitRoute (some "mullvad") with
+     | some (.mullvad source (some name)) => source.v4 == "100.100.100.1" && source.v6.isNone && name == "test-exit-node"
+     | _ => false)
+  check "test mode: exitnode is an exit node Mullvad does not confirm"
+    (match exitRoute (some "exitnode") with | some (.exitNode source) => source.v4 == "100.100.100.1" | _ => false)
+  check "test mode: no exit node unless asked for, and none for a word it does not know"
+    ((exitRoute none).isNone && (exitRoute (some "1")).isNone && (exitRoute (some "Mullvad")).isNone)
+  check "test mode: the launch reads the exit route's variable" (WinnowApp.e2eVariables.contains "WINNOW_E2E_EXIT_ROUTE")
   check "test mode: the launch reads one seed variable"
     (WinnowApp.e2eVariables.filter (fun v => v == "WINNOW_E2E_ENTROPY" || v == "WINNOW_E2E_MNEMONIC") == ["WINNOW_E2E_ENTROPY"])
 

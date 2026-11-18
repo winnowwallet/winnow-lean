@@ -34,6 +34,11 @@ building each payment and signing with the fixed key, and the phone checking, si
 /-- Every `Deps.journal` line of the run: which backend (A, B, C), the event, its fields. -/
 initialize journalEvents : IO.Ref (Array (String × String × List (String × String))) ← IO.mkRef #[]
 
+/-- How backend A's direct connections leave the machine, as its `Deps.exitRoute` is told, and whether that
+exit node still carries the default route: `routingAndBackground` sets them. No tailnet is asked. -/
+initialize exitRouteNow : IO.Ref ExitRoute ← IO.mkRef .direct
+initialize exitCarried : IO.Ref Bool ← IO.mkRef true
+
 /-! ## The node -/
 
 def TestKit.Regtest.Node.winnowPeers (n : Node) : IO Nat := do
@@ -48,7 +53,9 @@ def regtestSettings (n : Node) : Settings :=
 
 def deps (keys : IO.Ref Keys.InMemorySecrets) (tag : String := "A") : Real.Deps :=
   { keyStore := inMemoryKeyStore keys, fetch := curlFetch "/usr/bin/curl", peerCount := 1,
-    journal := fun name fields => journalEvents.modify (·.push (tag, name, fields)) }
+    journal := fun name fields => journalEvents.modify (·.push (tag, name, fields)),
+    exitRoute := if tag == "A" then some exitRouteNow.get else none,
+    tunnelCarries := fun _ => exitCarried.get, exitWatchMs := 100 }
 
 /-! ## The journal (test mode's `story-events.jsonl`, captured) -/
 
@@ -455,6 +462,40 @@ def routingAndBackground (a : Backend) (envA : Real.Env) (n : Node) (settings : 
      (← waitUntil 5_000 do return (← envA.diagnostics).liveLoops == 0))
   a.startNetworking settings
   check "background check: refused while the scene is active" (!(← a.runBackgroundSync settings))
+  -- 2d. A Tailscale exit node as the route, Mullvad's: shown as the route, held when it is gone, and not left
+  -- for a direct connection in the background. The node is on this machine, which a connection reaches without
+  -- the exit node, so this is the app's side of it; io-test has the connections bound to an exit node.
+  let mullvad : ExitRoute := .mullvad { v4 := "100.127.255.254" } (some "se-sto-wg-001")
+  let state (s : Status) := PeerRoutingState.ofStatus "automatic" s
+  let settled (s : Status) := s.peerCount > 0 && !s.discoveringGateways
+  exitRouteNow.set mullvad
+  a.reconnect settings
+  let (sVia, _) ← syncUntil a 30_000 fun s _ => settled s
+  check "exit node: Automatic with no gateway shows Mullvad as the route, without the warning"
+    (sVia.exitRoute == mullvad && state sVia == .mullvad && !(state sVia).warns) s!"{repr (state sVia)}"
+  let unanswered := "http://127.0.0.1:9/"
+  check "exit node: an HTTP request is made while it is the route"
+    (match ← ((← envA.get).http.get unanswered 16).attempt with | .error (.http .unavailable) => false | _ => true)
+  exitCarried.set false
+  let held ← waitUntil 5_000 do return (← a.snapshot).1.exitDropped
+  check "exit node gone: peers wait, and the home says so" (held && state (← a.snapshot).1 == .held true)
+  check "exit node gone: no HTTP request is made"
+    (match ← ((← envA.get).http.get unanswered 16).attempt with | .error (.http .unavailable) => true | _ => false)
+  exitCarried.set true
+  let back ← waitUntil 5_000 do return !(← a.snapshot).1.exitDropped
+  check "exit node back: the route again" (back && state (← a.snapshot).1 == .mullvad)
+  a.stopNetworking
+  exitRouteNow.set .direct
+  check "background check: not directly after the foreground went through Mullvad" (!(← a.runBackgroundSync settings))
+  exitRouteNow.set mullvad
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  check "background check: through Mullvad, as the foreground went" (← a.runBackgroundSync settings)
+  exitRouteNow.set .direct
+  a.startNetworking settings
+  let (sOff, _) ← syncUntil a 30_000 fun s _ => settled s
+  check "exit node off at the next start: direct, and the warning is back"
+    (sOff.exitRoute == .direct && state sOff == .direct true && (state sOff).warns) s!"{repr (state sOff)}"
 
 /-! ## Paying saved people -/
 

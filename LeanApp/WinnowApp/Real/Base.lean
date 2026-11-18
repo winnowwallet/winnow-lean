@@ -104,6 +104,15 @@ structure Deps where
   clearnet: tests, and test mode unless `WINNOW_E2E_LIVE_GATEWAYS=1` (a UI journey never depends on the
   developer's tailnet). -/
   discoverGateways : Option (IO PeerGatewayConfiguration) := none
+  /-- How direct connections leave the phone (`Winnow.IO.detectExitRoute`): looked at once per generation
+  whose routing includes clearnet. None never looks and is direct, under the same rule as `discoverGateways`;
+  test mode's `WINNOW_E2E_EXIT_ROUTE` gives a route without looking. -/
+  exitRoute : Option (IO ExitRoute) := none
+  /-- Whether an exit node still carries the phone's default route (`TunnelSource.carries`: the routing table
+  is read, nothing is sent). -/
+  tunnelCarries : TunnelSource → IO Bool := fun t => t.carries
+  /-- How often a generation that leaves through an exit node looks whether it still does. -/
+  exitWatchMs : Nat := 5_000
   /-- Runs once `loadPaymentDetails` has the payment's transaction, before it checks that the wallet it asked
   for is still the one open; nothing in the app. backend-test's `paymentRaceFlow` changes the wallet here. -/
   paymentFetched : (txid : String) → IO Unit := fun _ => pure ()
@@ -330,7 +339,14 @@ structure Core where
   httpGateways : PeerGatewayConfiguration := {}
   /-- `discoveringGateways`, and the discovery every caller of this generation waits for. -/
   discoveringGateways : Bool := false
-  gatewayDiscovery : Option (Task (Option PeerGatewayConfiguration)) := none
+  gatewayDiscovery : Option (Task (Option (PeerGatewayConfiguration × ExitRoute))) := none
+  /-- How this generation's direct connections leave the phone. Through an exit node they are bound to it
+  (`PeerConnection.tunnel`), and every HTTP request is refused once it is no longer the route (`Env.new`). -/
+  exitRoute : ExitRoute := .direct
+  /-- That exit node is no longer the route (`startExitWatch`). -/
+  exitDropped : Bool := false
+  /-- The generation the exit node's watch runs for. -/
+  exitWatch : Option Nat := none
   /-- `preparedGatewayGeneration`: routing is resolved once per generation. -/
   preparedGatewayGeneration : Option Nat := none
   /-- `lastE2EPeerFingerprint` / `lastE2ESnapshotFingerprint`: the last `peers.status` and
@@ -452,8 +468,8 @@ def Core.withSettings (c : Core) (s : Settings) : Core :=
   else { c with gatewaySettings := s.peerGatewaySettings, activeGateways := s.peerGatewaySettings.initialActive,
                 preparedGatewayGeneration := none }
 
-/-- `DefaultsKey.automaticUsedGateways` (global): whether Automatic routing last reached peers through Tor
-or I2P in the foreground, as a file beside the network directories. -/
+/-- `DefaultsKey.automaticUsedGateways` (global): what Automatic routing last reached peers through in the
+foreground (`RouteRank`: Tor or I2P, Mullvad, or directly), as a file beside the network directories. -/
 def gatewaysUsedPath (dir : String) : System.FilePath :=
   (System.FilePath.mk dir).parent.getD (System.FilePath.mk dir) / "peer-gateways.automatic-used"
 
@@ -465,7 +481,7 @@ def readLastCompleteCheck (dir : String) : IO (Option Nat) := do
 
 def unixNow : IO Nat := do return (← Std.Time.Timestamp.now).toSecondsSinceUnixEpoch.val.toNat
 
-def readGatewaysUsed (dir : String) : IO Bool := do
-  try return (← IO.FS.readFile (gatewaysUsedPath dir)).trimAscii.copy == "true" catch _ => return false
+def readForegroundRoute (dir : String) : IO RouteRank := do
+  try return RouteRank.ofRaw (← IO.FS.readFile (gatewaysUsedPath dir)).trimAscii.copy catch _ => return .direct
 
 end WinnowApp.Real

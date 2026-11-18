@@ -68,7 +68,10 @@ new payments may appear at the next sync.
 
 You can use your own filter-serving node or route peer connections through Tor
 and I2P SOCKS gateways on your Tailscale network. Winnow bundles no Tor or I2P
-client. See [peer gateway setup](docs/peer-gateways.md). Explorer links open an
+client. With no gateway, a Mullvad exit node chosen in Tailscale shows peers
+Mullvad's address in place of yours; Mullvad then sees your peers, so Winnow
+shows it as the route and does not call it private. See
+[peer gateway setup](docs/peer-gateways.md). Explorer links open an
 external website after a privacy warning; they do not supply wallet balances.
 
 ## Backups

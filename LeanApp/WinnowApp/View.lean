@@ -58,7 +58,7 @@ def confirms (m : Model) : List H :=
        [.identified Ids.warningSettingsButton (.button "Network settings" .primary (some (.home (.warningSettings .network)))),
         .button "OK" .cancel (some .dismissConfirm)]]
   | some (.homeWarning .routing) =>
-    let state := PeerRoutingState.current m.settings.peerGatewaySettings.mode m.status.activeGateways m.status.discoveringGateways
+    let state := PeerRoutingState.ofStatus m.settings.peerGatewaySettings.mode m.status
     [.alert state.alertTitle state.message
        [.identified Ids.warningSettingsButton (.button "Peers and routing" .primary (some (.home (.warningSettings .routing)))),
         .button "OK" .cancel (some .dismissConfirm)]]

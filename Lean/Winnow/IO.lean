@@ -6,6 +6,7 @@ import Winnow.IO.Diversity
 import Winnow.IO.Seeds
 import Winnow.IO.Census
 import Winnow.IO.Gateways
+import Winnow.IO.ExitRoute
 import Winnow.IO.Headers
 import Winnow.IO.Pool
 import Winnow.IO.Filters
@@ -23,6 +24,7 @@ import Winnow.IO.Broadcast
 | `IO/Seeds.lean` | `Peers/SeedResolver.swift` (DoH through `RoutedHTTPClient`, `getaddrinfo` via `Std.Async.DNS`) |
 | `IO/Census.lean` | `Peers/CensusCatalog.swift` (the list shipped with the build: `CensusCatalog.bundled`) |
 | `IO/Gateways.lean` | `Peers/PeerGateways.swift`, `Peers/TailnetGatewayDiscovery.swift` (MagicDNS over `Std.Async.UDP`) |
+| `IO/ExitRoute.lean` | none: a Tailscale exit node as the route of direct connections, whether it is Mullvad's, and connections bound to it |
 | `IO/Headers.lean` | `Headers/HeaderChain.swift`: file read/write and `sync(using:)` (the chain is Net's pure `HeaderChain`) |
 | `IO/Pool.lean` | `Peers/PeerPool.swift` |
 | `IO/Filters.lean` | `Filters/FilterSync.swift`: `sync`, `transaction(_:at:)`, filters.json (decisions: Net's `FilterSync`) |

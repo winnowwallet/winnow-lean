@@ -125,6 +125,19 @@ def networkFooter (m : Model) : String :=
     s!"This debug session is locked to {match m.settings.network with | .mainnet => "mainnet" | .signet => "public signet" | .regtest => "a local regtest node"}."
   else "Each network has a separate wallet. Signet uses test coins with no value."
 
+/-- How the session's direct connections leave the phone, when through a Tailscale exit node: whose it is,
+and that peers wait when it is gone. -/
+def exitRouteRows (s : Status) : List H :=
+  let dropped := if s.exitDropped then
+      errorRows (some "This exit node is no longer the route. Nothing is sent directly: peers wait until it returns or you reconnect.")
+    else []
+  match s.exitRoute with
+  | .direct => []
+  | .mullvad _ server =>
+    [.identified Ids.activeExitRoute (.labeled "Active exit node" (match server with | some n => s!"Mullvad · {n}" | none => "Mullvad"))] ++ dropped
+  | .exitNode _ =>
+    [.identified Ids.activeExitRoute (.labeled "Active exit node" "Tailscale, not confirmed as Mullvad's")] ++ dropped
+
 /-- PeerGatewaysSection: stage edits until Apply so incomplete addresses never disrupt live peers. -/
 def peerGatewaysSection (m : Model) : H :=
   let d := m.settingsDraft
@@ -135,7 +148,7 @@ def peerGatewaysSection (m : Model) : H :=
     .identified (Ids.peerType (n.rawValue))
       (.toggle (match n with | .clearnet => "Clearnet peers" | .tor => "Tor peers" | .i2p => "I2P peers")
         (d.gatewayNetworks.contains n) fun on => .settings (.setGatewayNetwork n on))
-  .section "Peer networks" "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does, Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Tor and I2P peers always use their gateway. The peer list ships with the app, so finding peers downloads nothing. Explorer requests use clearnet when selected, Tor otherwise; with I2P alone they are unavailable. A SOCKS check does not guarantee overlay connectivity."
+  .section "Peer networks" "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does. Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Tor and I2P peers always use their gateway. While a Tailscale exit node carries this phone's traffic, clearnet peers leave only through it: a Mullvad exit node shows them Mullvad's address and shows Mullvad your peers; an exit node of your own shows them its address. The peer list ships with the app, so finding peers downloads nothing. Explorer requests use clearnet when selected, Tor otherwise; with I2P alone they are unavailable. A SOCKS check does not guarantee overlay connectivity."
     ([ .identified Ids.gatewayRoutingMode
          (.picker "Gateway routing" ["Automatic", "Direct only", "Manual"] d.gatewayMode fun i => .settings (.setGatewayMode i)) ] ++
      (if d.gatewayMode == 2 then
@@ -150,7 +163,12 @@ def peerGatewaysSection (m : Model) : H :=
      (if m.status.discoveringGateways then [.progress "Checking Tailscale gateways…"] else
        (match active.torProxy with | some e => [.labeled "Active Tor gateway" (gatewayAddressText e)] | none => []) ++
        (match active.i2pProxy with | some e => [.labeled "Active I2P gateway" (gatewayAddressText e)] | none => []) ++
-       (if active.networks == [.clearnet] then [caption "Using clearnet peers."] else []) ++
+       (if active.networks.contains .clearnet then exitRouteRows m.status else []) ++
+       (if active.networks == [.clearnet] then
+         [caption (match m.status.exitRoute with
+           | .direct => "Using clearnet peers."
+           | .mullvad .. => "Using clearnet peers through Mullvad."
+           | .exitNode _ => "Using clearnet peers through your exit node.")] else []) ++
        (if !active.isValid then errorRows (some "Gateway settings are invalid. Networking is offline.") else [])) ++
      [ .identified Ids.checkPeerGateways (.button "Check gateways and reconnect" .plain
          (if m.status.discoveringGateways || off then none else some (.settings .checkGateways))) ])
@@ -171,7 +189,7 @@ def peersSections (m : Model) : List H :=
        [.button "Reconnect peers" .plain (some (.settings .reconnect))])
   , .section "Connected peers" ""
       ((d.peers.map fun p =>
-          .col [.identified Ids.peerNetwork (Html.tone (if p.network == .clearnet then .warning else .secondary) (caption (peerNetworkLabel p.network))),
+          .col [.identified Ids.peerNetwork (Html.tone (if p.network == .clearnet && !m.status.exitRoute.isMullvad then .warning else .secondary) (caption (peerNetworkLabel p.network m.status.exitRoute))),
                 .identified Ids.peerEndpoint (literal p.endpoint),
                 caption (s!"{p.userAgent} · height {p.startHeight}" ++ (match p.feeFilter with | some f => s!" · floor {f} sat/kvB" | none => ""))]) ++
        (if d.peers.isEmpty then [caption "No peers connected."] else []) ++

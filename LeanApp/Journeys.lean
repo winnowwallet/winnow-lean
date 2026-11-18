@@ -5,7 +5,7 @@ import Journeys.Screens
 
 /-! # The UI journeys
 
-Nine journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Ten journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -692,9 +692,73 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
   finally
     discard <| h.cli #["setnetworkactive", "true"]⟩
 
+/-- A Mullvad exit node chosen in Tailscale, as test mode gives one (`WINNOW_E2E_EXIT_ROUTE=mullvad`: the route
+the app otherwise reads from the phone's routing table and Mullvad's answer). On mainnet, where the home has its
+routing line: the line is Mullvad's, with neither the warning that peers see the person's IP nor the word
+"Private" that Tor and I2P get, and Settings → Network → Peers and routing names the exit node. Then the exit
+node goes (the control file's `exitRouteDropped`): the home warns within the watch's turn, its alert says
+nothing is sent directly, and Peers and routing says so under the exit node. It comes back, and the warning
+goes by itself. These are the screens only: this run has no peer (the fixture's node is regtest's), so that a
+connection is refused rather than made directly is io-test's and backend-test's to show, and Mullvad's own
+answer only a real exit node's. -/
+def mullvadExitNode : Journey := ⟨"mullvadExitNode", do
+  let r ← Run.new "exitnode"
+  r.dropExitRoute false
+  r.launch "exitnode" [("WINNOW_E2E_NETWORK", "mainnet"), ("WINNOW_E2E_EXIT_ROUTE", "mullvad")]
+  createWallet
+  let mullvadLine : Find := .text "^Mullvad exit node: peers see Mullvad's address, not yours$"
+  try
+    step "the home's routing line is Mullvad's: no warning, and not called private" do
+      waitFor mullvadLine 30
+      expectGone (.text "^Peers see your IP$")
+      expectGone (.text "^Private")
+      shot "70-home-mullvad"
+
+    step "Peers and routing names the exit node" do
+      openSettings
+      scrolled networkPeersButton
+      tap networkPeersButton
+      waitFor activeExitRoute 20
+      scrolled activeExitRoute
+      expectEq "the active exit node" (← text activeExitRoute) "Mullvad · test-exit-node"
+      here (.text "^Using clearnet peers through Mullvad\\.$")
+      expectGone (.text "^This exit node is no longer the route")
+      shot "71-settings-mullvad"
+      backToWalletList
+
+    step "the exit node drops: the home warns, and its alert says nothing is sent directly" do
+      r.dropExitRoute true
+      waitUntil 20 "the home does not say the Mullvad route dropped" do
+        return (← exists? peerRoutingBanner) && (← text peerRoutingBanner) == "Mullvad route dropped"
+      expectGone mullvadLine
+      shot "72-home-mullvad-dropped"
+      tap peerRoutingBanner
+      waitFor (.alert "Peers and routing") 10
+      here (.text "^Peers are waiting for the exit node$")
+      here (.text "^The Mullvad exit node this session used is no longer the route\\. Nothing is sent directly")
+
+    step "the alert leads to Peers and routing, which says so under the exit node" do
+      tap (.alert "Peers and routing")
+      waitFor activeExitRoute 20
+      scrolled activeExitRoute
+      expectEq "the exit node, still named" (← text activeExitRoute) "Mullvad · test-exit-node"
+      waitFor (.text "^This exit node is no longer the route\\. Nothing is sent directly") 10
+      shot "73-settings-mullvad-dropped"
+
+    step "the exit node returns: the warning goes by itself, here and on the home" do
+      r.dropExitRoute false
+      waitUntil 20 "Peers and routing still says the exit node is gone" do
+        gone? (.text "^This exit node is no longer the route")
+      expectEq "the exit node" (← text activeExitRoute) "Mullvad · test-exit-node"
+      backToWalletList
+      waitFor mullvadLine 20
+      expectGone (.text "^Mullvad route dropped$")
+  finally
+    r.dropExitRoute false⟩
+
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
-   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers]
+   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, mullvadExitNode]
 
 end WinnowJourneys
 

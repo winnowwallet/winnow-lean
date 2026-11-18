@@ -64,6 +64,10 @@ def Run.new (name : String) : IO Run := do
 def Run.clipboard (r : Run) (text : String) : IO Unit :=
   IO.FS.writeFile r.control (Json.mkObj [("clipboard", Json.str text)]).compress
 
+/-- Takes the exit node test mode gave the run (`WINNOW_E2E_EXIT_ROUTE`) away, or gives it back. -/
+def Run.dropExitRoute (r : Run) (dropped : Bool) : IO Unit :=
+  IO.FS.writeFile r.control (Json.mkObj [("exitRouteDropped", Json.bool dropped)]).compress
+
 /-- The app in test mode on the fixture's node, as its only peer, with a fresh seed; `extra` adds to the
 environment or replaces in it. -/
 def Run.launch (r : Run) (run : String) (extra : List (String × String) := []) : UI Unit := do

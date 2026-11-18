@@ -110,42 +110,78 @@ def Window.close (w : Window) : IO Unit := do
 
 /-! ## Peer routing -/
 
+/-- While a generation leaves through an exit node: every `exitWatchMs`, whether it still does (the routing
+table is read; nothing is sent). The generation's connections are bound to the exit node, so this changes no
+route. It tells the person: gone, the home says peers are waiting; back, Mullvad is asked again whose it is
+and the pool dials at once. A different exit address is a different route: that waits for a reconnect. -/
+def startExitWatch (env : Env) (epoch : Nat) : IO Unit := do
+  let go ← env.modifyGet fun c =>
+    if c.generation != epoch || c.exitWatch == some epoch then (false, c) else (true, { c with exitWatch := some epoch })
+  if !go then return
+  let alive (c : Core) := c.generation == epoch && c.exitWatch == some epoch
+  env.spawnLoop do
+    repeat
+      if !(← env.sleepWhile env.deps.exitWatchMs alive) then break
+      let c ← env.get
+      if !alive c then break
+      let some source := c.exitRoute.source? | break
+      let carried ← try env.deps.tunnelCarries source catch _ => pure false
+      if !carried then
+        env.modify fun c => if alive c then { c with exitDropped := true } else c
+      else if c.exitDropped then
+        let route ← match env.deps.exitRoute with
+          | some look => try look catch _ => pure .direct
+          | none => pure c.exitRoute
+        if route.source? == some source then
+          let stack ← env.modifyGet fun c =>
+            if alive c then (c.stack, { c with exitRoute := route, exitDropped := false }) else (none, c)
+          if let some s := stack then s.pool.retry
+
 /-- `preparePeerGateways()`: resolve the routing once per networking generation. Direct only is clearnet,
-Manual the gateways typed in, Automatic what discovery finds (callers of one generation share one
-discovery). A generation that ended meanwhile installs nothing. No discovered address is persisted:
-the next generation asks again. The routed HTTP client follows the routing. -/
+Manual the gateways typed in, Automatic what discovery finds; then, for a routing that includes clearnet, how
+direct connections leave the phone (`Deps.exitRoute`: through a Tailscale exit node, and whether Mullvad's).
+Callers of one generation share one resolution. A generation that ended meanwhile installs nothing. Nothing
+found is persisted: the next generation asks again. The routed HTTP client follows the routing. -/
 def preparePeerGateways (env : Env) : IO Unit := do
   let c ← env.get
   let epoch := c.generation
   if c.preparedGatewayGeneration == some epoch then return
   let settings := c.gatewaySettings
-  let config ← match settings.mode with
-    | "direct" => pure {}
-    | "manual" => pure settings.manual
-    | _ =>
-      match env.deps.discoverGateways with
-      | none => pure {}
-      | some discover =>
-        let p ← IO.Promise.new
-        let (mine, t) ← env.modifyGet fun c =>
-          match c.gatewayDiscovery with
-          | some t => ((false, t), c)
-          | none =>
-            if c.generation != epoch then ((false, Task.pure none), c)
-            else ((true, p.result?), { c with gatewayDiscovery := some p.result?, discoveringGateways := true })
-        if mine then
-          discard <| IO.asTask (prio := .dedicated) do
-            let r ← try discover catch _ => pure {}
-            p.resolve r
-        pure ((← IO.wait t).getD {})
+  let (chosen, discover) : PeerGatewayConfiguration × Option (IO PeerGatewayConfiguration) := match settings.mode with
+    | "direct" => ({}, none)
+    | "manual" => (settings.manual, none)
+    | _ => ({}, env.deps.discoverGateways)
+  let (config, route) ←
+    if discover.isNone && env.deps.exitRoute.isNone then pure (chosen, ExitRoute.direct)
+    else
+      let p ← IO.Promise.new
+      let (mine, t) ← env.modifyGet fun c =>
+        match c.gatewayDiscovery with
+        | some t => ((false, t), c)
+        | none =>
+          if c.generation != epoch then ((false, Task.pure none), c)
+          else ((true, p.result?), { c with gatewayDiscovery := some p.result?, discoveringGateways := true })
+      if mine then
+        discard <| IO.asTask (prio := .dedicated) do
+          let config ← match discover with
+            | some d => try d catch _ => pure {}
+            | none => pure chosen
+          let route ← match env.deps.exitRoute with
+            | some look => if config.isValid && config.networks.contains .clearnet then (try look catch _ => pure .direct)
+                           else pure .direct
+            | none => pure .direct
+          p.resolve (config, route)
+      pure ((← IO.wait t).getD ({}, .direct))
   let claim ← env.modifyGet fun c =>
     if c.generation != epoch then (none, c) else
     (some (c.active, c.activeGateways == config && c.httpGateways == config, c.http, c.dir),
-     { c with preparedGatewayGeneration := some epoch, gatewayDiscovery := none, discoveringGateways := false })
+     { c with preparedGatewayGeneration := some epoch, gatewayDiscovery := none, discoveringGateways := false,
+              exitRoute := route, exitDropped := false })
   let some (active, same, old, dir) := claim | return
+  if route.source?.isSome then startExitWatch env epoch
   if settings.mode == "automatic" && active then
     if let some d := dir then
-      try IO.FS.writeFile (gatewaysUsedPath d) (toString !(config.networks.contains .clearnet)) catch _ => pure ()
+      try IO.FS.writeFile (gatewaysUsedPath d) (RouteRank.of config route).rawValue catch _ => pure ()
   if same && !(← old.isCancelled) then return
   let fresh ← RoutedHTTPClient.ofGateways env.deps.fetch config
   let replaced ← env.modifyGet fun c =>
@@ -185,7 +221,7 @@ partial def buildStackIfNeeded (env : Env) : IO Unit := do
         (peersFile := some (dirFile dir "peers.json")) (relayPreference := true)
         (dialTimeoutMs := if c.activeGateways.networks == [.clearnet] then 5_000 else 30_000)
         (seedResolver := some (SeedResolver.routed c.http)) (censusCatalog := catalog) (gateways := c.activeGateways)
-        (avoidOnReset := c.peersToAvoid) (httpFetch := env.deps.fetch)
+        (avoidOnReset := c.peersToAvoid) (httpFetch := env.deps.fetch) (tunnel := c.exitRoute.source?)
       let start ← chainStart c.wallet params key.verifyFromGenesis
       let chain ← runNet (openOrRebuildChain params (dirFile dir "headers.bin") start)
       if (← env.get).generation != epoch then pool.stop; return
