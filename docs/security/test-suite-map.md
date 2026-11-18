@@ -70,7 +70,7 @@ the suite, where the earlier map recorded one.
 | `WinnowSoak` | `winnow-debug soak` | None: this tree has no soak tool |
 | `PeerGatewayTests`, `TailnetGatewayDiscoveryTests`, `RoutingTests` | | `io-test`: the routing gate (comments there name `RoutingTests` and `PeerGatewayTests`), MagicDNS answers and SOCKS5 |
 | `PeerGatewaySettingsUITests`, `LiveGatewayDeviceTests` | | Not ported ([PORT.md](../../PORT.md)) |
-| The signet journey (`WinnowAppUITests`, `UITests/MultisigJourney.swift`) | | The ten journeys of `LeanApp/Journeys.lean` on regtest: the 2-of-3 with two Bitcoin Core wallets and its recovery spend is `multisigTwoOfThreeWithRecovery`, the silent payment leg `silentPaymentSend`, the fee bump `feeBumpReplaceConfirm` |
+| The signet journey (`WinnowAppUITests`, `UITests/MultisigJourney.swift`) | | The eleven journeys of `LeanApp/Journeys.lean` on regtest: the 2-of-3 with two Bitcoin Core wallets and its recovery spend is `multisigTwoOfThreeWithRecovery`, the silent payment leg `silentPaymentSend`, the fee bump `feeBumpReplaceConfirm` |
 | `StorefrontCaptureTests`, the demo and story tests, `ExternalDisclosureTests` | retired in the Swift app | None |
 
 ## What the Swift map recorded

@@ -249,11 +249,9 @@ def activitySection (m : Model) : H :=
 
 /-- The home's Accounts, once this phone has a multisig account. -/
 def accountsSection (m : Model) : List H :=
-  if m.multisig.accounts.isEmpty then [] else
+  if m.multisig.accounts.isEmpty && m.multisig.arriving.isEmpty then [] else
   [.identified Ids.homeAccountsSection (.section "Accounts" ""
-    (m.multisig.accounts.map fun a =>
-      .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
-            Html.tone .secondary (body (satsText a.balance))]))]
+    (m.multisig.accounts.map accountRow ++ m.multisig.arriving.map arrivingRow))]
 
 def homeSections (m : Model) : List H :=
   [ balanceSection m ] ++ protectionCards m ++

@@ -361,6 +361,15 @@ Deviations, all forced by the Lean app's shape or the renderer:
 * BackupSection's, the reveal sheet's and the export sheet's footers follow d2ca878 (upstream #184's
   wording, which the earlier port had missed).
 
+**Not upstream's: accounts and signers follow a person between devices** (2026-11-18, the owner's request after
+joining an account on the Mac that the phone could not see). Each device reads the wallet boxes of the other
+backups under the same Apple Account and takes the multisig accounts and signers it lacks; stamps in the backup's
+context (`CloudAppState.sync`) decide renames, removals and a payment awaiting signatures. The rules are
+`Winnow/Wallet/DeviceSync.lean` (pure, with `Stamp.max` proved commutative, associative and idempotent), the app's
+side `Real/DeviceSync.lean`, an arriving account's catch-up `MultisigApp.catchUp` over `FilterSyncIO.scanRange`
+(its first caller in the app). Verified by device-sync-test and backend-test's `devicesFlow`;
+`CloudKit/README.md`, "Your other devices", says what follows, what does not and when.
+
 Needs a real device and iCloud account: CloudKit save/list/load and the iCloud Keychain key (the simulator
 build carries the entitlement and answers that iCloud is unavailable, which the onboarding shows), a
 second device restoring, iOS launching and expiring background tasks (the simulator refuses `bgtask.schedule`;
@@ -400,13 +409,13 @@ Upstream's Swift tests, UI tests and workflows went with the Swift code; their L
   the wallet (one "Moved to …" row) and pays from it on the Send tab with the Ledger signing in the
   collection step. Both passed on a throwaway iOS 27 simulator against `backend-test --fixture`. Differences from upstream's harness: the node is regtest, not a
   custom signet; Core co-signers are driven by bitcoin-cli from the runner (posix_spawn, as upstream).
-  Those were the first three journeys. `Journeys.lean`'s `all` now has ten; the
+  Those were the first three journeys. `Journeys.lean`'s `all` now has eleven; the
   [README](README.md#ui-tests) lists them.
 * **CI**: `ci.yml` calls LeanNative's reusable `ios-app` workflow at the commit `LeanApp/lake-manifest.json`
   pins, on GitHub's hosted `macos-26` runners (or, for this repository's own branches, the label in the
   repository variable `MACOS_RUNNER` while it is set). Three jobs start at once and each builds the Lean from
-  the cache: `lean` (the test lines of `ci.yml`, `scripts/ci-regtest`'s five suites and the ten journeys
-  headless), `app` (the Debug simulator build and the ten journeys in the simulator, split across two runners)
+  the cache: `lean` (the test lines of `ci.yml`, `scripts/ci-regtest`'s five suites and the eleven journeys
+  headless), `app` (the Debug simulator build and the eleven journeys in the simulator, split across two runners)
   and `release` (Debug and Release for the simulator, Release for devices). `media` joins the two parts'
   recordings. The release check replaces upstream's `strings`-based release check, which cannot work here
   (test mode is compiled into every build and switched on only when the shell answers Debug): LeanNative's

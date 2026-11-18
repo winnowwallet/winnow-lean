@@ -5,7 +5,7 @@ import Journeys.Screens
 
 /-! # The UI journeys
 
-Ten journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Eleven journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -764,9 +764,67 @@ def cardForOnePerson : Journey := ⟨"cardForOnePerson", do
         return (← text (historyPayment txid)) == "Received from Dana"
     shot "51-card-payments-from-dana"⟩
 
+/-- Whether a backup in the stand-in iCloud was saved after `marker` was written. -/
+def savedSince (cloud marker : System.FilePath) : IO Bool := do
+  let since := (← marker.metadata).modified
+  for entry in ← cloud.readDir do
+    if entry.fileName.endsWith ".backup" && decide ((← entry.path.metadata).modified > since) then return true
+  return false
+
+/-- An account follows a person from one device to another. Two launches with two seeds are the two devices,
+and a directory both are given stands in for their iCloud (`WINNOW_E2E_CLOUD`; test mode has no iCloud
+otherwise). The first builds a 2-of-2 with a Core key, is paid, and saves its backup. The second, a different
+wallet, is told nothing: it lists the account by itself, with the balance its own scan confirms and the next
+address Core derives, and says it only watches, since its wallet holds none of the account's keys. -/
+def accountFollowsDevices : Journey := ⟨"accountFollowsDevices", do
+  let r ← Run.new "devices"
+  let h := r.host
+  let run ← randomHex 4
+  let core ← h.coreSigner s!"ui-core-devices-{run}"
+  let cloud := s!"{h.fixture}/icloud-{run}"
+  IO.FS.createDirAll cloud
+  r.launch "devicesfirst" [("WINNOW_E2E_CLOUD", cloud)]
+  createWallet
+
+  let descriptor ← step "the first device builds a 2-of-2 of this phone and a Core key" do
+    openMultisigAccounts
+    Builder.start
+    Builder.name "Phone and Core"
+    Builder.addPastedMember r core.keyExpression
+    waitFor (.beginning "Members · 2") 10
+    Builder.create
+  let account := accountID descriptor
+  h.importAccount core descriptor
+
+  step "the node funds it, and the first device's backup is saved with it" do
+    Builder.openAccount
+    let first ← h.deriveAddress descriptor 0
+    expectEq "the account's first address (Core's)" (← Account.receiveAddress) first
+    discard <| h.fund first funding
+    waitForBalance funding multisigBalance
+    let marker := s!"{cloud}/seen"
+    IO.FS.writeFile marker ""
+    waitUntil 60 "the first device's backup was not saved after the payment" (every := 0.5) do savedSince cloud marker
+    shot "40-devices-first"
+
+  step "a second device, another wallet, the same iCloud: the account is there by itself" do
+    r.launch "devicessecond" [("WINNOW_E2E_CLOUD", cloud)]
+    createWallet
+    waitFor (multisigAccount account) 120
+    waitFor (multisigWatchOnly account) 10
+    expectEq "the account's name" (← text (multisigAccount account)) "Phone and Core"
+    shot "41-devices-second-home"
+
+  step "its page says it only watches, with the balance and Core's next address" do
+    openAccountRow account
+    waitFor multisigWatchOnlyNote 20
+    waitForBalance funding multisigBalance
+    expectEq "the next address, the one after the paid one (Core's)" (← Account.receiveAddress) (← h.deriveAddress descriptor 1)
+    shot "42-devices-watch-only"⟩
+
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
-   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson]
+   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson, accountFollowsDevices]
 
 end WinnowJourneys
 

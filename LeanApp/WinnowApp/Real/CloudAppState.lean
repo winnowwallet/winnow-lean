@@ -1,6 +1,7 @@
 import WinnowApp.Real.RecordsStores
 import WinnowApp.Real.SignerStore
 import Winnow.Wallet.CloudWalletBackup
+import Winnow.Wallet.DeviceSync
 
 /-! # The wallet context inside an iCloud backup (`Sources/WinnowApp/CloudAppState.swift`, upstream d2ca878)
 
@@ -13,7 +14,12 @@ with a default is still decoded by the synthesized `init(from:)`).
 `signers` is the list of paired Ledgers and saved keys a context carried while only the iCloud copy held
 them; new contexts leave it out (the bundle carries them, `ImportBundle.signers`). An old context's list
 is held to `SignerStore.validateBackup` (the signer file's own rules and its 1 MiB ceiling) and merged on
-restore (`SignerStore.planRestore`, then `restore`). -/
+restore (`SignerStore.planRestore`, then `restore`).
+
+`sync` is not Swift's: when each account and signer of the bundle last changed and on which device, and which
+were removed (`Winnow.DeviceSync.SyncMeta`), for the person's other devices, which read this backup's wallet
+box to keep in step. A reader that does not know the key ignores it; one that cannot read its value (a later
+version's) takes the backup as one written before devices kept in step. A restore does not apply it. -/
 
 namespace WinnowApp.RecordsReal
 open Winnow SwiftJSON
@@ -29,6 +35,7 @@ structure CloudAppState where
   ownDisplayName : String
   advancedMode : Bool
   signers : Option (Array SignerRecord) := none
+  sync : Option DeviceSync.SyncMeta := none
   deriving Inhabited
 
 namespace CloudAppState
@@ -40,7 +47,7 @@ private def sortedLabels (labels : Array (String × String)) : Array (String × 
 def same (a b : CloudAppState) : Bool :=
   a.version == b.version && a.network == b.network && a.descriptor == b.descriptor && a.people == b.people &&
     sortedLabels a.receiveLabels == sortedLabels b.receiveLabels && a.ownDisplayName == b.ownDisplayName &&
-    a.advancedMode == b.advancedMode && a.signers == b.signers
+    a.advancedMode == b.advancedMode && a.signers == b.signers && a.sync == b.sync
 
 instance : BEq CloudAppState := ⟨same⟩
 
@@ -48,7 +55,7 @@ def toJV (c : CloudAppState) : JV :=
   obj [("version", some (ofInt c.version)), ("network", some (.str c.network)), ("descriptor", c.descriptor.map .str),
     ("people", some c.people.toJV), ("receiveLabels", some (PeopleStore.labelsJV c.receiveLabels)),
     ("ownDisplayName", some (.str c.ownDisplayName)), ("advancedMode", some (.bool c.advancedMode)),
-    ("signers", c.signers.map (.arr ∘ Array.map SignerRecord.toJV))]
+    ("signers", c.signers.map (.arr ∘ Array.map SignerRecord.toJV)), ("sync", c.sync.map DeviceSync.SyncMeta.toJV)]
 
 def ofJV (v : JV) : D CloudAppState := do
   let kvs ← asObject v
@@ -56,7 +63,8 @@ def ofJV (v : JV) : D CloudAppState := do
            descriptor := ← keyIfPresent kvs "descriptor" asString, people := ← key kvs "people" PeopleStore.Backup.ofJV,
            receiveLabels := ← key kvs "receiveLabels" PeopleStore.asStringMap,
            ownDisplayName := ← key kvs "ownDisplayName" asString, advancedMode := ← key kvs "advancedMode" asBool,
-           signers := ← keyIfPresent kvs "signers" (asArray SignerRecord.ofJV) }
+           signers := ← keyIfPresent kvs "signers" (asArray SignerRecord.ofJV),
+           sync := (← keyIfPresent kvs "sync" fun v => pure (DeviceSync.SyncMeta.ofJV v).toOption).join }
 
 /-- `encoded()`: sorted keys, escaped slashes. -/
 def encoded (c : CloudAppState) : ByteArray := (write c.toJV).toUTF8

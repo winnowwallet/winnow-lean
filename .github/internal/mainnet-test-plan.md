@@ -7,7 +7,7 @@ with automatically mined confirmations and disposable test keys. No real-money
 recording or physical-device measurement is required by that workflow.
 
 Note of 2026-11-17: integration and website media now come from the Lean app's
-ten journeys against a disposable regtest node; see
+eleven journeys against a disposable regtest node; see
 [docs/testing.md](../../docs/testing.md).
 
 The old plan assumed one particular development node, promised unconfirmed

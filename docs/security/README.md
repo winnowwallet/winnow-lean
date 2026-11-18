@@ -36,7 +36,7 @@ What this directory holds now:
 Where the Lean app's checks and claims are:
 
 - [The testing guide](../testing.md): what CI runs today (the Lean test
-  executables, five suites against a regtest Bitcoin Core, the ten UI journeys,
+  executables, five suites against a regtest Bitcoin Core, the eleven UI journeys,
   the fuzzer) and what they do not cover.
 - [SECURITY.md](../../SECURITY.md): how to report, and what is and is not
   claimed about the curve code (`Lean/SecpCt`) and timing.
