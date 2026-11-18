@@ -19,6 +19,9 @@ Release with `#if DEBUG`) and the app is launched with `WINNOW_E2E=1`. Then:
   clipboard can be set (the census URL and keys went with the census download, upstream e5ce950; the first
   tab and Advanced mode went with the one home);
 * device authentication is skipped unless `WINNOW_E2E_DEVICE_AUTH=1`;
+* the wallet secret's Keychain item is not put behind the person's presence, as the app's is, unless
+  `WINNOW_E2E_KEYCHAIN_PROTECTION=1` (which a run sets with `WINNOW_E2E_DEVICE_AUTH=1`: a read needs the
+  authentication);
 * (Lean only) `WINNOW_E2E_LEDGER=<entropy hex>` makes a simulated Ledger with that seed the app's Ledger,
   advertising nearby to the home's scan (and onboarding then shows its Bluetooth card); set but unreadable,
   the launch fails closed;
@@ -41,6 +44,8 @@ structure Mode where
   clipboard : Option String
   forcedNetwork : Option Network
   requireDeviceAuthentication : Bool
+  /-- `WINNOW_E2E_KEYCHAIN_PROTECTION=1`: the wallet's secret behind the person's presence, as outside test mode. -/
+  keychainProtection : Bool := false
   controlFile : Option String
   peerCount : Option Nat
   syncIntervalSeconds : Option Float
@@ -95,6 +100,7 @@ def resolve (env : String → Option String) : Resolution :=
         clipboard := env "WINNOW_E2E_CLIPBOARD"
         forcedNetwork := (env "WINNOW_E2E_NETWORK").bind networkOfRaw
         requireDeviceAuthentication := env "WINNOW_E2E_DEVICE_AUTH" == some "1"
+        keychainProtection := env "WINNOW_E2E_KEYCHAIN_PROTECTION" == some "1"
         controlFile := env "WINNOW_E2E_CONTROL_FILE"
         peerCount := (env "WINNOW_E2E_PEER_COUNT").bind swiftInt? |>.bind fun n => if n > 0 then some n.toNat else none
         syncIntervalSeconds := (env "WINNOW_E2E_SYNC_INTERVAL").bind parseDouble |>.bind fun d => if d > 0 then some d else none

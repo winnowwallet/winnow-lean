@@ -52,7 +52,7 @@ def journal (name : String) (fields : List (String × String) := []) : IO Unit :
 def e2eVariables : List String :=
   ["WINNOW_E2E", "WINNOW_E2E_ENTROPY", "WINNOW_E2E_RUN", "WINNOW_E2E_PEER",
    "WINNOW_E2E_CHALLENGE", "WINNOW_E2E_RESET", "WINNOW_E2E_CLIPBOARD", "WINNOW_E2E_NETWORK",
-   "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
+   "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_KEYCHAIN_PROTECTION", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
    "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS"]
 
 /-- `E2EMode.current` in a Debug build: inactive, active, or — without pinned entropy — a stop, because a
@@ -98,8 +98,19 @@ def background (fx : Effects Host) (gen : Nat) (ctx : String) (act : IO Host) : 
   discard <| IO.asTask do
     try fx.post (← act) catch e => do trace s!"failed {gen} {ctx}: {e}"; fx.post (.failed gen ctx (toString e))
 
+/-- How long the shell keeps an authentication for the Keychain reads of the action it was asked for, at
+most (seconds; the shell's own ceiling). The action ends it sooner (`Real.withKeychainContext`). -/
+def authenticationKeptFor : Nat := 60
+
+/-- The `auth` request: the reason, and that a yes be kept for the reads that follow, so the Keychain, which
+holds the wallet's secret behind the person's presence, is satisfied by this one prompt. -/
+def authRequest (reason : String) : Json :=
+  Json.mkObj [("reason", Json.str reason), ("keep", toJson authenticationKeptFor)]
+
 /-- `authenticateSensitiveAction`: device-owner authentication before `act` (inside a task). A
-cancelled prompt is a decision, not a failure: `ctx ++ ".cancelled"` clears the busy state quietly. -/
+cancelled prompt is a decision, not a failure: `ctx ++ ".cancelled"` clears the busy state quietly. `act`
+runs under the authentication the shell kept, which ends with it; a search for cards that waits for the
+wallet's secret gets what it needs of it first (`Backend.personPresent`). -/
 def authenticated (fx : Effects Host) (gen : Nat) (ctx reason : String) (act : IO Host) : IO Unit :=
   discard <| IO.asTask do
     -- automated Debug runs skip it unless they ask for it (`WINNOW_E2E_DEVICE_AUTH=1`)
@@ -107,9 +118,11 @@ def authenticated (fx : Effects Host) (gen : Nat) (ctx reason : String) (act : I
       if !m.requireDeviceAuthentication then
         try fx.post (← act) catch e => fx.post (.failed gen ctx (toString e))
         return
-    let auth ← IO.wait (← fx.ask "auth" (Json.mkObj [("reason", Json.str reason)]))
+    let auth ← IO.wait (← fx.ask "auth" (authRequest reason))
     if (auth.getObjValAs? Bool "ok").toOption.getD false then
-      try fx.post (← act) catch e => fx.post (.failed gen ctx (toString e))
+      Real.withKeychainContext fx.ask (auth.getObjValAs? String "context").toOption do
+        try (← backendRef.get).personPresent catch _ => pure ()
+        try fx.post (← act) catch e => fx.post (.failed gen ctx (toString e))
     else
       let err := (auth.getObjValAs? String "error").toOption.getD "Device authentication failed."
       let cancelled := (err.toLower.splitOn "cancel").length > 1
@@ -122,9 +135,12 @@ test mode with and without `WINNOW_E2E_DEVICE_AUTH=1`. -/
 def authenticateNow (fx : Effects Host) (reason : String) : IO Unit := do
   if let some m ← e2eRef.get then
     if !m.requireDeviceAuthentication then return
-  let auth ← IO.wait (← fx.ask "auth" (Json.mkObj [("reason", Json.str reason)]))
+  let auth ← IO.wait (← fx.ask "auth" (authRequest reason))
   unless (auth.getObjValAs? Bool "ok").toOption.getD false do
     throw (IO.userError ((auth.getObjValAs? String "error").toOption.getD "Device authentication failed."))
+  -- what follows (the words for a first iCloud copy; a restore) reads under this authentication. Nothing
+  -- brackets it here, so it ends at its time, when the app leaves the front, or when the next one is asked for
+  Real.keychainContext.set (auth.getObjValAs? String "context").toOption
 
 /-- What the shell's `clipboard.set` is asked for: the recovery phrase stays on this device and expires after
 two minutes, anything else may sync and lasts five (records-test's `backupScreens`). -/
@@ -143,7 +159,9 @@ def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit
     backendRef.set { Backend.sample with scanLedgers := pure (if ledger then [sampleNearbyLedger] else []) }
   else
     let service := (mode.map (·.keychainService)).getD Real.walletService
-    let deps : Real.Deps := { keyStore := Real.shellKeyStore fx.ask service, fetch := Real.shellFetch fx.ask,
+    -- the wallet's secret is behind the person's presence; a test run's is only when it asks
+    let userPresence := (mode.map (·.keychainProtection)).getD true
+    let deps : Real.Deps := { keyStore := Real.shellKeyStore fx.ask service userPresence, fetch := Real.shellFetch fx.ask,
                               discoverGateways := some (Winnow.IO.discoverGateways) }
     let deps := match mode with
       | none => deps

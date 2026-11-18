@@ -703,6 +703,60 @@ def shellAdapters : TM Unit := do
   check "load: a locked device is errSecInteractionNotAllowed" ((← (store.load "w1").run) matches .error (.keychain (-25308)))
   answer fun _ _ => obj [("hex", Lean.Json.null), ("status", (-25300 : Int))]
   check "loadBytes: missing is none" ((← (store.loadBytes "w1").run) matches .ok none)
+  -- as it was: nothing of an access control or a kept authentication is sent by a store that was not asked for it
+  let sent (name : String) : IO (Array Lean.Json) := do return (← asked.get).filterMap fun (n, a) => if n == name then some a else none
+  let has (a : Lean.Json) (key : String) : Bool := (a.getObjVal? key).toOption.isSome
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false)]
+  discard (store.store secret "w1").run
+  check "store: without userPresence, no access is sent" ((← sent "keychain.add").all (!has · "access"))
+  check "upgradeProtection: without userPresence, nothing is asked"
+    ((← (store.upgradeProtection "w1").run) matches .ok false && (← sent "keychain.protect").isEmpty)
+  -- the wallet's secret behind the person's presence (SEC-060): the secret's item alone, and its reads under
+  -- the authentication the app keeps
+  let guarded := Real.shellKeyStore ask Real.walletService true
+  Real.keychainContext.set none
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false), ("access", "userPresence")]
+  let stored ← (guarded.store secret "w1").run
+  check "userPresence: the secret is added behind the person's presence, by one keychain.add"
+    (stored matches .ok () && ((← asked.get).map (·.1)) == #["keychain.add"] &&
+     ((← sent "keychain.add").map fun a => (a.getObjValAs? String "access").toOption) == #[some "userPresence"])
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false)]
+  discard (guarded.storeBytes (ByteArray.mk #[1, 2, 3]) "store-key.people.main").run
+  check "userPresence: an item kept as bytes is not: a sync pass reads it with nobody there"
+    ((← sent "keychain.add").size == 1 && (← sent "keychain.add").all (!has · "access"))
+  answer fun _ _ => obj [("value", Lean.Json.null), ("status", (-25308 : Int))]
+  check "userPresence: a read with no authentication names none, and the Keychain's refusal is its status"
+    ((← (guarded.load "w1").run) matches .error (.keychain (-25308)) && (← sent "keychain.get").all (!has · "context"))
+  answer fun name _ =>
+    if name == "keychain.get" then obj [("value", Lean.Json.str (String.fromUTF8! secret.serialized)), ("status", (0 : Int))]
+    else obj [("ok", true)]
+  let twoReads : IO Bool := do
+    let first ← (guarded.load "w1").run
+    let second ← (guarded.load "w1").run
+    return first matches .ok _ && second matches .ok _
+  let read ← (Real.withKeychainContext ask (some "kept-1") twoReads : IO Bool)
+  check "userPresence: under a kept authentication every read names it, and it is ended once, after"
+    (read && ((← sent "keychain.get").map fun a => (a.getObjValAs? String "context").toOption) == #[some "kept-1", some "kept-1"] &&
+     ((← sent "auth.end").map fun a => (a.getObjValAs? String "context").toOption) == #[some "kept-1"] &&
+     ((← asked.get).map (·.1)) == #["keychain.get", "keychain.get", "auth.end"] && (← Real.keychainContext.get).isNone)
+  answer fun _ _ => obj [("ok", true)]
+  let threw ← (Real.withKeychainContext ask (some "kept-2") (throw (IO.userError "the action failed") : IO Unit)).toBaseIO
+  check "userPresence: an action that fails still ends its authentication"
+    (threw matches .error _ && ((← sent "auth.end").map fun a => (a.getObjValAs? String "context").toOption) == #[some "kept-2"] &&
+     (← Real.keychainContext.get).isNone)
+  answer fun _ _ => obj [("value", Lean.Json.null), ("status", (-25308 : Int))]
+  discard (guarded.load "w1").run
+  check "userPresence: after it, a read names no authentication again" ((← sent "keychain.get").all (!has · "context"))
+  -- an item an earlier build stored: one keychain.protect, in place; a wallet that only watches has none
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("changed", true), ("access", "userPresence")]
+  check "upgradeProtection: one keychain.protect and nothing else, and it says it changed the item"
+    ((← (guarded.upgradeProtection "w1").run) matches .ok true && ((← asked.get).map (·.1)) == #["keychain.protect"])
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("changed", false), ("access", "userPresence")]
+  check "upgradeProtection: an item already protected is left" ((← (guarded.upgradeProtection "w1").run) matches .ok false)
+  answer fun _ _ => obj [("ok", false), ("status", (-25300 : Int)), ("changed", false)]
+  check "upgradeProtection: no item (a wallet that only watches) is not a failure" ((← (guarded.upgradeProtection "w1").run) matches .ok false)
+  answer fun _ _ => obj [("ok", false), ("status", (-25293 : Int)), ("changed", false)]
+  check "upgradeProtection: a refusal is its status" ((← (guarded.upgradeProtection "w1").run) matches .error (.keychain (-25293)))
   -- fetch: a response is a response; the shell's errors as the routed client's
   let fetch (reply : Lean.Json) : IO (Except Winnow.IO.NetError Winnow.IO.HttpHop) := do
     answer fun _ _ => reply
@@ -877,6 +931,20 @@ def declinedDeviceCheck (root : System.FilePath) : TM Unit := do
   WinnowApp.e2eRef.set (mode [("WINNOW_E2E_DEVICE_AUTH", "1")])
   check "test mode with WINNOW_E2E_DEVICE_AUTH=1: asked, and declined it stops"
     ((← failsWith (WinnowApp.authenticateNow fx "Restore") "Canceled by user.") && (← prompts) == #["Restore"])
+  -- approved, the authentication the shell kept is what the Keychain's reads that follow name
+  let keeps : IO (Array Lean.Json) := do
+    return (← asked.get).filterMap fun (n, a) => if n == "auth" then (a.getObjVal? "keep").toOption else none
+  check "the check asks the shell to keep a yes, for a minute at most" ((← keeps) == #[Lean.toJson (60 : Nat)])
+  Real.keychainContext.set none
+  answer.set (Lean.Json.mkObj [("ok", true), ("context", "kept-9")])
+  check "approved: the kept authentication is the one the reads name"
+    (!(← fails (WinnowApp.authenticateNow fx "Restore")) && (← Real.keychainContext.get) == some "kept-9")
+  answer.set (Lean.Json.mkObj [("ok", true)])
+  check "approved by a shell that kept none: the reads name none"
+    (!(← fails (WinnowApp.authenticateNow fx "Restore")) && (← Real.keychainContext.get).isNone)
+  check "test mode: the secret is behind the person's presence only when the run asks"
+    ((mode []).map (·.keychainProtection) == some false &&
+     (mode [("WINNOW_E2E_KEYCHAIN_PROTECTION", "1")]).map (·.keychainProtection) == some true)
   WinnowApp.e2eRef.set none
 
 def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
