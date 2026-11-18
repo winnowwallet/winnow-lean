@@ -217,10 +217,11 @@ def accountsBalanceLine (m : Model) : List H :=
   [.identified Ids.accountsBalanceText
     (caption s!"of which {satsText m.status.accountsBalance} in {count} multisig account{if count == 1 then "" else "s"}, needs co-signers")]
 
-/-- `PeerRoutingBanner`: the home's routing line (a lock when every peer is behind Tor or I2P; a short warning
-when any peer can see the phone's IP address, its whole message in an alert). -/
+/-- `PeerRoutingBanner`: the home's routing line (a lock when every peer is behind Tor or I2P; a half shield
+when direct peers are reached through Mullvad; a short warning when any peer can see an address that is the
+person's or the session's exit node is gone, its whole message in an alert). -/
 def peerRoutingBanner (m : Model) : H :=
-  let state := PeerRoutingState.current m.settings.peerGatewaySettings.mode m.status.activeGateways m.status.discoveringGateways
+  let state := PeerRoutingState.ofStatus m.settings.peerGatewaySettings.mode m.status
   if state.warns then
     compactWarning Ids.peerRoutingBanner state.shortLabel .routing state.symbol (if state == .offline then .negative else .warning)
   else .identified Ids.peerRoutingBanner (.row [.icon state.symbol, caption state.message])

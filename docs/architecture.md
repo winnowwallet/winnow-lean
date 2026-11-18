@@ -44,8 +44,9 @@ This is a compact-filter wallet. Its checks do not establish the same view as
 independently validating every block from genesis. Peer choice, checkpoints,
 filter agreement and catch-up limits are described in the bundled
 [read-side guide](read-side.html). Direct peers observe connection metadata and
-requests. Optional SOCKS gateways change transport; they do not remove the
-wallet's chain-verification assumptions.
+requests. Optional SOCKS gateways change transport, and a Tailscale exit node
+changes whose address peers see; neither removes the wallet's
+chain-verification assumptions.
 
 ## Payment review and signing
 

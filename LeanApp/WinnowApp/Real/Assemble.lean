@@ -36,9 +36,20 @@ def Env.currentWallet (env : Env) : IO (Option Wallet) := do return (← env.get
 def Env.httpGet (env : Env) (url : String) (maximumBytes : Nat) : IO ByteArray := do
   runNet ((← env.get).http.get url maximumBytes)
 
+/-- The backend's state. Every HTTP request it makes (`deps.fetch`: seeds, explorer lookups) first looks at
+the route of the generation's direct connections: through an exit node that is no longer the route, the
+request is refused rather than sent directly. The shell's fetch cannot be bound to the exit node as a peer
+connection is, so this is a look just before the request, not a guarantee during it. -/
 def Env.new (deps : Deps) : IO Env := do
-  let http ← RoutedHTTPClient.new deps.fetch
-  return { deps, core := ← Std.Mutex.new { http }, walletLock := ← Std.Mutex.new () }
+  let core ← Std.Mutex.new { http := ← RoutedHTTPClient.new deps.fetch }
+  let fetch : HttpFetch := fun req => do
+    let c ← (core.atomically (m := IO) MonadStateOf.get : IO Core)
+    if let some t := c.exitRoute.source? then
+      unless ← (deps.tunnelCarries t : IO Bool) do throw (.http .unavailable)
+    deps.fetch req
+  let http ← RoutedHTTPClient.new fetch
+  core.atomically (m := IO) (_root_.modify fun c => { c with http })
+  return { deps := { deps with fetch }, core, walletLock := ← Std.Mutex.new () }
 
 def Env.backend (env : Env) : Backend :=
   { Backend.pending with

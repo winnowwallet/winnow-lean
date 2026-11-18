@@ -19,8 +19,8 @@ Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s four suites as four lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested) and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the eight journeys headless against the app itself (LeanNative's `wire-journey`). |
-| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump and Retry on one runner; Ledger, census, silent payments and spent-elsewhere on the other). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s four suites as four lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested) and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the ten journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump, Retry and the Mullvad exit node on one runner; the two Ledger journeys, census, silent payments and spent-elsewhere on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
 
@@ -29,20 +29,24 @@ The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
 Debug must start the test run and journal it, Release must ignore it and boot
 into its ordinary storage.
 
-## The eight journeys
+## The ten journeys
 
 The UI journeys are Lean (`LeanApp/Journeys.lean`), run on the Mac. Each step
 is one command to LeanNative's journey driver, the one XCUITest in the app's UI
 test target; each check is Lean, against the node. Each journey launches the
 app in test mode on an iPhone Duo simulator against a regtest node, finds
 controls by the identifiers the views give them, and checks the app's results
-against the node.
+against the node (the two on mainnet, `shippedCensus` and `mullvadExitNode`,
+have no peer and check the screens alone).
 
 - `createReceiveSendConfirm`: create a wallet, receive from the node,
   review and send a payment the node accepts, see it confirm.
 - `ledgerPairVerifySpend`: pair test mode's simulated Ledger, have it
   verify the receive address, and spend with the phone's and the Ledger's
   signatures.
+- `ledgerCardTwoOfTwo`: the simulated Ledger advertising nearby brings the
+  home's card; Set up pairs it, creates and registers a 2-of-2, and the
+  phone shows the address the Ledger shows. The node pays it.
 - `multisigTwoOfThreeWithRecovery`: a 2-of-3 with two Bitcoin Core
   wallets, built in the app. The first address is Core's; the phone and both
   Cores sign, and Core accepts a witness with exactly two signatures. After the
@@ -71,10 +75,21 @@ against the node.
   says it couldn't reach the network and offers Retry. With the node back,
   Retry reconnects before the pool's own redial would, and the wallet finds
   a payment. The node goes back on the network however the journey ends.
+- `mullvadExitNode`: test mode gives the session a Mullvad exit node
+  (`WINNOW_E2E_EXIT_ROUTE=mullvad`, in place of the phone's routing table and
+  Mullvad's answer). The home's routing line is Mullvad's, with no warning
+  and not called private, and Peers and routing names the exit node. The
+  runner takes the exit node away (the control file's `exitRouteDropped`):
+  the home warns, its alert says nothing is sent directly, and Peers and
+  routing says so. It comes back, and the warning goes by itself. The screens
+  only: that a connection is refused rather than made directly is `io-test`'s
+  and `backend-test`'s to show.
 
 What the journeys do not cover: a physical Ledger (CI's is simulated; the
 owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift
-app), receiving silent payments (Winnow does not), live Tor and I2P gateways,
+app), receiving silent payments (Winnow does not), live Tor and I2P gateways, a
+real Tailscale exit node (the journey's is test mode's: no routing table is
+read and Mullvad is not asked),
 iCloud, background tasks scheduled by iOS, and iPad layouts. Two of those
 paths run headless instead: `records-test` sends a background task's launch and
 expiry through the app's `perform` with a fake shell, and `cloud-backup-test`
@@ -116,10 +131,10 @@ app's `Tools/Fuzz`. It runs in the `lean` job on every run, with a seed taken fr
 the commit, so each commit tries new inputs and a failure replays from the line it
 prints. There is no separate job and no schedule.
 
-It mutates known-good inputs for 30 targets: the fifteen upstream had, the same
+It mutates known-good inputs for 31 targets: the fifteen upstream had, the same
 address and silent payment rules past their checksums, the files and Ledger
-replies upstream's harness could not reach, and seven for ECDSA and SegWit v0
-multisig accounts (below). A check parses the input and holds what
+replies upstream's harness could not reach, Mullvad's answer about an exit
+node, and seven for ECDSA and SegWit v0 multisig accounts (below). A check parses the input and holds what
 parsed to what the wallet relies on, mostly that the canonical form parses back to
 the same value. A refusal is not a finding. These are:
 

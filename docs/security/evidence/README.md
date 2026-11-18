@@ -20,6 +20,10 @@ They are historical evidence, not a live health check or an automated test fixtu
 `scripts/check-live-gateways` and independent SOCKS, mirror and handshake
 checks through the project's Tor and I2P gateways.
 
+[Exit node, 2026-11-18](exit-node-2026-11-18.md) records what the routing
+table and a bound connection showed on a Mac with a Tailscale exit node on
+and off, which exit-node recognition rests on.
+
 [Ledger on mainnet, 2026-10-26](ledger-mainnet-2026-10-26.md) records the
 first spend a physical Ledger Nano X co-signed from a Winnow 2-of-2 account,
 with the transaction's witness.

@@ -155,6 +155,7 @@ def snapshot (env : Env) : IO (Status × SyncPhase) := do
     if let some f := stack.filters then s := { s with nextScanHeight := (← f.nextScanHeight).toNat }
   s := { s with syncing := c.syncing, lastSyncError := c.lastSyncError, relayStoreQuarantined := c.relayStoreQuarantined,
                 activeGateways := c.activeGateways, discoveringGateways := c.discoveringGateways,
+                exitRoute := c.exitRoute, exitDropped := c.exitDropped,
                 transientSyncError := c.transientSyncError, transientSyncFailures := c.transientSyncFailures }
   if let some at_ := c.lastCompleteCheck then
     let now ← unixNow

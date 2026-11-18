@@ -346,6 +346,24 @@ private def dnsJSON : Target := {
     require (hosts.all (!·.isEmpty)) "an empty host from a DNS answer"
     return true }
 
+/-- What Mullvad answers about the address a request reached it from (`am.i.mullvad.net/json`): an exit node
+is called Mullvad's only on the word `true` under that key, and a server name shown is one worth showing. -/
+private def mullvadAnswer : Target := {
+  name := "mullvad-answer"
+  seeds := #[.empty, utf8 "{\"ip\":\"185.213.154.68\",\"mullvad_exit_ip\":true,\"mullvad_exit_ip_hostname\":\"se-sto-wg-001\"}",
+    utf8 "{\"ip\":\"8.8.8.8\",\"mullvad_exit_ip\":false,\"organization\":\"Example\"}", utf8 ("".pushn '[' 16000)]
+  tokens := jsonTokens ++ #[utf8 "\"mullvad_exit_ip\"", utf8 "\"mullvad_exit_ip_hostname\"", utf8 "true", utf8 "false"]
+  check := fun _ data => do
+    let some answer := MullvadAnswer.parse data | return false
+    let text := (String.fromUTF8? data).getD ""
+    if let .mullvad server := answer then
+      require ((text.splitOn "mullvad_exit_ip").length > 1 && (text.splitOn "true").length > 1)
+        "an exit node called Mullvad's without the word under its key"
+      if let some name := server then
+        require (MullvadAnswer.serverName name == some name && (text.splitOn name).length > 1)
+          "a Mullvad server name not worth showing, or not in the answer"
+    return true }
+
 private def fundingSources : Target := {
   name := "funding-sources"
   tokens := wideLengths
@@ -787,7 +805,7 @@ private def segwitSpend : Target := {
 
 private def targets : Array Target :=
   #[psbt, descriptor, transaction, block, messages, framing, filter, address, importBundle, census, dnsJSON,
-    fundingSources, controlBlock, personPaste, silentPaymentAddress, addressProgram, silentPaymentKeys,
+    mullvadAnswer, fundingSources, controlBlock, personPaste, silentPaymentAddress, addressProgram, silentPaymentKeys,
     persistedPeers, rangeScan, broadcastStore, walletState, ledgerFrames, ledgerCommands,
     ecdsaDer, ecdsaVerify, ecdsaSign, schnorrSign, constantTimeArithmetic, segwitDescriptor, segwitSpend]
 

@@ -1,5 +1,6 @@
 import Lean.Data.Json
 import Winnow.IO.Gateways
+import Winnow.IO.ExitRoute
 
 /-! The app-facing view of the wallet: what the screens show, already derived (the Model never holds
 WalletCore objects, only these summaries). Mirrors AppModel's `Status`, `SyncPhase`, settings, stage,
@@ -202,8 +203,13 @@ structure Status where
   feeFloorMilli : Option Nat := none
   /-- `activePeerGateways`: the routing in effect (discovered, manual or clearnet). -/
   activeGateways : Winnow.IO.PeerGatewayConfiguration := {}
-  /-- `discoveringGateways`: Automatic is asking the tailnet for its gateways. -/
+  /-- `discoveringGateways`: the routing is being resolved (the tailnet asked for its gateways, Mullvad asked
+  whether the exit node is its own). -/
   discoveringGateways : Bool := false
+  /-- How this session's direct connections leave the phone: directly, or through a Tailscale exit node. -/
+  exitRoute : Winnow.IO.ExitRoute := .direct
+  /-- That exit node is no longer the route: the session's direct connections are bound to it and wait. -/
+  exitDropped : Bool := false
   /-- `transientSyncError` / `transientSyncFailures`: the message the last dropped or slow peer left and how
   many passes in a row ended so (`simpleSyncError`). -/
   transientSyncError : Option String := none

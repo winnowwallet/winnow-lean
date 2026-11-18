@@ -1452,6 +1452,129 @@ def gatewayChecks (n : Node) : IO Unit := do
     (seated == #[onion] && (← seedAsks.get) == 0 && (← asked.get) == #[onion.host]) s!"{seated.map (·.host)}"
   pool.stop
 
+/-- 11. A Tailscale exit node as the route of direct connections, and Mullvad's among them: what the routing
+table's answers mean, what Mullvad's answer means, the one request that asks it, and connections bound to the
+exit node. No exit node, tailnet or Mullvad is involved: the routing table's answers and Mullvad's are given. -/
+def exitRouteChecks (n : Node) : IO Unit := do
+  say "exit node (Tailscale, Mullvad)"
+  let tail4 := "100.68.170.77"
+  let tail6 := "fd7a:115c:a1e0::9a01:aa4d"
+  -- the routing table: which local address a socket for each destination would leave from
+  let routes (public4 quad100 : Option String) (public6 : Option String := none) : String → IO (Option String) := fun h =>
+    pure (if h == TunnelSource.probe4 then public4 else if h == "100.100.100.100" then quad100
+          else if h == TunnelSource.probe6 then public6 else none)
+  let asked ← IO.mkRef 0
+  let resolver (answers : Bool) : IO Bool := do asked.modify (· + 1); pure answers
+  check "exit node on: public traffic leaves from the tailnet addresses"
+    ((← tunnelSource (routes (some tail4) (some tail4) (some tail6)) (resolver false)) == some { v4 := tail4, v6 := some tail6 } &&
+     (← asked.get) == 0)
+  check "no exit node: public traffic leaves from the phone's own network"
+    ((← tunnelSource (routes (some "192.168.1.20") (some tail4)) (resolver true)) == none)
+  check "no exit node, a carrier numbering from 100.64/10: not the tailnet's address"
+    ((← tunnelSource (routes (some "100.70.1.1") (some tail4)) (resolver true)) == none)
+  check "Tailscale off on such a carrier: both leave from the carrier's address, and the resolver is silent"
+    ((← tunnelSource (routes (some "100.70.1.1") (some "100.70.1.1") (some "2001:db8::5")) (resolver false)) == none &&
+     (← asked.get) == 1)
+  check "a tailnet without IPv6: Tailscale's resolver answering settles it"
+    ((← tunnelSource (routes (some tail4) (some tail4)) (resolver true)) == some { v4 := tail4 } && (← asked.get) == 2)
+  check "no route at all" ((← tunnelSource (routes none none) (resolver true)) == none)
+  check "Tailscale's IPv6 prefix is fd7a:115c:a1e0::/48"
+    (isTailnetIPv6 tail6 && !isTailnetIPv6 "fd7a:115c:a1e1::1" && !isTailnetIPv6 "2001:db8::1" && !isTailnetIPv6 tail4)
+  check "the routing table really answers: loopback leaves from loopback, a name is not asked"
+    ((← localAddressToward "127.0.0.1") == some "127.0.0.1" && (← localAddressToward "example.invalid") == none)
+  let source : TunnelSource := { v4 := tail4, v6 := some tail6 }
+  check "still the route while public traffic would leave from the tunnel"
+    ((← source.carries (routes (some tail4) (some tail4))) && !(← source.carries (routes (some "192.168.1.20") (some tail4))) &&
+     !(← source.carries (routes none none)) && !(← source.carries (routes (some "100.99.9.9") (some "100.99.9.9"))))
+  -- Mullvad's answer
+  let json (t : String) : ByteArray := t.toUTF8
+  check "Mullvad: one of its exit addresses, with the server's name"
+    (MullvadAnswer.parse (json "{\"ip\":\"185.213.154.68\",\"mullvad_exit_ip\":true,\"mullvad_exit_ip_hostname\":\"se-sto-wg-001\"}")
+      == some (.mullvad (some "se-sto-wg-001")))
+  check "Mullvad: one of its exit addresses, no name or a name not worth showing"
+    (MullvadAnswer.parse (json "{\"mullvad_exit_ip\":true}") == some (.mullvad none) &&
+     MullvadAnswer.parse (json "{\"mullvad_exit_ip\":true,\"mullvad_exit_ip_hostname\":\"<b>x</b>\"}") == some (.mullvad none) &&
+     MullvadAnswer.parse (json "{\"mullvad_exit_ip\":true,\"mullvad_exit_ip_hostname\":7}") == some (.mullvad none))
+  check "Mullvad: not one of its addresses" (MullvadAnswer.parse (json "{\"ip\":\"8.8.8.8\",\"mullvad_exit_ip\":false}") == some .notMullvad)
+  check "Mullvad: only the boolean true counts; anything else is no answer"
+    (["{\"mullvad_exit_ip\":\"true\"}", "{\"mullvad_exit_ip\":1}", "{\"ip\":\"8.8.8.8\"}", "[true]", "true", "", "<html>"].all fun t =>
+      MullvadAnswer.parse (json t) == none)
+  check "Mullvad: bytes that are not text are no answer" (MullvadAnswer.parse (ByteArray.mk #[0xff, 0xfe]) == none)
+  let requests ← IO.mkRef (#[] : Array HttpRequest)
+  let answering (hop : NetM HttpHop) : HttpFetch := fun r => do requests.modify (·.push r); hop
+  let yes := json "{\"mullvad_exit_ip\":true,\"mullvad_exit_ip_hostname\":\"us-mia-wg-002\"}"
+  check "asking Mullvad: its answer" ((← askMullvad (answering (pure (.response 200 none yes)))) == some (.mullvad (some "us-mia-wg-002")))
+  check "asking Mullvad: one request, to its check, through no gateway, a few seconds at most"
+    (match (← requests.get).toList with
+      | [r] => r.url == "https://am.i.mullvad.net/json" && r.socks.isNone && r.maximumBytes == 4096 &&
+               r.requestTimeoutSeconds ≤ 5 && r.resourceTimeoutSeconds ≤ 8
+      | _ => false)
+  check "asking Mullvad: a redirect, a failure, an error or too long an answer is no answer"
+    ((← askMullvad (answering (pure (.redirect 302 "https://elsewhere.example/")))) == none &&
+     (← askMullvad (answering (pure (.response 500 none yes)))) == none &&
+     (← askMullvad (answering (throw (.http (.transport "offline"))))) == none &&
+     (← askMullvad (answering (pure (.response 200 none (yes ++ ByteArray.mk (Array.replicate 4096 32)))))) == none)
+  -- the route: Mullvad is asked only behind an exit node, and the route is looked at again afterwards
+  let asks ← IO.mkRef 0
+  let ask (a : Option MullvadAnswer) : IO (Option MullvadAnswer) := do asks.modify (· + 1); pure a
+  check "route: no exit node is direct, and Mullvad is not asked"
+    ((← detectExitRoute (ask (some (.mullvad none))) (pure none)) == .direct && (← asks.get) == 0)
+  check "route: an exit node Mullvad confirms"
+    ((← detectExitRoute (ask (some (.mullvad (some "se-sto-wg-001")))) (pure (some source))) == .mullvad source (some "se-sto-wg-001"))
+  check "route: an exit node Mullvad does not confirm, or does not answer for, is not called Mullvad's"
+    ((← detectExitRoute (ask (some .notMullvad)) (pure (some source))) == .exitNode source &&
+     (← detectExitRoute (ask none) (pure (some source))) == .exitNode source)
+  let looks ← IO.mkRef 0
+  let leaving : IO (Option TunnelSource) := do
+    return if (← looks.modifyGet fun k => (k, k + 1)) == 0 then some source else none
+  check "route: an exit node switched off while Mullvad was asked is direct"
+    ((← detectExitRoute (ask (some (.mullvad none))) leaving) == .direct)
+  -- connections bound to the exit node
+  let v4 (a b c d : UInt8) (port : UInt16 := 8333) : Std.Net.SocketAddress := .v4 ⟨.ofParts a b c d, port⟩
+  let v6 (a b : UInt16) (h : UInt16 := 1) : Std.Net.SocketAddress := .v6 ⟨.ofParts a b 0 0 0 0 0 h, 8333⟩
+  check "binding: a public address is bound to the tunnel's address of its family"
+    ((source.bindingFor (v4 8 8 8 8)).toOption == some (some (v4 100 68 170 77 0)) &&
+     (match source.bindingFor (v6 0x2001 0x4860) with | .ok (some (.v6 a)) => toString a.addr == tail6 && a.port == 0 | _ => false))
+  check "binding: the phone's own networks are reached as ever (loopback, private, link-local, the tailnet)"
+    ([v4 127 0 0 1, v4 10 1 2 3, v4 172 16 0 1, v4 192 168 1 1, v4 169 254 1 1, v4 100 119 253 19, v6 0 0, v6 0xfe80 0, v6 0xfd7a 0x115c].all
+      fun a => (source.bindingFor a).toOption == some none)
+  check "binding: no address of the family is no connection, not a direct one"
+    ((match ({ v4 := tail4 } : TunnelSource).bindingFor (v6 0x2001 0x4860) with | .error _ => true | _ => false) &&
+     (match ({ v4 := "nonsense" } : TunnelSource).bindingFor (v4 8 8 8 8) with | .error _ => true | _ => false))
+  -- 192.0.2.1 is a documentation address: nothing answers there. A connection bound to an address this
+  -- machine does not have fails at once; unbound, it would be sent and run into the dial's deadline.
+  let unreachable : PeerEndpoint := { host := "192.0.2.1", port := 8333 }
+  let bound ← PeerConnection.new unreachable regtest (tunnel := some { v4 := "100.127.255.254" })
+  let began ← IO.monoMsNow
+  let outcome ← (bound.connect 8_000).attempt
+  check "a public peer through an exit node that is gone: refused before anything is sent"
+    ((match outcome with | .error e@(.peer (.disconnected _)) => e.isTransportPeerError | _ => false) && (← IO.monoMsNow) - began < 4_000)
+    s!"{(← IO.monoMsNow) - began} ms"
+  let named ← PeerConnection.new { host := "node.example.invalid", port := 8333 } regtest (tunnel := some { v4 := "100.127.255.254" })
+  check "a named peer through an exit node that is gone: its name is not looked up"
+    (match ← (named.connect 8_000).attempt with
+      | .error (.peer (.disconnected m)) => m == "the exit node is no longer the route"
+      | _ => false)
+  let local_ ← PeerConnection.new n.endpoint regtest (tunnel := some { v4 := "100.127.255.254" })
+  runNet "connect to a local peer with an exit node set" (local_.connect 10_000)
+  check "a peer on the phone's own network is reached without the exit node" (← local_.isConnected)
+  local_.disconnect
+  -- The pool: seeds are looked up only while the exit node is still the route.
+  let seedAsks ← IO.mkRef 0
+  let counting : SeedResolver := { lookup := fun _ _ _ => do seedAsks.modify (· + 1); pure #[] }
+  let seeded := { regtest with dnsSeeds := #["seed.example.invalid"] }
+  let gone ← PeerPool.new seeded (peerCount := 1) (seedResolver := some counting) (tunnel := some { v4 := "100.127.255.254" })
+  gone.start
+  discard <| waitUntil 5_000 (do return (← gone.connectionStatus).exhausted)
+  gone.stop
+  let gonesAsks ← seedAsks.get
+  let open_ ← PeerPool.new seeded (peerCount := 1) (seedResolver := some counting)
+  open_.start
+  discard <| waitUntil 5_000 (do return (← seedAsks.get) > 0)
+  open_.stop
+  check "pool: no seed is looked up through an exit node that is gone" (gonesAsks == 0 && (← seedAsks.get) == 1)
+    s!"{gonesAsks}, then {← seedAsks.get}"
+
 /-- FilterSync's pure steps that the IO scan runs: `batches` (the cfheaders requests of a batch, and
 `batchStop`, which the forward and range scans step by) and `verifiedBlock` on a real block, a block the
 filter did not name, and one whose transactions were changed. -/
@@ -1750,5 +1873,6 @@ def main (_args : List String) : IO UInt32 := runMain "io-test" (progress := tru
       routedHTTPChecks dir
       nodeChecks dir n
       gatewayChecks n
+      exitRouteChecks n
   finally
     try IO.FS.removeDirAll tmp catch _ => pure ()

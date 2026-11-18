@@ -4,6 +4,7 @@ import Winnow.IO.Headers
 import Winnow.IO.Seeds
 import Winnow.IO.Census
 import Winnow.IO.Gateways
+import Winnow.IO.ExitRoute
 
 /-! # The peer pool (`Network/Peers/PeerPool.swift`)
 
@@ -96,6 +97,8 @@ structure PeerPool where
   censusCatalog : Option CensusCatalog
   /-- The networks this pool may use and the SOCKS gateway for each overlay. -/
   gateways : PeerGatewayConfiguration
+  /-- The exit node this pool's direct connections leave through (`PeerConnection.tunnel`), when one does. -/
+  tunnel : Option TunnelSource := none
   avoidOnReset : Array PeerEndpoint
   /-- Monotonic milliseconds for cooldowns (`now`). -/
   now : IO Nat
@@ -124,7 +127,7 @@ def new (params : NetworkParams) (peerCount : Nat := 3) (manualPeers : Array Pee
     (maxParallelDials : Nat := 5) (maxDialAttempts : Nat := 50) (seedResolver : Option SeedResolver := none)
     (censusCatalog : Option CensusCatalog := none) (gateways : PeerGatewayConfiguration := {})
     (avoidOnReset : Array PeerEndpoint := #[]) (now : IO Nat := monoMs) (monitorIntervalMs : Nat := 30_000)
-    (httpFetch : HttpFetch := curlFetch) : IO PeerPool := do
+    (httpFetch : HttpFetch := curlFetch) (tunnel : Option TunnelSource := none) : IO PeerPool := do
   let resolver : SeedResolver ← match seedResolver with
     | some r => pure r
     | none => pure (SeedResolver.routed (← RoutedHTTPClient.new httpFetch))
@@ -138,7 +141,7 @@ def new (params : NetworkParams) (peerCount : Nat := 3) (manualPeers : Array Pee
             st := { st with knownGood := st.knownGood.push c.endpoint,
                             knownSource := st.knownSource.insert c.endpoint c.source }
   return { params, peerCount, manualPeers, peersFile, relayPreference, dialTimeoutMs, maxParallelDials,
-           maxDialAttempts, seedResolver := resolver, censusCatalog, gateways, avoidOnReset, now, monitorIntervalMs,
+           maxDialAttempts, seedResolver := resolver, censusCatalog, gateways, tunnel, avoidOnReset, now, monitorIntervalMs,
            state := ← IO.mkRef st }
 
 /-- Seats `enterRelayOnly` keeps unless asked otherwise. -/
@@ -245,9 +248,13 @@ def shouldResolveSeeds (manualPeers : Bool) (next queued : Nat) (resolved : Bool
   next ≥ queued && !resolved && (running == 0 || !manualPeers)
 
 /-- One lookup per seed, in shuffled order, each reporting on `done` when it answers; only on a valid
-route that includes clearnet (an overlay-only pool resolves no DNS). Returns how many were started. -/
+route that includes clearnet (an overlay-only pool resolves no DNS), and through an exit node only while it
+is still the route (the system resolver is the lookup's fallback, and would be asked directly). Returns how
+many were started. -/
 private def launchSeedLookups (p : PeerPool) (done : EventStream DiscoveryResult Unit) : IO Nat := do
   unless p.gateways.isValid && p.gateways.networks.contains .clearnet do return 0
+  if let some t := p.tunnel then
+    unless ← t.carries do return 0
   let seeds ← shuffle p.params.dnsSeeds
   for seed in seeds do
     spawn do
@@ -340,7 +347,7 @@ partial def replenish (p : PeerPool) : IO Unit := do
       running := running + 1
       let endpoint := candidate.endpoint
       let peer ← PeerConnection.new endpoint p.params (relayPreference := p.relayPreference)
-        (socksProxy := p.gateways.proxy endpoint)
+        (socksProxy := p.gateways.proxy endpoint) (tunnel := p.tunnel)
       p.state.modify fun st => { st with attemptsThisRound := st.attemptsThisRound + 1,
                                          inFlight := st.inFlight.push (endpoint, peer) }
       spawn do

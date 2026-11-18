@@ -71,52 +71,76 @@ inductive PeerRoutingState where
   | mixed
   /-- Every peer is direct. `fallback` means Automatic found no gateway. -/
   | direct (fallback : Bool)
+  /-- Direct peers are reached through a Mullvad exit node of the tailnet: they see Mullvad's address, and
+  Mullvad sees them. Not the lock Tor and I2P get. -/
+  | mullvad
+  /-- Direct peers are reached through a Tailscale exit node Mullvad did not confirm as its own: they see that
+  machine's address, which may be the person's alone. -/
+  | exitNode
+  /-- The exit node this session's direct connections are bound to is no longer the route: none is made until
+  it returns or the person reconnects. `mullvad`: it was Mullvad's. -/
+  | held (mullvad : Bool)
   | offline
   deriving Repr, BEq, Inhabited
 
 namespace PeerRoutingState
 open Winnow.IO
 
-def current (mode : String) (active : PeerGatewayConfiguration) (discovering : Bool) : PeerRoutingState :=
+def current (mode : String) (active : PeerGatewayConfiguration) (discovering : Bool)
+    (exit : ExitRoute := .direct) (exitDropped : Bool := false) : PeerRoutingState :=
   if discovering then .checking
   else if !active.isValid then .offline
   else
     let tor := active.networks.contains .tor
     let i2p := active.networks.contains .i2p
     if !active.networks.contains .clearnet then .overlay tor i2p
-    else if tor || i2p then .mixed
-    else .direct (mode == "automatic")
+    else match exit with
+      | .direct => if tor || i2p then .mixed else .direct (mode == "automatic")
+      | route => if exitDropped then .held route.isMullvad else if route.isMullvad then .mullvad else .exitNode
 
 def message : PeerRoutingState → String
-  | .checking => "Checking your Tor and I2P gateways…"
+  | .checking => "Checking your private routes…"
   | .overlay tor i2p => s!"Private: peers reached through {if tor && i2p then "Tor and I2P" else if tor then "Tor" else "I2P"}"
   | .mixed => "Some peers are direct and can see your IP address"
-  | .direct true => "Direct: peers can see your IP address. No Tor or I2P gateway found; connect Tailscale, then return to Winnow."
+  | .direct true => "Direct: peers can see your IP address. No Tor or I2P gateway found; connect Tailscale, then return to Winnow. A Mullvad exit node chosen in Tailscale also keeps your address from peers."
   | .direct false => "Direct: peers can see your IP address"
+  | .mullvad => "Mullvad exit node: peers see Mullvad's address, not yours"
+  | .exitNode => "Peers see the address of the Tailscale exit node in use, and Mullvad does not confirm it as one of its own. If the machine is yours, its address identifies you. Choose a Mullvad exit node in Tailscale, or connect your Tor or I2P gateway, then return to Winnow."
+  | .held wasMullvad => s!"The {if wasMullvad then "Mullvad exit node" else "exit node"} this session used is no longer the route. Nothing is sent directly: peers wait until it returns, or until you tap Check gateways and reconnect in Peers and routing."
   | .offline => "Offline: peer routing settings are invalid"
 
-/-- A state the person should act on: a peer can see the phone's IP address, or no peer can be reached. -/
+/-- A state the person should act on: a peer can see an address that is theirs, or no peer can be reached. -/
 def warns : PeerRoutingState → Bool
-  | .mixed | .direct _ | .offline => true
-  | .checking | .overlay .. => false
+  | .mixed | .direct _ | .exitNode | .held _ | .offline => true
+  | .checking | .overlay .. | .mullvad => false
 
 /-- The home's short line for a state that warns; tapped, it shows `message` in full. -/
 def shortLabel : PeerRoutingState → String
   | .mixed => "Some peers see your IP"
   | .direct _ => "Peers see your IP"
+  | .exitNode => "Peers see your exit node's IP"
+  | .held true => "Mullvad route dropped"
+  | .held false => "Exit node dropped"
   | .offline => "Routing settings invalid"
-  | .checking | .overlay .. => ""
+  | .checking | .overlay .. | .mullvad => ""
 
 /-- The title of the alert the short line opens. -/
 def alertTitle : PeerRoutingState → String
   | .offline => "Peer routing is offline"
+  | .exitNode => "Peers can see your exit node's address"
+  | .held _ => "Peers are waiting for the exit node"
   | _ => "Peers can see your IP address"
 
 def symbol : PeerRoutingState → String
   | .checking => "network"
   | .overlay .. => "lock.shield.fill"
-  | .mixed | .direct _ => "exclamationmark.triangle.fill"
+  | .mullvad => "shield.lefthalf.filled"
+  | .mixed | .direct _ | .exitNode | .held _ => "exclamationmark.triangle.fill"
   | .offline => "xmark.octagon.fill"
+
+/-- The state the screens show: the chosen mode and what the backend reports. -/
+def ofStatus (mode : String) (s : WinnowApp.Status) : PeerRoutingState :=
+  current mode s.activeGateways s.discoveringGateways s.exitRoute s.exitDropped
 
 end PeerRoutingState
 
@@ -124,18 +148,46 @@ end PeerRoutingState
 def gatewayAddressText (e : Winnow.Net.PeerEndpoint) : String :=
   if e.host.toList.contains ':' then s!"[{e.host}]:{e.port}" else s!"{e.host}:{e.port}"
 
-/-- `SettingsView.PeerInfo.networkLabel`. -/
-def peerNetworkLabel : Winnow.IO.PeerNetwork → String
-  | .clearnet => "Clearnet · sees your IP"
-  | .tor => "Tor"
-  | .i2p => "I2P"
+/-- `SettingsView.PeerInfo.networkLabel`: what a peer of that network sees. A direct peer sees whatever the
+session's direct connections leave from. -/
+def peerNetworkLabel (n : Winnow.IO.PeerNetwork) (exit : Winnow.IO.ExitRoute := .direct) : String :=
+  match n, exit with
+  | .clearnet, .direct => "Clearnet · sees your IP"
+  | .clearnet, .mullvad .. => "Clearnet · sees Mullvad's address"
+  | .clearnet, .exitNode _ => "Clearnet · sees your exit node's IP"
+  | .tor, _ => "Tor"
+  | .i2p, _ => "I2P"
 
-/-- `AppModel.backgroundRoutingAllowed`: a background check has no banner, so after the foreground last
-reached peers through Tor or I2P, Automatic routing that found no gateway waits for the app to open
-rather than connect directly. Direct only and Manual are followed exactly as in the foreground. -/
+/-- How a session reaches peers, weakest first: directly (an exit node Mullvad does not confirm counts as
+direct, since its address may be the person's alone), through Mullvad, through Tor and I2P only. -/
+inductive RouteRank where
+  | direct | mullvad | gateways
+  deriving Repr, BEq, Inhabited
+
+namespace RouteRank
+
+def of (resolved : Winnow.IO.PeerGatewayConfiguration) (exit : Winnow.IO.ExitRoute) : RouteRank :=
+  if !resolved.networks.contains .clearnet then .gateways else if exit.isMullvad then .mullvad else .direct
+
+/-- As `DefaultsKey.automaticUsedGateways` keeps it: `true` and `false` are what it held before Mullvad. -/
+def rawValue : RouteRank → String
+  | .direct => "false" | .mullvad => "mullvad" | .gateways => "true"
+
+def ofRaw (s : String) : RouteRank :=
+  if s == "true" then .gateways else if s == "mullvad" then .mullvad else .direct
+
+def level : RouteRank → Nat
+  | .direct => 0 | .mullvad => 1 | .gateways => 2
+
+end RouteRank
+
+/-- `AppModel.backgroundRoutingAllowed`: a background check has no banner, so Automatic routing does not
+reach peers there by a weaker route than the foreground last used: after Tor or I2P it waits for the app to
+open rather than connect through Mullvad or directly, and after Mullvad rather than connect directly. Direct
+only and Manual are followed exactly as in the foreground. -/
 def backgroundRoutingAllowed (mode : String) (resolved : Winnow.IO.PeerGatewayConfiguration)
-    (foregroundUsedGateways : Bool) : Bool :=
-  mode != "automatic" || !resolved.networks.contains .clearnet || !foregroundUsedGateways
+    (foreground : RouteRank) (exit : Winnow.IO.ExitRoute := .direct) : Bool :=
+  mode != "automatic" || (RouteRank.of resolved exit).level ≥ foreground.level
 
 /-! ## History -/
 

@@ -22,6 +22,9 @@ Release with `#if DEBUG`) and the app is launched with `WINNOW_E2E=1`. Then:
 * (Lean only) `WINNOW_E2E_LEDGER=<entropy hex>` makes a simulated Ledger with that seed the app's Ledger,
   advertising nearby to the home's scan (and onboarding then shows its Bluetooth card); set but unreadable,
   the launch fails closed;
+* (Lean only) `WINNOW_E2E_EXIT_ROUTE=mullvad` or `exitnode` gives the session a Tailscale exit node in place
+  of reading the phone's routing table and asking Mullvad; the control file's `exitRouteDropped` takes it
+  away and gives it back while the app runs;
 * events are appended to `story-events.jsonl` in the run's storage directory, refusing any field that
   looks like a secret.
 
@@ -51,6 +54,10 @@ structure Mode where
   /-- `WINNOW_E2E_LIVE_GATEWAYS=1`: let Automatic routing probe the real tailnet. Only the live gateway
   journey sets it; every other run keeps discovery off so it never depends on the developer's network. -/
   liveGateways : Bool := false
+  /-- `WINNOW_E2E_EXIT_ROUTE` (Lean only): the Tailscale exit node this run's direct connections leave
+  through, given in place of `Winnow.IO.detectExitRoute` (the phone's routing table, then Mullvad's answer).
+  `WINNOW_E2E_LIVE_GATEWAYS=1` looks at the real one instead. -/
+  exitRoute : Option Winnow.IO.ExitRoute := none
 
 inductive Resolution where
   | inactive
@@ -64,6 +71,18 @@ def networkOfRaw : String → Option Network
   | "mainnet" => some .mainnet
   | "signet" => some .signet
   | "regtest" => some .regtest
+  | _ => none
+
+/-- The address test mode's exit node gives the phone: one of the tailnet's range that Tailscale keeps for its
+own services (100.100.100.0/24) and never gives a device, so a connection bound to it leaves no machine the
+run is on. -/
+def testTunnel : Winnow.IO.TunnelSource := { v4 := "100.100.100.1" }
+
+/-- `WINNOW_E2E_EXIT_ROUTE`: `mullvad` is an exit node Mullvad confirms and names, `exitnode` one it does
+not; anything else is no exit node. -/
+def exitRouteOfRaw : String → Option Winnow.IO.ExitRoute
+  | "mullvad" => some (.mullvad testTunnel (some "test-exit-node"))
+  | "exitnode" => some (.exitNode testTunnel)
   | _ => none
 
 /-- `Int(String)`: an optional sign and decimal digits, nothing else, within `Int`'s 64 bits. -/
@@ -100,7 +119,8 @@ def resolve (env : String → Option String) : Resolution :=
         syncIntervalSeconds := (env "WINNOW_E2E_SYNC_INTERVAL").bind parseDouble |>.bind fun d => if d > 0 then some d else none
         ledgerEntropy := (env "WINNOW_E2E_LEDGER").map fun h =>
           (Wire.dataOfHex? h).filter fun e => 16 ≤ e.size && e.size ≤ 32 && e.size % 4 == 0
-        liveGateways := env "WINNOW_E2E_LIVE_GATEWAYS" == some "1" }
+        liveGateways := env "WINNOW_E2E_LIVE_GATEWAYS" == some "1"
+        exitRoute := (env "WINNOW_E2E_EXIT_ROUTE").bind exitRouteOfRaw }
 
 namespace Mode
 
@@ -117,13 +137,19 @@ def networkParams (m : Mode) : Option Net.NetworkParams :=
 /-- `Control`: what the runner writes to the control file while the app runs; read when needed. -/
 structure Control where
   clipboard : Option String := none
+  /-- The exit node `WINNOW_E2E_EXIT_ROUTE` gave is no longer the phone's route. -/
+  exitRouteDropped : Bool := false
 
 def control (m : Mode) : IO (Option Control) := do
   let some path := m.controlFile | return none
   let text ← try IO.FS.readFile path catch _ => return none
   match Lean.Json.parse text with
-  | .ok j => return some { clipboard := (j.getObjValAs? String "clipboard").toOption }
+  | .ok j => return some { clipboard := (j.getObjValAs? String "clipboard").toOption
+                           exitRouteDropped := (j.getObjValAs? Bool "exitRouteDropped").toOption.getD false }
   | .error _ => return none
+
+/-- Whether the runner has taken the run's exit node away (the control file, read now). -/
+def exitRouteDropped (m : Mode) : IO Bool := return (← m.control).any (·.exitRouteDropped)
 
 end Mode
 

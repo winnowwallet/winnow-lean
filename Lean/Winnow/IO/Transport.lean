@@ -78,6 +78,13 @@ structure ConnState where
 
 initialize connectionCounter : IO.Ref Nat ← IO.mkRef 0
 
+/-- The device's own addresses on a tunnel that carries its default route: a Tailscale exit node, where they
+are the tailnet addresses. A connection bound to one leaves through the tunnel or not at all. -/
+structure TunnelSource where
+  v4 : String
+  v6 : Option String := none
+  deriving BEq, Repr, Inhabited
+
 structure PeerConnection where
   /-- Identity (Swift compares connections with `===`). -/
   uid : Nat
@@ -93,9 +100,69 @@ structure PeerConnection where
   /-- An external SOCKS5 gateway (a Tor or I2P proxy): dialled instead of the peer, which is named to it
   unresolved, so `.onion` and `.i2p` hosts reach the gateway as names. -/
   socksProxy : Option PeerEndpoint := none
+  /-- The exit node this session's direct connections leave through: a dial to an address beyond the
+  device's own networks is bound to it, so it cannot go out directly when the exit node is gone. -/
+  tunnel : Option TunnelSource := none
   state : IO.Ref ConnState
 
 instance : BEq PeerConnection := ⟨fun a b => a.uid == b.uid⟩
+
+/-- Whether `host` is written as an address, so reaching it asks no resolver. -/
+def isAddressLiteral (host : String) : Bool :=
+  (IPv4Addr.ofString host).isSome ||
+    (let h := if host.startsWith "[" && host.endsWith "]" then ((host.drop 1).dropEnd 1).toString else host
+     !h.contains '%' && (IPv6Addr.ofString h).isSome)
+
+/-- An address beyond the device's own networks: not loopback, private, link-local, carrier-grade NAT (where
+a tailnet's own devices are) or multicast. Whoever answers there sees the address the connection left from. -/
+def isBeyondLocalNetworks : SocketAddress → Bool
+  | .v4 a =>
+    let o := a.addr.octets
+    let (x, y) := (o[0], o[1])
+    !(x == 0 || x == 10 || x == 127 || (x == 169 && y == 254) || (x == 172 && (y &&& 0xF0) == 16) ||
+      (x == 192 && y == 168) || (x == 100 && (y &&& 0xC0) == 64) || x ≥ 224)
+  | .v6 a =>
+    let s := a.addr.segments
+    !(s.toArray.all (· == 0) || ((s.toArray.extract 0 7).all (· == 0) && s[7] == 1) || (s[0] &&& 0xFE00) == 0xFC00 ||
+      (s[0] &&& 0xFFC0) == 0xFE80 || (s[0] &&& 0xFF00) == 0xFF00)
+
+/-- The local address the routing table gives a datagram socket for `host` (an address, never a name):
+connecting a datagram socket picks the route and sends nothing. None when there is no route. -/
+def localAddressToward (host : String) : IO (Option String) := do
+  try
+    let addr : SocketAddress ← match IPv4Addr.ofString host, IPv6Addr.ofString host with
+      | some a, _ => pure (.v4 ⟨a, 53⟩)
+      | none, some a => pure (.v6 ⟨a, 53⟩)
+      | none, none => return none
+    let sock ← UDP.Socket.mk
+    sock.connect addr
+    return some (toString (← sock.getSockName).ipAddr)
+  catch _ => return none
+
+namespace TunnelSource
+
+/-- The public addresses whose route is asked for. Nothing is sent to them. -/
+def probe4 : String := "1.1.1.1"
+def probe6 : String := "2606:4700:4700::1111"
+
+/-- Whether the tunnel still carries the default route: a socket for a public address would leave from the
+tunnel's address. No packet is sent. -/
+def carries (t : TunnelSource) (toward : String → IO (Option String) := localAddressToward) : IO Bool := do
+  return (← toward probe4) == some t.v4
+
+/-- The local address a connection to `destination` is bound to: none for the device's own networks; an
+error when the tunnel has no address of the destination's family, so that connection is not made. -/
+def bindingFor (t : TunnelSource) (destination : SocketAddress) : Except String (Option SocketAddress) :=
+  if !isBeyondLocalNetworks destination then .ok none else
+  match destination with
+  | .v4 _ => match IPv4Addr.ofString t.v4 with
+    | some a => .ok (some (.v4 ⟨a, 0⟩))
+    | none => .error "the exit node has no IPv4 address to leave from"
+  | .v6 _ => match t.v6.bind IPv6Addr.ofString with
+    | some a => .ok (some (.v6 ⟨a, 0⟩))
+    | none => .error "the exit node has no IPv6 address to leave from"
+
+end TunnelSource
 
 namespace PeerConnection
 
@@ -111,12 +178,13 @@ def maximumRelayedTransactionBytes : Nat := 400_000
 def new (endpoint : PeerEndpoint) (params : NetworkParams) (localServices : UInt64 := 0)
     (localStartHeight : Int32 := 0) (relayPreference : Bool := false)
     (backlogByteLimit : Nat := defaultBacklogByteLimit) (pingIntervalMs : Nat := 60_000)
-    (readIdleTimeoutMs : Nat := 150_000) (socksProxy : Option PeerEndpoint := none) : IO PeerConnection := do
+    (readIdleTimeoutMs : Nat := 150_000) (socksProxy : Option PeerEndpoint := none)
+    (tunnel : Option TunnelSource := none) : IO PeerConnection := do
   if backlogByteLimit == 0 then throw (IO.userError "the gossip buffer needs a positive ceiling")
   let uid ← connectionCounter.modifyGet fun n => (n, n + 1)
   let now ← monoMs
   return { uid, endpoint, params, localServices, localStartHeight, relayPreference, backlogByteLimit,
-           pingIntervalMs, readIdleTimeoutMs, socksProxy,
+           pingIntervalMs, readIdleTimeoutMs, socksProxy, tunnel,
            state := ← IO.mkRef { framer := { magic := params.magic }, lastReceivedAt := now } }
 
 def peerServices (c : PeerConnection) : BaseIO UInt64 := do return (← c.state.get).peerServices
@@ -468,8 +536,8 @@ def negotiateSOCKS5 (sock : TCP.Socket.Client) (destination : PeerEndpoint) : As
     | .ok _ => return .ok ()
     | .error e => return .error e
 
-/-- TCP connect (through `socksProxy` when set) + version handshake; `missingCompactFilters` when the peer
-cannot serve BIP157. -/
+/-- TCP connect (through `socksProxy` when set, bound to `tunnel` when set) + version handshake;
+`missingCompactFilters` when the peer cannot serve BIP157. -/
 def connect (c : PeerConnection) (timeoutMs : Nat := 20_000) : NetM Unit := do
   let sock ← TCP.Socket.Client.mk
   let ready ← IO.Promise.new
@@ -484,7 +552,17 @@ def connect (c : PeerConnection) (timeoutMs : Nat := 20_000) : NetM Unit := do
   -- through a gateway, the proxy is dialled and the peer named to it inside the same deadline
   let target := c.socksProxy.getD c.endpoint
   let dial ← (do
+      -- through an exit node: a name is not looked up once the exit node is gone, and a connection to an
+      -- address beyond the device's own networks is bound to the tunnel, so it never leaves directly
+      if let some t := c.tunnel then
+        unless isAddressLiteral target.host || (← t.carries) do
+          throw (IO.userError "the exit node is no longer the route")
       let addr ← resolveAddress target.host target.port
+      if let some t := c.tunnel then
+        match t.bindingFor addr with
+        | .ok (some source) => sock.bind source
+        | .ok none => pure ()
+        | .error e => throw (IO.userError e)
       sock.connect addr
       match c.socksProxy with
       | none => return Except.ok ()

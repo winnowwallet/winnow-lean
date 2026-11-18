@@ -53,7 +53,7 @@ def e2eVariables : List String :=
   ["WINNOW_E2E", "WINNOW_E2E_ENTROPY", "WINNOW_E2E_RUN", "WINNOW_E2E_PEER",
    "WINNOW_E2E_CHALLENGE", "WINNOW_E2E_RESET", "WINNOW_E2E_CLIPBOARD", "WINNOW_E2E_NETWORK",
    "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
-   "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS"]
+   "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS", "WINNOW_E2E_EXIT_ROUTE"]
 
 /-- `E2EMode.current` in a Debug build: inactive, active, or — without pinned entropy — a stop, because a
 capture run that generated a real seed would publish it. -/
@@ -144,7 +144,9 @@ def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit
   else
     let service := (mode.map (·.keychainService)).getD Real.walletService
     let deps : Real.Deps := { keyStore := Real.shellKeyStore fx.ask service, fetch := Real.shellFetch fx.ask,
-                              discoverGateways := some (Winnow.IO.discoverGateways) }
+                              discoverGateways := some (Winnow.IO.discoverGateways)
+                              -- Mullvad is asked with the shell's own fetch, never through a gateway
+                              exitRoute := some (Winnow.IO.detectExitRoute (Winnow.IO.askMullvad (Real.shellFetch fx.ask))) }
     let deps := match mode with
       | none => deps
       | some m =>
@@ -154,8 +156,15 @@ def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit
           networkParams := m.networkParams
           entropy := m.entropy
           journal := fun n f => journal n f
-          -- UI journeys never probe the developer's real tailnet, except the live gateway journey
-          discoverGateways := if m.liveGateways then deps.discoverGateways else none }
+          -- UI journeys never probe the developer's real tailnet, except the live gateway journey. The exit
+          -- node journey is given its route (`WINNOW_E2E_EXIT_ROUTE`) and loses it through the control file,
+          -- with the watch at a second so the journey does not wait five.
+          discoverGateways := if m.liveGateways then deps.discoverGateways else none
+          exitRoute := if m.liveGateways then deps.exitRoute else m.exitRoute.map fun route => do
+            return if ← m.exitRouteDropped then .direct else route
+          tunnelCarries := if m.liveGateways || m.exitRoute.isNone then deps.tunnelCarries
+            else fun _ => do return !(← m.exitRouteDropped)
+          exitWatchMs := if m.liveGateways || m.exitRoute.isNone then deps.exitWatchMs else 1_000 }
     -- the Ledger: Bluetooth through the shell, or test mode's simulated device with its pinned seed
     let ledger ← match mode.bind (·.ledgerEntropy) |>.join with
       | some entropy =>

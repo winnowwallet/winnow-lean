@@ -60,8 +60,9 @@ end BackgroundSyncRun
 
 /-! ## The backend's half -/
 
-/-- `scanInBackground()`: a ready wallet, the foreground's routing (refused when Automatic would connect
-directly after the foreground last used a gateway), the stack, the pool, one bounded scan. -/
+/-- `scanInBackground()`: a ready wallet, the foreground's routing (refused when Automatic would reach peers
+by a weaker route than the foreground last used: directly or through Mullvad after a gateway, directly after
+Mullvad), the stack, the pool, one bounded scan. -/
 def scanInBackground (env : Env) : IO Bool := do
   let cancelled : IO Bool := do return (← env.get).backgroundCancelled
   let c ← env.get
@@ -70,7 +71,8 @@ def scanInBackground (env : Env) : IO Bool := do
   preparePeerGateways env
   if ← cancelled then return false
   let c ← env.get
-  unless backgroundRoutingAllowed c.gatewaySettings.mode c.activeGateways (← readGatewaysUsed dir) do return false
+  unless backgroundRoutingAllowed c.gatewaySettings.mode c.activeGateways (← readForegroundRoute dir) c.exitRoute do
+    return false
   buildStackIfNeeded env
   if ← cancelled then return false
   let some s := (← env.get).stack | return false
