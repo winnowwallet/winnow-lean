@@ -36,7 +36,7 @@ def manifest : Manifest where
     -- the census list this build ships (CensusCatalog.bundled reads peers.json beside the executable),
     -- fetched by scripts/import-census (scripts/build-ios runs it when the list is missing)
     "../../build/census/peers.json"]
-  uses := ["auth", "keychain.*", "build", "clipboard.*", "paths", "exclude-from-backup", "http.get", "open", "appearance",
+  uses := ["auth", "auth.end", "keychain.*", "build", "clipboard.*", "paths", "exclude-from-backup", "http.get", "open", "appearance",
            "ble.*", "bgtask.*", "cloudkit.*"]
   usage := [
     ("NSFaceIDUsageDescription", "Approve payments and reveal your recovery words."),

@@ -166,6 +166,10 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   scanLedgers : IO (List NearbyLedger)
   /-- Ask for Bluetooth (`ble.state`: iOS asks the person the first time). -/
   askBluetooth : IO Unit
+  /-- The person has just authenticated, and the Keychain's reads of the wallet's secret are allowed for the
+  action that follows: what has waited for that is done first (a restored wallet's search for cards that has
+  no search key keeps one). Never why the action fails. -/
+  personPresent : IO Unit := pure ()
 
 def notPorted (what : String) : IO α := throw (IO.userError s!"{what}: this part of Winnow is still being ported to Lean.")
 

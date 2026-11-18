@@ -73,6 +73,16 @@ def openWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO BootResul
     | .error e => env.journal "keychain.protectionUpgradeFailed" [("walletID", w.id), ("error", keyStoreErrorDescribing e)]
     return ← bootResult dir w.id
 
+/-- `Backend.personPresent`: a search for cards that has no search key (one begun by a build that read the
+wallet's secret in every round) keeps one now, while the secret can be read, so that its rounds in sync
+passes go on. A wallet with no such search reads nothing. -/
+def personPresent (env : Env) : IO Unit := do
+  let some w := (← env.get).wallet | return
+  match ← (runWM w.keepCardSearchKeyIfWaiting).toBaseIO with
+  | .ok true => env.journal "cards.searchKeyKept" [("walletID", w.id)]
+  | .ok false => pure ()
+  | .error e => env.journal "cards.searchKeyWaiting" [("error", toString e)]
+
 /-! ## The snapshot -/
 
 /-- One history row with its transaction decoded (what the payment screens read). -/
@@ -300,7 +310,8 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
   -- forward watches for them, and a sync pass looks further if one was paid (`finishCardRestore`). A backup
   -- without the phrase or a master key restores a wallet that cannot derive a card
   -- never why a restore fails: the wallet is already written
-  match ← (runWM w.beginCardRestore).toBaseIO with
+  -- the phrase the backup carries is the secret just stored: the Keychain is not asked for it back
+  match ← (runWM (w.beginCardRestore (bundle.mnemonic.map .mnemonic))).toBaseIO with
   | .ok true =>
     env.journal "cards.restoreBegun" [("fromHeight", toString ((← w.cardRestoreFrom).getD 0)), ("cards", toString (← w.cards).size)]
   | .ok false => pure ()
@@ -379,6 +390,8 @@ def deleteWallet (env : Env) : IO Unit := do
   match ← (env.deps.keyStore.delete w.id).run with
   | .ok () => pure ()
   | .error e => failText e.errorDescription
+  -- what a restore kept for its search for cards goes with the wallet
+  w.forgetCardSearchKey
   env.withWalletLock <| env.modify fun c =>
     { (c.withWallet none) with lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                reviews := #[], bumps := #[] }

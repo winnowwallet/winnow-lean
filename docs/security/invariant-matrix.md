@@ -131,16 +131,19 @@ checked as follows ([the testing guide](../testing.md) says what CI runs):
   and `ledger-transport-test` run them against stand-ins for iCloud and for the
   peripheral.
 
-S1 and IR-023 in the Lean app: the wallet's Keychain item is
+S1 and IR-023 in the Lean app: through 0.9.16 the wallet's Keychain item is
 `WhenUnlockedThisDeviceOnly` and carries no access-control flag, and the app
-asks for device authentication before each read instead
-(`LeanApp/WinnowApp/Real/Shell.lean`). The S1 row's sentences about a
-`.userPresence` access control and its in-place upgrade describe the Swift app
-from 2026-09-15. Here no key store of the app overrides
-`KeyStore.upgradeProtection`, whose default changes nothing
-(`Lean/Winnow/Keys/KeyStore.lean`). `KeychainAttributeTests` has no Lean
-counterpart. This is open as `SEC-060` in the
-[findings register](findings.md).
+asks for device authentication before each read instead. The S1 row's
+sentences about a `.userPresence` access control and its in-place upgrade
+describe the Swift app from 2026-09-15. `SEC-060` in the
+[findings register](findings.md) is that gap and its fix: the item behind a
+user-presence access control (`LeanApp/WinnowApp/Real/Shell.lean`), its reads
+under the authentication the shell keeps for one action, and
+`KeyStore.upgradeProtection` giving an older item the access control in place.
+`cloud-backup-test` (`shellAdapters`) holds what the app asks of the shell, and
+the `feeBumpReplaceConfirm` journey creates, sends and bumps with the item so
+protected. That iOS refuses an unauthenticated read is hardware evidence, as
+the S1 row says of the Swift app; a simulator's Keychain does not enforce it.
 
 | ID | Invariant | Recorded deterministic evidence | Recorded negative/manual evidence and gaps | Historical status |
 |---|---|---|---|---|

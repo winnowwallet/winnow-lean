@@ -285,12 +285,21 @@ def labelledSpendKey (spendKey label : ByteArray) : PP ByteArray := do
   | .ok p => pure (serializeCompressed p)
   | .error _ => throw .invalidTweak
 
+/-- Person `k`'s code from the wallet's scan private key and its spend public key (compressed): their shared
+secret and their labelled spend key. A code is made from these two alone, so a wallet that looks for the cards
+it could have issued needs the scan private key and nothing that signs. -/
+def codeForKeys (scan spendKey : ByteArray) (hrp : String) (k : UInt32) : PP CardCode := do
+  let scanKey ← match publicKeyOf scan with
+    | .ok key => pure key
+    | .error _ => throw .invalidPrivateKey
+  let secret ← sharedSecretOf scanKey (← tweakFor scan k)
+  return { sharedSecret := secret, spendKey := ← labelledSpendKey spendKey (← labelFor scan k), hrp }
+
 /-- Person `k`'s code from the wallet's scan and spend private keys: their shared secret and their labelled
 spend key. -/
 def codeFor (scan spend : ByteArray) (hrp : String) (k : UInt32) : PP CardCode := do
   let own ← address scan spend hrp
-  let secret ← sharedSecretOf own.scanKey (← tweakFor scan k)
-  return { sharedSecret := secret, spendKey := ← labelledSpendKey own.spendKey (← labelFor scan k), hrp }
+  codeForKeys scan own.spendKey hrp k
 
 /-- Person `k`'s code from the master key. -/
 def issueCode (master : HDKey) (coinType : UInt32) (hrp : String) (k : UInt32) : PP CardCode := do

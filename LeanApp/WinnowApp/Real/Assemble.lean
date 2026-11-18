@@ -56,6 +56,7 @@ def Env.backend (env : Env) : Backend :=
     watchAddress := fun address seen => watchAddress env address seen
     stopWatchingAddress := stopWatchingAddress env
     deleteWallet := deleteWallet env
+    personPresent := personPresent env
     startNetworking := fun s => startNetworking env s
     stopNetworking := stopNetworking env
     syncNow := syncNow env

@@ -10,8 +10,8 @@ behind historical network findings rather than relying only on a summary.
 [findings register](../findings.md) provide context.
 Preserve their original contents and interpretation.
 
-Note of 2026-11-17: every record in this directory was made with the Swift
-app (winnowwallet/winnow). The soak driver and its debugging runbook
+Note of 2026-11-17: every record in this directory dated before then was made
+with the Swift app (winnowwallet/winnow). The soak driver and its debugging runbook
 (`Tools/Debug`), and the scripts the gateway record names, are not in this
 repository, and this tree has no soak tool. For a new observation, keep the
 revision, command, network, time interval and resulting data together, and
@@ -25,3 +25,8 @@ checks through the project's Tor and I2P gateways.
 [Ledger on mainnet, 2026-10-26](ledger-mainnet-2026-10-26.md) records the
 first spend a physical Ledger Nano X co-signed from a Winnow 2-of-2 account,
 with the transaction's witness. It was made with the Swift app's build 0.8.14.
+
+[The Keychain's user-presence access control, 2026-11-18](keychain-user-presence-2026-11-18.md)
+records a run on an iPhone of LeanNative's self-test for the access control
+the Lean app puts on the wallet secret (`SEC-060`). It is the one record here
+made for the Lean app, and it is of the shell capability, not of Winnow itself.
