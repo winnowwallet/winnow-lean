@@ -255,8 +255,17 @@ def traceCmd : Cmd → IO Unit
 /-- People and labels changed: the records after `r`, with what the screen does next. -/
 def recordsAfter (g : Nat) (d : Done) (r : IO Records) : IO Host := do return .updated g d (← r)
 
+/-- This build's version, from the `Info.plist` beside the executable (on iOS the bundle's root, where
+`CensusCatalog.bundled` finds `peers.json`). None outside an app bundle, as in the tests. -/
+def readBundleVersion : IO (Option String) := do
+  try
+    let some dir := (← IO.appPath).parent | return none
+    return BundleInfo.versionText? (← IO.FS.readBinFile (dir / "Info.plist"))
+  catch _ => return none
+
 /-- `boot()`: the build and paths, test mode, the backend, the storage directory and the settings. -/
 def bootApp (fx : Effects Host) : IO Unit := discard <| IO.asTask do
+  if let some text ← readBundleVersion then fx.post (.versionRead text)
   let build := (← IO.wait (← fx.ask "build" Json.null))
   let debug := (build.getObjValAs? Bool "debug").toOption.getD false
   debugBuild.set debug

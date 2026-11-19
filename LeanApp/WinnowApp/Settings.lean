@@ -250,7 +250,7 @@ def settingsSections (m : Model) : List H :=
     (.picker "Appearance" (Appearance.all.map (·.label)) (Appearance.all.idxOf s.appearance) (fun i => .settings (.setAppearance i)))]] ++
   [networkSection m] ++ walletsSection m ++ [securitySection m, backupSection m] ++
   [.section "About" ""
-    ([.labeled "Version" appVersionText, .labeled "Wallet ID" (m.walletID.getD "—")] ++
+    ([.identified Ids.appVersion (.labeled "Version" (m.appVersion.getD "Unknown")), .labeled "Wallet ID" (m.walletID.getD "—")] ++
      [navLink "Design papers" (some (.settings .openPapers)) (symbol := "doc.text")])] ++
   (if m.walletID.isSome then
     [.section "Danger zone" s!"Removes wallet {m.walletID.getD ""}, this device's {s.network.name} wallet that is open, so you can create or import another. The key is deleted from this device; restore it from your iCloud backup or a backup file that includes the recovery phrase, or the money is gone. People you added stay on this phone, and block headers are kept, so the next wallet does not re-sync the chain."

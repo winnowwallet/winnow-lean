@@ -42,6 +42,8 @@ def ownNameField : String := "ownNameField"
 def closeShareCardButton : String := "closeShareCardButton"
 def closeSendButton : String := "closeSendButton"
 def cloudBackupRow : String := "cloudBackupRow"
+/-- Settings → About: this build's version. -/
+def appVersion : String := "appVersion"
 def cloudBackupRowStatus : String := "cloudBackupRowStatus"
 def cloudBackupStatus : String := "cloudBackupStatus"
 def collectSignaturesButton : String := "collectSignaturesButton"
