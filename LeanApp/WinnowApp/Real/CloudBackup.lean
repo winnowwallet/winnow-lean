@@ -181,7 +181,9 @@ def configure (c : CloudBackupController) (directory : Option System.FilePath) (
   let s ← c.get
   if path == s.configurationPath && walletID == s.configuredWalletID then return
   c.suspend
-  let preferencePath := directory.map (· / "cloud-backup-preferences.json")
+  -- of the network, whichever of its wallets is open: "automatic backup off for this wallet" is kept by wallet
+  -- id, and outlives the wallet's directory
+  let preferencePath := directory.map fun d => System.FilePath.mk (networkDirOf d.toString) / "cloud-backup-preferences.json"
   let reset (s : CloudControllerState) : CloudControllerState :=
     { s with configurationPath := path, configuredWalletID := walletID, configuration := none, message := none,
              failureCount := 0, retryAfter := 0, preferencePath, disabledWallets := [], automaticEnabled := true }

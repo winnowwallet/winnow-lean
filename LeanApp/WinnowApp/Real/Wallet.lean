@@ -11,12 +11,46 @@ another network's directory), `refresh` (:1033), `creationHeightForNewWallet` (:
 namespace WinnowApp.Real
 open Winnow Winnow.IO Winnow.Net
 
+/-- How long a switch to another place waits for a sync pass in flight to end. -/
+def switchWaitMs : Nat := 5_000
+
+/-- Whether another wallet file on this device, on any network and in any slot, is the wallet `id`. The
+Keychain names a wallet's secret by its id alone, which is the master key's fingerprint and says nothing of
+the network or the slot: one phrase on mainnet and on signet is one item. The places looked in are this
+wallet's network directory and, beside it, the directories named for a network. A wallet file that does not
+read counts as one, since a key is not deleted on a guess. -/
+def secretInUseElsewhere (env : Env) (dir id : String) : IO Bool := do
+  let real (path : String) : IO String := do
+    try pure (← IO.FS.realPath (System.FilePath.mk path)).toString catch _ => pure path
+  let network := networkDirOf dir
+  let beside := match (System.FilePath.mk network).parent with
+    | some root => [WinnowApp.Network.mainnet, .signet, .regtest].map fun n => (root / n.name).toString
+    | none => []
+  let here ← real dir
+  let mut looked : List String := []
+  for place in network :: beside do
+    unless ← (System.FilePath.mk place).isDir do continue
+    let place' ← real place
+    if looked.contains place' then continue
+    looked := place' :: looked
+    for slot in ← listSlots place do
+      let other := slotDir place slot
+      if (← real other) == here then continue
+      match ← (Wallet.open (walletPath other) env.deps.keyStore env.deps.random).run with
+      | .ok w => if w.id == id then return true
+      | .error _ => return true
+  return false
+
 /-- The network's directory becomes current; another network or directory first ends the old one
 (`switchNetwork`: stop, drop the wallet, nothing carried over). -/
 def switchTo (env : Env) (n : WinnowApp.Network) (dir : String) : IO Unit := do
   let c ← env.get
   if c.network == some n && c.dir == some dir then return
   suspendAndStop env false
+  -- a pass in flight still calls the stores of the place it began in (an account's coins, a card's payment):
+  -- it is let finish, or run out of the peers just stopped, before those stores are pointed elsewhere. Its
+  -- writes to the wallet itself are refused either way (`walletSerial`)
+  discard <| env.sleepWhile switchWaitMs (·.syncing)
   env.hooks.walletChanged
   let checked ← readLastCompleteCheck dir
   env.withWalletLock <| env.modify fun c =>
@@ -187,10 +221,12 @@ def creationHeightForNewWallet (s : Stack) : IO UInt32 := do
 
 /-- `adopt(wallet:startSync:)`: the previous wallet's chain-facing files go; an existing stack gets
 new filters and a new broadcaster (or is rebuilt from genesis when the wallet is older than it). -/
-def adopt (env : Env) (w : Wallet) (startSync : Bool) : IO Unit := do
-  let (stack, dir, n) ← env.modifyGet fun c =>
-    ((c.stack, c.dir, c.network), { c with loopToken := c.loopToken + 1, syncLoop := none })
-  let some dir := dir | failWith .noWallet
+def adopt (env : Env) (w : Wallet) (dir : String) (startSync : Bool) : IO Unit := do
+  -- the files that go are the directory's the wallet was written in: were another place current by now (a
+  -- switch while the wallet was made), they would be another wallet's
+  unless (← env.get).dir == some dir do failWith .walletReplaced
+  let (stack, n) ← env.modifyGet fun c =>
+    ((c.stack, c.network), { c with loopToken := c.loopToken + 1, syncLoop := none })
   env.hooks.walletChanged
   if let some s := stack then s.broadcaster.shutdown
   for name in ["filters.json", "broadcast.json", "vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json"] do
@@ -222,6 +258,8 @@ def readMnemonic (env : Env) (walletID : String) : IO (Option String) := do
 /-- `createWallet()`: a fresh wallet dated at the chain tip, adopted; its id and recovery words (which go
 only to the iCloud backup's preparation, never to a screen). -/
 def createWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO (String × String) := do
+  -- a new wallet never takes the place of one: its files would be written over the other's
+  if ← holdsWallet dir then failWith .walletAlreadyHere
   switchTo env n dir
   buildStackIfNeeded env
   let some stack := (← env.get).stack | failWith .noStack
@@ -229,7 +267,7 @@ def createWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO (String
   env.replacingWallet
   let w ← runWM (Wallet.create (Network.tx n) env.deps.keyStore (some (walletPath dir)) (entropy := env.deps.entropy) (creationHeight := knownHeight)
     (random := env.deps.random))
-  adopt env w true
+  adopt env w dir true
   let some words ← readMnemonic env w.id | failWith .mnemonicUnavailable
   env.journal "wallet.created" [("walletID", w.id), ("height", toString knownHeight), ("headersContinueInBackground", "true")]
   return (w.id, words)
@@ -316,7 +354,7 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
     env.journal "cards.restoreBegun" [("fromHeight", toString ((← w.cardRestoreFrom).getD 0)), ("cards", toString (← w.cards).size)]
   | .ok false => pure ()
   | .error e => env.journal "cards.restoreSkipped" [("error", toString e)]
-  adopt env w false
+  adopt env w dir false
   env.hooks.multisigRestore (bundle.vaults.getD #[])
   env.hooks.signerMerge (bundle.signers.getD #[])
   try
@@ -380,18 +418,30 @@ def revealMnemonic (env : Env) : IO (List String) := do
   return words.splitOn " "
 
 /-- `destroyWallet()`: networking down, the key first, then the per-wallet files (headers and peers stay). The
-wallet is let go before its files go, so a write through it still in flight (a sync pass) is refused rather than
-writing `wallet.json` back (backend-test `oldWalletWritesFlow`). -/
-def deleteWallet (env : Env) : IO Unit := do
+wallet is let go before its files go,
+so a write through it still in flight (a sync pass) is refused rather than writing `wallet.json` back
+(backend-test `oldWalletWritesFlow`). With `expected`, only that wallet is deleted: the one open may no
+longer be the one the person was shown. The key stays while another wallet file on the device is the same
+wallet (`secretInUseElsewhere`). -/
+def deleteWallet (env : Env) (expected : Option String := none) : IO Unit := do
   let c ← env.get
   let some w := c.wallet | failWith .noWallet
-  env.hooks.walletChanged
+  if let some id := expected then
+    unless w.id == id do failWith .walletReplaced
+  let shared ← match c.dir with
+    | some dir => secretInUseElsewhere env dir w.id
+    | none => pure false
+  -- stopped before the stores are told: a round or a pass of this wallet is over before they change
   suspendAndStop env false
-  match ← (env.deps.keyStore.delete w.id).run with
-  | .ok () => pure ()
-  | .error e => failText e.errorDescription
-  -- what a restore kept for its search for cards goes with the wallet
-  w.forgetCardSearchKey
+  discard <| env.sleepWhile switchWaitMs (·.syncing)
+  env.hooks.walletChanged
+  if shared then env.journal "wallet.keyKept" [("walletID", w.id)]
+  else
+    match ← (env.deps.keyStore.delete w.id).run with
+    | .ok () => pure ()
+    | .error e => failText e.errorDescription
+    -- what a restore kept for its search for cards goes with the wallet
+    w.forgetCardSearchKey
   env.withWalletLock <| env.modify fun c =>
     { (c.withWallet none) with lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                reviews := #[], bumps := #[] }

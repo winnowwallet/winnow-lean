@@ -144,6 +144,8 @@ structure SyncApp where
   opened : IO.Ref (Array (String × Float × Replica × Nat))
   /-- The backups that did not open in this run of the app, by id and save date: not fetched again in it. -/
   unopened : IO.Ref (Array (String × Float))
+  /-- Moves when the wallet changes or goes (`reset`): what a round read before then is another wallet's. -/
+  epoch : IO.Ref Nat
   running : IO.Ref Bool
   /-- When the last round began (monotonic milliseconds); none before the first. -/
   lastRound : IO.Ref (Option Nat)
@@ -169,7 +171,7 @@ def unixMs : IO Nat := do
 
 def new (controller : CloudBackupController) (env : Env) (multisig : MultisigApp) (allows : Bool)
     (intervalMs : Nat := 60_000) : IO SyncApp := do
-  return { controller, env, multisig, allows, lock := ← Std.Mutex.new (), opened := ← IO.mkRef #[], unopened := ← IO.mkRef #[],
+  return { controller, env, multisig, allows, lock := ← Std.Mutex.new (), opened := ← IO.mkRef #[], unopened := ← IO.mkRef #[], epoch := ← IO.mkRef 0,
            running := ← IO.mkRef false, lastRound := ← IO.mkRef none, intervalMs, nowMs := unixMs,
            status := ← IO.mkRef {}, changed := ← IO.mkRef (pure ()), loop := ← IO.mkRef 0, looping := ← IO.mkRef false, noticed := ← IO.mkRef none,
            journaled := ← IO.mkRef none }
@@ -246,21 +248,25 @@ def stamped (a : SyncApp) (view : SyncView) (initial : Bool) (fresh : Stamp) :
 private def sameView (a b : SyncView) : Bool := write a.toJV == write b.toJV
 
 /-- The view read, brought up to date by `body` and written when it changed, under the lock. `body` gets a
-stamp for now. Nothing happens without an open wallet. -/
+stamp for now. Nothing happens without an open wallet, nor once the wallet has changed: `body` writes to
+whichever wallet's stores are current, so it runs only while they are still those of the wallet it was
+decided for (`since`, the epoch a round began in; the place, read again under the lock, which `reset` takes
+before the stores are pointed elsewhere). -/
 def withView {α} (a : SyncApp) (none' : α)
-    (body : SyncView → (initial : Bool) → Stamp → IO (SyncView × α)) (latest : Nat := 0) : IO α := do
-  let some (wallet, _, dir) ← a.place | return none'
+    (body : SyncView → (initial : Bool) → Stamp → IO (SyncView × α)) (latest : Nat := 0)
+    (since : Option Nat := none) : IO α := do
+  let some (wallet, network, dir) ← a.place | return none'
+  let began := since.getD (← a.epoch.get)
   a.locked do
+    unless (← a.epoch.get) == began && (← a.place) == some (wallet, network, dir) do return none'
     let (loaded, initial) ← loadView dir wallet
     let clock := max loaded.clock latest
     let fresh := Stamp.after clock (← a.nowMs) loaded.device
     let (view, result) ← body { loaded with clock } initial fresh
     -- nothing later may be stamped behind a stamp read or written here
     let view := { view with clock := max clock view.published.latest }
-    -- the wallet may have gone while the lock was waited for
-    if (← a.place).map (·.1) == some wallet then
-      if initial || !sameView view loaded then saveView dir view
-      a.multisig.elsewhere.set view.elsewhere
+    if initial || !sameView view loaded then saveView dir view
+    a.multisig.elsewhere.set view.elsewhere
     return result
 
 /-- What this device's next backup says of its accounts and signers (`CloudAppState.sync`): the stamps, after
@@ -538,6 +544,7 @@ def journalOnce (a : SyncApp) (name : String) (fields : List (String × String))
 
 /-- One look at the other devices' backups: read what changed, decide, do it, and remember. -/
 def round (a : SyncApp) : IO Unit := do
+  let began ← a.epoch.get
   let some (wallet, network, dir) ← a.place | return
   unless (← a.controller.get).automaticEnabled do return
   let store ← a.multisig.host.read
@@ -554,11 +561,11 @@ def round (a : SyncApp) : IO Unit := do
   let reading ← a.replicas network settled
   let found := reading.found
   let read := reading.read
-  -- the wallet or the network changed while the backups were read
-  unless (← a.place).map (fun p => (p.1, p.2.1)) == some (wallet, network) do return
+  -- the wallet, its place or the network changed while the backups were read
+  unless (← a.epoch.get) == began && (← a.place) == some (wallet, network, dir) do return
   a.renewWaiting found
   let latest := found.foldl (fun t r => max t ((r.sync.map (·.latest)).getD 0)) 0
-  let changed ← a.withView false (latest := latest) fun view initial fresh => do
+  let changed ← a.withView false (latest := latest) (since := some began) fun view initial fresh => do
     let (before, accounts, signers) ← a.stamped view initial fresh
     let known := (before.accounts.filter fun e => !accounts.any (·.record.id == e.stamps.id)).map (·.stamps)
     let mut view := before
@@ -659,7 +666,9 @@ def stop (a : SyncApp) : IO Unit := do
   a.looping.set false
 
 /-- The wallet changed or went: what was read is another wallet's business. -/
-def reset (a : SyncApp) : IO Unit := do
+def reset (a : SyncApp) : IO Unit := a.locked do
+  -- under the lock: a round's writes to the stores are over before they are pointed at another wallet
+  a.epoch.modify (· + 1)
   a.opened.set #[]
   a.unopened.set #[]
   a.lastRound.set none

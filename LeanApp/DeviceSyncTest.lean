@@ -207,14 +207,15 @@ structure Device where
 
 open Real in
 def device (root : System.FilePath) (name : String) (cloud : MemoryCloud) (cloudKeys : CloudBackupKeys)
-    (ledger : IO LedgerSession := noLedger) (devicesIntervalMs : Nat := 60_000) : TM Device := do
+    (ledger : IO LedgerSession := noLedger) (devicesIntervalMs : Nat := 60_000)
+    (store : Option CloudBackupStore := none) : TM Device := do
   let vars := [("WINNOW_E2E", "1"), ("WINNOW_E2E_RUN", "devices"), ("WINNOW_E2E_ENTROPY", "04040404040404040404040404040404"),
                ("WINNOW_E2E_PEER", "127.0.0.1:1"), ("WINNOW_E2E_CHALLENGE", "51")]
   let .active mode := WinnowApp.E2E.resolve (fun k => vars.lookup k) | throw "test mode did not resolve"
   let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
   let deps : Deps := { keyStore := inMemoryKeyStore secrets, networkParams := mode.networkParams, peerCount := 1,
                        importPeerWaitMs := 1_000, fetch := fun _ => throw (.other "offline") }
-  let (backend, env, app) ← Backend.realWithCloud deps ledger (store := cloud.store) (keys := cloudKeys) (scheduleDelayMs := 20)
+  let (backend, env, app) ← Backend.realWithCloud deps ledger (store := store.getD cloud.store) (keys := cloudKeys) (scheduleDelayMs := 20)
     (devicesIntervalMs := devicesIntervalMs)
   let dir := (root / name / "signet").toString
   IO.FS.createDirAll dir
@@ -625,6 +626,29 @@ def olderForms (root : System.FilePath) : TM Unit := do
   check "…and is still said at the next look" (((← b.app.follow.status.get).unread.map (·.2)) == #[Real.Unread.notOpened])
   b.stop
 
+/-- A wallet that changes while a round reads the other backups. What the round read was for the wallet that
+was open; the stores it would write to are the next one's by the time it is done. It writes nothing. -/
+def walletChangesMidRound (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "midA" cloud cloudKeys
+  -- the second device's iCloud does something of the test's choosing while its list is read
+  let during ← IO.mkRef (pure () : IO Unit)
+  let listing : Real.CloudBackupStore := { cloud.store with list := fun n => do (← during.get); cloud.store.list n }
+  let b ← device root "midB" cloud cloudKeys (store := some listing)
+  discard <| a.create
+  discard <| b.create
+  discard <| a.backend.addSignerKeys "Dana" (← testKey 0xB2)
+  a.publish
+  during.set b.app.follow.reset
+  b.look
+  check "a round whose wallet changed while it read writes nothing" ((← b.signerNames) == [])
+  during.set (pure ())
+  b.look
+  check "the next round, begun for the wallet now open, takes it" ((← b.signerNames) == ["Dana"])
+  a.stop
+  b.stop
+
 def whenNothingFollows (root : System.FilePath) : TM Unit := do
   let cloud ← Real.MemoryCloud.new
   -- the first device's key reaches the second only when the test says so (iCloud Keychain is its own service)
@@ -835,6 +859,7 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "removalStopsAtCoins" (removalStopsAtCoins root)
   runTest "olderBackups" (olderBackups root)
   runTest "olderForms" (olderForms root)
+  runTest "walletChangesMidRound" (walletChangesMidRound root)
   runTest "whenNothingFollows" (whenNothingFollows root)
   runTest "threeDevices" (threeDevices root)
   runTest "leftAlone" (leftAlone root)

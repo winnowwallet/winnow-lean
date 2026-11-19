@@ -148,10 +148,16 @@ inductive AppError where
   /-- Not in Swift, whose actor writes through whichever wallet it was handed: a write through a wallet that
   was erased or replaced since it was read (`Env.walletWrite`). -/
   | walletReplaced
+  /-- Not in Swift, which kept one wallet: a new wallet asked for where one is kept. Creating never replaces. -/
+  | walletAlreadyHere
+  /-- Not in Swift: the wallet a backup or a file holds is one this device already keeps on this network. -/
+  | walletAlreadyHeld
 
 def AppError.text : AppError → String
   | .noWallet => "No wallet is open."
   | .walletReplaced => "The wallet changed before this finished, so nothing was saved to it."
+  | .walletAlreadyHere => "A wallet is already kept here, and nothing was changed. Add another wallet beside it from Settings."
+  | .walletAlreadyHeld => "This wallet is already on this device. Choose it under Settings → Wallets."
   | .paymentDetailsUnavailable => "Payment details aren’t available on this phone."
   | .feeDecisionRequired rate floor =>
     s!"Connected peers require at least {SwiftDouble.description floor} sat/vB to relay this payment, above the selected {SwiftDouble.description rate} sat/vB. " ++
@@ -445,6 +451,88 @@ def dirFile (dir name : String) : System.FilePath := System.FilePath.mk dir / na
 def removeQuietly (p : System.FilePath) : IO Unit := do
   try IO.FS.removeFile p catch _ => pure ()
 
+/-! ## A network's wallets
+
+A wallet's directory is a whole directory in the one layout. The first wallet's is the network's own
+directory, where every install has kept it; a wallet added beside it has a directory of its own under
+`wallets/`, named by a number (its slot). A slot holds a wallet when it holds `wallet.json`: nothing else
+lists the wallets, so no list can disagree with the files. Which one was open last is one small file. -/
+
+/-- The directory, under a network's, of the wallets added beside the first. -/
+def slotsDirName : String := "wallets"
+
+/-- A slot's name is a number: never a path, never a name a person chose. -/
+def validSlot (slot : String) : Bool := !slot.isEmpty && slot.length ≤ 6 && slot.all Char.isDigit
+
+/-- The network's directory of a wallet's directory: itself, or two up from a slot. -/
+def networkDirOf (dir : String) : String :=
+  let p := System.FilePath.mk dir
+  match p.parent with
+  | some parent =>
+    if parent.fileName == some slotsDirName && (p.fileName.map validSlot).getD false
+    then (parent.parent.map (·.toString)).getD dir else dir
+  | none => dir
+
+/-- The wallet's directory a slot names: the empty slot is the network's own. -/
+def slotDir (networkDir slot : String) : String :=
+  if slot.isEmpty then networkDir else (System.FilePath.mk networkDir / slotsDirName / slot).toString
+
+/-- The slot of a wallet's directory. -/
+def slotOf (dir : String) : String :=
+  if networkDirOf dir == dir then "" else (System.FilePath.mk dir).fileName.getD ""
+
+def holdsWallet (dir : String) : IO Bool := (walletPath dir).pathExists
+
+/-- The slots that hold a wallet: the network's own first, then the added ones in their order. -/
+def listSlots (networkDir : String) : IO (List String) := do
+  let mut slots : List String := if ← holdsWallet networkDir then [""] else []
+  let base := System.FilePath.mk networkDir / slotsDirName
+  if ← base.isDir then
+    let names := ((← base.readDir).map (·.fileName)).filter validSlot
+    for name in (names.qsort fun a b => a.toNat?.getD 0 < b.toNat?.getD 0) do
+      if ← holdsWallet (slotDir networkDir name) then slots := slots ++ [name]
+  return slots
+
+/-- A slot for a wallet to be added: the network's own while it holds none, else the lowest number whose
+directory holds none. What an addition that never finished left there is cleared first, as a new wallet's
+files replace the last one's in the network's own directory (`adopt`). -/
+def freeSlot (networkDir : String) : IO String := do
+  if !(← holdsWallet networkDir) then return ""
+  let mut n := 1
+  while ← holdsWallet (slotDir networkDir (toString n)) do n := n + 1
+  let dir := System.FilePath.mk (slotDir networkDir (toString n))
+  if ← dir.isDir then
+    for entry in ← dir.readDir do
+      unless ← entry.path.isDir do removeQuietly entry.path
+  return toString n
+
+/-- An added slot that holds no wallet is taken away with what an unfinished addition left in it. The
+network's own directory, and a slot that holds a wallet, are left alone. -/
+def discardEmptySlot (dir : String) : IO Unit := do
+  if networkDirOf dir == dir || (← holdsWallet dir) then return
+  let path := System.FilePath.mk dir
+  unless ← path.isDir do return
+  for entry in ← path.readDir do
+    unless ← entry.path.isDir do removeQuietly entry.path
+  try IO.FS.removeDir path catch _ => pure ()
+
+/-- Which slot was open last, in the network's directory. -/
+def activeSlotPath (networkDir : String) : System.FilePath := System.FilePath.mk networkDir / "active-wallet"
+
+/-- Written once a wallet has opened there, in one rename. -/
+def writeActiveSlot (networkDir slot : String) : IO Unit :=
+  Winnow.IO.writeAtomic (activeSlotPath networkDir) slot.toUTF8
+
+/-- The slot to open: the one open last if it still holds a wallet, else the first that does, else the
+network's own. A pointer that names nothing, or a slot whose wallet is gone, costs nothing. -/
+def resolveSlot (networkDir : String) : IO String := do
+  let slots ← listSlots networkDir
+  let pointed ← try pure (some (← IO.FS.readFile (activeSlotPath networkDir)).trimAscii.copy) catch _ => pure none
+  match pointed with
+  | some slot => if slots.contains slot then return slot
+  | none => pure ()
+  return slots.head?.getD ""
+
 /-- A saved manual peer, read by the rule Settings validated it with (`peerHostPort`). -/
 def parsePeerEndpoint (text : String) : Option PeerEndpoint :=
   (peerHostPort text).map fun (host, p) => { host, port := p.toUInt16 }
@@ -471,7 +559,10 @@ def Core.withSettings (c : Core) (s : Settings) : Core :=
 /-- `DefaultsKey.automaticUsedGateways` (global): whether Automatic routing last reached peers through Tor
 or I2P in the foreground, as a file beside the network directories. -/
 def gatewaysUsedPath (dir : String) : System.FilePath :=
-  (System.FilePath.mk dir).parent.getD (System.FilePath.mk dir) / "peer-gateways.automatic-used"
+  -- beside the network directories whichever wallet's directory asks: an added wallet's background check
+  -- must read the same answer the foreground wrote
+  let network := System.FilePath.mk (networkDirOf dir)
+  network.parent.getD network / "peer-gateways.automatic-used"
 
 /-- `DefaultsKey.lastCompleteCheck(network)`, as a file in the network's directory (Unix seconds). -/
 def lastCompleteCheckPath (dir : String) : System.FilePath := System.FilePath.mk dir / "sync.last-complete"

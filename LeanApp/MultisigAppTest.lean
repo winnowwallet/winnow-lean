@@ -753,6 +753,45 @@ def testRecoveryPathRefusesCoinsThatAreTooYoung : IO Unit := do
   | .ok p => check "the signers' path spends it at once" p.screen.isSome
   | .error e => check "the signers' path spends it at once" false (toString e)
 
+/-- The Keychain names a wallet's secret by the master key's fingerprint, which says nothing of the network:
+one phrase used on two networks is one item. Deleting one of the two wallets must leave the other its key. -/
+def testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes : IO Unit := do
+  let root := (← tempFile "x").parent.get!
+  let signet := root / "signet"
+  let regtest := root / "regtest"
+  IO.FS.createDirAll signet
+  IO.FS.createDirAll regtest
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let ks := Winnow.inMemoryKeyStore secrets
+  let entropy := some (zeros 16 0xD4)
+  let first ← match ← (Wallet.create .signet ks (some (signet / "wallet.json")) (entropy := entropy)).run with
+    | .ok w => pure w
+    | .error e => throw (IO.userError s!"Wallet.create: {e.name}")
+  -- the same phrase restored on regtest: a bundle of it, made by a wallet that keeps its key elsewhere
+  let elsewhere := Winnow.inMemoryKeyStore (← IO.mkRef ({} : Keys.InMemorySecrets))
+  let bundle ← match ← (do
+      let w ← Wallet.create .regtest elsewhere none (entropy := entropy)
+      w.exportBundle true).run with
+    | .ok b => pure b
+    | .error e => throw (IO.userError s!"the regtest bundle: {e.name}")
+  match ← (Wallet.importing bundle ks (some (regtest / "wallet.json"))).run with
+  | .ok w => check "one phrase on two networks is one wallet id" (w.id == first.id)
+  | .error e => throw (IO.userError s!"Wallet.importing: {e.name}")
+  check "…and one Keychain item" ((← secrets.get).size == 1)
+  let (backend, env, _) ← Backend.realWithMultisig { keyStore := ks, fetch := fun _ => throw (.other "offline") }
+  check "the regtest wallet opens" ((← backend.openWallet .regtest regtest.toString) matches .opened _)
+  failsWith "a wallet is never created over one" (backend.createWallet .regtest regtest.toString)
+    Real.AppError.walletAlreadyHere.text
+  check "…and the one there is as it was" ((← backend.openWallet .regtest regtest.toString) matches .opened _)
+  Real.deleteWallet env
+  check "deleting one of the two leaves the key the other needs" ((← secrets.get).size == 1)
+  check "the signet wallet opens" ((← backend.openWallet .signet signet.toString) matches .opened _)
+  check "…and still reads its phrase" ((← backend.revealMnemonic).length == 12)
+  failsWith "a delete names the wallet it means" (Real.deleteWallet env (expected := some "00000000"))
+    Real.AppError.walletReplaced.text
+  Real.deleteWallet env (expected := some first.id)
+  check "deleting the last one deletes the key" ((← secrets.get).isEmpty)
+
 def flowTests : List (String × IO Unit) :=
   [ ("testBuilderMakesAccountWithAnotherWinnowAndRecovery", testBuilderMakesAccountWithAnotherWinnowAndRecovery)
   , ("testTwoPhonesSignACoSignersSpendWithBIP326Sequences", testTwoPhonesSignACoSignersSpendWithBIP326Sequences)
@@ -2397,6 +2436,7 @@ def testRefusedAddressesAndPSBTsFromAnAccount : IO Unit := do
 def accountTests : List (String × IO Unit) :=
   [ ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
   , ("testJoiningAnAccountFromAPastedDescriptor", testJoiningAnAccountFromAPastedDescriptor)
+  , ("testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes", testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes)
   , ("testASegwitAccountIsJoinedAndAPastedPaymentSignedHere", testASegwitAccountIsJoinedAndAPastedPaymentSignedHere)
   , ("testNewAddressMovesTheAccountOn", testNewAddressMovesTheAccountOn)
   , ("testACollectionPageShowsItsDraftAndDiscardsIt", testACollectionPageShowsItsDraftAndDiscardsIt)

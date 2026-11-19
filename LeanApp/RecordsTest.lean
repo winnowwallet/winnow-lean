@@ -2248,6 +2248,52 @@ def testModeSeed : IO Unit := do
   check "test mode: the launch reads one seed variable"
     (WinnowApp.e2eVariables.filter (fun v => v == "WINNOW_E2E_ENTROPY" || v == "WINNOW_E2E_MNEMONIC") == ["WINNOW_E2E_ENTROPY"])
 
+/-- A network's wallets on disk: the first in the network's own directory, the others in numbered slots,
+found by their `wallet.json` and by nothing else; which was open last is one small file that may be wrong. -/
+def walletSlots (root : System.FilePath) : IO Unit := do
+  let net := (root / "slots" / "signet").toString
+  IO.FS.createDirAll net
+  check "slots: the network's own directory is the empty slot"
+    (Real.slotDir net "" == net && Real.slotOf net == "" && Real.networkDirOf net == net)
+  let two := Real.slotDir net "2"
+  check "slots: an added wallet's directory is under wallets/"
+    (two == s!"{net}/wallets/2" && Real.slotOf two == "2" && Real.networkDirOf two == net) two
+  check "slots: a directory that only looks like one is its own network's"
+    (Real.networkDirOf s!"{net}/wallets/x" == s!"{net}/wallets/x" && Real.networkDirOf s!"{net}/other/2" == s!"{net}/other/2")
+  check "slots: none while no wallet is kept"
+    ((← Real.listSlots net) == [] && (← Real.freeSlot net) == "" && (← Real.resolveSlot net) == "")
+  IO.FS.writeFile (Real.walletPath net) "{}"
+  check "slots: the first wallet" ((← Real.listSlots net) == [""] && (← Real.freeSlot net) == "1")
+  -- an addition that never finished left files and no wallet
+  let one := Real.slotDir net "1"
+  IO.FS.createDirAll one
+  IO.FS.writeFile (Real.dirFile one "people.json") "left behind"
+  check "slots: a slot without a wallet is not one" ((← Real.listSlots net) == [""])
+  check "slots: …and is cleared before it is used again"
+    ((← Real.freeSlot net) == "1" && !(← (Real.dirFile one "people.json").pathExists))
+  IO.FS.writeFile (Real.walletPath one) "{}"
+  let three := Real.slotDir net "3"
+  IO.FS.createDirAll three
+  IO.FS.writeFile (Real.walletPath three) "{}"
+  check "slots: listed in order, the next free one between them"
+    ((← Real.listSlots net) == ["", "1", "3"] && (← Real.freeSlot net) == "2") s!"{← Real.listSlots net}"
+  check "slots: with no pointer, the first" ((← Real.resolveSlot net) == "")
+  Real.writeActiveSlot net "3"
+  check "slots: the one open last" ((← Real.resolveSlot net) == "3")
+  IO.FS.removeFile (Real.walletPath three)
+  check "slots: a pointer to a wallet that is gone falls back to the first" ((← Real.resolveSlot net) == "")
+  Real.writeActiveSlot net "../../elsewhere"
+  check "slots: a pointer that names no slot opens nothing else" ((← Real.resolveSlot net) == "")
+  Real.discardEmptySlot three
+  check "slots: an empty added slot is taken away" (!(← (System.FilePath.mk three).pathExists))
+  Real.discardEmptySlot one
+  Real.discardEmptySlot net
+  check "slots: one that holds a wallet, and the network's own, are left" ((← Real.listSlots net) == ["", "1"])
+  check "slots: the gateways answer is one file beside the networks, whichever wallet asks"
+    (Real.gatewaysUsedPath net == Real.gatewaysUsedPath two &&
+     Real.gatewaysUsedPath net == System.FilePath.mk s!"{root}/slots/peer-gateways.automatic-used")
+    s!"{Real.gatewaysUsedPath two}"
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
@@ -2259,6 +2305,7 @@ def main : IO UInt32 := runMain "records-test" do
   backgroundRuns
   backgroundTaskCommands
   testModeSeed
+  walletSlots root
   try
     let a ← newPhone root "A"
     let b ← newPhone root "B"
