@@ -168,21 +168,18 @@ on the curve and has that x. -/
 theorem parseCompressed_spec {b : ByteArray} {p : Affine} (h : parseCompressed b = some p) :
     b.size = 33 ∧ p.x.toNat = Secp.fromBE (b.extract 1 33) ∧ p.Good := by
   unfold parseCompressed at h
-  rcases Bool.eq_false_or_eq_true (b.size == 33 && (b[0]! == 2 || b[0]! == 3)) with shape | shape
-  · simp only [shape, ↓reduceIte] at h
-    have size : b.size = 33 := by
-      simp only [Bool.and_eq_true, beq_iff_eq] at shape
-      exact shape.1
-    obtain ⟨q, parsed, made⟩ := Option.map_eq_some_iff.mp h
-    obtain ⟨_, number, good, _⟩ := parseXOnly_spec parsed
-    subst made
-    rcases Bool.eq_false_or_eq_true (b[0]! == 3) with odd | odd
-    · simp only [odd, ↓reduceIte]
-      exact ⟨size, number, Affine.neg_good good⟩
-    · simp only [odd, Bool.false_eq_true, ↓reduceIte]
-      exact ⟨size, number, good⟩
-  · simp only [shape, Bool.false_eq_true, ↓reduceIte] at h
-    cases h
+  split at h
+  · rename_i size
+    dsimp only at h
+    split at h
+    · obtain ⟨q, parsed, made⟩ := Option.map_eq_some_iff.mp h
+      obtain ⟨_, number, good, _⟩ := parseXOnly_spec parsed
+      subst made
+      split
+      · exact ⟨size, number, Affine.neg_good good⟩
+      · exact ⟨size, number, good⟩
+    · cases h
+  · cases h
 
 /-- Whether the curve's equation holds, as `onCurve` checks it, is whether it holds. -/
 theorem onCurve_spec {x y : Fe} (h : onCurve x y = true) : y.toF * y.toF = x.toF * x.toF * x.toF + 7 := by
@@ -194,26 +191,23 @@ point of the curve. -/
 theorem parseUncompressed_spec {b : ByteArray} {p : Affine} (h : parseUncompressed b = some p) :
     b.size = 65 ∧ p.x.toNat = Secp.fromBE (b.extract 1 33) ∧ p.y.toNat = Secp.fromBE (b.extract 33 65) ∧ p.Good := by
   unfold parseUncompressed at h
-  rcases Bool.eq_false_or_eq_true (b.size == 65 && (b[0]! == 4 || b[0]! == 6 || b[0]! == 7)) with shape | shape
-  · simp only [shape, ↓reduceIte] at h
-    have size : b.size = 65 := by
-      simp only [Bool.and_eq_true, beq_iff_eq] at shape
-      exact shape.1
-    obtain ⟨x, readX, rest⟩ := Option.bind_eq_some_iff.mp h
-    obtain ⟨y, readY, made⟩ := Option.bind_eq_some_iff.mp rest
-    obtain ⟨_, numberX, validX⟩ := Fe.ofBytes?_spec readX
-    obtain ⟨_, numberY, validY⟩ := Fe.ofBytes?_spec readY
-    rcases Bool.eq_false_or_eq_true (onCurve x y && (b[0]! == 4 || ((y.isOdd == 1) == (b[0]! == 7)))) with fits | fits
-    · simp only [fits, ↓reduceIte, Option.some.injEq] at made
-      subst made
-      have curve : onCurve x y = true := by
+  split at h
+  · rename_i size
+    dsimp only at h
+    split at h
+    · obtain ⟨x, readX, rest⟩ := Option.bind_eq_some_iff.mp h
+      obtain ⟨y, readY, made⟩ := Option.bind_eq_some_iff.mp rest
+      obtain ⟨_, numberX, validX⟩ := Fe.ofBytes?_spec readX
+      obtain ⟨_, numberY, validY⟩ := Fe.ofBytes?_spec readY
+      split at made
+      · rename_i fits
+        injection made with made
+        subst made
         simp only [Bool.and_eq_true] at fits
-        exact fits.1
-      exact ⟨size, numberX, numberY, validX, validY, onCurve_spec curve⟩
-    · simp only [fits, Bool.false_eq_true, ↓reduceIte] at made
-      cases made
-  · simp only [shape, Bool.false_eq_true, ↓reduceIte] at h
-    cases h
+        exact ⟨size, numberX, numberY, validX, validY, onCurve_spec fits.1⟩
+      · cases made
+    · cases h
+  · cases h
 
 /-! ## Numbers that are not secret -/
 

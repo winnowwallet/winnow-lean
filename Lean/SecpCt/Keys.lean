@@ -68,16 +68,22 @@ def parseXOnly (b : ByteArray) : Option Affine := (Fe.ofBytes? b).bind liftX?
 
 /-- A compressed public key: 02 or 03, then an x below P with a point above it. -/
 def parseCompressed (b : ByteArray) : Option Affine :=
-  if b.size == 33 && (b[0]! == 2 || b[0]! == 3) then
-    (parseXOnly (b.extract 1 33)).map fun p => if b[0]! == 3 then p.neg else p
+  if h : b.size = 33 then
+    let tag := b[0]'(by omega)
+    if tag == 2 || tag == 3 then
+      (parseXOnly (b.extract 1 33)).map fun p => if tag == 3 then p.neg else p
+    else none
   else none
 
 /-- An uncompressed public key: 04, x, y, both below P and on the curve; or the hybrid form, 06 or 07, whose
 first byte must also say whether y is odd. -/
 def parseUncompressed (b : ByteArray) : Option Affine :=
-  if b.size == 65 && (b[0]! == 4 || b[0]! == 6 || b[0]! == 7) then
-    (Fe.ofBytes? (b.extract 1 33)).bind fun x => (Fe.ofBytes? (b.extract 33 65)).bind fun y =>
-      if onCurve x y && (b[0]! == 4 || ((y.isOdd == 1) == (b[0]! == 7))) then some ⟨x, y⟩ else none
+  if h : b.size = 65 then
+    let tag := b[0]'(by omega)
+    if tag == 4 || tag == 6 || tag == 7 then
+      (Fe.ofBytes? (b.extract 1 33)).bind fun x => (Fe.ofBytes? (b.extract 33 65)).bind fun y =>
+        if onCurve x y && (tag == 4 || ((y.isOdd == 1) == (tag == 7))) then some ⟨x, y⟩ else none
+    else none
   else none
 
 /-- A number that is not secret, as 32 bytes below N: a tweak, or a number out of a signature. -/

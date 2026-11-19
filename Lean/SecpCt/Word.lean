@@ -68,11 +68,14 @@ def low32 : UInt64 := 0xFFFFFFFF
   let (hi, s3) := mulAdd a u3 r3 k
   (s0, s1, s2, s3, hi)
 
-/-- The eight bytes at `offset`, most significant first, as a word. The caller has checked they are there. -/
+/-- The eight bytes at `offset`, most significant first, as a word (0 if out of range). -/
 @[inline] def wordAt (b : ByteArray) (offset : Nat) : UInt64 :=
-  (b[offset]!.toUInt64 <<< 56) ||| (b[offset + 1]!.toUInt64 <<< 48) ||| (b[offset + 2]!.toUInt64 <<< 40) |||
-  (b[offset + 3]!.toUInt64 <<< 32) ||| (b[offset + 4]!.toUInt64 <<< 24) ||| (b[offset + 5]!.toUInt64 <<< 16) |||
-  (b[offset + 6]!.toUInt64 <<< 8) ||| b[offset + 7]!.toUInt64
+  if h : offset + 8 ≤ b.size then
+    ((b[offset]'(by omega)).toUInt64 <<< 56) ||| ((b[offset + 1]'(by omega)).toUInt64 <<< 48) |||
+    ((b[offset + 2]'(by omega)).toUInt64 <<< 40) ||| ((b[offset + 3]'(by omega)).toUInt64 <<< 32) |||
+    ((b[offset + 4]'(by omega)).toUInt64 <<< 24) ||| ((b[offset + 5]'(by omega)).toUInt64 <<< 16) |||
+    ((b[offset + 6]'(by omega)).toUInt64 <<< 8) ||| (b[offset + 7]'(by omega)).toUInt64
+  else 0
 
 /-- `out` with the word `w` appended, most significant byte first. -/
 @[inline] def pushWord (out : ByteArray) (w : UInt64) : ByteArray :=

@@ -30,36 +30,12 @@ namespace SecpCt
 open Secp.Spec (F)
 open Secp
 
-/-- One round of compression gives eight words. -/
-theorem compress_size (h : Array UInt32) (p : ByteArray) (off : Nat) : (Sha256.compress h p off).size = 8 := by
-  simp only [Sha256.compress]
-  simp
-
-theorem compressed_size (p : ByteArray) (l : List Nat) (h : Array UInt32) (hs : h.size = 8) :
-    (l.foldl (fun b a => Sha256.compress b p (64 * a)) h).size = 8 := by
-  induction l generalizing h with
-  | nil => exact hs
-  | cons i l ih => exact ih _ (compress_size _ _ _)
-
-theorem pushed_size (l : List UInt32) (out : ByteArray) :
-    (l.foldl (fun b a =>
-          (((b.push (UInt8.ofNat (a.toNat >>> 24))).push (UInt8.ofNat (a.toNat >>> 16) &&& 255)).push
-                (UInt8.ofNat (a.toNat >>> 8) &&& 255)).push
-            (a.toUInt8 &&& 255)) out).size = out.size + 4 * l.length := by
-  induction l generalizing out with
-  | nil => rfl
-  | cons a l ih =>
-    rw [List.foldl_cons, ih]
-    simp only [ByteArray.size_push, List.length_cons]
-    omega
-
 /-- A SHA-256 hash is thirty-two bytes. -/
 theorem hash_size (msg : ByteArray) : (Sha256.hash msg).size = 32 := by
   simp only [Sha256.hash]
-  simp
-  rw [← Array.foldl_toList, pushed_size]
-  have eight := compressed_size (Sha256.pad msg) (List.range' 0 ((Sha256.pad msg).size / 64)) Sha256.H0 rfl
-  simp [eight]
+  show (Sha256.State.toBytes _).size = 32
+  have he : (ByteArray.emptyWithCapacity 32).size = 0 := rfl
+  simp [Sha256.State.toBytes, Sha256.pushU32BE, ByteArray.size_push, he]
 
 /-- And so is a tagged hash. -/
 theorem tagged_size (tag : String) (msg : ByteArray) : (Sha256.tagged tag msg).size = 32 := hash_size _
@@ -98,11 +74,13 @@ theorem toList_bytes (bs : ByteArray) : bs.toList = bs.data.toList := by
 
 /-- The signer's xor of two thirty-two byte strings is winnow's. -/
 theorem xor32_eq (a b : ByteArray) (ha : a.size = 32) (hb : b.size = 32) : xor32 a b = Secp.xorBytes a b := by
-  obtain ⟨a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, rfl⟩ := bytes32 a ha
-  obtain ⟨c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21, c22, c23, c24, c25, c26, c27, c28, c29, c30, c31, rfl⟩ := bytes32 b hb
+  simp only [xor32, ha, hb, and_self, ↓reduceDIte, Secp.xorBytes]
   apply bytes_ext
-  simp [xor32, Secp.xorBytes, List.range'_succ, ByteArray.push, toList_bytes]
-  rfl
+  apply List.ext_getElem
+  · simp [toList_bytes, Array.length_toList, show a.data.size = a.size from rfl, show b.data.size = b.size from rfl, ha, hb]
+  · intro i h1 h2
+    rw [Array.getElem_toList, Array.getElem_ofFn]
+    simp [toList_bytes, ByteArray.getElem_eq_getElem_data]
 /-! ## The signature -/
 
 /-- The number of points, here and in the specification. -/
@@ -277,9 +255,9 @@ theorem sign_eq [Fermat] (secret m aux : ByteArray) (size : secret.size = 32)
 /-! ## The public key and adding keys, as the signer calls them -/
 
 /-- The last of the thirty-two bytes winnow writes for a number says whether the number is odd. -/
-theorem last_byte_parity (n : Nat) : (Secp.toBE32 n)[31]!.toUInt64 &&& 1 = if n % 2 = 1 then 1 else 0 := by
-  have last : (Secp.toBE32 n)[31]! = UInt8.ofNat n := by
-    rw [getElem!_pos (Secp.toBE32 n) 31 (by rw [toBE32_size]; decide)]
+theorem last_byte_parity (n : Nat) (h31 : 31 < (Secp.toBE32 n).size) :
+    ((Secp.toBE32 n)[31]'h31).toUInt64 &&& 1 = if n % 2 = 1 then 1 else 0 := by
+  have last : (Secp.toBE32 n)[31]'h31 = UInt8.ofNat n := by
     simp [Secp.toBE32, ByteArray.getElem_eq_getElem_data]
   rw [last]
   apply UInt64.toNat_inj.mp
@@ -303,8 +281,9 @@ theorem publicKey_spec [Fermat] (secret : ByteArray) (size : secret.size = 32)
   have key : Sc.isKey secret = 1 := by
     rw [Sc.isKey_spec secret size]
     simp only [positive, below, and_self, ↓reduceIte]
-  simp only [publicKey, size, raw, key, last_byte_parity]
-  rfl
+  have hy : 31 < (Secp.toBE32 y.val).size := by rw [toBE32_size]; decide
+  simp only [publicKey, size, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte, raw, key, beq_self_eq_true,
+    hy, and_self, ↓reduceDIte, last_byte_parity]
 
 /-- **Adding keys.** The sum `addRaw` returns is the sum of the two numbers modulo N, as winnow writes it, and
 the bit beside it says whether that sum is not zero. -/
