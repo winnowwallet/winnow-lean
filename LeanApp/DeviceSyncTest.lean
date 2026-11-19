@@ -547,6 +547,84 @@ def olderBackups (root : System.FilePath) : TM Unit := do
   b.stop
   c.stop
 
+/-- In an object, the value under `k` changed by `f`. -/
+def editKey (k : String) (f : SwiftJSON.JV → SwiftJSON.JV) : SwiftJSON.JV → SwiftJSON.JV
+  | .obj kvs => .obj (kvs.map fun (n, v) => if n == k then (n, f v) else (n, v))
+  | v => v
+
+/-- A backup as another build may have left it: `source`'s own things, with the bundle's JSON changed by
+`bundle` and the app's context replaced by `context`, sealed under a key of its own (or, with `sealWith`,
+under one iCloud Keychain does not hold for it). No restore would write these; an older app did. -/
+def craftedCopy (cloud : Real.MemoryCloud) (cloudKeys : Real.CloudBackupKeys) (source : Device)
+    (bundle : SwiftJSON.JV → SwiftJSON.JV := id) (context : Option ByteArray := none) (sealWith : Option ByteArray := none) :
+    TM (String × ByteArray) := do
+  let exported ← source.app.exportedBundle
+  let id ← UUIDText.random
+  let key ← cloudKeys.create id
+  let savedAt ← referenceDateNow
+  let json := obj [("bundle", some (bundle ({ exported with mnemonic := none } : ImportBundle).toJV)),
+                             ("appState", context.map SwiftJSON.ofData)]
+  let box ← need "the sealed wallet box" (CloudWalletBackup.sealed (sealWith.getD key) (SwiftJSON.write json).toUTF8
+    (CloudWalletBackup.context id exported.network (CloudWalletBackup.walletPurpose savedAt)))
+  cloud.records.modify (·.push { version := 2, id, network := exported.network, savedAt, sealedPhrase := ByteArray.mk #[0], sealedWallet := box })
+  return (id, key)
+
+/-- Backups in forms a restore refuses. An older app's backup may hold an account of a kind this build does
+not keep, a signer of another shape, or a context that no longer reads: a restore refuses the whole of it,
+and a device keeping in step takes the rest. One that does not open at all is said so, with its date, and
+is not fetched again and again. -/
+def olderForms (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let gone ← device root "formsGone" cloud cloudKeys
+  let b ← device root "formsB" cloud cloudKeys
+  discard <| gone.create
+  discard <| b.create
+  let id ← sharedAccount gone
+  discard <| gone.backend.addSignerKeys "Carol" (← testKey 0xC3)
+  -- what the older app wrote: the account and the signer, and beside them an account of another kind, an
+  -- entry that is no account, a signer of another shape, and a context this build does not read
+  let (old, key) ← craftedCopy cloud cloudKeys gone
+    (bundle := fun j =>
+      let j := editKey "vaults" (fun
+        | .arr xs => .arr (xs ++ #[editKey "id" (fun _ => .str "another-kind") (editKey "descriptor" (fun _ => .str "tr(musig(a,b))") (xs[0]?.getD .null)),
+                                    .str "not an account"])
+        | v => v) j
+      editKey "signers" (fun | .arr xs => .arr (xs ++ #[.obj #[("label", .str "an older shape")]]) | v => v) j)
+    (context := some "{\"people\":5}".toUTF8)
+  -- the install is gone: its own backup with it, the older one left behind
+  let own := ((← gone.app.controller.get).configuration.map (·.backup.id)).getD ""
+  gone.stop
+  cloud.records.modify (·.filter (·.id != own))
+  let some backup := (← cloud.records.get).find? (·.id == old) | throw "the older backup is not in iCloud"
+  check "a restore's reading refuses the whole backup" ((← (backup.state key).run) matches .error _)
+  let shared ← need "the reading a device keeping in step makes" (backup.shared key)
+  check "…and a device's reading has the account and the signer, and counts what it left"
+    (shared.accounts.any (·.id == id) && shared.signers.size == 1 && shared.unread ≥ 2)
+    s!"{shared.accounts.map (·.id)} {shared.signers.size} {shared.unread}"
+  b.look
+  b.settle
+  check "the account and the signer follow from it" ((← b.overview).accounts.map (·.id) == [id] && (← b.signerNames) == ["Carol"])
+    s!"{(← b.overview).accounts.map (·.id)} {(← b.overview).arriving.map (·.id)} {← b.signerNames}"
+  let status ← b.app.follow.status.get
+  check "the three it did not keep are counted, and the backup counts as read"
+    (status.listed == 1 && status.unread.isEmpty && status.skipped == 3) s!"{status.listed} {status.unread.size} {status.skipped}"
+  let note := ((← b.backend.cloudStatus).devicesNote).getD ""
+  check "the backup page says both" (contains note "in step with 1 backup" && contains note "3 accounts or signers in those backups are of a kind this version does not keep") note
+  -- one that does not open: sealed under another key than the one iCloud Keychain holds for it
+  let (closed, _) ← craftedCopy cloud cloudKeys b (sealWith := some (ByteArray.mk (Array.replicate 32 7)))
+  b.look
+  let status ← b.app.follow.status.get
+  check "a backup that does not open is said so, and the others are still read"
+    (status.listed == 2 && status.unread.map (·.2) == #[Real.Unread.notOpened] && (← b.overview).accounts.map (·.id) == [id])
+    s!"{status.listed} {status.unread.size}"
+  let note := ((← b.backend.cloudStatus).devicesNote).getD ""
+  check "the backup page says which, by when it was saved" (contains note "1 of 2 backups read" && contains note "1 backup (saved " && contains note "could not be opened") note
+  check "it is not fetched again in this run" ((← b.app.follow.unopened.get).map (·.1) == #[closed])
+  b.look
+  check "…and is still said at the next look" (((← b.app.follow.status.get).unread.map (·.2)) == #[Real.Unread.notOpened])
+  b.stop
+
 def whenNothingFollows (root : System.FilePath) : TM Unit := do
   let cloud ← Real.MemoryCloud.new
   -- the first device's key reaches the second only when the test says so (iCloud Keychain is its own service)
@@ -566,7 +644,12 @@ def whenNothingFollows (root : System.FilePath) : TM Unit := do
   -- the backup's key has not arrived
   b.look
   check "a backup whose key has not arrived is passed over" ((← b.signerNames) == [])
-  check "…and Settings says one could not be read" (((← b.app.follow.status.get).message).isSome && (← b.view).settled.isEmpty)
+  let status ← b.app.follow.status.get
+  check "…and it is counted as waiting for its key, to be looked for again"
+    (status.listed == 1 && status.unread.map (·.2) == #[Real.Unread.keyMissing] && (← b.view).settled.isEmpty)
+  let note := ((← b.backend.cloudStatus).devicesNote).getD ""
+  check "…and the backup page says so, with when it was saved and where the key comes from"
+    (contains note "0 of 1 backup read" && contains note "Waiting for the key of 1 backup (saved " && contains note "iCloud Keychain") note
   -- automatic backup off: nothing is read
   arrived.set true
   b.backend.setAutomaticCloudBackup false
@@ -751,6 +834,7 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "accountsFollow" (accountsFollow root)
   runTest "removalStopsAtCoins" (removalStopsAtCoins root)
   runTest "olderBackups" (olderBackups root)
+  runTest "olderForms" (olderForms root)
   runTest "whenNothingFollows" (whenNothingFollows root)
   runTest "threeDevices" (threeDevices root)
   runTest "leftAlone" (leftAlone root)

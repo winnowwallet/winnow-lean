@@ -12,7 +12,7 @@ what to take (`Winnow.DeviceSync`, the rules) and doing it to its own stores; it
 the result, with the stamps the other devices decide by (`CloudAppState.sync`).
 
 Nothing is uploaded that a backup did not already hold, apart from those stamps. The recovery words' box is
-never opened here: only `CloudWalletBackup.state`, the wallet box. So no key or phrase reaches a device by
+never opened here: only the wallet box, for its accounts and signers (`CloudWalletBackup.shared`). So no key or phrase reaches a device by
 this path, and a device whose wallet is another one sees an account of the first as watch-only.
 
 There is no push: the shell has CloudKit's records and no subscriptions, so a device looks when it comes to
@@ -104,11 +104,29 @@ def published (v : SyncView) : SyncMeta :=
 
 end SyncView
 
+/-- Why another device's backup was not read in a round. -/
+inductive Unread where
+  /-- Its key has not arrived from iCloud Keychain: looked for again each round. -/
+  | keyMissing
+  /-- It does not open with its key, or is not a backup this build reads. It is not fetched again in this
+  run of the app unless it is saved again. -/
+  | notOpened
+  /-- iCloud did not hand it over this time: fetched again next round. -/
+  | notFetched
+  deriving BEq, Inhabited
+
 /-- How keeping in step stands, for Settings → Backup. -/
 structure SyncStatus where
   /-- When the other devices' backups were last read (seconds since 1970). -/
   checkedAt : Option Nat := none
+  /-- A round that failed as a whole, in its own words. -/
   message : Option String := none
+  /-- The other backups iCloud listed in the last round. -/
+  listed : Nat := 0
+  /-- Those of them not read, each with when it was saved (seconds since 2001) and why. -/
+  unread : Array (Float × Unread) := #[]
+  /-- Accounts and signers in the backups read that are of a kind or a shape this build does not keep. -/
+  skipped : Nat := 0
   deriving Inhabited
 
 /-- At most this many other backups are read in a round, newest first. -/
@@ -123,7 +141,9 @@ structure SyncApp where
   /-- One reader or writer of `device-sync.json` at a time. -/
   lock : Std.Mutex Unit
   /-- The backups opened in this run of the app, by id and save date. -/
-  opened : IO.Ref (Array (String × Float × Replica))
+  opened : IO.Ref (Array (String × Float × Replica × Nat))
+  /-- The backups that did not open in this run of the app, by id and save date: not fetched again in it. -/
+  unopened : IO.Ref (Array (String × Float))
   running : IO.Ref Bool
   /-- When the last round began (monotonic milliseconds); none before the first. -/
   lastRound : IO.Ref (Option Nat)
@@ -149,7 +169,7 @@ def unixMs : IO Nat := do
 
 def new (controller : CloudBackupController) (env : Env) (multisig : MultisigApp) (allows : Bool)
     (intervalMs : Nat := 60_000) : IO SyncApp := do
-  return { controller, env, multisig, allows, lock := ← Std.Mutex.new (), opened := ← IO.mkRef #[],
+  return { controller, env, multisig, allows, lock := ← Std.Mutex.new (), opened := ← IO.mkRef #[], unopened := ← IO.mkRef #[],
            running := ← IO.mkRef false, lastRound := ← IO.mkRef none, intervalMs, nowMs := unixMs,
            status := ← IO.mkRef {}, changed := ← IO.mkRef (pure ()), loop := ← IO.mkRef 0, looping := ← IO.mkRef false, noticed := ← IO.mkRef none,
            journaled := ← IO.mkRef none }
@@ -270,59 +290,85 @@ def noteSignerRemoved (a : SyncApp) (key : String) : IO Unit := do
 
 /-! ## Reading the other devices' backups -/
 
-/-- Another device's backup as the rules read it: its wallet box opened with its key from iCloud Keychain
-(never the words' box), its accounts and signers each held to the store's own rules, one that fails left
-out. None when the backup is another network's or its context does not read. -/
-def openReplica (a : SyncApp) (id account : String) (network : WinnowApp.Network) : IO (Option Replica) := do
-  let backup ← a.controller.store.load id account
-  let key ← a.controller.keys.load id
-  let (bundle, appState) ← runWM (backup.state key)
-  unless bundle.network == network.name do return none
+/-- Another device's backup as the rules read it, and how many of its accounts and signers were left
+out: the key first (it is on this device or it is not, and asking costs nothing), then the record, then its
+wallet box opened for its accounts and signers alone (`CloudWalletBackup.shared`, never the words' box, and
+not a restore's reading: an older backup holding an account this build does not keep still gives the rest).
+Each account and signer is held to the store's own rules, one that fails left out. The stamps are read from
+the context by themselves. None when the backup is another network's. -/
+def openReplica (a : SyncApp) (id account : String) (network : WinnowApp.Network) :
+    IO (Except Unread (Option Replica × Nat)) := do
+  let key ← match ← (a.controller.keys.load id).toBaseIO with
+    | .ok k => pure k
+    | .error e =>
+      return .error (if toString e == CloudBackupError.keyUnavailable.description then .keyMissing else .notOpened)
+  let backup ← match ← (a.controller.store.load id account).toBaseIO with
+    | .ok b => pure b
+    | .error e =>
+      return .error (if toString e == CloudBackupError.invalidBackup.description then .notOpened else .notFetched)
+  unless backup.network == network.name do return .ok (none, 0)
+  let shared ← match ← (backup.shared key).run with
+    | .ok s => pure s
+    | .error _ => return .error .notOpened
   let net := Network.tx network
-  let context ← match ← (CloudAppState.decode appState bundle).run with
-    | .ok c => pure c
-    | .error _ => return none
+  let mut skipped := shared.unread
   let mut accounts : Array MultisigAccountRecord := #[]
-  for r in bundle.vaults.getD #[] do
+  for r in shared.accounts do
     if (← (MultisigStore.validate #[r] net).run).toOption.isSome then accounts := accounts.push r
+    else skipped := skipped + 1
   let mut signers : Array (String × SignerRecord) := #[]
-  for r in bundle.signers.getD #[] do
-    if (← (SignerStore.validate #[r] net).run).toOption.isNone then continue
-    let some key ← signerKey r net | continue
+  for r in shared.signers do
+    if (← (SignerStore.validate #[r] net).run).toOption.isNone then
+      skipped := skipped + 1
+      continue
+    let some key ← signerKey r net | skipped := skipped + 1; continue
     unless signers.any (·.1 == key) do signers := signers.push (key, r)
-  return some { id, height := bundle.lastKnownHeight, accounts, signers, sync := context.bind (·.sync) }
+  return .ok (some { id, height := shared.lastKnownHeight, accounts, signers, sync := CloudAppState.syncOf shared.appState }, skipped)
 
-/-- The other backups of this network, newest first, each opened once per save date; one whose key has not
-arrived or that cannot be read is passed over this time. With them, those opened just now (id and save
-date), and whether every one listed was read. -/
-def replicas (a : SyncApp) (network : WinnowApp.Network) (settled : Array (String × Float)) :
-    IO (Array Replica × Array (String × Float) × Bool) := do
+/-- What a round's reading of the other backups came to. -/
+structure Reading where
+  found : Array Replica := #[]
+  /-- Those there is nothing more to take from until they are saved again (id and save date). -/
+  read : Array (String × Float) := #[]
+  listed : Nat := 0
+  unread : Array (Float × Unread) := #[]
+  skipped : Nat := 0
+
+/-- The other backups of this network, newest first, each opened once per save date. One whose key has not
+arrived, or that iCloud did not hand over, is passed over this time and tried again; one that does not open
+is not fetched again in this run of the app unless it is saved again. -/
+def replicas (a : SyncApp) (network : WinnowApp.Network) (settled : Array (String × Float)) : IO Reading := do
   let state ← a.controller.get
   let account ← a.controller.store.account
   if let some pinned := state.configuration.bind (·.account) then
     unless pinned == account do CloudBackupError.accountChanged.throw
   let own := state.configuration.map (·.backup.id)
   let listed := ((← a.controller.store.list network.name).filter (some ·.id != own)).extract 0 maximumSiblings
-  let mut found : Array Replica := #[]
-  let mut read : Array (String × Float) := #[]
-  let mut complete := true
-  let mut cache := (← a.opened.get).filter fun (id, savedAt, _) => listed.any fun s => s.id == id && s.savedAt == savedAt
+  let mut reading : Reading := { listed := listed.size }
+  let mut cache := (← a.opened.get).filter fun (id, savedAt, _, _) => listed.any fun s => s.id == id && s.savedAt == savedAt
+  let mut unopened := (← a.unopened.get).filter fun (id, savedAt) => listed.any fun s => s.id == id && s.savedAt == savedAt
   for summary in listed do
     if settled.any fun (id, savedAt) => id == summary.id && savedAt == summary.savedAt then continue
-    if let some (_, _, replica) := cache.find? fun (id, savedAt, _) => id == summary.id && savedAt == summary.savedAt then
-      found := found.push replica
-      read := read.push (summary.id, summary.savedAt)
+    if unopened.any fun (id, savedAt) => id == summary.id && savedAt == summary.savedAt then
+      reading := { reading with unread := reading.unread.push (summary.savedAt, .notOpened) }
       continue
-    match ← (a.openReplica summary.id account network).toBaseIO with
-    | .ok (some replica) =>
-      cache := cache.push (summary.id, summary.savedAt, replica)
-      found := found.push replica
-      read := read.push (summary.id, summary.savedAt)
-    -- another network's, or a context this build does not read: nothing to take, now or later
-    | .ok none => read := read.push (summary.id, summary.savedAt)
-    | .error _ => complete := false
+    if let some (_, _, replica, skipped) := cache.find? fun (id, savedAt, _, _) => id == summary.id && savedAt == summary.savedAt then
+      reading := { reading with found := reading.found.push replica, read := reading.read.push (summary.id, summary.savedAt),
+                                skipped := reading.skipped + skipped }
+      continue
+    match ← a.openReplica summary.id account network with
+    | .ok (some replica, skipped) =>
+      cache := cache.push (summary.id, summary.savedAt, replica, skipped)
+      reading := { reading with found := reading.found.push replica, read := reading.read.push (summary.id, summary.savedAt),
+                                skipped := reading.skipped + skipped }
+    -- another network's: nothing to take, now or later
+    | .ok (none, _) => reading := { reading with read := reading.read.push (summary.id, summary.savedAt) }
+    | .error why =>
+      if why == .notOpened then unopened := unopened.push (summary.id, summary.savedAt)
+      reading := { reading with unread := reading.unread.push (summary.savedAt, why) }
   a.opened.set cache
-  return (found, read, complete)
+  a.unopened.set unopened
+  return reading
 
 /-! ## Doing what was decided -/
 
@@ -505,7 +551,9 @@ def round (a : SyncApp) : IO Unit := do
       !arriving.any (·.record.id == e.stamps.id)) ||
     seen.signers.any (fun e => !e.stamps.isRemoved && !signerKeys.contains e.stamps.key)
   let settled := if lacking then #[] else seen.settled
-  let (found, read, complete) ← a.replicas network settled
+  let reading ← a.replicas network settled
+  let found := reading.found
+  let read := reading.read
   -- the wallet or the network changed while the backups were read
   unless (← a.place).map (fun p => (p.1, p.2.1)) == some (wallet, network) do return
   a.renewWaiting found
@@ -532,8 +580,11 @@ def round (a : SyncApp) : IO Unit := do
     let listed := settled.filter fun (id, _) => !read.any (·.1 == id)
     let moved := changed || !sameView { view with settled := before.settled } before
     return (if quiet then { view with settled := listed ++ read } else { view with settled := #[] }, moved)
-  a.status.set { checkedAt := some ((← a.nowMs) / 1000), message := if complete then none else some "One of your devices' backups could not be read yet." }
-  a.journalOnce "devices.looked" [("backups", toString found.size), ("complete", toString complete), ("changed", toString changed)]
+  a.status.set { checkedAt := some ((← a.nowMs) / 1000), listed := reading.listed, unread := reading.unread, skipped := reading.skipped }
+  let count (why : Unread) := toString (reading.unread.filter (·.2 == why)).size
+  a.journalOnce "devices.looked" [("listed", toString reading.listed), ("backups", toString found.size),
+    ("keyMissing", count .keyMissing), ("notOpened", count .notOpened), ("notFetched", count .notFetched),
+    ("skipped", toString reading.skipped), ("changed", toString changed)]
   if changed then
     a.multisig.overviewCache.set none
     (← a.changed.get)
@@ -610,6 +661,7 @@ def stop (a : SyncApp) : IO Unit := do
 /-- The wallet changed or went: what was read is another wallet's business. -/
 def reset (a : SyncApp) : IO Unit := do
   a.opened.set #[]
+  a.unopened.set #[]
   a.lastRound.set none
   a.status.set {}
   a.noticed.set none

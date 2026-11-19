@@ -66,6 +66,14 @@ def ofJV (v : JV) : D CloudAppState := do
            signers := ← keyIfPresent kvs "signers" (asArray SignerRecord.ofJV),
            sync := (← keyIfPresent kvs "sync" fun v => pure (DeviceSync.SyncMeta.ofJV v).toOption).join }
 
+/-- The stamps alone, from a context as it was sealed: what another device needs of it. The rest (people,
+labels) is a restore's, and is not held to a restore's rules to read this. -/
+def syncOf (data : Option ByteArray) : Option DeviceSync.SyncMeta := do
+  let text ← String.fromUTF8? (← data)
+  let read : D (Option DeviceSync.SyncMeta) := decodeText text fun v => do
+    return (lookup (← asObject v) "sync").bind fun s => (DeviceSync.SyncMeta.ofJV s).toOption
+  read.toOption.join
+
 /-- `encoded()`: sorted keys, escaped slashes. -/
 def encoded (c : CloudAppState) : ByteArray := (write c.toJV).toUTF8
 

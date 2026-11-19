@@ -170,6 +170,62 @@ def state (b : CloudWalletBackup) (key : ByteArray) : WM (ImportBundle × Option
     invalid "cloud backup identity does not match"
   return (bundle, appState)
 
+/-- What a person's other device takes from a backup: its accounts and signers, each read by itself. `state`
+is a restore's reading, and refuses the whole backup for one thing this wallet does not keep (a MuSig2
+account of the shared-account Winnow, a signer list of an older shape), so that a restore never loses an
+account in silence. Nothing is restored from this: what does not read is counted and left where it is. -/
+structure Shared where
+  lastKnownHeight : UInt32
+  accounts : Array MultisigAccountRecord := #[]
+  signers : Array SignerRecord := #[]
+  /-- The app's own data, as it was sealed. -/
+  appState : Option ByteArray := none
+  /-- Accounts and signers the backup lists that were not kept: of a kind or a shape this build does not
+  read, or past the bounds. -/
+  unread : Nat := 0
+  deriving Inhabited
+
+/-- At most this many signers are taken from one backup. -/
+def maximumSharedSigners : Nat := 1_000
+
+/-- The wallet box opened for `Shared`: `state`'s key, authentication and identity checks, and
+`ImportBundle.checkAccountsAndSigners`'s bounds on what is kept. The coins, the history and the wallet's own
+descriptor are not read. -/
+def shared (b : CloudWalletBackup) (key : ByteArray) : WM Shared := do
+  unless b.version == 1 || b.version == 2 do invalid "unsupported cloud backup"
+  let data ← aes (AESGCM.openCombined key b.sealedWallet (context b.id b.network (walletPurpose b.savedAt)))
+  let some text := String.fromUTF8? data | throw (.named "dataCorrupted")
+  let each {α} (kvs : Array (String × JV)) (name : String) (f : JV → D α) : Array α × Nat :=
+    match lookup kvs name with
+    | some (.arr xs) => xs.foldl (fun (kept, lost) x =>
+        match f x with | .ok r => (kept.push r, lost) | .error _ => (kept, lost + 1)) (#[], 0)
+    | _ => (#[], 0)
+  let read : D (Bool × Shared) := decodeText text fun v => do
+    let top ← asObject v
+    -- version 1 sealed the bundle alone
+    let (kvs, appState) ← if b.version == 1 then pure (top, none) else do
+      pure (← SwiftJSON.key top "bundle" asObject, ← keyIfPresent top "appState" asData)
+    let network ← SwiftJSON.key kvs "network" asString
+    let own := network == b.network && (lookup kvs "mnemonic").all (· == .null) &&
+      (appState.map (·.size)).getD 0 ≤ maximumAppStateBytes
+    let (listed, lostAccounts) := each kvs "vaults" MultisigAccountRecord.ofJV
+    -- the bounds a restore holds every account to together: past them, the rest are left
+    let (accounts, _, _, lostAccounts) := listed.foldl (fun (kept, coins, history, lost) r =>
+      let coins' := coins + r.allUtxos.size
+      let history' := history + r.history.size
+      if kept.size < ImportBundle.maximumVaults && coins' ≤ ImportBundle.maximumEntries &&
+          history' ≤ ImportBundle.maximumEntries &&
+          ((r.draft.map (·.psbtBase64.utf8ByteSize)).getD 0) ≤ MultisigSpendDraft.maximumBytes
+      then (kept.push r, coins', history', lost) else (kept, coins, history, lost + 1)) (#[], 0, 0, lostAccounts)
+    let (signers, lostSigners) := each kvs "signers" SignerRecord.ofJV
+    let kept := signers.extract 0 maximumSharedSigners
+    return (own, { lastKnownHeight := ← SwiftJSON.key kvs "lastKnownHeight" asUInt32, accounts, signers := kept, appState,
+                   unread := lostAccounts + lostSigners + (signers.size - kept.size) })
+  match read with
+  | .ok (true, shared) => return shared
+  | .ok (false, _) => invalid "cloud backup identity does not match"
+  | .error e => throw (.named e)
+
 /-- `updating(bundle:appState:key:savedAt:)`: the same wallet (network and descriptor), the phrase box
 kept as it is, the app data kept unless replaced. -/
 def updating (b : CloudWalletBackup) (bundle : ImportBundle) (key : ByteArray) (appState : Option ByteArray := none)

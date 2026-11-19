@@ -452,7 +452,11 @@ def shellCloudStore (ask : Ask) : CloudBackupStore :=
           if e.name == "tooLarge" || e.kind == .malformed then CloudBackupError.invalidBackup.throw
           else failText (cloudErrorText e)
       unless data.size ≤ CloudWalletBackup.maximumBytes do CloudBackupError.invalidBackup.throw
-      let backup ← runWM (CloudWalletBackup.decode data)
+      -- a record that does not decode is said as its other unreadable shapes are, so a caller can tell a
+      -- backup that will never read from one iCloud did not hand over
+      let backup ← match ← (CloudWalletBackup.decode data).run with
+        | .ok b => pure b
+        | .error _ => CloudBackupError.invalidBackup.throw
       unless backup.id == id && (← account) == expected do CloudBackupError.accountChanged.throw
       return backup }
 

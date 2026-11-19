@@ -106,8 +106,11 @@ the rest headless. `device-sync-test` holds the rules
 phones, each the real backend with its iCloud flows, over one in-memory iCloud
 and Keychain: signers and Ledgers follow, are renamed and removed; an account
 arrives, is caught up and shown watch-only; a removal travels, and does not
-where coins are; and nothing follows with backup off, under another Apple
-Account or from a backup whose key has not arrived. `backend-test`'s
+where coins are; nothing follows with backup off, under another Apple
+Account or from a backup whose key has not arrived; and a backup in a form a
+restore refuses (an account of another kind, a signer of another shape, a
+context that no longer reads) still gives its accounts and signers, while one
+that does not open is said so by its date and not fetched again. `backend-test`'s
 `devicesFlow` runs two on regtest: the second device finds a coin paid after the
 first one's backup by its own scan, and a payment started on one gathers its
 signatures across both and confirms. Real iCloud between two real devices is

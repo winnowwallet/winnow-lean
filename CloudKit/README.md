@@ -116,6 +116,21 @@ the app's side is [Real/DeviceSync](../LeanApp/WinnowApp/Real/DeviceSync.lean).
 - **Older backups.** One written before this carries no stamps. Its accounts
   and signers are still taken, as added at the beginning of time, so a removal
   made since beats them, and its names never replace a device's own.
+- **Read apart from a restore.** A restore refuses a whole backup for one thing
+  this wallet does not keep (a MuSig2 account of the shared-account Winnow, a
+  signer list of an older shape), so that it never loses an account in
+  silence. A device keeping in step restores nothing, and reads each account
+  and signer by itself (`CloudWalletBackup.shared`): the ones that read are
+  taken and the rest are counted. The stamps are read from the app context by
+  themselves, whether or not the rest of it still reads. 0.9.17 and 0.9.18
+  used the restore's reading, and said of any such backup only that it "could
+  not be read yet", every minute, on every device.
+- **What Settings says.** Settings → Backup → iCloud backup gives when the
+  other backups were checked and how many were read. For one that was not: when
+  it was saved and why. Its key has not arrived from iCloud Keychain (looked
+  for again each round, before anything is downloaded); it does not open, or is
+  no backup this build reads (not fetched again while the app runs unless it is
+  saved again); or iCloud did not hand it over this time.
 - **When.** There is no push: the app's shell has CloudKit's records and no
   subscriptions. A device looks when it comes to the foreground and then about
   once a minute while open, and saves its own backup a few seconds after a
@@ -123,8 +138,7 @@ the app's side is [Real/DeviceSync](../LeanApp/WinnowApp/Real/DeviceSync.lean).
   again.
 - **Off.** With automatic backup off for a wallet, without an Apple Account, or
   under a different account than the one the backup is bound to, nothing is
-  read and nothing follows; the wallet works as before. A backup whose key has
-  not arrived from iCloud Keychain is passed over until it has.
+  read and nothing follows; the wallet works as before.
 
 Limits worth knowing. A device's backup waits while a payment from its own
 wallet is unconfirmed, and so does what the others can take from it. Stale backups of installs that are gone stay in iCloud

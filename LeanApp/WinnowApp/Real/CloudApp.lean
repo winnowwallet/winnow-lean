@@ -309,6 +309,32 @@ def restore (a : CloudApp) (n : WinnowApp.Network) (dir id : String) : IO CloudR
   return { walletID, matchesBundle := report.map (·.matchesBundle),
            context := validated.map fun s => (s.ownDisplayName, s.advancedMode) }
 
+
+/-- What Settings → Backup → iCloud backup says of the other devices after a round: when, how many of the
+other backups were read, and of each that was not, when it was saved and why. -/
+def devicesText (f : SyncStatus) (ago : String) : IO String := do
+  let saved (why : Unread) : IO (List String) :=
+    ((f.unread.filter (·.2 == why)).toList.take 3).mapM (formatReferenceDate ·.1)
+  let count (why : Unread) : Nat := (f.unread.filter (·.2 == why)).size
+  let backups (n : Nat) : String := if n == 1 then "1 backup" else s!"{n} backups"
+  let dates (ds : List String) (n : Nat) : String :=
+    ", ".intercalate ds ++ (if n > ds.length then s!" and {n - ds.length} more" else "")
+  let read := f.listed - f.unread.size
+  let first :=
+    if f.listed == 0 then s!"Other devices checked {ago} ago: no other backup in iCloud yet."
+    else if f.unread.isEmpty then s!"Other devices checked {ago} ago: in step with {backups f.listed}."
+    else s!"Other devices checked {ago} ago: {read} of {backups f.listed} read."
+  let mut lines := [first]
+  if count .keyMissing > 0 then
+    lines := lines ++ [s!"Waiting for the key of {backups (count .keyMissing)} (saved {dates (← saved .keyMissing) (count .keyMissing)}): it comes through iCloud Keychain, so check Passwords & Keychain on both devices."]
+  if count .notOpened > 0 then
+    lines := lines ++ [s!"{backups (count .notOpened)} (saved {dates (← saved .notOpened) (count .notOpened)}) could not be opened and nothing is taken from {if count .notOpened == 1 then "it" else "them"}: made by another version of Winnow, or damaged."]
+  if count .notFetched > 0 then
+    lines := lines ++ [s!"iCloud did not hand over {backups (count .notFetched)} this time; Winnow will ask again."]
+  if f.skipped > 0 then
+    lines := lines ++ [s!"{f.skipped} {if f.skipped == 1 then "account or signer" else "accounts or signers"} in those backups {if f.skipped == 1 then "is" else "are"} of a kind this version does not keep."]
+  return " ".intercalate lines
+
 /-- The status the screens read, with its dates rendered. -/
 def status (a : CloudApp) : IO CloudStatus := do
   let s ← a.controller.get
@@ -320,11 +346,11 @@ def status (a : CloudApp) : IO CloudStatus := do
   let lastSavedAgo := s.lastSaved.map fun d => relativeAgo (max 0 (now - (d + 978_307_200))).toUInt64.toNat
   let available ← s.available.toList.mapM fun b => do return ({ id := b.id, savedAtText := ← formatReferenceDate b.savedAt } : CloudBackupInfo)
   let follow ← a.follow.status.get
-  let devicesNote := if !a.allows || !s.automaticEnabled then none else
+  let devicesNote ← if !a.allows || !s.automaticEnabled then pure none else
     match follow.message, follow.checkedAt with
-    | some m, _ => some m
-    | none, some t => some s!"Other devices checked {relativeAgo (now.toUInt64.toNat - t)} ago"
-    | none, none => none
+    | some m, _ => pure (some m)
+    | none, some t => some <$> devicesText follow (relativeAgo (now.toUInt64.toNat - t))
+    | none, none => pure none
   return { automaticEnabled := s.automaticEnabled, enabled := s.enabled, statusTitle := s.statusTitle, lastSavedText, lastSavedAgo,
            message := s.message, busy := s.busy, available, restoreNotice := ← a.restoreNotice.get, devicesNote }
 
