@@ -4,6 +4,7 @@ import Winnow
 import Winnow.Proofs.DeviceSyncProofs
 import Winnow.Proofs.Custody
 import Winnow.Proofs.Spend
+import Winnow.Proofs.Selection
 
 /-! # `Winnow/Proofs/Gate.lean`: Single Auditable Verification Gate
 
@@ -234,6 +235,24 @@ example : ∀ (r : ReviewedSend) (tx : Transaction) (fee : Int64) (changeAmount 
       List.Perm (tx.outputs.toList.map outputKey) ((r.expected resolved).map paymentKey) ∧
       r.change.isNone = r.changeAmount.isNone :=
   authorizesTransaction_iff
+
+-- Coin selection adds up (SEC-047)
+example : ∀ {utxos : Array WalletUTXO} {payments : Array Payment} {changeScript : ByteArray}
+    {rate : Float} {w : Int} {s : Selection},
+    CoinSelection.select utxos payments changeScript rate w = .ok s →
+    Winnow.Proofs.Selection.coinTotal s.selected.toList =
+        Winnow.Proofs.Selection.paymentTotal payments.toList + s.fee.toInt +
+          ((s.changeAmount.map (·.toInt)).getD 0) ∧
+      0 ≤ s.fee.toInt ∧
+      (∀ c, s.changeAmount = some c → CoinSelection.dustThreshold changeScript ≤ c.toInt ∧
+        s.fee.toInt = CoinSelection.feeAt (TransactionBuilder.signedVSize s.selected.size
+          ((Winnow.Proofs.Selection.paymentOutputs payments).push
+            (Winnow.Proofs.Selection.changeOutput changeScript)) w) (CoinSelection.satPerKvB rate)) ∧
+      (s.changeAmount = none →
+        CoinSelection.feeAt (TransactionBuilder.signedVSize s.selected.size
+          (Winnow.Proofs.Selection.paymentOutputs payments) w) (CoinSelection.satPerKvB rate) ≤ s.fee.toInt) ∧
+      (∀ u, u ∈ s.selected → u ∈ utxos) :=
+  @Winnow.Proofs.Selection.select_conserves
 
 end spend
 
