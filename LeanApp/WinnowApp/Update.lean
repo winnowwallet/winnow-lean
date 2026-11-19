@@ -43,6 +43,7 @@ def Model.sensitive (m : Model) (g e : Nat) : Bool := g == m.generation && e == 
 def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
   | .launched forced => ({ m with forcedNetwork := forced }, [])
+  | .versionRead text => ({ m with appVersion := some text }, [])
   | .settingsLoaded s =>
     let m := { m with settings := s }.loadGatewayDraft
     (m, [.setAppearance s.appearance, .openWallet m.generation s.network true])
@@ -314,7 +315,8 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
   (m, cs ++ cs2)
 where onArea (h : Host) (m : Model) : Model × List Cmd :=
   match h with
-  | .launched .. | .settingsLoaded .. | .booted .. | .walletPlace .. | .created .. | .imported .. | .cloud .. | .cloudRestored ..
+  | .launched .. | .versionRead .. | .settingsLoaded .. | .booted .. | .walletPlace .. | .created .. | .imported .. | .cloud ..
+  | .cloudRestored ..
   | .deleted .. =>
     m.onWalletHost h
   | .snapshot .. | .records .. | .updated .. | .receiveAddress .. | .unconfirmed .. | .failed .. =>

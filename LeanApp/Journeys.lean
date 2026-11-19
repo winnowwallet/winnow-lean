@@ -333,8 +333,9 @@ def ledgerCardTwoOfTwo : Journey := ⟨"ledgerCardTwoOfTwo", do
     expect (!(← exists? ledgerNearbyCard)) "the nearby card came back with a Ledger paired"⟩
 
 /-- The census list the build ships (the app's manifest bundles build/census/peers.json): Settings → Network →
-Peers and routing on mainnet shows its date and count, not the sentence for a build without one; then the plain
-texts (PORT.md, deliberate departures): Settings' Backup section, the backup file sheet, the iCloud sheet,
+Peers and routing on mainnet shows its date and count, not the sentence for a build without one; About shows
+the version on the build's own bundle (in a simulator; headless there is no bundle, and it says Unknown); then
+the plain texts (PORT.md, deliberate departures): Settings' Backup section, the backup file sheet, the iCloud sheet,
 Settings → Security → Multisig accounts and Join. -/
 def shippedCensus : Journey := ⟨"shippedCensus", do
   let r ← Run.new "census"
@@ -353,6 +354,13 @@ def shippedCensus : Journey := ⟨"shippedCensus", do
     expect (count.getD 0 > 100) s!"census line: {line}"
     shot "30-settings-census"
     tap .back
+
+  step "About shows the version on this build's bundle" do
+    scrolled appVersion
+    let shown ← text appVersion
+    -- headless, the app is the journeys' own executable, with no Info.plist beside it: nothing to read
+    if (← IO.getEnv "LEANNATIVE_DRIVER") == some "wire" then expectEq "the version, with no bundle" shown "Unknown"
+    else expect (shown != "Unknown" && (digits shown).isSome && shown.endsWith ")") s!"the version in a bundle: {shown}"
 
   step "the Backup section, the backup file sheet and the iCloud sheet" do
     waitFor exportBundleButton 10

@@ -2355,11 +2355,48 @@ def walletSwitcher (root : System.FilePath) : IO Unit := do
   check "wallets: and one for another network" ((← dirOf 6 .mainnet).isNone)
   openPlace.set none
 
+/-- The version Settings shows is the bundle's, read from its `Info.plist` in either form a build writes one,
+and never a number made up here: a file cut short, a file that is something else, or a build setting left
+unexpanded gives none, and Settings then says Unknown. -/
+def bundleVersion : IO Unit := do
+  let xml (version build : String) : String :=
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n" ++
+    "\t<key>CFBundleIdentifier</key>\n\t<string>com.btcswift.app</string>\n" ++
+    s!"\t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n" ++
+    s!"\t<key>CFBundleVersion</key>\n\t<string>{build}</string>\n</dict>\n</plist>\n"
+  let read (s : String) : Option String := BundleInfo.versionText? s.toUTF8
+  check "version: an XML Info.plist" (read (xml "0.9.19" "26") == some "0.9.19 (26)") s!"{read (xml "0.9.19" "26")}"
+  check "version: a build setting left unexpanded is not a version"
+    (read (xml "$(MARKETING_VERSION)" "$(CURRENT_PROJECT_VERSION)") == none && read (xml "0.9.19" "") == none)
+  check "version: without a build number there is none" (read ((xml "0.9.19" "26").replace "CFBundleVersion" "Other") == none)
+  check "version: the string must be the key's own"
+    (read ((xml "0.9.19" "26").replace "<string>0.9.19</string>" "<true/>") == none)
+  check "version: not a property list" (read "not a plist" == none && BundleInfo.versionText? .empty == none)
+  -- plutil's binary form of such a file (`plutil -convert binary1`), its display name a UTF-16 string
+  let binary := Winnow.ofHex! <|
+    "62706c6973743030d50102030405060708090a5f101a434642756e646c6553686f727456657273696f6e537472696e675f1013" ++
+    "434642756e646c65446973706c61794e616d655f100f434642756e646c6556657273696f6e5f1012434642756e646c654964656e" ++
+    "7469666965725f10124c5352657175697265734950686f6e654f5356302e392e31396600570069006e006e00f600775232365f10" ++
+    "10636f6d2e62746373776966742e6170700908133046586d82899699ac0000000000000101000000000000000b00000000000000" ++
+    "0000000000000000ad"
+  check "version: a binary Info.plist" (BundleInfo.versionText? binary == some "0.9.19 (26)") s!"{BundleInfo.versionText? binary}"
+  check "version: a binary plist's UTF-16 string" (BundleInfo.binaryString? binary "CFBundleDisplayName" == some "Winnöw")
+  check "version: a key a binary plist lacks" (BundleInfo.binaryString? binary "CFBundleName" == none)
+  check "version: a binary plist cut short is none at every length"
+    ((List.range binary.size).all fun n => BundleInfo.versionText? (binary.extract 0 n) == none)
+  -- Settings → About: what launch read, and Unknown until then
+  let settings (m : Model) : String := rendered (update (.home .openSettings) m)
+  let unread := settings (readyModel "w")
+  check "version: Settings says Unknown before launch has read it" (contains unread "Unknown" && !contains unread "0.1.0")
+  let read := settings (update (.host (.versionRead "0.9.19 (26)")) (readyModel "w"))
+  check "version: Settings shows the bundle's version" (contains read "0.9.19 (26)" && !contains read "Unknown")
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
   syncErrorBookkeeping
   foundationURLRules
+  bundleVersion
   peerGatewayModel
   homeWarnings
   syncBookkeepingScreens
