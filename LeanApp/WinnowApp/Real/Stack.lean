@@ -375,9 +375,11 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
             else { c with lastSyncError := some (toString e), transientSyncFailures := 0, transientSyncError := none }
           else c
         return false
+    env.deps.syncScriptsChosen
     let pass : NetM Unit := do
       let scripts := (← WM.toNet w.watchScripts) ++ multisigScripts
       let b := s.broadcaster
+      let began ← f.nextScanHeight
       let applyMatch : BlockMatch → NetM Unit := fun m => do
         let effect ← env.walletWriteNet serial "sync.apply" (w.apply m)
         -- a payment to a card is its person's: said once the coin is the wallet's, and never a reason to stop
@@ -391,6 +393,35 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
           if pending.contains tx.txid then b.markConfirmed tx.txid m.height
       f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w serial b fork : IO Unit)) (onMatch := applyMatch)
       env.walletWriteNet serial "sync.recordScanHeight" (w.recordScanHeight (← f.nextScanHeight))
+      -- An account made or joined while this pass ran is not among the scripts it began with, and the pass has
+      -- moved the frontier past the blocks it scanned: a payment to the account that one of them confirmed
+      -- would never be looked for again. Those blocks are scanned once more, for the scripts the pass did not
+      -- have, before anything else. A block before the pass began cannot pay an account that did not exist.
+      -- What does not finish now (a peer, a limit) is owed, and done for every account's scripts at the next
+      -- pass. Applying a block to the accounts again changes nothing for what they already hold.
+      let owed := (← env.get).accountRescanFrom
+      let scanned ← f.nextScanHeight
+      let current ← match ← (env.hooks.multisigWatchScripts w.network : IO _).toBaseIO with
+        | .ok scripts => pure scripts
+        | .error _ => pure multisigScripts
+      let known : Std.HashSet ByteArray := multisigScripts.foldl (·.insert ·) {}
+      let fresh := current.filter (!known.contains ·)
+      let lowest : Option UInt32 := match owed, (if fresh.isEmpty || scanned ≤ began then none else some began) with
+        | some a, some b => some (min a b)
+        | some a, none => some a
+        | none, b => b
+      if let some low := lowest then
+        if scanned > low then
+          let again := if owed.isSome then current else fresh
+          let applyAccounts : BlockMatch → NetM Unit := fun m => do
+            for discarded in ← (env.hooks.multisigApply m w.network : IO _) do b.cancel discarded
+          let done ← match ← (f.scanRange low (scanned - 1) again (limits := arrivingScanLimits) (onMatch := applyAccounts)).attempt with
+            | .ok outcome => pure outcome.isComplete
+            | .error e =>
+              env.journal "multisig.rescanWaiting" [("from", toString low), ("error", e.name)]
+              pure false
+          if done then env.journal "multisig.rescanned" [("from", toString low), ("through", toString (scanned - 1)), ("scripts", toString again.size)]
+          env.modify fun c => if c.walletSerial == serial then { c with accountRescanFrom := if done then none else some low } else c
       -- a restored wallet's search for cards, once the scan is at the tip. What it cannot do now it does on a
       -- later pass, and it is never why a pass fails
       if (← w.cardRestoreFrom).isSome && (← f.nextScanHeight) > (← s.chain.height) then

@@ -126,6 +126,9 @@ structure Deps where
   /-- Runs inside `loadPaymentDetails`'s one locked step, after that check and before the write; nothing in the
   app. backend-test's `paymentRaceFlow` tries a wallet change here, which must wait for the write. -/
   paymentChecked : (txid : String) → IO Unit := fun _ => pure ()
+  /-- A sync pass has chosen the scripts it scans for and has not yet scanned (a test's moment: an account
+  made here is one the pass does not know of). -/
+  syncScriptsChosen : IO Unit := pure ()
   /-- Runs as a write through a wallet (`Env.walletWrite`, named by `what`, such as "sync.apply") is about to
   take the wallet lock; nothing in the app. backend-test's `oldWalletWritesFlow` erases or replaces the wallet
   here, which the write must not outlive. -/
@@ -314,6 +317,9 @@ structure Core where
   dir : Option String := none
   settings : Option Settings := none
   wallet : Option Wallet := none
+  /-- The lowest block a pass scanned for scripts that did not yet include every account's (one was made or
+  joined while it ran) and that has not been scanned for them since. The next pass begins by doing so. -/
+  accountRescanFrom : Option UInt32 := none
   /-- The wallets kept for the open network, the open one among them, as of the last wallet opened, adopted or
   deleted (`refreshHeld`). -/
   held : Array HeldWallet := #[]
@@ -377,7 +383,8 @@ structure Core where
 
 /-- `w` (or none) becomes the open wallet, and `walletSerial` moves: opening, adopting a created or imported
 wallet, switching network, erasing. -/
-def Core.withWallet (c : Core) (w : Option Wallet) : Core := { c with wallet := w, walletSerial := c.walletSerial + 1 }
+def Core.withWallet (c : Core) (w : Option Wallet) : Core :=
+  { c with wallet := w, walletSerial := c.walletSerial + 1, accountRescanFrom := none }
 
 structure Env where
   deps : Deps

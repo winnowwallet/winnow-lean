@@ -1445,6 +1445,11 @@ def paymentRaceFlow (dir : String) (n : Node) : IO Unit := do
     b.deleteWallet
     b.startNetworking settings
     discard <| b.createWallet .regtest home
+    -- the new wallet's own sync writes its file too (the scan height, as its first pass ends). It is stopped
+    -- and its pass in flight let finish, so that what the file gains from here on is the late answer's or
+    -- nobody's; without this the check below failed once in CI on a write that was the new wallet's own
+    b.stopNetworking
+    discard <| waitUntil 10_000 (do return !(← b.snapshot).1.syncing)
   check "payment race, Erased: the new wallet shows nothing of the old payment" (history? s sent).isNone
   b.stopNetworking
 
@@ -1738,6 +1743,56 @@ def devicesFlow (dir : String) (n : Node) : IO Unit := do
   a.stopNetworking
   b.stopNetworking
 
+/-- An account made while a sync pass is running. A pass scans with the scripts it began with, so a block it
+scans after the account exists is scanned without the account's scripts, and the frontier moves past it. The
+pass then scans its blocks once more for the scripts it did not have, and the payment is found
+(`Deps.syncScriptsChosen` is the moment between choosing the scripts and scanning). -/
+def accountDuringPassFlow (dir : String) (n : Node) : IO Unit := do
+  say "an account made while a pass runs"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let during ← IO.mkRef (pure () : IO Unit)
+  let racing : Real.Deps := { deps secrets "During" with syncScriptsChosen := do (← during.get) }
+  let (b, _, _) ← Backend.realWithMultisig racing
+  let home := s!"{dir}/During/BTCSwift/regtest"
+  IO.FS.createDirAll home
+  discard <| b.openWallet .regtest home
+  b.startNetworking settings
+  discard <| b.createWallet .regtest home
+  let atTip ← waitUntil 90_000 (do
+    b.syncNow
+    let s := (← b.snapshot).1
+    return !s.syncing && s.nextScanHeight > (← n.height))
+  check "during a pass: the wallet is at the tip, nothing running" atTip
+  let (_, otherKey) ← testSigner 0xB2
+  let made ← IO.mkRef (none : Option String)
+  let before := (← journaled "multisig.rescanned").size
+  -- the next pass: once it has chosen its scripts, an account is made and the node confirms a payment to it
+  during.set do
+    during.set (pure ())
+    let own := (← b.multisigOverview).keyExpression.getD ""
+    let (id, descriptor, _) ← b.createMultisigAccount "Made mid-pass" 2 [([own], none), ([otherKey], none)] none
+    let account ← match MultisigAccount.parse descriptor .regtest with
+      | .ok acc => pure acc
+      | .error e => throw (IO.userError s!"account: {e.name}")
+    let some address := (account.address 0).toOption | throw (IO.userError "address 0")
+    let txid ← n.wallet #["sendtoaddress", address, "0.3"]
+    discard <| waitUntil 20_000 (do return (← n.mempool).contains txid)
+    n.mine 1 mineAddr
+    n.waitFilterIndex
+    made.set (some id)
+  let found ← waitUntil 90_000 (do
+    b.syncNow
+    match ← made.get with
+    | some id => return ((← multisigAccount? b id).map (·.balance)) == some 30_000_000
+    | none => return false)
+  check "during a pass: a payment confirmed in the pass that did not know the account is found" found
+    s!"{(← made.get)} {(← b.multisigOverview).accounts.map (·.balance)} next {(← b.snapshot).1.nextScanHeight} node {← n.height}"
+  check "during a pass: by the pass scanning its blocks again for the account's scripts"
+    ((← journaled "multisig.rescanned").size > before)
+  b.stopNetworking
+
 /-- A 2-of-2 of two wallets kept on one device, on regtest: the account built with both wallets' keys is paid,
 a payment from it is signed by the open wallet and then by the other, each by itself, and the node confirms
 it. No other device, and no other signer, takes part. -/
@@ -1762,13 +1817,6 @@ def heldKeysFlow (dir : String) (n : Node) : IO Unit := do
   -- the first wallet, open: an account of the two
   discard <| b.openWallet .regtest first
   b.startNetworking settings
-  -- the pass that began as the wallet opened is over before the account exists: a pass scans with the scripts
-  -- it began with
-  let caughtUp ← waitUntil 90_000 (do
-    b.syncNow
-    let s := (← b.snapshot).1
-    return !s.syncing && s.nextScanHeight > (← n.height))
-  check "held keys: the first wallet, opened again, is at the tip" caughtUp
   let keyA ← Real.multisigKeyExpression env
   let (id, descriptor, _) ← b.createMultisigAccount "Both wallets" 2 [([keyA], none), ([keyB], none)] none
   let account ← match MultisigAccount.parse descriptor .regtest with
@@ -2407,5 +2455,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; heldKeysFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; heldKeysFlow dir n; accountDuringPassFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()
