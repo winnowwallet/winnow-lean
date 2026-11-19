@@ -82,10 +82,17 @@ def signs : AnyMultisigAccount → HDKey → Bool
   | .taproot a, key => a.signs key
   | .segwit a, key => a.includes key
 
-/-- The output at `index` for each choice, receive then change: what a record's watched scripts are made of. -/
-def derivedOutputs : AnyMultisigAccount → UInt32 → MAM (Array Descriptor.DerivedOutput)
-  | .taproot a, index => MultisigAccount.lift (·.name) (a.descriptor.derived index a.network)
-  | .segwit a, index => return #[← a.derivedOutput index 0, ← a.derivedOutput index 1]
+/-- The output at `index` for each choice, receive then change: what a record's watched scripts are made of.
+`none` for a choice where a SegWit v0 account has no address at `index` (`SegwitMultisigAccount.usable`). -/
+def derivedOutputs : AnyMultisigAccount → UInt32 → MAM (Array (Option Descriptor.DerivedOutput))
+  | .taproot a, index => (·.map some) <$> MultisigAccount.lift (·.name) (a.descriptor.derived index a.network)
+  | .segwit a, index => return #[← a.derivedOutput? index 0, ← a.derivedOutput? index 1]
+
+/-- The first index at or after `index` where the account has an address on `choice`: `index` itself for a
+Taproot account, and for a SegWit v0 account wherever it has an address there. -/
+def usableIndex : AnyMultisigAccount → (choice : Nat) → UInt32 → MAM UInt32
+  | .taproot _, _, index => pure index
+  | .segwit a, choice, index => a.usableIndex choice index
 
 /-- scriptPubKey at (multipath choice, index): choice 0 receive, 1 change. -/
 def scriptPubKey : AnyMultisigAccount → UInt32 → (choice : Nat := 0) → MAM ByteArray

@@ -2199,6 +2199,48 @@ def testJoiningAnAccountFromAPastedDescriptor : IO Unit := do
     contains (rendered m) (m.multisigAdd.error.getD "?"))
   check "joined twice: one account, its name kept" ((← phone.accounts).map (·.name) == ["Household"])
 
+/-- A co-signer's key given by itself is their own extended key's child at receive index 8, so at that one
+index two of the account's keys are the same key and the account has no address
+(`SegwitMultisigAccount.usable`). Joining cannot see it. The account goes on working around the place: every
+other script is watched, a payment past it is credited, the address shown steps over it and New address goes
+on from the one shown. Before, an account like this could not list its scripts once the watched indices
+reached the place, and the scan stopped for every account with it. -/
+def testASegwitAccountWithNoAddressAtOneIndexGoesOnWorking : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let theirs ← master 0xC3
+  let spoiled : UInt32 := 8
+  let child ← needE "their child" (·.name) ((← accountKey theirs).derivedPath #[0, spoiled])
+  let descriptor := s!"wsh(sortedmulti(2,{hex child.publicKey},{← phone.keyExpression},{← keyExpression theirs}))"
+  let account ← need "the account" (SegwitMultisigAccount.parse descriptor signet)
+  let script (index : UInt32) (choice : Nat := 0) : IO ByteArray :=
+    need s!"script {index}/{choice}" (account.scriptPubKey index choice)
+  check "the account has no address there" ((account.usable 0 spoiled) matches .ok none)
+  -- the store: the scripts around the place, and a payment past it
+  let (store, _) ← S.open (← memoryKeys) none
+  let added ← need "add" (store.step fun st => st.add store.keys writeAtomically "Exchange" (.segwit account) 100)
+  let watched ← need "the scripts to watch" store.watch
+  check "39 scripts for the first 20 indices: every place but that one"
+    (watched.size == 39 && watched.contains (← script 7) && watched.contains (← script 9) &&
+      watched.contains (← script spoiled 1) && !watched.contains ByteArray.empty)
+  discard <| need "apply 101" (store.apply (block 101 #[payment (← script 9) 9_000 (foreign 0x51)]))
+  let current ← store.fetch added.id
+  check "a payment past the place is credited and moves the counter on" (current.balance == 9_000 && current.nextReceiveIndex == 10)
+  check "and the window with it: 59 scripts for 30 indices" ((← need "watch again" store.watch).size == 59)
+  -- the phone: the address shown, and New address
+  let id ← phone.join "Exchange" descriptor
+  let shown : IO (Option MultisigInfo) := do return (← phone.accounts).find? (·.id == id)
+  check "the first address is index 0's" (((← shown).bind (·.receiveAddress)) == (account.address 0).toOption)
+  for _ in [0:8] do Real.newMultisigReceiveAddress phone.multisig id
+  check "eight addresses on, the counter stands at the place" ((← phone.record id).nextReceiveIndex == spoiled)
+  check "the address shown is the next index's"
+    (((← shown).map (·.nextReceiveIndex)) == some 9 && ((← shown).bind (·.receiveAddress)) == (account.address 9).toOption &&
+      (account.address 9).toOption.isSome)
+  Real.newMultisigReceiveAddress phone.multisig id
+  check "New address goes on from the one shown"
+    ((← phone.record id).nextReceiveIndex == 10 && ((← shown).bind (·.receiveAddress)) == (account.address 10).toOption)
+  check "the phone's scan has every script but that place's: 59 for 30 indices"
+    ((← phone.multisig.watchScripts signet).size == 59)
+
 /-- New address: the account's next address, the one every co-signer derives, kept across a restart. -/
 def testNewAddressMovesTheAccountOn : IO Unit := do
   let phone ← phoneWith 0xA1
@@ -2604,6 +2646,7 @@ def accountTests : List (String × IO Unit) :=
   , ("testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes", testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes)
   , ("testTwoWalletsAreKeptSideBySideOnOneNetwork", testTwoWalletsAreKeptSideBySideOnOneNetwork)
   , ("testASegwitAccountIsJoinedAndAPastedPaymentSignedHere", testASegwitAccountIsJoinedAndAPastedPaymentSignedHere)
+  , ("testASegwitAccountWithNoAddressAtOneIndexGoesOnWorking", testASegwitAccountWithNoAddressAtOneIndexGoesOnWorking)
   , ("testNewAddressMovesTheAccountOn", testNewAddressMovesTheAccountOn)
   , ("testACollectionPageShowsItsDraftAndDiscardsIt", testACollectionPageShowsItsDraftAndDiscardsIt)
   , ("testTheBuilderRemovesMembersAndKeys", testTheBuilderRemovesMembersAndKeys)

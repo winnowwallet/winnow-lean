@@ -37,7 +37,11 @@ abbrev OwnerMap := Std.HashMap ByteArray (Nat × UInt32)
 
 /-- A record's watched scripts for one descriptor, indices `0 ..< count` (both choices, index-major) and
 the owner map over them. Deriving one index costs a BIP32 step per key and a Taproot tweak (or, for a SegWit v0
-account, a hash of its witness script), so the cache grows with the frontier instead of being rebuilt. -/
+account, a hash of its witness script), so the cache grows with the frontier instead of being rebuilt.
+
+Every index takes two places in `scripts`. Where a SegWit v0 account has no address
+(`SegwitMultisigAccount.usable`) the place holds an empty script and `owner` has nothing for it, so no output
+is ever the account's there; `watched` leaves those places out. -/
 structure OwnerCache where
   id : String
   descriptor : String
@@ -45,6 +49,10 @@ structure OwnerCache where
   scripts : Array ByteArray
   owner : OwnerMap
   deriving Inhabited
+
+/-- The scripts of the first `count` indices, both chains: what a scan looks for. -/
+def OwnerCache.watched (c : OwnerCache) (count : UInt32) : Array ByteArray :=
+  (c.scripts.extract 0 (2 * count.toNat)).filter (!·.isEmpty)
 
 /-- A failure of a `MultisigAccount` call, as the screens describe it. -/
 def multisigFailure (network : BitcoinNetwork) : MultisigFailure → RecordsError
@@ -306,8 +314,11 @@ def ownerCache (s : MultisigStore) (r : MultisigAccountRecord) : RM (OwnerCache 
     let outputs ← liftAccount s.network (account.derivedOutputs index.toUInt32)
     for h : choice in [0:outputs.size] do
       if choice < 2 then
-        c := { c with scripts := c.scripts.push outputs[choice].scriptPubKey,
-                      owner := c.owner.insert outputs[choice].scriptPubKey (choice, index.toUInt32) }
+        match outputs[choice] with
+        | some output =>
+          c := { c with scripts := c.scripts.push output.scriptPubKey,
+                        owner := c.owner.insert output.scriptPubKey (choice, index.toUInt32) }
+        | none => c := { c with scripts := c.scripts.push ByteArray.empty }
   c := { c with count }
   return (c, { s with ownerMaps := (s.ownerMaps.filter (·.id != r.id)).push c })
 
@@ -331,7 +342,7 @@ def watchScripts (s : MultisigStore) (network : BitcoinNetwork) : RM (Array Byte
   if s.isDamaged then throw (.multisig .damaged)
   unless network == s.network do invalid "the account network does not match the open wallet"
   let (caches, store) ← s.ownerCaches s.records
-  return (caches.foldl (fun acc c => acc ++ c.scripts.extract 0 (2 * (watchCountOf c s.records).toNat)) #[], store)
+  return (caches.foldl (fun acc c => acc ++ c.watched (watchCountOf c s.records)) #[], store)
 where
   watchCountOf (c : OwnerCache) (records : Array MultisigAccountRecord) : UInt32 :=
     ((records.find? (·.id == c.id)).map watchCount).getD c.count
@@ -519,12 +530,20 @@ def apply (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (m 
 
 /-! ## Spends, addresses, rollbacks -/
 
-/-- Marks the next receive address used ("New address"). -/
+/-- The index of the receive address a record shows: its counter, or the first index after it where the
+account has an address (a SegWit v0 account may have none at one index, `SegwitMultisigAccount.usable`). -/
+def shownReceiveIndex (account : AnyMultisigAccount) (r : MultisigAccountRecord) : MAM UInt32 :=
+  account.usableIndex AddressChain.receive.rawValue r.nextReceiveIndex
+
+/-- Marks the receive address shown used ("New address"): the counter goes past it. -/
 def advanceReceiveIndex (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (id : String) : RM MultisigStore := do
   s.requireReadable
   let some i := s.records.findIdx? (·.id == id) | return s
-  unless s.records[i]!.nextReceiveIndex < maximumNextIndex do invalid "receive address index is out of range"
-  s.mutate keys writeData (s.records.modify i fun r => { r with nextReceiveIndex := r.nextReceiveIndex + 1 })
+  let r := s.records[i]!
+  let account ← liftAccount s.network (AnyMultisigAccount.parse r.descriptor s.network)
+  let shown ← liftAccount s.network (shownReceiveIndex account r)
+  unless shown < maximumNextIndex do invalid "receive address index is out of range"
+  s.mutate keys writeData (s.records.modify i fun r => { r with nextReceiveIndex := shown + 1 })
 
 /-- `setLedger(id:registration:)`: files the Ledger registration for an account the Ledger signs for,
 once it is this account's own policy and names one of its signers. -/
@@ -725,7 +744,7 @@ def rollBack (a : ArrivingAccount) (fork : UInt32) : ArrivingAccount :=
 /-- The scripts a pass looks for: both chains below the record's watch count. -/
 def scripts (a : ArrivingAccount) (caches : MultisigStore) : RM (Array ByteArray × MultisigStore) := do
   let (cache, caches) ← caches.ownerCache a.record
-  return (cache.scripts.extract 0 (2 * (MultisigStore.watchCount a.record).toNat), caches)
+  return (cache.watched (MultisigStore.watchCount a.record), caches)
 
 /-- One matched block against the record, as `MultisigStore.applyPaying` does for a kept account. Applying a
 block again changes nothing, which a range scan that stopped and began again relies on. -/

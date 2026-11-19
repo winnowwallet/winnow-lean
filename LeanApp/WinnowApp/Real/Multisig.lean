@@ -1154,7 +1154,10 @@ def info (r : MultisigAccountRecord) (network : Tx.BitcoinNetwork) (signers : Ar
     let (membersHeader, memberLines) := match taproot with
       | some taproot => groupsSection taproot ownKey names
       | none => (none, [])
+    -- the receive address shown: at the counter, or past an index where the account has no address
+    let shown := (MultisigStore.shownReceiveIndex account r).toOption
     { base with
+      nextReceiveIndex := (shown.getD r.nextReceiveIndex).toNat
       policy := some account.policySummary
       recovery := taproot.bind fun taproot => taproot.recovery.map (recoveryText · taproot)
       buildsPayments := taproot.isSome
@@ -1168,7 +1171,7 @@ def info (r : MultisigAccountRecord) (network : Tx.BitcoinNetwork) (signers : Ar
       isNested := account.isNested, membersHeader, memberLines
       signerExpressions := (taproot.map (·.signerExpressions.toList)).getD []
       threshold := account.threshold.toNat, signerCount := account.signers.size
-      receiveAddress := (account.address r.nextReceiveIndex).toOption
+      receiveAddress := shown.bind fun index => (account.address index).toOption
       coins := r.utxos.toList.map fun u =>
         { amount := natOf u.amount, line := coinLine u,
           recoveryFrom := (taproot.bind (·.recoveryUnlockHeight u)).map (·.toNat) } }
