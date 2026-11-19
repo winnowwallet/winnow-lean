@@ -255,6 +255,66 @@ example : ∀ (clock now device : Nat) (s : Winnow.DeviceSync.Stamp),
     s.time ≤ clock → s < Winnow.DeviceSync.Stamp.after clock now device :=
   Winnow.Proofs.DeviceSync.Stamp.after_later
 
+/-! ## Phase 4: accounts and signers that follow a person between devices -/
+
+section deviceSync
+open Winnow.DeviceSync Winnow.Proofs.DeviceSync
+
+example : ∀ (fresh : Stamp) (txidOf : MultisigSpendDraft → Option ByteArray) (id : String)
+    (known : Option AccountMeta) (replicas : Array Replica),
+    knownRemoved id none known replicas →
+    (decideAccount fresh txidOf id none known replicas).existence = .unchanged :=
+  decideAccount_absent_removed
+
+example : ∀ (fresh : Stamp) (txidOf : MultisigSpendDraft → Option ByteArray) (id : String) (l : LocalAccount)
+    (known : Option AccountMeta) (replicas : Array Replica),
+    knownRemoved id (some l) known replicas → l.removable = true →
+    (decideAccount fresh txidOf id (some l) known replicas).existence = .remove :=
+  decideAccount_removes
+
+example : ∀ (fresh : Stamp) (txidOf : MultisigSpendDraft → Option ByteArray) (id : String) (l : LocalAccount)
+    (known : Option AccountMeta) (replicas : Array Replica),
+    knownRemoved id (some l) known replicas → l.removable = false →
+    let d := decideAccount fresh txidOf id (some l) known replicas
+    d.existence = .reassert ∧ d.added = fresh ∧
+      (removedOf id (some l) known replicas < fresh → ¬ d.added < d.removed) :=
+  decideAccount_reasserts
+
+example : ∀ (fresh : Stamp) (txidOf : MultisigSpendDraft → Option ByteArray) (id : String) (l : LocalAccount)
+    (known : Option AccountMeta) (replicas : Array Replica),
+    ¬ knownRemoved id (some l) known replicas →
+    (decideAccount fresh txidOf id (some l) known replicas).existence = .unchanged :=
+  decideAccount_keeps
+
+example : ∀ (fresh : Stamp) (txidOf : MultisigSpendDraft → Option ByteArray) (id : String)
+    (here : Option LocalAccount) (known : Option AccountMeta) (replicas : Array Replica),
+    (decideAccount fresh txidOf id here known replicas).removed = removedOf id here known replicas :=
+  decideAccount_removed
+
+example : ∀ (id : String) (here : Option LocalAccount) (known : Option AccountMeta)
+    {replicas replicas' : Array Replica}, List.Perm replicas.toList replicas'.toList →
+    removedOf id here known replicas = removedOf id here known replicas' :=
+  removedOf_perm
+
+example : ∀ (id : String) (here : Option LocalAccount) (known : Option AccountMeta)
+    {replicas replicas' : Array Replica}, List.Perm replicas.toList replicas'.toList →
+    addedOf id here known replicas = addedOf id here known replicas' :=
+  addedOf_perm
+
+example : ∀ (txidOf : MultisigSpendDraft → Option ByteArray) (l : LocalAccount) (mine : AccountMeta)
+    (holders : Array Holder) (named registered : Option Holder) (receive change r c : UInt32),
+    Change.raise r c ∈ accountChanges txidOf l mine holders named registered receive change →
+    l.record.nextReceiveIndex ≤ r ∧ l.record.nextChangeIndex ≤ c :=
+  accountChanges_raise
+
+-- The hypotheses hold of something: an account one backup removed after it was added is removed
+example : knownRemoved "a" none none
+    #[{ id := "b", height := 0, sync := some { device := 1, accounts := #[{ id := "a", removed := { time := 1 } }] } }] := by
+  unfold knownRemoved addedOf removedOf startOf latestOf
+  decide
+
+end deviceSync
+
 end Winnow.Proofs.Gate
 
 #assert_all_axioms Secp SecpCt Winnow WinnowProofs
