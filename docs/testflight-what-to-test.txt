@@ -1,10 +1,12 @@
 Winnow: the same wallet, rewritten in Lean
 
-New: several wallets on one device
+New in 0.9.21: nothing new to tap. More of the wallet is proved, not only tested, and fees are whole-number arithmetic. Please send once: the fee quoted must be the fee paid (it may be a sat lower than before).
 
-A device can keep several wallets for a network, each with its own coins, history, contacts and backup. Only the open one syncs. A device with two wallets can sign for both alone.
-1. Settings → Wallets → Add a wallet. Create one, or restore another of your wallets from its iCloud backup (the list names each backup's wallet). Your first wallet must be untouched: same balance and Activity when you open it again.
-2. Settings → Wallets: tap the other wallet to open it. Each has its own balance, and catches up when opened.
+Since 0.9.20: several wallets on one device
+
+A device can keep several wallets for a network, each with its own coins, history, contacts and backup. Only the open one syncs.
+1. Settings → Wallets → Add a wallet. Create one, or restore another of yours from its iCloud backup. Your first wallet must be untouched: same balance and Activity when you open it again.
+2. Settings → Wallets: tap the other wallet to open it. It catches up when opened.
 3. An account with a key of each wallet: its payment page has "Add this phone's signature" and "Add wallet …'s signature", each asking Face ID by itself. Both make a 2-of-2 complete on this device.
 4. An account that came from another device and was "Watch-only on this device" signs here once you add the wallet that holds its key.
 5. Delete the added wallet (Settings → Danger zone names it): the first wallet still opens and sends.
@@ -22,9 +24,7 @@ The wallet's key sits behind Face ID or the passcode: Send asks once, and nothin
 
 Since 0.9.15
 
-Join an account also takes a SegWit v0 account, wsh(sortedmulti(…)), with one signer a single fixed key. On signet, with Bitcoin Core holding the other keys:
-1. Join an account: paste the descriptor. Policy must say "2 of 3" and the first address must be Core's.
-2. Pay that address, have Core build and sign a payment, then "Paste a PSBT from a co-signer", "Add this phone's signature", "Finalize and broadcast".
+Join an account also takes a SegWit v0 account, wsh(sortedmulti(…)), with one signer a single fixed key. On signet, with Bitcoin Core holding the other keys: paste the descriptor (policy "2 of 3", first address Core's), pay that address, then paste Core's PSBT, add this phone's signature, finalize and broadcast.
 
 Since 0.9.11
 
