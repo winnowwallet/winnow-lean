@@ -2297,8 +2297,67 @@ def cursorPastTheWindowIsDamage : TM Unit := do
   let reopened ← need "open" (Wallet.open file store)
   check "cursors: the window's last cursor opens" ((← reopened.nextReceiveIndex) == edge)
 
+/-! ## What a reviewed send authorizes (`Wallet/SendAuthorization.lean`)
+
+The check between a review and a signature (SEC-007, SEC-018), case by case. What it accepts in general is
+proved (`Winnow.Proofs.Spend.authorizesTransaction_iff`); these are the cases a person would name. -/
+
+def sendAuthorization : TM Unit := do
+  let script (b : UInt8) : ByteArray := ByteArray.mk (#[0x51, 0x20] ++ Array.replicate 32 b)
+  let outpoint (b : UInt8) (vout : UInt32) : Transaction.Outpoint := ⟨ByteArray.mk (Array.replicate 32 b), vout⟩
+  let input (o : Transaction.Outpoint) : Transaction.Input := { previousOutput := o, scriptSig := .empty, sequence := 0xFFFF_FFFD }
+  let pay (amount : Int64) (b : UInt8) : Payment := { amount, scriptPubKey := script b }
+  let out (amount : Int64) (b : UInt8) : Transaction.Output := { value := amount, scriptPubKey := script b }
+  let coins := #[outpoint 0x11 0, outpoint 0x22 3]
+  let reviewed : ReviewedSend :=
+    { payments := #[pay 60_000 0xA0, pay 60_000 0xA0, pay 5_000 0xB0], fee := 1_000, changeAmount := some 24_000,
+      selected := coins, change := some (pay 24_000 0xC0) }
+  let tx (outputs : Array Transaction.Output) (inputs := coins) : Transaction :=
+    { version := 2, locktime := 0, inputs := inputs.map input, outputs }
+  let outputs := #[out 60_000 0xA0, out 60_000 0xA0, out 5_000 0xB0, out 24_000 0xC0]
+  let accepts (t : Transaction) (fee : Int64 := 1_000) (change : Option Int64 := some 24_000) (r := reviewed)
+      (resolved : Array Payment := #[]) := r.authorizesTransaction t fee change resolved
+  check "the reviewed send" (accepts (tx outputs))
+  check "its outputs in another order" (accepts (tx #[out 24_000 0xC0, out 5_000 0xB0, out 60_000 0xA0, out 60_000 0xA0]))
+  check "another fee: refused" (!accepts (tx outputs) (fee := 1_001))
+  check "another change amount: refused" (!accepts (tx outputs) (change := some 23_999))
+  check "no change amount: refused" (!accepts (tx outputs) (change := none))
+  check "the coins in another order: refused" (!accepts (tx outputs (inputs := coins.reverse)))
+  check "another coin: refused" (!accepts (tx outputs (inputs := #[outpoint 0x11 0, outpoint 0x22 4])))
+  check "a coin more: refused" (!accepts (tx outputs (inputs := coins.push (outpoint 0x33 0))))
+  check "a coin fewer: refused" (!accepts (tx outputs (inputs := #[outpoint 0x11 0])))
+  check "a payment redirected: refused" (!accepts (tx #[out 60_000 0xA0, out 60_000 0xA1, out 5_000 0xB0, out 24_000 0xC0]))
+  check "a payment reduced: refused" (!accepts (tx #[out 60_000 0xA0, out 59_999 0xA0, out 5_000 0xB0, out 24_000 0xC0]))
+  check "one of two equal payments left out: refused" (!accepts (tx #[out 60_000 0xA0, out 5_000 0xB0, out 24_000 0xC0]))
+  check "two equal payments merged into one: refused" (!accepts (tx #[out 120_000 0xA0, out 5_000 0xB0, out 24_000 0xC0]))
+  check "an output added: refused" (!accepts (tx (outputs.push (out 1 0xD0))))
+  check "the change to another script: refused" (!accepts (tx #[out 60_000 0xA0, out 60_000 0xA0, out 5_000 0xB0, out 24_000 0xC1]))
+  check "no outputs: refused" (!accepts (tx #[]))
+  -- a send with no change
+  let exact : ReviewedSend := { reviewed with changeAmount := none, change := none, fee := 25_000 }
+  let withoutChange := #[out 60_000 0xA0, out 60_000 0xA0, out 5_000 0xB0]
+  check "a send with no change" (accepts (tx withoutChange) (fee := 25_000) (change := none) (r := exact))
+  check "a change output where none was reviewed: refused" (!accepts (tx outputs) (fee := 25_000) (change := none) (r := exact))
+  check "a change payment reviewed with no change amount: refused"
+    (!accepts (tx outputs) (change := none) (r := { reviewed with changeAmount := none }))
+  -- silent payments: the wallet hands over the scripts it derived, one per reviewed amount, in order
+  let silent : ReviewedSend := { exact with payments := #[pay 5_000 0xB0], silentAmounts := #[60_000, 61_000], fee := 9_000 }
+  let resolved := #[pay 60_000 0xE1, pay 61_000 0xE2]
+  let silentOutputs := #[out 5_000 0xB0, out 60_000 0xE1, out 61_000 0xE2]
+  check "silent payments at the scripts the wallet derived"
+    (accepts (tx silentOutputs) (fee := 9_000) (change := none) (r := silent) (resolved := resolved))
+  check "none resolved: refused" (!accepts (tx silentOutputs) (fee := 9_000) (change := none) (r := silent))
+  check "one resolved for another amount: refused"
+    (!accepts (tx silentOutputs) (fee := 9_000) (change := none) (r := silent) (resolved := #[pay 60_000 0xE1, pay 60_999 0xE2]))
+  check "resolved in another order: refused"
+    (!accepts (tx silentOutputs) (fee := 9_000) (change := none) (r := silent) (resolved := resolved.reverse))
+  check "a silent output paid elsewhere than resolved: refused"
+    (!accepts (tx #[out 5_000 0xB0, out 60_000 0xE1, out 61_000 0xE3]) (fee := 9_000) (change := none) (r := silent)
+      (resolved := resolved))
+
 def main : IO UInt32 := runMain "multisig-test" do
   runTest "feeResolution" feeResolution
+  runTest "sendAuthorization" sendAuthorization
   runTest "twoOfThree" twoOfThree
   runTest "everyPairCanSpend" everyPairCanSpend
   runTest "threeOfThree" threeOfThree
