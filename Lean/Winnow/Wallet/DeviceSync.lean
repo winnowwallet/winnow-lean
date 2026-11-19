@@ -334,6 +334,59 @@ private def latest {α} (stamp : α → Stamp) (xs : Array α) : Option α :=
     | none => some x
     | some b => if stamp b < stamp x then some x else some b) none
 
+/-- A backup that has the account: the backup, its record of the account and its stamps for it. -/
+abbrev Holder := Replica × MultisigAccountRecord × AccountMeta
+
+/-- A later name on another device. -/
+def renameChange (mine : AccountMeta) (named : Option Holder) : Option Change :=
+  match named with
+  | some (_, r, m) => if mine.name < m.name then some (.rename r.name m.name) else none
+  | none => none
+
+/-- Address counters further on on another device: each goes to the higher of the two, never back. -/
+def raiseChange (l : LocalAccount) (receive change : UInt32) : Option Change :=
+  if receive > l.record.nextReceiveIndex || change > l.record.nextChangeIndex then
+    some (.raise (Max.max receive l.record.nextReceiveIndex) (Max.max change l.record.nextChangeIndex))
+  else none
+
+/-- A later Ledger registration on another device. -/
+def ledgerChange (mine : AccountMeta) (registered : Option Holder) : Option Change :=
+  match registered with
+  | some (_, r, m) =>
+    match r.ledger with
+    | some registration => if mine.ledger < m.ledger then some (.ledger registration m.ledger) else none
+    | none => none
+  | none => none
+
+/-- The payment awaiting signatures: replaced or discarded by a later change on another device, or, where
+another device has the same payment, its signatures joined to this device's, whichever copy is later. -/
+def draftChange (txidOf : MultisigSpendDraft → Option ByteArray) (l : LocalAccount) (mine : AccountMeta)
+    (holders : Array Holder) : Option Change :=
+  let payment := l.record.draft.bind txidOf
+  let same : Array (MultisigSpendDraft × Stamp) := holders.filterMap fun (_, r, m) =>
+    match r.draft with
+    | some d => if payment.isSome && txidOf d == payment && some d != l.record.draft then some (d, m.draft) else none
+    | none => none
+  let replaced := match latest (fun (h : Holder) => h.2.2.draft) holders with
+    | some (_, r, m) =>
+      let samePayment := payment.isSome && (r.draft.bind txidOf) == payment
+      if mine.draft < m.draft && !samePayment then some (r.draft, m.draft) else none
+    | none => none
+  match replaced with
+  | some (value, stamp) => some (.draft value stamp)
+  | none =>
+    if same.isEmpty then none
+    else some (.combine (same.map (·.1)) (same.foldl (fun s x => Stamp.max s x.2) mine.draft))
+
+/-- What the backups have later than this device, for an account both have, in this order: a later name,
+counters further on, a later Ledger registration, and the payment awaiting signatures. `mine` is this
+device's stamps, `holders` the backups that have the account, `named` and `registered` the ones whose name
+and registration are latest, `receive` and `change` the highest counters among them. -/
+def accountChanges (txidOf : MultisigSpendDraft → Option ByteArray) (l : LocalAccount) (mine : AccountMeta)
+    (holders : Array Holder) (named registered : Option Holder) (receive change : UInt32) : Array Change :=
+  (renameChange mine named).toArray ++ (raiseChange l receive change).toArray ++
+    (ledgerChange mine registered).toArray ++ (draftChange txidOf l mine holders).toArray
+
 /-- The decision for one account: `here` is this device's, `known` the stamps it remembers of one it does not
 have (a removal), `fresh` a stamp for now, `txidOf` a draft's payment. -/
 def decideAccount (fresh : Stamp) (txidOf : MultisigSpendDraft → Option ByteArray) (id : String)
@@ -368,33 +421,7 @@ def decideAccount (fresh : Stamp) (txidOf : MultisigSpendDraft → Option ByteAr
     if added < removed then
       if l.removable then { id, added, removed, existence := .remove }
       else { id, added := fresh, removed, existence := .reassert }
-    else Id.run do
-      let mut changes : Array Change := #[]
-      if let some (_, r, m) := named then
-        if mine.name < m.name then changes := changes.push (.rename r.name m.name)
-      if receive > l.record.nextReceiveIndex || change > l.record.nextChangeIndex then
-        changes := changes.push (.raise (Max.max receive l.record.nextReceiveIndex) (Max.max change l.record.nextChangeIndex))
-      if let some (_, r, m) := registered then
-        if let some registration := r.ledger then
-          if mine.ledger < m.ledger then changes := changes.push (.ledger registration m.ledger)
-      -- the same payment on another device: its signatures join ours, whichever copy is later
-      let payment := l.record.draft.bind txidOf
-      let same : Array (MultisigSpendDraft × Stamp) := holders.filterMap fun (_, r, m) =>
-        match r.draft with
-        | some d => if payment.isSome && txidOf d == payment && some d != l.record.draft then some (d, m.draft) else none
-        | none => none
-      let newest := latest (fun (h : Replica × MultisigAccountRecord × AccountMeta) => h.2.2.draft) holders
-      let replaced := match newest with
-        | some (_, r, m) =>
-          let samePayment := payment.isSome && (r.draft.bind txidOf) == payment
-          if mine.draft < m.draft && !samePayment then some (r.draft, m.draft) else none
-        | none => none
-      match replaced with
-      | some (value, stamp) => changes := changes.push (.draft value stamp)
-      | none =>
-        unless same.isEmpty do
-          changes := changes.push (.combine (same.map (·.1)) (same.foldl (fun s x => Stamp.max s x.2) mine.draft))
-      return { id, added, removed, changes }
+    else { id, added, removed, changes := accountChanges txidOf l mine holders named registered receive change }
 
 /-- Every account this device, what it remembers or any backup names, each decided. -/
 def decideAccounts (fresh : Stamp) (txidOf : MultisigSpendDraft → Option ByteArray) (here : Array LocalAccount)
