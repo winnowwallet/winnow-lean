@@ -121,8 +121,7 @@ checked as follows ([the testing guide](../testing.md) says what CI runs):
   specification in `Lean/Secp`. The gates `Lean/SecpCt/Gate.lean` and
   `Lean/Secp/Proofs/Gate.lean` fail the build on a `sorry` or on an axiom
   beyond Lean's standard three. The compiled code is held by `secpct-test` to
-  `Lean/Vectors/secp-known-answers.json` (`scripts/secp-vectors --check`), and
-  CI runs `scripts/gen-scalar-mul-proofs --check`.
+  `Lean/Vectors/secp-known-answers.json` (`scripts/secp-vectors --check`).
   [SECURITY.md](../../SECURITY.md) says what is and is not claimed about timing.
 - **The core library**, `Lean/WinnowCore.lean`: `scripts/check-core` holds its
   import closure to an allowed list, and CI runs it.

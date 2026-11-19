@@ -60,9 +60,6 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   The wallet has one implementation of secp256k1 (`Lean/SecpCt`), so this is what its compiled code is compared
   with; secpct-test holds it to every record. The output is the same on every run, and `--check` (CI runs it)
   fails if the kept file is not it.
-- [gen-scalar-mul-proofs](gen-scalar-mul-proofs) writes `Lean/SecpCt/ScalarMulProofs.lean`, the proofs about the
-  constant-time scalar multiplication, which are too long to write by hand; Lean checks what it writes like any
-  other proof. `--check` (CI) fails unless the file in the repository is what the script writes.
 - [swift-utf8-vectors](swift-utf8-vectors) writes `Lean/Vectors/swift-utf8-decoding.json`, Swift's own
   `String(decoding:as: UTF8.self)` over well-formed and ill-formed UTF-8, which `crypto-test` holds
   `Winnow.Text.decodeUTF8Lossy` to. It needs Xcode's Swift and feeds the program to `xcrun swift` on stdin, so

@@ -60,6 +60,14 @@ def low32 : UInt64 := 0xFFFFFFFF
 /-- 1 if `x` is not zero, else 0. -/
 @[inline] def nonzero (x : UInt64) : UInt64 := (x ||| (0 - x)) >>> 63
 
+/-- `a · (u0..u3) + (r0..r3)` in five words, least significant first. -/
+@[inline] def mulRow (a u0 u1 u2 u3 r0 r1 r2 r3 : UInt64) : UInt64 × UInt64 × UInt64 × UInt64 × UInt64 :=
+  let (k, s0) := mulAdd a u0 r0 0
+  let (k, s1) := mulAdd a u1 r1 k
+  let (k, s2) := mulAdd a u2 r2 k
+  let (hi, s3) := mulAdd a u3 r3 k
+  (s0, s1, s2, s3, hi)
+
 /-- The eight bytes at `offset`, most significant first, as a word. The caller has checked they are there. -/
 @[inline] def wordAt (b : ByteArray) (offset : Nat) : UInt64 :=
   (b[offset]!.toUInt64 <<< 56) ||| (b[offset + 1]!.toUInt64 <<< 48) ||| (b[offset + 2]!.toUInt64 <<< 40) |||
