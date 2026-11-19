@@ -3,6 +3,7 @@ import SecpCt.Gate
 import Winnow
 import Winnow.Proofs.DeviceSyncProofs
 import Winnow.Proofs.Custody
+import Winnow.Proofs.Spend
 
 /-! # `Winnow/Proofs/Gate.lean`: Single Auditable Verification Gate
 
@@ -212,6 +213,29 @@ example : ∀ {master : HDKey} {coinType k i : UInt32} {hrp : String}
   @Winnow.Proofs.Custody.SilentPaymentPairing.issue_spendable
 
 end custody
+
+/-! ## Phase 3: what a spend is held to -/
+
+section spend
+open Winnow.Proofs.Spend
+
+-- A SegWit v0 account: an index where two keys collide never makes the account's addresses fail (SEC-061)
+example : ∀ {a : SegwitMultisigAccount} {choice : Nat} {index : UInt32} {e : MultisigFailure},
+    a.usable choice index = .error e → ∃ n, e = .named n :=
+  @usable_error
+
+-- The send that is signed is the send that was reviewed, exactly (SEC-007, SEC-018)
+example : ∀ (r : ReviewedSend) (tx : Transaction) (fee : Int64) (changeAmount : Option Int64)
+    (resolved : Array Payment),
+    r.authorizesTransaction tx fee changeAmount resolved = true ↔
+      fee = r.fee ∧ changeAmount = r.changeAmount ∧
+      tx.inputs.toList.map (fun i => outpointKey i.previousOutput) = r.selected.toList.map outpointKey ∧
+      resolved.map (·.amount) = r.silentAmounts ∧
+      List.Perm (tx.outputs.toList.map outputKey) ((r.expected resolved).map paymentKey) ∧
+      r.change.isNone = r.changeAmount.isNone :=
+  authorizesTransaction_iff
+
+end spend
 
 /-! ## `DeviceSync` Stamp Semilattice & Clock Monotonicity -/
 

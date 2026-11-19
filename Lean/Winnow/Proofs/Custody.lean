@@ -1,5 +1,5 @@
-import Lean.Elab.Term
 import SecpCt.CompleteProofs
+import Winnow.Proofs.Tools
 import Winnow.Spec.Custody
 import Winnow.Tx.Taproot
 
@@ -37,27 +37,9 @@ know, which does not end. So nothing here ever makes the kernel look inside the 
 namespace Winnow.Proofs.Custody
 
 open Secp
+open Winnow.Proofs (throw_eq pure_eq ok_bind error_bind)
 open Winnow.Keys
 open Winnow.Spec.Custody
-
-open Lean Elab Term Meta in
-/-- `body% f [c₁, …] [x₁, …]`: the definition of `f` with each constant `cᵢ` replaced by the term `xᵢ`; with
-no constants, `f`'s definition itself.
-
-A proof tool, in no statement that is kept. The kernel has no notion of "do not unfold": when a proof step
-leaves it comparing two `match`es on `pointOfSecret d`, it evaluates `pointOfSecret d`, a 256-step ladder on a
-symbolic number, and does not come back. So a function that calls the curve is reasoned about in two steps:
-a lemma about `body% f [pointOfSecret, …] [pos, …]`, where the callees are variables and any simplification is
-cheap to check, and then `rw [f_def]; exact lemma …`, which the kernel checks by seeing that the two terms are
-the same term. -/
-elab "body% " f:ident "[" cs:ident,* "]" "[" xs:term,* "]" : term => do
-  let fn ← realizeGlobalConstNoOverload f
-  let info ← getConstInfo fn
-  let cns ← cs.getElems.mapM (realizeGlobalConstNoOverload ·)
-  let xes ← xs.getElems.mapM (elabTerm · none)
-  return info.value!.replace fun e => match e with
-    | .const n _ => (cns.idxOf? n).map (xes[·]!)
-    | _ => none
 
 /-! The curve code and the hashes are never unfolded by these proofs: everything said about them comes from
 the theorems of `SecpCt` and from their being functions. Marking them irreducible here keeps the elaborator
@@ -223,11 +205,6 @@ private to `Winnow/Keys/Secp256k1.lean`, whose functions check it); the theorems
 def _root_.Winnow.Keys.Secret.Valid (d : Secret) : Prop :=
   0 < d.scalar.toNat ∧ d.scalar.toNat < SecpCt.N
 
-private theorem throw_eq {ε α : Type} (e : ε) : (throw e : Except ε α) = .error e := rfl
-private theorem pure_eq {ε α : Type} (a : α) : (pure a : Except ε α) = .ok a := rfl
-private theorem ok_bind {ε α β : Type} (a : α) (f : α → Except ε β) : (Except.ok a >>= f) = f a := rfl
-private theorem error_bind {ε α β : Type} (e : ε) (f : α → Except ε β) :
-    ((Except.error e : Except ε α) >>= f) = .error e := rfl
 private theorem found_some {α : Type} (a : α) : found (some a) = .ok a := rfl
 private theorem found_none {α : Type} : found (none : Option α) = .error .underlyingCryptoError := rfl
 private theorem found_ok {α : Type} {o : Option α} {a : α} (h : found o = .ok a) : o = some a := by
