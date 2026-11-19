@@ -229,6 +229,18 @@ structure StoreKeyVault where
 def keyBytes : Nat := 32
 def accountPrefix : String := "store-key."
 
+/-- Where a store's key waits while it is moved out from behind the person's presence
+(`repairRefusedStoreKeys`): under its own id with this after it, until the move is done. -/
+def movingSuffix : String := ".moving"
+
+/-- `errSecInteractionNotAllowed`: the Keychain would have to ask the person for the item. -/
+def interactionNotAllowed : Int32 := -25308
+
+/-- The stores' keys (their accounts, `people.mainnet`) the Keychain refused to give with nobody there since
+the app started: put behind the person's presence by a build that should not have (0.9.17 to 0.9.21). Each is
+moved out from behind it the next time the person authenticates (`repairRefusedStoreKeys`). -/
+initialize refusedStoreKeys : IO.Ref (Array String) ← IO.mkRef #[]
+
 /-- An in-memory vault (the tests' `StoreKeyVault`). -/
 def StoreKeyVault.inMemory (ref : IO.Ref (Std.HashMap String ByteArray)) : StoreKeyVault where
   key a := RM.io do return (← ref.get)[a]?
@@ -246,14 +258,29 @@ apps; the files are. A Swift item reads as no key here (it is not text); `rawKey
 `StoreSeal.setAsideSwiftEra` moves it and its file out of the way. -/
 def StoreKeyVault.ofKeyStore (ks : Keys.KeyStore IO) : StoreKeyVault where
   key a := do
-    match ← RM.io (ks.load (accountPrefix ++ a)).run with
-    | .ok (.masterKey h) =>
+    let parse (h : String) : RM ByteArray :=
       match ofHex? h with
-      | some k => if k.size == keyBytes then pure (some k) else throw (.keyVault .malformedKey)
+      | some k => if k.size == keyBytes then pure k else throw (.keyVault .malformedKey)
       | none => throw (.keyVault .malformedKey)
+    match ← RM.io (ks.load (accountPrefix ++ a)).run with
+    | .ok (.masterKey h) => some <$> parse h
     | .ok (.mnemonic _) | .ok (.accountKey ..) => throw (.keyVault .malformedKey)
-    | .error (.notFound _) => pure none
-    | .error (.keychain s) => throw (.keyVault (.keychain s))
+    | .error (.notFound _) =>
+      -- a move out from behind the person's presence that stopped half-way: the key is where it waited
+      match ← RM.io (ks.load (accountPrefix ++ a ++ movingSuffix)).run with
+      | .ok (.masterKey h) =>
+        let k ← parse h
+        match ← RM.io (ks.store (.masterKey h) (accountPrefix ++ a)).run with
+        | .ok () | .error (.alreadyExists _) => pure ()
+        | .error (.keychain s) => throw (.keyVault (.keychain s))
+        | .error _ => throw (.keyVault .malformedKey)
+        discard <| RM.io (ks.delete (accountPrefix ++ a ++ movingSuffix)).run
+        pure (some k)
+      | _ => pure none
+    | .error (.keychain s) =>
+      if s == interactionNotAllowed then
+        RM.io (refusedStoreKeys.modify fun r => if r.contains a then r else r.push a)
+      throw (.keyVault (.keychain s))
     | .error _ => throw (.keyVault .malformedKey)
   establishKey a := do
     let k ← RM.io (IO.getRandomBytes keyBytes.toUSize)
@@ -278,6 +305,41 @@ def StoreKeyVault.ofKeyStore (ks : Keys.KeyStore IO) : StoreKeyVault where
     | .ok () | .error (.alreadyExists _) => pure ()
     | .error (.keychain s) => throw (.keyVault (.keychain s))
     | .error _ => throw (.keyVault .malformedKey)
+
+/-- Moves each store key the Keychain refused (`refusedStoreKeys`) out from behind the person's presence,
+keeping its bytes: run while the person has just authenticated, when it can be read. Never a moment without
+the key somewhere: it is first copied to `<id>.moving`, then the item is taken away and added again as it
+should be, then the copy goes; a key whose item is missing is taken from the copy (`StoreKeyVault.key`). The
+accounts moved; one that could not be is left for the next time. -/
+def repairRefusedStoreKeys (ks : Keys.KeyStore IO) : IO (List String) := do
+  let mut moved : List String := []
+  for a in ← refusedStoreKeys.get do
+    let main := accountPrefix ++ a
+    let waiting := main ++ movingSuffix
+    let attempt : ExceptT String IO Unit := do
+      let secret ← match ← (ks.load main).run with
+        | .ok s@(.masterKey _) => pure s
+        | .ok _ => throw "not a store key"
+        | .error e => throw e.errorDescription
+      match ← (ks.store secret waiting).run with
+      | .ok () => pure ()
+      | .error (.alreadyExists _) =>
+        unless (← (ks.load waiting).run).toOption == some secret do throw "a different key waits in its place"
+      | .error e => throw e.errorDescription
+      match ← (ks.delete main).run with
+      | .ok () => pure ()
+      | .error e => throw e.errorDescription
+      match ← (ks.store secret main).run with
+      | .ok () => pure ()
+      | .error e => throw e.errorDescription
+      unless (← (ks.load main).run).toOption == some secret do throw "the key did not read back"
+      discard <| (ks.delete waiting).run
+    match ← attempt.run with
+    | .ok () =>
+      moved := moved ++ [a]
+      refusedStoreKeys.modify (·.erase a)
+    | .error _ => pure ()
+  return moved
 
 /-! ## The sealed file -/
 

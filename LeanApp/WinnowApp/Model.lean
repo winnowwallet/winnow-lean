@@ -909,6 +909,8 @@ inductive CloudMsg where
 
 inductive Msg where
   | createWallet
+  /-- Face ID once, for the records' keys an earlier build locked behind it (`Status.recordsLocked`). -/
+  | unlockRecords
   | openImport
   | setImportText (s : String)
   | pasteImport
@@ -956,6 +958,8 @@ inductive Cmd where
   | importWallet (gen : Nat) (network : Network) (json : String)
   | finishOnboarding (gen : Nat)
   | refresh (gen : Nat)
+  /-- An authentication and nothing else: the backend frees what waited for one (`Backend.personPresent`). -/
+  | unlockRecords (gen : Nat)
   /-- The people and labels alone, read again: a payment to a person's card arrives already named. -/
   | records (gen : Nat)
   | syncNow (gen : Nat)

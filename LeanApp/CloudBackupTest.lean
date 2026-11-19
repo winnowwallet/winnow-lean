@@ -745,6 +745,88 @@ def shellAnswers : TM Unit := do
     ((← accountText (Lean.Json.mkObj [("status", Lean.Json.str "noAccount"), ("user", Lean.Json.null)])) == Real.CloudBackupError.unavailable.description)
   check "available: the user" ((← accountText (Lean.Json.mkObj [("status", Lean.Json.str "available"), ("user", Lean.Json.str "_u")])) == "ok")
 
+/-- A Keychain as the shell's `keychain.*` capabilities give it: items by key, each with whether it is behind
+the person's presence, which a read that names no kept authentication is refused as a device refuses it. -/
+def fakeKeychain : IO (Real.Ask × IO.Ref (Std.HashMap String (String × Bool))) := do
+  let items ← IO.mkRef ({} : Std.HashMap String (String × Bool))
+  let ask : Real.Ask := fun name args => do
+    let obj := Lean.Json.mkObj
+    let key := (args.getObjValAs? String "key").toOption.getD ""
+    let answer ← match name with
+      | "keychain.add" =>
+        -- the item as the device keeps it: the bytes given as hex (or text), read back as text
+        let value := match (args.getObjValAs? String "hex").toOption with
+          | some h => ((ofHex? h).bind String.fromUTF8?).getD ""
+          | none => (args.getObjValAs? String "value").toOption.getD ""
+        let guarded := (args.getObjValAs? String "access").toOption == some "userPresence"
+        if (← items.get).contains key then pure (obj [("ok", false), ("status", (-25299 : Int)), ("exists", true)])
+        else
+          items.modify (·.insert key (value, guarded))
+          pure (obj [("ok", true), ("status", (0 : Int)), ("exists", false), ("access", if guarded then "userPresence" else "unlocked")])
+      | "keychain.get" =>
+        let named := (args.getObjValAs? String "context").toOption.isSome
+        match (← items.get)[key]? with
+        | none => pure (obj [("value", Lean.Json.null), ("status", (-25300 : Int))])
+        | some (v, guarded) =>
+          if guarded && !named then pure (obj [("value", Lean.Json.null), ("status", (-25308 : Int))])
+          else pure (obj [("value", Lean.Json.str v), ("status", (0 : Int))])
+      | "keychain.delete" =>
+        items.modify (·.erase key)
+        pure (obj [("ok", true), ("status", (0 : Int))])
+      | _ => pure Lean.Json.null
+    pure (Task.pure answer)
+  return (ask, items)
+
+/-- 0.9.17 to 0.9.21 put every item the app added behind the person's presence, the sealed stores' keys
+included: a store first sealed then read as damaged at the next launch, with nobody there to give the key.
+Now only the wallet's secret goes behind it, and a key an earlier build put there is moved out the next time
+the person authenticates, keeping its bytes, so the files it sealed read again. A move cut short is finished
+from where the key waited. -/
+def storeKeysOutOfPresence (root : System.FilePath) : TM Unit := do
+  let (ask, items) ← fakeKeychain
+  let ks := Real.shellKeyStore ask Real.walletService true
+  let vault := StoreKeyVault.ofKeyStore ks
+  let net : BitcoinNetwork := .signet
+  let account := ({ store := SignerStore.storeName, keys := vault } : StoreSeal).account net
+  let main := accountPrefix ++ account
+  Real.keychainContext.set none
+  refusedStoreKeys.set #[]
+  -- what an earlier build left: the signers' key behind the person's presence, and the file it sealed
+  let key ← IO.getRandomBytes 32
+  let text := String.fromUTF8! (WalletSecret.masterKey (hex key)).serialized
+  items.modify (·.insert main (text, true))
+  let dir := root / "lockedKeys"
+  IO.FS.createDirAll dir
+  let path := dir / SignerStore.fileName
+  IO.FS.writeBinFile path (SealedStoreFile.sealed (SignerStore.encode #[]) SignerStore.storeName net key)
+  let (opened, _) ← SignerStore.configure vault (some path) net
+  check "an earlier build's key: the store reads as damaged with nobody there" opened.isDamaged
+  check "…and the key is noted as refused, not lost" ((← refusedStoreKeys.get) == #[account])
+  check "…and the file is untouched" ((← IO.FS.readBinFile path).size > 0)
+  -- the wallet's secret and a new store's key, as this build adds them
+  discard (ks.store (.mnemonic "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about") "w1").run
+  let other := accountPrefix ++ ({ store := "people", keys := vault } : StoreSeal).account net
+  discard <| (vault.establishKey (({ store := "people", keys := vault } : StoreSeal).account net)).run
+  check "the wallet's secret goes behind the person's presence" (((← items.get)["w1"]?).map (·.2) == some true)
+  check "a new store's key does not" (((← items.get)[other]?).map (·.2) == some false)
+  -- nobody has authenticated: nothing moves
+  check "with nobody there, nothing is moved" ((← repairRefusedStoreKeys ks).isEmpty && ((← items.get)[main]?).map (·.2) == some true)
+  -- the person authenticates (any action that asks): the key comes out from behind it, with its bytes
+  Real.keychainContext.set (some "ctx")
+  let moved ← repairRefusedStoreKeys ks
+  Real.keychainContext.set none
+  check "authenticated: the refused key is moved out from behind the person's presence" (moved == [account])
+  check "…as the same key, and no copy is left waiting"
+    (((← items.get)[main]?) == some (text, false) && !(← items.get).contains (main ++ movingSuffix))
+  check "…and none is still refused" ((← refusedStoreKeys.get).isEmpty)
+  let (again, _) ← SignerStore.configure vault (some path) net
+  check "the store it sealed reads again, with nobody there" (!again.isDamaged)
+  -- a move cut short after the item went and before it came back: the key waits under its copy
+  items.modify fun m => (m.erase main).insert (main ++ movingSuffix) (text, false)
+  check "a move cut short: the key is taken from where it waited" (((← (vault.key account).run).toOption.join) == some key)
+  check "…put back as it should be, and the copy gone"
+    (((← items.get)[main]?) == some (text, false) && !(← items.get).contains (main ++ movingSuffix))
+
 /-- The shell adapters over LeanNative's typed clients, against a scripted shell: what they ask and how
 they read the answers into this app's errors and texts. -/
 def shellAdapters : TM Unit := do
@@ -794,6 +876,11 @@ def shellAdapters : TM Unit := do
   answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false)]
   discard (guarded.storeBytes (ByteArray.mk #[1, 2, 3]) "store-key.people.main").run
   check "userPresence: an item kept as bytes is not: a sync pass reads it with nobody there"
+    ((← sent "keychain.add").size == 1 && (← sent "keychain.add").all (!has · "access"))
+  -- a sealed store's key goes through `store`, as text, and is read at every launch with nobody there
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false)]
+  discard (guarded.store (.masterKey (String.ofList (List.replicate 64 'a'))) "store-key.signers.main").run
+  check "userPresence: a store's key, kept as text, is not behind the person's presence"
     ((← sent "keychain.add").size == 1 && (← sent "keychain.add").all (!has · "access"))
   answer fun _ _ => obj [("value", Lean.Json.null), ("status", (-25308 : Int))]
   check "userPresence: a read with no authentication names none, and the Keychain's refusal is its status"
@@ -1036,6 +1123,7 @@ def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
   runTest "shellAnswers" shellAnswers
   runTest "shellAdapters" shellAdapters
   let root ← IO.FS.createTempDir
+  runTest "storeKeysOutOfPresence" (storeKeysOutOfPresence root)
   runTest "automaticCloud" (automaticCloudTests root)
   runTest "scopedPreparation" (scopedPreparationTests root)
   runTest "restoreFromICloud" (restoreFromICloud root)

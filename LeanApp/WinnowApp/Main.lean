@@ -608,6 +608,9 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .openURL url => fx.cap "open" (Json.mkObj [("url", Json.str url)]) fun _ => .copiedExpired ""
   | .setAppearance a => discard <| IO.asTask (discard <| fx.ask "appearance" (Json.mkObj [("style", Json.str a.style)]))
   | .journal name fields => journal name fields
+  | .unlockRecords g => authenticated fx g "unlock" "Unlock Winnow's records" do
+      let (s, p) ← b.snapshot
+      return .snapshot g s p
   | .discoverCloud => discard <| IO.asTask (try b.discoverCloudBackups catch _ => pure ())
   | .setAutomaticCloud enabled => discard <| IO.asTask (try b.setAutomaticCloudBackup enabled catch _ => pure ())
   | .restoreCloud g n id => background fx g "cloudRestore" do
@@ -701,7 +704,7 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .signDraftWithLedger .. | .adoptDraft .. | .broadcastDraft .. | .discardDraft .. | .rebroadcastSpend ..
   | .abandonSpend .. | .scanLedgers .. | .askBluetooth =>
     performMultisig b fx c
-  | .copy .. | .timer .. | .openURL .. | .setAppearance .. | .journal .. | .discoverCloud | .setAutomaticCloud .. | .restoreCloud ..
+  | .copy .. | .timer .. | .openURL .. | .setAppearance .. | .journal .. | .unlockRecords .. | .discoverCloud | .setAutomaticCloud .. | .restoreCloud ..
   | .suspendCloud | .cloudScene .. | .scheduleBackgroundTasks | .runBackgroundTask .. | .expireBackgroundTask ..
   | .completeBackgroundTask ..
   | .backgroundRefreshStatus | .paste .. =>

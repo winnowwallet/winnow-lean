@@ -19,9 +19,10 @@ shell's `keychain.*` and `http.get` requests and read their answers. `ask name a
   raw bytes. With `userPresence` the wallet secret's item is behind the person's presence: the Keychain
   itself gives it only under the authentication the app has just asked for (`keychainContext`), and a read
   with none is refused (`errSecInteractionNotAllowed`), never a prompt. An item an earlier build stored
-  without it is given it in place when the wallet opens (`upgradeProtection`). The items kept as raw bytes
-  (the sealed stores' keys, a restore's search key) are read in sync passes with nobody there, and stay
-  `WhenUnlockedThisDeviceOnly` alone.
+  without it is given it in place when the wallet opens (`upgradeProtection`). The sealed stores' keys (kept
+  as text through `store`, under `store-key.`) and a restore's search key (raw bytes) are read at launch and
+  in sync passes with nobody there, and stay `WhenUnlockedThisDeviceOnly` alone. 0.9.17 to 0.9.21 gave the
+  stores' keys the access control too; `RecordsReal.repairRefusedStoreKeys` takes it off them.
 * `HttpFetch`: one request, with its `Accept` header. The shell follows same-host redirects itself
   (never https → http); the declared length is not reported (the body size is checked here). -/
 
@@ -60,13 +61,20 @@ def withKeychainContext (ask : Ask) (context : Option String) (act : IO α) : IO
     keychainContext.modify fun held => if held == some id then none else held
     try discard <| ask "auth.end" (Json.mkObj [("context", Json.str id)]) catch _ => pure ()
 
+/-- The ids of the sealed stores' keys (`RecordsReal.accountPrefix`): kept as text through `store`, and read in
+sync passes and at launch with nobody there, so never behind the person's presence. -/
+def storeKeyPrefix : String := "store-key."
+
 open LeanNative.Native in
 /-- The Keychain capability as a `KeyStore`, under `service` (test mode passes its own namespace).
-`userPresence` puts the wallet's secret behind the person's presence (the module documentation). -/
+`userPresence` puts the wallet's secret behind the person's presence (the module documentation), and that
+secret alone: a sealed store's key, which goes through `store` too, is read at every launch and in sync passes
+with nobody there. 0.9.17 to 0.9.21 put every item `store` added behind it, those keys included
+(`RecordsReal.repairRefusedStoreKeys` takes them back out). -/
 def shellKeyStore (ask : Ask) (service : String := walletService) (userPresence : Bool := false) : KeyStore IO :=
   let item (id : String) : Client.Keychain.Item := { key := id, service := some service }
   let guarded (id : String) : Client.Keychain.Item :=
-    { item id with access := if userPresence then .userPresence else .unlocked }
+    { item id with access := if userPresence && !id.startsWith storeKeyPrefix then .userPresence else .unlocked }
   let call {α} (r : Client.Request α) : ExceptT KeyStoreError IO α := do
     match ← (callAsk ask r : IO _) with
     | .ok a => pure a

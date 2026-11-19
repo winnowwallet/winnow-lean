@@ -1,4 +1,5 @@
 import WinnowApp.Real.Stack
+import WinnowApp.Real.RecordsSeal
 
 /-! # The wallet's lifecycle and the UI snapshot
 
@@ -152,6 +153,14 @@ def openWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO BootResul
 wallet's secret in every round) keeps one now, while the secret can be read, so that its rounds in sync
 passes go on. A wallet with no such search reads nothing. -/
 def personPresent (env : Env) : IO Unit := do
+  -- the records' keys a build put behind the person's presence come out from behind it now, while it is
+  -- satisfied, and the stores sealed with them are read again
+  let moved ← RecordsReal.repairRefusedStoreKeys env.deps.keyStore
+  unless moved.isEmpty do
+    env.journal "keychain.storeKeysMoved" [("accounts", ",".intercalate moved)]
+    let c ← env.get
+    if let (some n, some dir) := (c.network, c.dir) then
+      try discard <| env.hooks.configure n dir catch _ => pure ()
   let some w := (← env.get).wallet | return
   match ← (runWM w.keepCardSearchKeyIfWaiting).toBaseIO with
   | .ok true => env.journal "cards.searchKeyKept" [("walletID", w.id)]
@@ -238,6 +247,7 @@ def snapshot (env : Env) : IO (Status × SyncPhase) := do
     s := { s with peerCount := (← stack.pool.connectedPeers).size, tipHeight := (← stack.chain.height).toNat
                   feeFloorMilli := ← feeFloorMilli stack.pool }
     if let some f := stack.filters then s := { s with nextScanHeight := (← f.nextScanHeight).toNat }
+  s := { s with recordsLocked := !(← RecordsReal.refusedStoreKeys.get).isEmpty }
   s := { s with syncing := c.syncing, lastSyncError := c.lastSyncError, relayStoreQuarantined := c.relayStoreQuarantined,
                 activeGateways := c.activeGateways, discoveringGateways := c.discoveringGateways,
                 transientSyncError := c.transientSyncError, transientSyncFailures := c.transientSyncFailures }

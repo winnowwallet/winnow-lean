@@ -357,6 +357,7 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
   | .createWallet =>
     ({ m with onboarding := { m.onboarding with busy := true, error := none } }, [.createWallet g m.settings.network])
   | .openImport => ({ m with onboarding := { m.onboarding with importReport := none, error := none } }.present .importWallet, [])
+  | .unlockRecords => if m.status.recordsLocked then (m, [.unlockRecords g]) else (m, [])
   | .setImportText s => ({ m with onboarding := { m.onboarding with importText := s } }, [])
   | .pasteImport => (m, [.paste .importBundle])
   | .importWallet =>

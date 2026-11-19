@@ -253,8 +253,14 @@ def accountsSection (m : Model) : List H :=
   [.identified Ids.homeAccountsSection (.section "Accounts" ""
     (m.multisig.accounts.map accountRow ++ m.multisig.arriving.map arrivingRow))]
 
+/-- The records an earlier build locked behind Face ID, and the one tap that frees them. -/
+def recordsLockedSection (m : Model) : List H :=
+  if !m.status.recordsLocked then [] else
+  [.section "" "An earlier version of Winnow locked the keys of some records (signers, accounts or people) behind Face ID, so they cannot be read or backed up. Unlock them once; nothing in them is lost."
+    [.identified Ids.unlockRecordsButton (Html.symbol "faceid" (.button "Unlock with Face ID" .primary (some .unlockRecords)))]]
+
 def homeSections (m : Model) : List H :=
-  [ balanceSection m ] ++ protectionCards m ++
+  recordsLockedSection m ++ [ balanceSection m ] ++ protectionCards m ++
   [ .section "" "" [.row [.identified Ids.receiveButton (Html.symbol "arrow.down.left" (.button "Receive" .plain (some .openReceive))),
                           .identified Ids.openSendButton (Html.symbol "arrow.up.right" (.button "Send" .primary (some .openSend)))]] ] ++
   accountsSection m ++

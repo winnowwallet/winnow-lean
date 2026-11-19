@@ -2391,6 +2391,17 @@ def bundleVersion : IO Unit := do
   let read := settings (update (.host (.versionRead "0.9.19 (26)")) (readyModel "w"))
   check "version: Settings shows the bundle's version" (contains read "0.9.19 (26)" && !contains read "Unknown")
 
+/-- Records an earlier build locked behind Face ID: the home says so and offers the one tap that frees them,
+which asks for an authentication and nothing else; with nothing locked there is neither. -/
+def recordsLockedRow : IO Unit := do
+  let ready : Model := { stage := .ready, active := true, walletID := some "w" }
+  check "locked records: nothing is said while none is locked"
+    (!contains (rendered ready) Ids.unlockRecordsButton && (step .unlockRecords ready).2.isEmpty)
+  let locked := { ready with status := { ready.status with recordsLocked := true } }
+  check "locked records: the home says so, with one button" (contains (rendered locked) Ids.unlockRecordsButton &&
+    contains (rendered locked) "Unlock with Face ID")
+  check "locked records: the tap asks for the authentication" ((step .unlockRecords locked).2.any (· matches .unlockRecords _))
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
@@ -2405,6 +2416,7 @@ def main : IO UInt32 := runMain "records-test" do
   testModeSeed
   walletSlots root
   walletSwitcher root
+  recordsLockedRow
   try
     let a ← newPhone root "A"
     let b ← newPhone root "B"

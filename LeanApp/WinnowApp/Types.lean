@@ -193,6 +193,9 @@ def DisplayedPayment.accountName (p : DisplayedPayment) : Option String :=
 structure Status where
   /-- The wallet's own coins. -/
   balance : Int := 0
+  /-- Some of the records' files are sealed with a key the Keychain gives only to the person
+  (`RecordsReal.refusedStoreKeys`): they read as damaged until the person authenticates once. -/
+  recordsLocked : Bool := false
   /-- The multisig accounts' live coins, which need co-signers to move. -/
   accountsBalance : Int := 0
   utxoCount : Nat := 0
