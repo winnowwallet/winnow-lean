@@ -8,10 +8,7 @@ import Lean.Util.CollectAxioms
   `sorryAx`, so it cannot hide. It logs `<name> OK, axioms: [...]`.
 * `#assert_all_axioms <ns>…` applies the same check to every theorem whose root namespace is one of
   the given ones, auto-generated lemmas included, and logs one line
-  `all theorems OK: <k> checked under <ns>`.
-
-The assumption that `P` is prime is a hypothesis (`[Spec.FieldP]`), not an axiom, so the gate
-does not let it through: a theorem that needs it says so in its statement. -/
+  `all theorems OK: <k> checked under <ns>`. -/
 
 namespace Secp.Gate
 open Lean

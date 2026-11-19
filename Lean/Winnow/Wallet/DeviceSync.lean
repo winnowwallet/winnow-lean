@@ -57,32 +57,8 @@ instance (a b : Stamp) : Decidable (a < b) :=
 /-- The later of two. -/
 def max (a b : Stamp) : Stamp := if a < b then b else a
 
-theorem lt_def (a b : Stamp) : a < b ↔ a.time < b.time ∨ (a.time = b.time ∧ a.device < b.device) := Iff.rfl
-
-theorem max_idem (a : Stamp) : max a a = a := by
-  simp [max]
-
-theorem max_comm (a b : Stamp) : max a b = max b a := by
-  obtain ⟨at_, ad⟩ := a
-  obtain ⟨bt, bd⟩ := b
-  simp only [max, lt_def]
-  split <;> split <;> first | rfl | (simp only [Stamp.mk.injEq]; omega)
-
-theorem max_assoc (a b c : Stamp) : max (max a b) c = max a (max b c) := by
-  obtain ⟨at_, ad⟩ := a
-  obtain ⟨bt, bd⟩ := b
-  obtain ⟨ct, cd⟩ := c
-  by_cases h1 : at_ < bt ∨ (at_ = bt ∧ ad < bd) <;> by_cases h2 : bt < ct ∨ (bt = ct ∧ bd < cd) <;>
-    by_cases h3 : at_ < ct ∨ (at_ = ct ∧ ad < cd) <;> simp [max, lt_def, h1, h2, h3] <;> omega
-
 /-- A stamp for a change made now on `device`, later than every stamp up to `clock`. -/
 def after (clock now device : Nat) : Stamp := { time := Nat.max now (clock + 1), device }
-
-theorem after_later (clock now device : Nat) (s : Stamp) (h : s.time ≤ clock) : s < after clock now device := by
-  simp only [lt_def, after]
-  left
-  have : clock + 1 ≤ Nat.max now (clock + 1) := Nat.le_max_right _ _
-  omega
 
 def toJV (s : Stamp) : JV := .arr #[ofInt s.time, ofInt s.device]
 

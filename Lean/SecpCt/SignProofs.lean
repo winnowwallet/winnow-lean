@@ -136,7 +136,7 @@ theorem mulG_point {k x y : Nat} (h : Spec.mulG k = some (x, y)) :
     exact ⟨px, py, rfl, h.1, h.2⟩
 
 /-- The two coordinates the code computes for a scalar are the numbers of the point the specification gives. -/
-theorem affine_of_smul [Fermat] (s : Sc) (x y : Nat) (h : Spec.mulG s.toNat = some (x, y)) :
+theorem affine_of_smul (s : Sc) (x y : Nat) (h : Spec.mulG s.toNat = some (x, y)) :
     (Point.mulGenerator s).affine.1.toNat = x ∧ (Point.mulGenerator s).affine.2.1.toNat = y := by
   obtain ⟨px, py, point, rfl, rfl⟩ := mulG_point h
   have rep := mulGenerator_rep s
@@ -147,7 +147,7 @@ theorem affine_of_smul [Fermat] (s : Sc) (x y : Nat) (h : Spec.mulG s.toNat = so
 /-- **The signature is the reference's.** For thirty-two bytes that spell a number below N, whenever
 winnow's reference signing gives a signature, `signRaw` gives the same bytes, and the bit beside them is the
 one that says whether the secret is a key. -/
-theorem signRaw_eq [Fermat] (secret m aux : ByteArray) (size : secret.size = 32)
+theorem signRaw_eq (secret m aux : ByteArray) (size : secret.size = 32)
     (below : Secp.fromBE secret < N) {sig pxb : ByteArray}
     (h : Secp.Bip340.signWith Spec.mulG m (Secp.fromBE secret) aux = some (sig, pxb)) :
     signRaw secret m aux = (sig, Sc.isKey secret) := by
@@ -230,7 +230,7 @@ theorem signRaw_eq [Fermat] (secret m aux : ByteArray) (size : secret.size = 32)
 
 /-- **`sign` returns the reference's signature.** For thirty-two bytes of secret that spell a number below N,
 whenever winnow's reference signing gives a signature, `sign` returns that signature. -/
-theorem sign_eq [Fermat] (secret m aux : ByteArray) (size : secret.size = 32)
+theorem sign_eq (secret m aux : ByteArray) (size : secret.size = 32)
     (below : Secp.fromBE secret < N) {sig pxb : ByteArray}
     (h : Secp.Bip340.signWith Spec.mulG m (Secp.fromBE secret) aux = some (sig, pxb)) :
     sign secret m aux = some sig := by
@@ -273,7 +273,7 @@ theorem last_byte_parity (n : Nat) (h31 : 31 < (Secp.toBE32 n).size) :
 
 /-- **The public key.** For thirty-two bytes that spell a number `d` from 1 to N − 1, `publicKey` returns the
 x of `d · G`, as winnow writes it, and whether its y is odd. -/
-theorem publicKey_spec [Fermat] (secret : ByteArray) (size : secret.size = 32)
+theorem publicKey_spec (secret : ByteArray) (size : secret.size = 32)
     (positive : 0 < Secp.fromBE secret) (below : Secp.fromBE secret < N) {x y : F}
     (point : Spec.smul (Secp.fromBE secret) Spec.G = .pt x y) :
     publicKey secret = some (Secp.toBE32 x.val, if y.val % 2 = 1 then 1 else 0) := by

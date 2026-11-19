@@ -1,6 +1,6 @@
 # Winnow in Lean: the port of Sources/WalletCore and Sources/WinnowApp (see ../PORT.md).
 name = "winnow"
-defaultTargets = ["Secp", "SecpCt", "WinnowCore", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
+defaultTargets = ["Secp", "SecpCt", "WinnowCore", "Winnow", "WinnowProofs", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
 
 # What the curve code is proved against, and the plain pieces around it: the curve as specified, signing as
 # BIP 340 and ECDSA give it, bytes, SHA-256, DER (Secp/Proofs/Gate.lean).
@@ -21,6 +21,11 @@ name = "WinnowCore"
 
 [[lean_lib]]
 name = "Winnow"
+
+# Build-time verification library (WinnowProofs.lean -> Winnow/Proofs/Gate.lean). Never imported by
+# WinnowCore, Winnow, or WinnowApp; scripts/check-proofs enforces zero proof leakage.
+[[lean_lib]]
+name = "WinnowProofs"
 
 # What the test executables share (TestKit/): the tally and how it prints, the test keys, a regtest bitcoind, a
 # fake peer.

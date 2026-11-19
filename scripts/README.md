@@ -12,6 +12,9 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   transaction review without seed phrases, Unicode tables, coin selection, wallet naming or I/O) to the list of
   modules it allows, so the core does not grow back; CI runs it. `--measure MOD...` prints a closure's module
   count and non-blank lines.
+- [check-proofs](check-proofs) enforces zero proof leakage into runtime libraries (`WinnowCore`, `Winnow`,
+  `WinnowApp`), zero theorems/axioms/`sorry` in runtime and spec modules, zero `sorry`/`native_decide`/`bv_decide`
+  in proof modules, and zero panicking `!`-indexing in bounds-cleaned modules; CI runs it.
 - [ci-regtest](ci-regtest) runs io-test, backend-test, multisig-differential, card-regtest and
   segwit-regtest against a disposable regtest bitcoind (CI's `lean` job).
 - [install-bitcoin](install-bitcoin) downloads the pinned Bitcoin Core release (31.1) from bitcoincore.org, checks

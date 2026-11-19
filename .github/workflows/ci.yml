@@ -50,6 +50,7 @@ jobs:
       prepare: scripts/import-census && cp build/census/peers-source.txt "$CI_RESULTS/"
       tests: |
         . scripts/check-core
+        . scripts/check-proofs
         . scripts/secp-vectors --check
         . Lean/.lake/build/bin/census-check build/census/peers.json
         . CENSUS_CHECK="$PWD/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s scripts/tests -v
