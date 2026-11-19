@@ -15,6 +15,10 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 - [check-proofs](check-proofs) enforces zero proof leakage into runtime libraries (`WinnowCore`, `Winnow`,
   `WinnowApp`), zero theorems/axioms/`sorry` in runtime and spec modules, zero `sorry`/`native_decide`/`bv_decide`
   in proof modules, and zero panicking `!`-indexing in bounds-cleaned modules; CI runs it.
+- [check-shell-names](check-shell-names) prepares the iOS project without Xcode (LeanNative's `build-ios` with
+  `PREPARE_ONLY=1`) to run the check CI's Xcode jobs make before they compile: a string in the app's compiled C
+  that equals the name of a shell capability the manifest does not list. A JSON key `"device"` stopped all
+  three Xcode jobs once; this says so in the `lean` job in about fifteen seconds. CI runs it.
 - [ci-regtest](ci-regtest) runs io-test, backend-test, multisig-differential, card-regtest and
   segwit-regtest against a disposable regtest bitcoind (CI's `lean` job).
 - [install-bitcoin](install-bitcoin) downloads the pinned Bitcoin Core release (31.1) from bitcoincore.org, checks

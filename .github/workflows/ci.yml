@@ -51,6 +51,7 @@ jobs:
       tests: |
         . scripts/check-core
         . scripts/check-proofs
+        . scripts/check-shell-names
         . scripts/secp-vectors --check
         . Lean/.lake/build/bin/census-check build/census/peers.json
         . CENSUS_CHECK="$PWD/Lean/.lake/build/bin/census-check" python3 -m unittest discover -s scripts/tests -v
