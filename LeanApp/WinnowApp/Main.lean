@@ -73,7 +73,42 @@ def resolveE2E : IO (Option E2E.Mode) := do
     IO.Process.exit 1
 
 def settingsPath : IO System.FilePath := return System.FilePath.mk (← rootDir.get) / "settings.json"
-def walletDir (n : Network) : IO String := return ((System.FilePath.mk (← rootDir.get)) / n.name).toString
+/-- The network's directory: its first wallet's own, and the one the wallets added beside it are kept under. -/
+def networkDir (n : Network) : IO String := return ((System.FilePath.mk (← rootDir.get)) / n.name).toString
+
+/-- The place the last `openWallet` or `openSlot` opened: the generation it was asked in, the network, the
+slot. What makes, imports, restores or deletes a wallet acts there and nowhere else. -/
+initialize openPlace : IO.Ref (Option (Nat × Network × String)) ← IO.mkRef none
+
+/-- The directory a command of generation `gen` for `n` acts in: the place open, when it was opened no later
+than the command was given. A command given before another place was opened is of the wallet that was open
+then, and is refused rather than run where it was not meant. -/
+def placeDir (gen : Nat) (n : Network) : IO String := do
+  match ← openPlace.get with
+  | some (opened, network, slot) =>
+    unless network == n && opened ≤ gen do Real.failWith .walletReplaced
+    return Real.slotDir (← networkDir n) slot
+  -- nothing was opened by a command yet (the app always opens first; a test may not): the network's own place
+  | none => networkDir n
+
+/-- Opens `slot` of `n` for generation `gen` and says which place it is and what is kept (`walletPlace`) before
+the answer. An added place left empty (an addition given up) is taken away once another is open. -/
+def openPlaceAt (b : Backend) (fx : Effects Host) (gen : Nat) (n : Network) (slot : String) : IO BootResult := do
+  let network ← networkDir n
+  let dir := Real.slotDir network slot
+  IO.FS.createDirAll dir
+  let before ← openPlace.get
+  let r ← b.openWallet n dir
+  openPlace.set (some (gen, n, slot))
+  if let some (_, was, old) := before then
+    if was != n || old != slot then Real.discardEmptySlot (Real.slotDir (← networkDir was) old)
+  fx.post (.walletPlace gen slot (← b.wallets network))
+  return r
+
+/-- The wallets kept for the place open, told again (one was made, imported or restored there). -/
+def tellWallets (b : Backend) (fx : Effects Host) (gen : Nat) (n : Network) : IO Unit := do
+  if let some (_, network, slot) ← openPlace.get then
+    if network == n then fx.post (.walletPlace gen slot (← b.wallets (← networkDir n)))
 
 def loadSettings : IO Settings := do
   let p ← settingsPath
@@ -214,6 +249,7 @@ def traceCmd : Cmd → IO Unit
   | .startNetworking g _ => trace s!"startNetworking {g}"
   | .stopNetworking => trace "stopNetworking"
   | .openWallet g _ _ => trace s!"openWallet {g}"
+  | .openSlot g _ slot => trace s!"openSlot {g} {slot}"
   | _ => pure ()
 
 /-- People and labels changed: the records after `r`, with what the screen does next. -/
@@ -276,9 +312,8 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
           IO.FS.writeFile (← settingsPath) (toJson s).pretty
           b.updateSettings s
   | .openWallet g n isBoot => background fx g "open" do
-      let dir ← walletDir n
-      IO.FS.createDirAll dir
-      let r ← b.openWallet n dir
+      -- the wallet that was open last, or the network's own place while it keeps none
+      let r ← openPlaceAt b fx g n (← Real.resolveSlot (← networkDir n))
       if isBoot then
         -- `boot()`: a resumed backup, then the stage it lands on (a damaged store journals nothing)
         match r with
@@ -286,11 +321,25 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         | .missing => journal "app.booted" [("stage", "onboarding"), ("walletID", "")]
         | .damaged _ => pure ()
       return .booted g r
+  | .openSlot g n slot => background fx g "open" do
+      let network ← networkDir n
+      let slot ← match slot with
+        | some slot =>
+          unless (← Real.listSlots network).contains slot do Real.failWith .noWallet
+          pure slot
+        | none => Real.freeSlot network
+      return .booted g (← openPlaceAt b fx g n slot)
   | .createWallet g n => authenticated fx g "create" "Create and protect your wallet" do
-      return .created g (← b.createWallet n (← walletDir n))
+      let id ← b.createWallet n (← placeDir g n)
+      tellWallets b fx g n
+      return .created g id
   | .importWallet g n json =>
     let act : IO Host := do
-      let (id, report) ← b.importBundle n (← walletDir n) json
+      let dir ← placeDir g n
+      -- onboarding offers this only where no wallet is: one that is there is never written over from here
+      if ← Real.holdsWallet dir then Real.failWith .walletAlreadyHere
+      let (id, report) ← b.importBundle n dir json
+      tellWallets b fx g n
       return .imported g id report
     -- a bundle carrying recovery words is imported only after device authentication, as AppModel
     let seeded := match Winnow.Text.parseJson json with
@@ -300,6 +349,8 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
     else background fx g "import" act
   | .finishOnboarding _ => discard <| IO.asTask b.finishOnboarding
   | .deleteWallet g => background fx g "delete" do
+      -- the wallet open when this was asked: another opened since is not the one meant
+      if let some (_, network, _) ← openPlace.get then discard <| placeDir g network
       b.deleteWallet
       return .deleted g
   | _ => pure ()
@@ -546,7 +597,10 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .discoverCloud => discard <| IO.asTask (try b.discoverCloudBackups catch _ => pure ())
   | .setAutomaticCloud enabled => discard <| IO.asTask (try b.setAutomaticCloudBackup enabled catch _ => pure ())
   | .restoreCloud g n id => background fx g "cloudRestore" do
-      let (walletID, verified, context) ← b.restoreCloudBackup n (← walletDir n) id
+      let dir ← placeDir g n
+      if ← Real.holdsWallet dir then Real.failWith .walletAlreadyHere
+      let (walletID, verified, context) ← b.restoreCloudBackup n dir id
+      tellWallets b fx g n
       return .cloudRestored g walletID verified context
   | .suspendCloud => discard <| IO.asTask b.suspendCloud
   | .cloudScene active => discard <| IO.asTask (try b.cloudScene active catch _ => pure ())
@@ -611,7 +665,7 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   let b ← backendRef.get
   match c with
   | .boot => bootApp fx
-  | .saveSettings .. | .openWallet .. | .createWallet .. | .importWallet .. | .finishOnboarding ..
+  | .saveSettings .. | .openWallet .. | .openSlot .. | .createWallet .. | .importWallet .. | .finishOnboarding ..
   | .deleteWallet .. =>
     performWallet b fx c
   | .refresh .. | .records .. | .syncNow .. | .retryPeers .. | .reconnect .. | .startNetworking .. | .stopNetworking =>

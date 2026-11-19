@@ -64,6 +64,8 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     -- looks for this network's iCloud backups (`.task(id: model.network)`)
     | .missing => ({ m with stage := .onboarding, walletID := none }, start ++ [.discoverCloud] ++ pending)
     | .damaged msg => ({ m with stage := .storageDamaged msg }, pending)
+  | .walletPlace g slot wallets =>
+    if !m.sameWallet g then (m, []) else ({ m with slot, wallets }, [])
   | .created g id =>
     -- creation finishes onboarding by itself: no phrase checklist, and neither iCloud nor a manual backup
     -- decides whether the wallet can be used
@@ -94,10 +96,12 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     -- the wallet is gone whether or not the scene left the front meanwhile
     if !m.sameWallet g then (m, []) else
     let m' := m.nextWallet
-    let m' := { m' with stage := Stage.onboarding, walletID := none, status := ({} : Status), records := ({} : Records),
+    let m' := { m' with stage := Stage.loading, walletID := none, status := ({} : Status), records := ({} : Records),
                         multisig := ({} : MultisigOverview), collect := m'.collect.cleared }
     let m' := { m' with phase := SyncPhase.idle, confirm := none, sheets := [], routes := [], nearbyLedger := none, ledgerSetup := none }
-    (m', [.stopNetworking])
+    -- what is kept now is asked of the backend: another of this network's wallets opens, or with none left
+    -- the empty place onboarding begins in
+    (m', [.stopNetworking, .openWallet m'.generation m'.settings.network false])
   | _ => (m, [])
 
 /-- What the sync and the records report: a snapshot, records, the receive window, a failure. -/
@@ -310,7 +314,7 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
   (m, cs ++ cs2)
 where onArea (h : Host) (m : Model) : Model × List Cmd :=
   match h with
-  | .launched .. | .settingsLoaded .. | .booted .. | .created .. | .imported .. | .cloud .. | .cloudRestored ..
+  | .launched .. | .settingsLoaded .. | .booted .. | .walletPlace .. | .created .. | .imported .. | .cloud .. | .cloudRestored ..
   | .deleted .. =>
     m.onWalletHost h
   | .snapshot .. | .records .. | .updated .. | .receiveAddress .. | .unconfirmed .. | .failed .. =>

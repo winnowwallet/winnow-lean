@@ -505,6 +505,10 @@ structure Model where
   status : Status := {}
   phase : SyncPhase := .idle
   walletID : Option String := none
+  /-- The place that is open, among those this network's wallets are kept in (empty: the network's own), and
+  the wallets kept for it, as the backend last told (`Host.walletPlace`). -/
+  slot : String := ""
+  wallets : List WalletSummary := []
   records : Records := {}
   /-- Test mode's `WINNOW_E2E_NETWORK`: the network cannot be switched away from it. -/
   forcedNetwork : Option Network := none
@@ -597,6 +601,9 @@ inductive Host where
   | launched (forcedNetwork : Option Network)
   | settingsLoaded (s : Settings)
   | booted (gen : Nat) (r : BootResult)
+  /-- Which place was opened and the wallets kept for the network: before `booted`, and again when one is
+  created, imported or restored. -/
+  | walletPlace (gen : Nat) (slot : String) (wallets : List WalletSummary)
   /-- The wallet is created and onboarding finished (its iCloud backup prepared when iCloud allows). -/
   | created (gen : Nat) (walletID : String)
   | imported (gen : Nat) (walletID : String) (report : String)
@@ -751,6 +758,12 @@ inductive SettingsMsg where
   | resetPeers
   | askDelete
   | deleteWallet
+  /-- Open another of the wallets kept for this network. -/
+  | selectWallet (slot : String)
+  /-- Open an empty place beside them, where onboarding makes or restores one more. -/
+  | addWallet
+  /-- Leave that empty place for the wallet that was open. -/
+  | cancelAddWallet
   | dismissTor
   -- PeerGatewaysSection
   | setGatewayMode (i : Nat)
@@ -929,6 +942,9 @@ inductive Cmd where
   | saveSettings (s : Settings)
   /-- `boot()` when `isBoot` (launch, Retry), `switchNetwork` otherwise: only a boot journals `app.booted`. -/
   | openWallet (gen : Nat) (network : Network) (isBoot : Bool)
+  /-- Open the wallet kept in `slot`, or with none an empty place for one to be added (`openWallet` opens the
+  one that was open last). -/
+  | openSlot (gen : Nat) (network : Network) (slot : Option String)
   | createWallet (gen : Nat) (network : Network)
   | importWallet (gen : Nat) (network : Network) (json : String)
   | finishOnboarding (gen : Nat)

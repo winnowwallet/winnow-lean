@@ -119,9 +119,15 @@ def onboardingView (m : Model) : H :=
   let o := m.onboarding
   let c := m.cloud
   let act (msg : Msg) : Option Msg := if o.busy then none else some msg
-  .screen "Winnow" none
+  -- with wallets already kept for this network, this is one more being added beside them
+  let adding := m.walletID.isNone && !m.wallets.isEmpty
+  .screen (if adding then "Add a wallet" else "Winnow") none
     ([ .list
-        ([ .section "" "" [Html.tone .secondary (body "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available.")]
+        ((if adding then
+            [ .section "" "The wallets you already keep stay as they are; this one is added beside them."
+                [ .identified Ids.cancelAddWalletButton (.button "Cancel" .plain (act (.settings .cancelAddWallet))) ] ]
+          else []) ++
+         [ .section "" "" [Html.tone .secondary (body "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available.")]
          , .section "" "No iCloud? Your wallet still works. You can save a backup file instead. Recovery words and backup controls are in Settings → Backup."
              (match m.walletID with
               | some _ =>
@@ -134,12 +140,14 @@ def onboardingView (m : Model) : H :=
                 , .identified Ids.importWalletButton (Html.symbol "square.and.arrow.down" (.button "Restore from a file" .plain (act .openImport))) ]) ] ++
          (if c.busy then [.section "" "" [.progress "Checking iCloud…"]] else []) ++
          (match c.message with | some t => [.section "" "" [caption t]] | none => []) ++
-         -- mainnet unless asked: the picker is folded behind "Use a test network" (open on a test network)
+         -- mainnet unless asked: the picker is folded behind "Use a test network" (open on a test network). A
+         -- wallet added beside others is this network's: the network is chosen in Settings
+         (if adding then [] else
          [.section "" (if m.settings.network == .mainnet && !m.isExpanded "onboarding.network" then "" else "Each network has its own wallet. Signet uses test coins with no value.")
            [.identified Ids.onboardingTestNetwork
              (.disclosure "Use a test network" (m.settings.network != .mainnet || m.isExpanded "onboarding.network") (Msg.setExpanded "onboarding.network")
                [.identified Ids.onboardingNetworkPicker
-                 (if o.busy then .labeled "Network" m.settings.network.label else networkPicker m)])]] ++
+                 (if o.busy then .labeled "Network" m.settings.network.label else networkPicker m)])]]) ++
          (if o.busy then [.section "" "" [.progress "Creating your wallet…"]] else []) ++
          (match o.error with | some e => [.section "" "" (errorRows (some e))] | none => [])) ] ++ overlays m)
 

@@ -98,6 +98,13 @@ def stepSettings (msg : SettingsMsg) (m : Model) : Model × List Cmd :=
   | .resetPeers => ({ m with confirm := none, settingsDraft := { d with resettingPeers := true } }, [.resetPeers g])
   | .askDelete => ({ m with confirm := some .deleteWallet }, [])
   | .deleteWallet => ({ m with confirm := none }, [.deleteWallet g])
+  | .selectWallet slot =>
+    if slot == m.slot || !m.wallets.any (·.slot == slot) then (m, [])
+    else m.switchWallet fun g => .openSlot g m.settings.network (some slot)
+  | .addWallet => m.switchWallet fun g => .openSlot g m.settings.network none
+  | .cancelAddWallet =>
+    if m.walletID.isSome || m.wallets.isEmpty then (m, [])
+    else m.switchWallet fun g => .openWallet g m.settings.network false
   | .dismissTor => save { m.settings with torRemovedNotice := false }
   | .setGatewayMode i => ({ m with settingsDraft := { d with gatewayMode := i } }, [])
   | .setGatewayNetwork n on =>
@@ -225,16 +232,28 @@ def securitySection (m : Model) : H :=
     , settingsRow Ids.multisigAccountsButton "Multisig accounts" "person.3" (if count == 0 then "" else s!"{count}")
         (.home .openMultisigAccounts) ]
 
+/-- The wallets kept on this device for the network: the open one marked, the others opened by a tap, and a
+way to add one more. Shown once a wallet is open. -/
+def walletsSection (m : Model) : List H :=
+  if m.walletID.isNone then [] else
+  [.section "Wallets" "Each wallet has its own coins, history, contacts and backup. Only the open one syncs; the others catch up when you open them."
+    ((m.wallets.map fun w =>
+        if w.slot == m.slot then
+          .identified (Ids.walletRow w.id) (.row [Html.symbol "checkmark.circle" (body s!"Wallet {w.id}"), .spacer, Html.tone .secondary (body "Open")])
+        else
+          .identified (Ids.walletRow w.id) (Html.symbol "circle" (.button s!"Wallet {w.id}" .plain (some (.settings (.selectWallet w.slot)))))) ++
+     [.identified Ids.addWalletButton (Html.symbol "plus.circle" (.button "Add a wallet" .plain (some (.settings .addWallet))))])]
+
 def settingsSections (m : Model) : List H :=
   let s := m.settings
   [.section "" "System follows your phone's light and dark setting." [.identified Ids.appearancePicker
     (.picker "Appearance" (Appearance.all.map (·.label)) (Appearance.all.idxOf s.appearance) (fun i => .settings (.setAppearance i)))]] ++
-  [networkSection m, securitySection m, backupSection m] ++
+  [networkSection m] ++ walletsSection m ++ [securitySection m, backupSection m] ++
   [.section "About" ""
     ([.labeled "Version" appVersionText, .labeled "Wallet ID" (m.walletID.getD "—")] ++
      [navLink "Design papers" (some (.settings .openPapers)) (symbol := "doc.text")])] ++
   (if m.walletID.isSome then
-    [.section "Danger zone" s!"Removes this {s.network.name} wallet so you can create or import another. The key is deleted from this device; restore it from your iCloud backup or a backup file that includes the recovery phrase, or the money is gone. People you added stay on this phone, and block headers are kept, so the next wallet does not re-sync the chain."
+    [.section "Danger zone" s!"Removes wallet {m.walletID.getD ""}, this device's {s.network.name} wallet that is open, so you can create or import another. The key is deleted from this device; restore it from your iCloud backup or a backup file that includes the recovery phrase, or the money is gone. People you added stay on this phone, and block headers are kept, so the next wallet does not re-sync the chain."
       [.button "Delete wallet from this device" .destructive (some (.settings .askDelete))]] else [])
 
 /-- `DesignPapersView` and `DesignPaperView`. The pages are the HTML files the site serves, bundled

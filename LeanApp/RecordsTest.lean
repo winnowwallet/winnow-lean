@@ -829,8 +829,14 @@ def backgroundRuns : IO Unit := do
     (failed.stage == .storageDamaged "The wallet's folder could not be made." && contains (LeanNative.Html.toWire (view failed)).toJson.compress "Retry")
   let ready : Model := { stage := .ready, active := true, walletID := some "w" }
   let (leaving, _) := onHost (.scene false) ready
-  let (deleted, _) := onHost (.deleted 0) leaving
-  check "Model: a wallet deleted while the app was away is gone" (deleted.stage == .onboarding && deleted.walletID.isNone)
+  let (deleted, cs) := onHost (.deleted 0) leaving
+  check "Model: a wallet deleted while the app was away is gone, and what is kept now is asked for"
+    (deleted.stage == .loading && deleted.walletID.isNone && cs.any (· matches .openWallet _ _ false))
+  let (none', _) := onHost (.booted deleted.generation .missing) deleted
+  check "Model: with no wallet left, onboarding" (none'.stage == .onboarding && none'.walletID.isNone)
+  let (kept, _) := onHost (.walletPlace deleted.generation "1" [{ id := "x", slot := "1", active := true }]) deleted
+  let (other, _) := onHost (.booted deleted.generation (.opened "x")) kept
+  check "Model: with another wallet kept, that one opens" (other.stage == .ready && other.walletID == some "x" && other.slot == "1")
   -- #92's finding 15: an amount there cannot be is refused, not wrapped into another one
   check "amount: every satoshi there is, is an amount"
     ((← (Real.satsOf Real.maximumMoney).toBaseIO).toOption == some (Int64.ofNat Real.maximumMoney))
@@ -1217,7 +1223,8 @@ def settingsScreen (root : System.FilePath) : IO Unit := do
   let (asking, _) ← tap .askDelete m
   check "delete: asks first" (asking.confirm == some .deleteWallet && contains (rendered asking) "Delete this wallet?")
   let (deleted, _) ← tap .deleteWallet asking
-  check "delete: the backend deletes, onboarding" ((← called "deleteWallet") && deleted.stage == .onboarding && deleted.walletID.isNone)
+  check "delete: the backend deletes, and the wallet is no longer shown" ((← called "deleteWallet") && deleted.stage != .ready && deleted.walletID.isNone)
+    s!"{repr deleted.stage}"
   backendRef.set Backend.pending
 
 /-! ### Receive (#45) -/
@@ -2294,6 +2301,60 @@ def walletSlots (root : System.FilePath) : IO Unit := do
      Real.gatewaysUsedPath net == System.FilePath.mk s!"{root}/slots/peer-gateways.automatic-used")
     s!"{Real.gatewaysUsedPath two}"
 
+/-- Several wallets for one network, as the screens and the commands have them: Settings lists them and opens
+another; adding one is onboarding in an empty place, with a way back; and a command acts in the place that
+was open when it was given. -/
+def walletSwitcher (root : System.FilePath) : IO Unit := do
+  let two : List WalletSummary := [{ id := "aaaa1111", slot := "", active := true }, { id := "bbbb2222", slot := "1" }]
+  let ready : Model := { stage := .ready, active := true, walletID := some "aaaa1111", wallets := two }
+  let page := rendered { ready with routes := [.settings] }
+  check "wallets: Settings lists the wallets kept, the open one marked, and offers one more"
+    (contains page "Wallet aaaa1111" && contains page "Wallet bbbb2222" && contains page "Add a wallet" && contains page Ids.addWalletButton)
+  check "wallets: the Danger zone names the wallet it deletes" (contains page "Removes wallet aaaa1111")
+  let (same, cs) := step (.settings (.selectWallet "")) ready
+  check "wallets: the open wallet chosen again changes nothing" (same.generation == ready.generation && cs.isEmpty)
+  let (_, cs) := step (.settings (.selectWallet "7")) ready
+  check "wallets: a place that keeps none is not opened" cs.isEmpty
+  let (switching, cs) := step (.settings (.selectWallet "1")) ready
+  check "wallets: another one chosen: networking stops and its place is opened, in a new generation"
+    (switching.stage == .loading && switching.walletID.isNone && switching.generation > ready.generation &&
+     cs.any (· matches .stopNetworking) && cs.any fun c => c matches .openSlot _ _ (some "1"))
+  let (stale, _) := onHost (.booted ready.generation (.opened "aaaa1111")) switching
+  check "wallets: an answer about the wallet left behind is dropped" (stale.stage == .loading && stale.walletID.isNone)
+  let (placed, _) := onHost (.walletPlace switching.generation "1" [{ id := "aaaa1111", slot := "" }, { id := "bbbb2222", slot := "1", active := true }]) switching
+  let (opened, _) := onHost (.booted switching.generation (.opened "bbbb2222")) placed
+  check "wallets: the other wallet is open" (opened.stage == .ready && opened.walletID == some "bbbb2222" && opened.slot == "1")
+  -- one more, added beside them
+  let (adding, cs) := step (.settings .addWallet) ready
+  check "wallets: adding one opens an empty place" (adding.stage == .loading && cs.any fun c => c matches .openSlot _ _ none)
+  let (placed, _) := onHost (.walletPlace adding.generation "2" two) adding
+  let (empty, cs) := onHost (.booted adding.generation .missing) placed
+  let screen := (LeanNative.Html.toWire (view empty)).toJson.compress
+  check "wallets: …where onboarding is \"Add a wallet\", with a way back and no change of network"
+    (empty.stage == .onboarding && contains screen "Add a wallet" && contains screen Ids.cancelAddWalletButton &&
+     contains screen Ids.createWalletButton && !contains screen Ids.onboardingTestNetwork && cs.any (· matches .discoverCloud))
+  let first : Model := { stage := .onboarding }
+  check "wallets: a first wallet's onboarding is as it was"
+    (!contains (LeanNative.Html.toWire (view first)).toJson.compress Ids.cancelAddWalletButton &&
+     contains (LeanNative.Html.toWire (view first)).toJson.compress Ids.onboardingTestNetwork)
+  let (back, cs) := step (.settings .cancelAddWallet) empty
+  check "wallets: Cancel goes back to the wallet that was open"
+    (back.stage == .loading && cs.any fun c => c matches .openWallet _ _ false)
+  let (stay, cs) := step (.settings .cancelAddWallet) ready
+  check "wallets: Cancel means nothing with a wallet open" (stay.stage == .ready && cs.isEmpty)
+  let (created, _) := onHost (.created empty.generation "cccc3333") empty
+  check "wallets: a wallet made there is the one open" (created.stage == .ready && created.walletID == some "cccc3333")
+  -- a command acts in the place that was open when it was given
+  rootDir.set root.toString
+  openPlace.set (some (5, .signet, "1"))
+  let dirOf (g : Nat) (n : Network) : IO (Option String) := do
+    match ← (placeDir g n).toBaseIO with | .ok d => pure (some d) | .error _ => pure none
+  check "wallets: a command given after the place was opened acts there"
+    ((← dirOf 5 .signet) == some s!"{root}/signet/wallets/1" && (← dirOf 9 .signet) == some s!"{root}/signet/wallets/1")
+  check "wallets: one given before it, for the wallet open then, is refused" ((← dirOf 4 .signet).isNone)
+  check "wallets: and one for another network" ((← dirOf 6 .mainnet).isNone)
+  openPlace.set none
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
@@ -2306,6 +2367,7 @@ def main : IO UInt32 := runMain "records-test" do
   backgroundTaskCommands
   testModeSeed
   walletSlots root
+  walletSwitcher root
   try
     let a ← newPhone root "A"
     let b ← newPhone root "B"
