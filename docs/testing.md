@@ -23,8 +23,8 @@ Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `scripts/check-core` (the core library's imports held to their list), `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, `device-sync-test`, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested), `card-regtest` and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the eleven journeys headless against the app itself (LeanNative's `wire-journey`). |
-| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two, five and six (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump, Retry and the card for one person on one runner; the two Ledger journeys, census, silent payments, spent-elsewhere and the account that follows devices on the other). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `scripts/check-core` (the core library's imports held to their list), `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, `device-sync-test`, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested), `card-regtest` and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the twelve journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two, six each (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump, Retry, the card for one person and two wallets on one device on one runner; the two Ledger journeys, census, silent payments, spent-elsewhere and the account that follows devices on the other). |
 | `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
 
@@ -33,7 +33,7 @@ The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
 Debug must start the test run and journal it, Release must ignore it and boot
 into its ordinary storage.
 
-## The eleven journeys
+## The twelve journeys
 
 The UI journeys are Lean (`LeanApp/Journeys.lean`), run on the Mac. Each step
 is one command to LeanNative's journey driver, the one XCUITest in the app's UI
@@ -77,6 +77,12 @@ CI's simulator is an iPhone 17 Pro (`ci.yml`'s `ui-device-type`).
   wallet, is told nothing: it lists the account by itself with the balance its
   own scan confirms and the next address Core derives, and says it only
   watches.
+- `twoWalletsOneDevice`: Settings → Wallets → Add a wallet makes a second
+  wallet beside the first, through the onboarding there already is. The second
+  builds a 2-of-2 of itself and the first and the node pays it. A payment from
+  it is signed by the wallet that is open, and then by the other wallet kept on
+  the device, with a button and a device check of its own; the node takes the
+  witness with both signatures.
 - `retryAfterNoPeers`: the node goes off the network (`setnetworkactive
   false`) while the app is in the background. Back in the foreground, Home
   says it couldn't reach the network and offers Retry. With the node back,

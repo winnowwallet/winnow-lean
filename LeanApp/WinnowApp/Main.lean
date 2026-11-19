@@ -553,6 +553,11 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       authenticated fx g s!"collect.{e}" "Sign this multisig payment" do
         b.signDraft id
         return .collected g e id
+  | .signDraftWith g e id walletID =>
+      -- another wallet kept on this device: asked for by itself, and named in what the person is asked
+      authenticated fx g s!"collect.{e}" s!"Sign this multisig payment with wallet {walletID}" do
+        b.signDraftWith id walletID
+        return .collected g e id
   | .signDraftWithLedger g e id => background fx g s!"collect.{e}" do
       b.signDraftWithLedger id
       return .collected g e id
@@ -683,7 +688,7 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .multisigOverview .. | .checkMultisigDescriptor .. | .addMultisigAccount .. | .removeMultisigAccount ..
   | .setAsideMultisig ..
   | .newMultisigAddress .. | .createMultisigAccount .. | .registerLedger .. | .pairLedger .. | .addSignerKeys ..
-  | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft ..
+  | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft .. | .signDraftWith ..
   | .signDraftWithLedger .. | .adoptDraft .. | .broadcastDraft .. | .discardDraft .. | .rebroadcastSpend ..
   | .abandonSpend .. | .scanLedgers .. | .askBluetooth =>
     performMultisig b fx c

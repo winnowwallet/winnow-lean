@@ -123,6 +123,9 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   signAndDraft : SendInputs → Preview → IO String
   /-- After device authentication: this phone's signature on the draft. -/
   signDraft : (id : String) → IO Unit
+  /-- The draft signed with the key of another wallet kept on this device, named by its id (after device
+  authentication): one wallet's key for one tap. -/
+  signDraftWith : (id walletID : String) → IO Unit := fun _ _ => throw (IO.userError "Signing with another wallet is not available here.")
   /-- The Ledger's signature on the draft. -/
   signDraftWithLedger : (id : String) → IO Unit
   /-- `adoptMultisigDraft(_:record:)`: a pasted PSBT combined into the draft, or adopted as it. -/

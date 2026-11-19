@@ -1,33 +1,37 @@
 Winnow: the same wallet, rewritten in Lean
 
-New since 0.9.16
+New: several wallets on one device
 
-0.9.18 said "One of your devices' backups could not be read yet" and took nothing from a backup an older Winnow left. This build takes what it can, and Settings → Backup → iCloud backup says how many backups were read and why one was not: please send us that line. A fresh install should find a backup to restore again.
+A device can keep several wallets for a network, each with its own coins, history, contacts and backup. Only the open one syncs. A device with two wallets can sign for both alone.
+1. Settings → Wallets → Add a wallet. Create one, or restore another of your wallets from its iCloud backup (the list names each backup's wallet). Your first wallet must be untouched: same balance and Activity when you open it again.
+2. Settings → Wallets: tap the other wallet to open it. Each has its own balance, and catches up when opened.
+3. An account with a key of each wallet: its payment page has "Add this phone's signature" and "Add wallet …'s signature", each asking Face ID by itself. Both make a 2-of-2 complete on this device.
+4. An account that came from another device and was "Watch-only on this device" signs here once you add the wallet that holds its key.
+5. Delete the added wallet (Settings → Danger zone names it): the first wallet still opens and sends.
+
+Since 0.9.16
+
+Settings → Backup → iCloud backup says how many other backups were read and, for one that was not, why.
 
 Multisig accounts and paired Ledgers follow your devices. With iCloud backup on, they appear on your other devices under the same Apple Account. With Winnow open on both:
-1. Join or create an account on one. Within two minutes the other lists it, first as catching up, then with its balance. A device with a different wallet says "Watch-only on this device" and cannot sign; one restored from the same iCloud backup signs.
+1. Join or create an account on one. Within two minutes the other lists it, first as catching up, then with its balance. A device with none of its keys says "Watch-only on this device".
 2. Pair a Ledger on one: the other lists it as "Paired on another device" until used there.
 3. Start a payment from an account and sign on one: the other shows it awaiting signatures, and a signature added there reaches the first.
-4. Remove an empty account or a Ledger on one: it goes from the other. One with coins stays.
-5. With backup off nothing follows.
 
-The wallet's key now sits behind Face ID or the passcode in the Keychain. After updating, the balance must be the same; Send asks once, and nothing asks while Winnow only syncs.
+The wallet's key sits behind Face ID or the passcode: Send asks once, and nothing asks while Winnow only syncs.
 
 Since 0.9.15
 
-Join an account also takes a SegWit v0 account, wsh(sortedmulti(…)), where one signer is a single fixed key that signs only ECDSA. On signet, with Bitcoin Core holding the other keys:
+Join an account also takes a SegWit v0 account, wsh(sortedmulti(…)), with one signer a single fixed key. On signet, with Bitcoin Core holding the other keys:
 1. Join an account: paste the descriptor. Policy must say "2 of 3" and the first address must be Core's.
-2. Pay that address: the coin appears on the account page, which has no "Send from this account".
-3. Have Core build and sign a payment. "Paste a PSBT from a co-signer", check the amounts and fee, "Add this phone's signature", "Finalize and broadcast".
+2. Pay that address, have Core build and sign a payment, then "Paste a PSBT from a co-signer", "Add this phone's signature", "Finalize and broadcast".
 
 Since 0.9.11
 
-A card for one person: they pay you at a new address each time. It holds a code made for them and none of your wallet's keys, plus an ordinary address for payers without Winnow. On two phones:
+A card for one person: they pay you at a new address each time. On two phones:
 1. Receiving phone: Receive. Under "From one person" type the payer's name and tap the button (Face ID). It shows "An address for …" and "A card for …".
 2. Paying phone: Send → Saved recipients → Add. Type a name, paste the card, Save. Send to them twice.
 3. The receiving phone must show both as "Received from" that name, at two different addresses.
-
-One home: Simple and Advanced mode are gone. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger".
 
 This build is Winnow rewritten in Lean 4, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Security → Hardware wallets and keys. Please try it on a phone whose wallet you could restore from its recovery words.
 
@@ -36,9 +40,6 @@ Install over the current app
 1. With the App Store's Winnow holding a wallet, install this build from TestFlight. The same wallet, balance and Activity must appear, and it must sync to "Up to date".
 2. Settings → Backup: iCloud backup should show "Backed up" with a time. On a second device signed into the same Apple Account, a fresh install should offer "Restore your iCloud wallet" and restore the same wallet.
 
-One Send
-
-1. Every payment, from the wallet or from an account, starts in Send: pick the account under From. With a recovery path, Send offers "Signers now / Recovery path".
-2. Sign and continue, then collect signatures (phone, Ledger, a pasted copy) and finalize.
+Every payment, from the wallet or from an account, starts in Send: pick the account under From, Sign and continue, then collect signatures and finalize.
 
 Report bugs at https://github.com/winnowwallet/winnow-lean/issues with app version, device, Ledger model, network and steps. Never include recovery words, private keys or backup files.

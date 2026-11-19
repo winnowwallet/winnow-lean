@@ -388,6 +388,13 @@ def MultisigProgress.nextStep (p : MultisigProgress) : String :=
   else if p.signedHere then "Share the PSBT below with the other signers, then combine their signed copies here."
   else "Check the payment, then add this phone's signature. Signers can sign in any order."
 
+/-- Another wallet kept on this device that holds one of the account's keys: which wallet, and whether it has
+yet to sign the payment on the screen. -/
+structure HeldKey where
+  walletID : String
+  unsigned : Bool
+  deriving Repr, Inhabited, BEq
+
 /-- `MultisigSigningScreen`: the review, the verified signatures per usable path, and the progress. -/
 structure MultisigScreen where
   outputs : List MultisigOutputLine
@@ -398,6 +405,8 @@ structure MultisigScreen where
   /-- Per usable path: the row's title and its UI-test identifier (`signaturesTitle`, `signatureCountIdentifier`). -/
   signatureTitles : List (String × String) := []
   progress : MultisigProgress
+  /-- The other wallets kept on this device that hold a key of this account (`progress` is the open wallet's). -/
+  heldKeys : List HeldKey := []
   deriving Repr, Inhabited, BEq
 
 def MultisigScreen.recoveryUsable (s : MultisigScreen) : Bool := s.signatures.any (·.1)

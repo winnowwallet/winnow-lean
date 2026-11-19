@@ -87,6 +87,9 @@ structure OverviewKey where
   tip : UInt32
   arriving : Array ArrivingAccount := #[]
   elsewhere : Array UInt32 := #[]
+  /-- The wallets kept on this device for the network (their ids): an account is only watched when none of
+  them holds one of its keys. -/
+  held : Array String := #[]
   deriving BEq
 
 /-- The store and a cache of the overview the screens poll (each address costs a derivation). -/
@@ -358,15 +361,23 @@ def reviewSpend (env : Env) (r : MultisigAccountRecord) (account : AnyMultisigAc
     IO MultisigAccount.SpendReview := do
   runMAM (account.reviewSpend psbt r.utxos (ownedCoordinates r) (← chainTip env))
 
+/-- Where on `path` an account key (a wallet's, public) is one of the account's signers. -/
+def positionsOf (key : Keys.HDKey) (account : AnyMultisigAccount) (path : SpendPath) : Array Nat :=
+  let keys := account.keysOn path
+  (List.range keys.size).toArray.filter fun i => match MultisigAccount.extendedKey? keys[i]! with
+    | some (base, _) => base.publicKey == key.publicKey
+    | none => false
+
 /-- `multisigOwnSignerPositions(_:path:)`. -/
 def ownSignerPositions (w : Wallet) (account : AnyMultisigAccount) (path : SpendPath) : Array Nat :=
   match walletAccountKey? w with
   | none => #[]
-  | some key =>
-    let keys := account.keysOn path
-    (List.range keys.size).toArray.filter fun i => match MultisigAccount.extendedKey? keys[i]! with
-      | some (base, _) => base.publicKey == key.publicKey
-      | none => false
+  | some key => positionsOf key account path
+
+/-- The other wallets kept on this device for the network: not the one that is open. -/
+def otherHeld (env : Env) : IO (Array HeldWallet) := do
+  let c ← env.get
+  return c.held.filter fun h => some h.dir != c.dir && some h.id != c.wallet.map (·.id)
 
 /-- `multisigApprovals(_:record:path:)`. -/
 def approvals (r : MultisigAccountRecord) (account : AnyMultisigAccount) (psbt : PSBT) (path : SpendPath) : Array Nat :=
@@ -417,11 +428,17 @@ def signingScreen (env : Env) (r : MultisigAccountRecord) (psbt : PSBT) : IO Mul
                                 phoneUnsigned := progress.phoneUnsigned || !own.all approved.contains }
     if let some ledger := ledgerPosition r (account.keysOn path) then
       progress := { progress with ledgerHolds := true, ledgerUnsigned := progress.ledgerUnsigned || !approved.contains ledger }
+  -- the other wallets kept here that hold one of the account's keys, each with whether it has signed
+  let mut heldKeys : List HeldKey := []
+  for h in ← otherHeld env do
+    let places := paths.map fun path => (positionsOf h.accountKey account path, approvals r account psbt path)
+    if places.any (!·.1.isEmpty) then
+      heldKeys := heldKeys ++ [{ walletID := h.id, unsigned := places.any fun (own, approved) => !own.all approved.contains }]
   let outputs := review.outputs.toList.map fun o =>
     { owned := o.isAccountOwned, amount := natOf o.amount,
       address := (AddressDecoder.address o.scriptPubKey network).getD (hex o.scriptPubKey) : MultisigOutputLine }
   return { outputs, inputTotal := natOf review.inputTotal, fee := natOf review.fee, signatures, signatureTitles := titles,
-           progress }
+           progress, heldKeys }
 
 /-- The screen's `install` + `refreshReview`: the PSBT in hand, its v0 text to share, and its review. -/
 def present (env : Env) (r : MultisigAccountRecord) (psbt : PSBT) : IO MultisigPSBT := do
@@ -906,7 +923,11 @@ def signAndDraft (env : Env) (a : MultisigApp) (inputs : SendInputs) (p : Previe
     | .ok t => pure t
     | .error e => failText (psbtErrorText e)
   unless review.authorizesTransaction unsigned review.fee review.changeAmount do failWith .sendReviewChanged
-  let signed ← signWithPhone env r psbt
+  -- the open wallet signs when one of the account's keys is its own; where none is (an account another
+  -- wallet's key is in), the payment is filed as it is and signed on its page, by whichever wallet holds a key
+  let w ← needWallet env
+  let account ← accountOf r w.network
+  let signed ← if (walletAccountKey? w).any account.includes then signWithPhone env r psbt else pure psbt
   let d ← draftOf signed (← chainTip env) (review.recipient.map (·.1)) (review.recipient.bind (·.2))
   fileDraft a r.id (some d)
   env.modify fun c => { c with reviews := c.reviews.filter (·.inputs != inputs) }
@@ -918,6 +939,27 @@ def signDraft (env : Env) (a : MultisigApp) (id : String) : IO Unit := do
   let r ← record a id
   let (_, psbt) ← draftPSBT r
   updateDraft env a r (← signWithPhone env r psbt)
+
+def notHeldText : String := "That wallet is not kept on this device."
+
+/-- The draft signed with the key of another wallet kept on this device (after device authentication): that
+wallet's signature and no other. Whether the wallet is kept here and its key is one of the account's is
+settled from the files before anything of the Keychain is asked for; then its secret is read once, by its id. -/
+def signDraftWith (env : Env) (a : MultisigApp) (id walletID : String) : IO Unit := do
+  let w ← needWallet env
+  if walletID == w.id then return ← signDraft env a id
+  let r ← record a id
+  let some h := (← otherHeld env).find? (·.id == walletID) | failText notHeldText
+  let account ← accountOf r w.network
+  unless account.includes h.accountKey do failText notASignerText
+  let (_, psbt) ← draftPSBT r
+  let other ← runWM (Wallet.open (walletPath h.dir) env.deps.keyStore env.deps.random)
+  unless other.id == walletID && other.network == w.network do failWith .walletReplaced
+  let key ← runWM other.multisigSigningKey
+  let signed ← runMAM (account.sign psbt key r.utxos (ownedCoordinates r) (← chainTip env) (← env.deps.random.auxRand))
+  journalPSBT env "multisig-signed" signed
+  env.journal "multisig.signedWith" [("id", r.id), ("walletID", walletID)]
+  updateDraft env a r signed
 
 /-- The draft signed by the Ledger (`signMultisigSpendWithLedger` then `updateMultisigDraft`). -/
 def signDraftWithLedger (env : Env) (a : MultisigApp) (id : String) : IO Unit := do
@@ -1141,15 +1183,17 @@ def overview (env : Env) (a : MultisigApp) : IO MultisigOverview := do
     | none => pure none
   let ownKey := (← env.get).wallet.bind walletAccountKey? |>.map (·.publicKey)
   let walletKey := (← env.get).wallet.bind walletAccountKey?
+  let held ← otherHeld env
   let answered ← a.answered.get
   let k : OverviewKey :=
     { records := store.records, signers := signers.records, notice := ← a.host.notice.get,
       signerNotice := ← a.signers.notice.get, key, tip := ← chainTip env, arriving := ← a.host.arrivingAccounts,
-      elsewhere := (← a.elsewhere.get).filter (!answered.contains ·) }
-  -- an account none of whose keys is this wallet's: it came from another device, and is only watched here
+      elsewhere := (← a.elsewhere.get).filter (!answered.contains ·), held := held.map (·.id) }
+  -- an account none of whose keys is a wallet's kept on this device: it came from another device, and is
+  -- only watched here. One whose key another wallet here holds is signed from its page, with that wallet's key
   let watchOnly (r : MultisigAccountRecord) : Bool :=
     match walletKey, AnyMultisigAccount.parse r.descriptor store.network with
-    | some own, .ok account => !account.includes own
+    | some own, .ok account => !account.includes own && !held.any fun h => account.includes h.accountKey
     | _, _ => false
   if let some (k', o) ← a.overviewCache.get then
     if k' == k then return o

@@ -140,6 +140,24 @@ the app's side is [Real/DeviceSync](../LeanApp/WinnowApp/Real/DeviceSync.lean).
   under a different account than the one the backup is bound to, nothing is
   read and nothing follows; the wallet works as before.
 
+## Several wallets on one device
+
+A device can keep more than one wallet for a network (Settings → Wallets). Each
+has its own backup record, made by this device for that wallet, and its own
+"automatic backup off" switch; the list of wallets with automatic backup off is
+the network's, kept by wallet id. Restoring from iCloud while a wallet is
+already kept adds the restored one beside it, in a directory of its own
+(`wallets/<number>/` under the network's), and never replaces one: the restore
+list names the wallet each backup is of, read from the backup's wallet box with
+its key from iCloud Keychain, and leaves out the backups of wallets the device
+already keeps. A wallet already kept is refused if it is asked for anyway.
+
+The automatic keeping in step still opens no recovery phrase. A second wallet
+reaches a device only by the person's own Restore, with the device check a
+restore has always asked for. Each wallet on a device reads the others' backups
+as it reads another device's, so an account one of them joins is listed under
+the others too, and is signed from its page by whichever of them holds a key.
+
 Limits worth knowing. A device's backup waits while a payment from its own
 wallet is unconfirmed, and so does what the others can take from it. Stale backups of installs that are gone stay in iCloud
 (nothing here deletes a record) and are read once each. An account whose

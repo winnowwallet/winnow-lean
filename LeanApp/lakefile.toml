@@ -63,7 +63,7 @@ root = "CloudBackupTest"
 name = "device-sync-test"
 root = "DeviceSyncTest"
 
-# The UI journeys: Journeys.lean (the eleven, as named steps) over Journeys/Screens.lean (what a person does on
+# The UI journeys: Journeys.lean (the twelve, as named steps) over Journeys/Screens.lean (what a person does on
 # each screen) and Journeys/Host.lean (the fixture's node and Core as a co-signer); run on the Mac by
 # LeanNative's ui-tests as UI_JOURNEY (scripts/journeys; CI: ios-app.yml's ui-journey) and headless by
 # LeanNative's wire-journeys (`scripts/journeys --wire`; CI: ios-app.yml's wire-journey)

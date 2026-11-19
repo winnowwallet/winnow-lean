@@ -1738,6 +1738,72 @@ def devicesFlow (dir : String) (n : Node) : IO Unit := do
   a.stopNetworking
   b.stopNetworking
 
+/-- A 2-of-2 of two wallets kept on one device, on regtest: the account built with both wallets' keys is paid,
+a payment from it is signed by the open wallet and then by the other, each by itself, and the node confirms
+it. No other device, and no other signer, takes part. -/
+def heldKeysFlow (dir : String) (n : Node) : IO Unit := do
+  say "held keys: two wallets on one device sign one account's payment"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (b, env, _) ← Backend.realWithMultisig (deps secrets "Held")
+  let first := s!"{dir}/Held/BTCSwift/regtest"
+  IO.FS.createDirAll first
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  let idA ← b.createWallet .regtest first
+  let second := Real.slotDir first (← Real.freeSlot first)
+  IO.FS.createDirAll second
+  discard <| b.openWallet .regtest second
+  b.startNetworking settings
+  let idB ← b.createWallet .regtest second
+  let keyB ← Real.multisigKeyExpression env
+  check "held keys: two wallets are kept" ((← b.wallets first).map (·.id) == [idA, idB])
+  -- the first wallet, open: an account of the two
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  -- the pass that began as the wallet opened is over before the account exists: a pass scans with the scripts
+  -- it began with
+  let caughtUp ← waitUntil 90_000 (do
+    b.syncNow
+    let s := (← b.snapshot).1
+    return !s.syncing && s.nextScanHeight > (← n.height))
+  check "held keys: the first wallet, opened again, is at the tip" caughtUp
+  let keyA ← Real.multisigKeyExpression env
+  let (id, descriptor, _) ← b.createMultisigAccount "Both wallets" 2 [([keyA], none), ([keyB], none)] none
+  let account ← match MultisigAccount.parse descriptor .regtest with
+    | .ok acc => pure acc
+    | .error e => throw (IO.userError s!"account: {e.name}")
+  let some address := (account.address 0).toOption | throw (IO.userError "address 0")
+  let funded ← n.wallet #["sendtoaddress", address, "0.4"]
+  discard <| waitUntil 20_000 (do return (← n.mempool).contains funded)
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let credited ← waitUntil 90_000 (do
+    b.syncNow
+    return ((← multisigAccount? b id).map (·.balance)) == some 40_000_000)
+  check "held keys: the account is paid, and is not watch-only" (credited && ((← multisigAccount? b id).map (·.watchOnly)) == some false)
+    s!"{(← multisigAccount? b id).map fun i => (i.balance, i.watchOnly)}"
+  let inputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "1500000", network := .regtest, accountID := some id }
+  discard <| b.signAndDraft inputs (← b.previewSend inputs)
+  let screen : IO (Option MultisigScreen) := do return ((← multisigAccount? b id).bind (·.draft)).bind (·.screen)
+  check "held keys: the open wallet has signed; the other one kept here has not"
+    (((← screen).map fun s => (s.signatures, s.heldKeys)) == some ([(false, 1, 2)], [{ walletID := idB, unsigned := true }]))
+    (reprStr ((← screen).map (·.heldKeys)))
+  b.signDraftWith id idB
+  check "held keys: the other wallet's signature completes it"
+    (((← screen).map fun s => (s.progress.complete, s.heldKeys)) == some (true, [{ walletID := idB, unsigned := false }]))
+  let txid ← b.broadcastDraft id
+  check "held keys: the node's mempool holds the payment" (← waitUntil 20_000 (do return (← n.mempool).contains txid))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let settled ← waitUntil 90_000 (do
+    b.syncNow
+    let now ← multisigAccount? b id
+    return (now.map (·.draft.isNone)) == some true && (now.map (decide <| ·.balance < 39_000_000)) == some true)
+  check "held keys: confirmed, with no payment waiting" settled
+  b.stopNetworking
+
 /-- Two wallets on one device, on regtest. The second, added in a place of its own, has its own chain files;
 the first's files are not touched while the second is open, and what was paid to the first meanwhile is found
 by its own scan when it is opened again. Deleting the second leaves the first its coins and its key. -/
@@ -2341,5 +2407,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; heldKeysFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

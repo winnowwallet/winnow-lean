@@ -409,13 +409,13 @@ Upstream's Swift tests, UI tests and workflows went with the Swift code; their L
   the wallet (one "Moved to …" row) and pays from it on the Send tab with the Ledger signing in the
   collection step. Both passed on a throwaway iOS 27 simulator against `backend-test --fixture`. Differences from upstream's harness: the node is regtest, not a
   custom signet; Core co-signers are driven by bitcoin-cli from the runner (posix_spawn, as upstream).
-  Those were the first three journeys. `Journeys.lean`'s `all` now has eleven; the
+  Those were the first three journeys. `Journeys.lean`'s `all` now has twelve; the
   [README](README.md#ui-tests) lists them.
 * **CI**: `ci.yml` calls LeanNative's reusable `ios-app` workflow at the commit `LeanApp/lake-manifest.json`
   pins, on GitHub's hosted `macos-26` runners (or, for this repository's own branches, the label in the
   repository variable `MACOS_RUNNER` while it is set). Three jobs start at once and each builds the Lean from
-  the cache: `lean` (the test lines of `ci.yml`, `scripts/ci-regtest`'s five suites and the eleven journeys
-  headless), `app` (the Debug simulator build and the eleven journeys in the simulator, split across two runners)
+  the cache: `lean` (the test lines of `ci.yml`, `scripts/ci-regtest`'s five suites and the twelve journeys
+  headless), `app` (the Debug simulator build and the twelve journeys in the simulator, split across two runners)
   and `release` (Debug and Release for the simulator, Release for devices). `media` joins the two parts'
   recordings. The release check replaces upstream's `strings`-based release check, which cannot work here
   (test mode is compiled into every build and switched on only when the shell answers Debug): LeanNative's

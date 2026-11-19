@@ -5,7 +5,7 @@ import Journeys.Screens
 
 /-! # The UI journeys
 
-Eleven journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Twelve journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -822,9 +822,74 @@ def accountFollowsDevices : Journey := ⟨"accountFollowsDevices", do
     expectEq "the next address, the one after the paid one (Core's)" (← Account.receiveAddress) (← h.deriveAddress descriptor 1)
     shot "42-devices-watch-only"⟩
 
+/-- Two wallets on one device. Settings → Wallets adds a second beside the first, through the onboarding
+there already is. The second builds a 2-of-2 of itself and the first; the node pays it; a payment from it is
+signed by the wallet that is open and then, with a button and a device check of its own, by the other wallet
+kept on the device; and the node takes a witness with both signatures. No other device takes part. -/
+def twoWalletsOneDevice : Journey := ⟨"twoWalletsOneDevice", do
+  let r ← Run.new "wallets"
+  let h := r.host
+  r.launch "wallets"
+  createWallet
+
+  let firstKey ← step "the first wallet's key, as it is sent to whoever builds an account" do
+    openMultisigAccounts
+    tap multisigAddButton
+    waitFor multisigKeyText 10
+    let key ← text multisigKeyText
+    backToWalletList
+    pure key
+
+  step "Settings → Wallets → Add a wallet: a second one, made beside the first" do
+    openSettings
+    scrolled addWalletButton
+    shot "60-wallets-one"
+    tap addWalletButton
+    waitFor cancelAddWalletButton 60
+    shot "61-wallets-add"
+    tap createWalletButton
+    waitFor receiveButton 60
+    waitFor balanceText 30
+    openSettings
+    scrolled addWalletButton
+    waitUntil 20 "Settings does not list two wallets" do return (← exists? (.text "^Wallet [0-9a-f]{8}$"))
+    shot "62-wallets-two"
+    backToWalletList
+
+  let descriptor ← step "the second wallet builds a 2-of-2 of itself and the first" do
+    openMultisigAccounts
+    Builder.start
+    Builder.name "Both wallets"
+    Builder.addPastedMember r firstKey
+    waitFor (.beginning "Members · 2") 10
+    Builder.create
+  let account := accountID descriptor
+
+  step "the node pays the account" do
+    Builder.openAccount
+    discard <| h.fund (← Account.receiveAddress) funding
+    waitForBalance funding multisigBalance
+
+  let destination ← h.bankAddress
+  step "a payment from it: the open wallet signs, and one signature is not enough" do
+    Send.fromAccount r account destination payment "needs 2 of 2"
+    Collect.countIs multisigSignatureCount "1 of 2"
+    shot "63-wallets-one-signature"
+
+  step "the other wallet kept here signs with a button of its own" do
+    scrolled (.beginning "Add wallet ")
+    tap (.beginning "Add wallet ")
+    Collect.countIs multisigSignatureCount "2 of 2" 60
+    shot "64-wallets-two-signatures"
+
+  step "the phone broadcasts, and the node takes it" do
+    let txid ← Collect.broadcast h
+    h.expectPays txid destination payment⟩
+
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
-   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson, accountFollowsDevices]
+   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson, accountFollowsDevices,
+   twoWalletsOneDevice]
 
 end WinnowJourneys
 

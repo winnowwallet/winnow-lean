@@ -2494,8 +2494,112 @@ def testRefusedAddressesAndPSBTsFromAnAccount : IO Unit := do
     "The PSBTs disagree about a field and cannot be combined safely."
   check "the account's spend in hand still reviews" ((← Real.reviewMultisigPSBT phone.env phone.multisig id mine.psbt).screen.isSome)
 
+/-- Two wallets kept on one device, each holding one key of a 2-of-2, and a third that holds none. From the
+open wallet the account is not watch-only; the open wallet signs with its own button and the other with its
+own, one read of the Keychain for the one wallet named; a wallet that is not kept, or whose key is not the
+account's, is refused before anything is read. An account only the other wallet's key is in is not watch-only
+either: its payment is filed unsigned and signed with that wallet's key. -/
+def testAnotherWalletOnTheDeviceSignsWithItsOwnKey : IO Unit := do
+  let net := (← tempFile "x").parent.get! / "signet"
+  IO.FS.createDirAll net
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let inner := Winnow.inMemoryKeyStore secrets
+  -- every read of a wallet's secret is noted (the sealed stores' own keys are not wallets' secrets)
+  let loads ← IO.mkRef (#[] : Array String)
+  let ks : Keys.KeyStore IO := { inner with load := fun id => do
+    unless id.startsWith "store-key." do (loads.modify (·.push id) : IO Unit)
+    inner.load id }
+  let make (dir : System.FilePath) (byte : UInt8) : IO Wallet := do
+    IO.FS.createDirAll dir
+    match ← (Wallet.create .signet ks (some (dir / "wallet.json")) (entropy := some (zeros 16 byte))).run with
+    | .ok w => pure w
+    | .error e => throw (IO.userError s!"Wallet.create: {e.name}")
+  let second := System.FilePath.mk (Real.slotDir net.toString "1")
+  let third := System.FilePath.mk (Real.slotDir net.toString "2")
+  let a ← make net 0xA1
+  let b ← make second 0xC3
+  let c ← make third 0xD4
+  let (backend, env, multisig) ← Backend.realWithMultisig { keyStore := ks, fetch := fun _ => throw (.other "offline") }
+  stackedPhones.modify (·.push { backend, env, multisig })
+  let opened (dir : System.FilePath) : IO Unit := do
+    unless (← backend.openWallet .signet dir.toString) matches .opened _ do throw (IO.userError s!"did not open {dir}")
+    Real.buildStackIfNeeded env
+  let infoOf (id : String) : IO MultisigInfo := do
+    let some i := (← backend.multisigOverview).accounts.find? (·.id == id) | throw (IO.userError s!"no account {id}")
+    return i
+  let fund (d : String) (id : String) (seed : UInt8) : IO Unit := do
+    let account ← need "account" (MultisigAccount.parse d signet)
+    let height := (← Real.record multisig id).createdAtHeight + 1
+    let funding := spend #[⟨zeros 32 seed, 0⟩] #[{ value := 60_000, scriptPubKey := ← spk account 0 }]
+    discard <| multisig.applyMatch (block height #[funding]) signet
+  -- the second wallet: its key, and an account only it and someone else are in
+  opened second
+  let keyB ← Real.multisigKeyExpression env
+  let (theirs, theirsDescriptor, _) ← backend.createMultisigAccount "Second's" 2 [([keyB], none), ([← keyExpression (← masters)[1]!], none)] none
+  let theirsRecord ← Real.record multisig theirs
+  -- the first wallet, open: an account of the two wallets kept here
+  opened net
+  let keyA ← Real.multisigKeyExpression env
+  let (both, bothDescriptor, _) ← backend.createMultisigAccount "Both" 2 [([keyA], none), ([keyB], none)] none
+  check "an account of two wallets kept here is not watch-only" (!(← infoOf both).watchOnly)
+  fund bothDescriptor both 0x46
+  let inputs := accountInputs both (← accountDestination) 25_000
+  let preview ← backend.previewSend inputs
+  discard <| backend.signAndDraft inputs preview
+  let screen (id : String) : IO MultisigScreen := do
+    let some s := (← infoOf id).draft.bind (·.screen) | throw (IO.userError "no signing screen")
+    return s
+  check "the open wallet has signed, and the other wallet kept here is still to sign"
+    ((← screen both).signatures == [(false, 1, 2)] && (← screen both).heldKeys == [{ walletID := b.id, unsigned := true }])
+    (reprStr (← screen both).heldKeys)
+  -- the screen and its messages: a button for the other wallet's key
+  let m : Model := { stage := .ready, walletID := some a.id, multisig := ← backend.multisigOverview, routes := [.multisigPSBT both] }
+  let page := rendered m
+  check "the page offers the other wallet's signature by name, beside this phone's"
+    (contains page (Ids.multisigSignWith b.id) && contains page s!"Add wallet {b.id}'s signature" && contains page Ids.multisigSignButton)
+  let (_, cs) := step (.multisig (.signWith both b.id)) m
+  check "its tap asks for that wallet's signature and no other" (cs.any fun cmd => cmd matches .signDraftWith _ _ _ _)
+  let (_, cs) := step (.multisig (.signWith both c.id)) m
+  check "a wallet the page does not offer is not asked for" cs.isEmpty
+  loads.set #[]
+  failsWith "a wallet not kept here is refused" (backend.signDraftWith both "00000000") Real.notHeldText
+  failsWith "a wallet kept here whose key is not the account's is refused" (backend.signDraftWith both c.id) Real.notASignerText
+  check "…before anything of the Keychain is read" ((← loads.get).isEmpty) s!"{← loads.get}"
+  backend.signDraftWith both b.id
+  check "the other wallet signs with one read, of its own secret" ((← loads.get) == #[b.id]) s!"{← loads.get}"
+  let done ← screen both
+  check "both signatures: the payment is complete, and nothing is left to sign here"
+    (done.signatures == [(false, 2, 2)] && done.progress.complete && done.heldKeys == [{ walletID := b.id, unsigned := false }])
+    (reprStr done.signatures)
+  let m : Model := { m with multisig := ← backend.multisigOverview }
+  let (_, cs) := step (.multisig (.signWith both b.id)) m
+  check "a wallet that has signed is not asked again" cs.isEmpty
+  -- an account only the second wallet's key is in, seen from the first (as it arrives from another device)
+  multisig.withStore fun s => do return (← s.admit multisig.host.keys multisig.host.writeData theirsRecord, ())
+  check "an account another wallet kept here holds a key of is not watch-only" (!(← infoOf theirs).watchOnly)
+  fund theirsDescriptor theirs 0x47
+  let inputs := accountInputs theirs (← accountDestination) 20_000
+  let preview ← backend.previewSend inputs
+  loads.set #[]
+  discard <| backend.signAndDraft inputs preview
+  check "its payment is filed unsigned by the open wallet, which holds no key of it, with nothing read"
+    ((← screen theirs).signatures == [(false, 0, 2)] && !(← screen theirs).progress.phoneHolds && (← loads.get).isEmpty)
+    (reprStr (← screen theirs).signatures)
+  let m : Model := { stage := .ready, walletID := some a.id, multisig := ← backend.multisigOverview, routes := [.multisigPSBT theirs] }
+  check "its page offers the other wallet's signature and not this phone's"
+    (contains (rendered m) (Ids.multisigSignWith b.id) && !contains (rendered m) Ids.multisigSignButton && !contains (rendered m) Ids.multisigWatchOnlyNote)
+  backend.signDraftWith theirs b.id
+  check "…and that wallet signs it" ((← screen theirs).signatures == [(false, 1, 2)] && (← loads.get) == #[b.id])
+  -- with the second wallet gone from the device, the account is only watched
+  opened second
+  Real.deleteWallet env (expected := some b.id)
+  opened net
+  check "once that wallet is deleted from the device, the account is watch-only" ((← infoOf theirs).watchOnly)
+  check "…and the first wallet's own account is as it was" (!(← infoOf both).watchOnly)
+
 def accountTests : List (String × IO Unit) :=
-  [ ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
+  [ ("testAnotherWalletOnTheDeviceSignsWithItsOwnKey", withStacksStopped testAnotherWalletOnTheDeviceSignsWithItsOwnKey)
+  , ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
   , ("testJoiningAnAccountFromAPastedDescriptor", testJoiningAnAccountFromAPastedDescriptor)
   , ("testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes", testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes)
   , ("testTwoWalletsAreKeptSideBySideOnOneNetwork", testTwoWalletsAreKeptSideBySideOnOneNetwork)

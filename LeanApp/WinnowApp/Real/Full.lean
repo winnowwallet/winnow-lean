@@ -98,6 +98,7 @@ def Real.MultisigApp.install (a : Real.MultisigApp) (env : Real.Env) (base : Bac
     previewSend := fun inputs => if inputs.accountID.isSome then Real.previewAccountSend env a inputs else base.previewSend inputs
     signAndDraft := fun inputs p => Real.signAndDraft env a inputs p
     signDraft := Real.signDraft env a
+    signDraftWith := Real.signDraftWith env a
     signDraftWithLedger := Real.signDraftWithLedger env a
     adoptDraft := Real.adoptDraft env a
     broadcastDraft := Real.broadcastDraft env a

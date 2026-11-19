@@ -860,6 +860,8 @@ inductive MultisigMsg where
   /-- "Use this PSBT" (no draft) or "Combine" (a draft): the account named. -/
   | addPasted (id : String)
   | sign (id : String)
+  /-- This device's signature with another wallet it keeps, one that holds a key of the account. -/
+  | signWith (id walletID : String)
   | signWithLedger (id : String)
   | broadcast (id : String)
   | askDiscard (id : String)
@@ -1014,6 +1016,7 @@ inductive Cmd where
   | signAndDraft (gen : Nat) (inputs : SendInputs) (p : Preview)
   /-- After device authentication ("Sign this multisig payment"). -/
   | signDraft (gen epoch : Nat) (id : String)
+  | signDraftWith (gen epoch : Nat) (id walletID : String)
   | signDraftWithLedger (gen epoch : Nat) (id : String)
   | adoptDraft (gen epoch : Nat) (id psbt : String)
   | broadcastDraft (gen epoch : Nat) (id : String)
