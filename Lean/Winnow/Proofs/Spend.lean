@@ -8,7 +8,12 @@ import Winnow.Wallet.SendAuthorization
 goes through. It answers `none` where two of the account's keys are the same key (SEC-061) and never refuses
 the account for that: `usable_error` says the only way it fails is that a key could not be derived or the
 address could not be written, which are other modules' errors. So an index where two keys collide cannot
-stop the scripts being listed, which is what it did before. -/
+stop the scripts being listed, which is what it did before. `make_admits` says what admission does
+guarantee: the threshold and the keys given, two to sixteen of them, no key listed twice, at least one
+extended.
+
+**The send that is signed.** `authorizesTransaction_iff`: the check between a review and a signature accepts
+exactly the reviewed transaction. -/
 
 namespace Winnow.Proofs.Spend
 
@@ -259,5 +264,74 @@ theorem authorizesTransaction_iff (r : ReviewedSend) (tx : Transaction) (fee : I
   simp only [Bool.and_eq_true, beq_iff_eq, hin, hout, and_assoc]
 
 end authorization
+
+/-! ## What an admitted SegWit v0 account is -/
+
+private theorem make_model {rk : type_of% @SegwitMultisigAccount.requireKey}
+    {ad : type_of% @SegwitMultisigAccount.allDifferent} {idn : type_of% @SegwitMultisigAccount.identity}
+    {threshold : Int} {keys : Array Descriptor.SingleKey} {network : Tx.BitcoinNetwork} {a : SegwitMultisigAccount}
+    (h : (body% SegwitMultisigAccount.make
+      [SegwitMultisigAccount.requireKey, SegwitMultisigAccount.allDifferent, SegwitMultisigAccount.identity]
+      [@rk, @ad, @idn]) threshold keys network = .ok a) :
+    a = { network, threshold := threshold.toNat, keys } ∧
+      2 ≤ keys.size ∧ keys.size ≤ SegwitMultisigAccount.maxKeys ∧ 1 ≤ threshold ∧ threshold ≤ keys.size ∧
+      ad (keys.map idn) = true ∧ (keys.any fun k => k.base.isExtended) = true := by
+  simp only [bind, Except.bind, pure, Except.pure, MultisigAccount.invalid, MultisigAccount.fail, throw,
+    throwThe, MonadExceptOf.throw] at h
+  by_cases h1 : keys.size ≥ 2
+  · by_cases h2 : keys.size ≤ SegwitMultisigAccount.maxKeys
+    · by_cases h3 : (decide (1 ≤ threshold) && decide (threshold ≤ ↑keys.size)) = true
+      · simp only [h1, h2, h3, ↓reduceIte] at h
+        split at h
+        · cases h
+        · by_cases h4 : ad (Array.map idn keys) = true
+          · by_cases h5 : (keys.any fun x => x.base.isExtended) = true
+            · simp only [h4, h5, ↓reduceIte] at h
+              injection h with h
+              simp only [Bool.and_eq_true, decide_eq_true_eq] at h3
+              exact ⟨h.symm, h1, h2, h3.1, h3.2, h4, h5⟩
+            · simp only [h4, h5, ↓reduceIte] at h; cases h
+          · simp only [h4] at h; cases h
+      · simp only [h1, h2, h3, ↓reduceIte] at h; cases h
+    · simp only [h1, h2, ↓reduceIte] at h; cases h
+  · simp only [h1, ↓reduceIte] at h; cases h
+
+theorem make_def : SegwitMultisigAccount.make = body% SegwitMultisigAccount.make [] [] := rfl
+
+/-- What `allDifferent` says: no two of the byte strings, at different places, are the same. -/
+theorem allDifferent_spec {keys : Array ByteArray} (h : SegwitMultisigAccount.allDifferent keys = true)
+    {i j : Nat} (hi : i < keys.size) (hj : j < i) : keys[i]! ≠ keys[j]! := by
+  unfold SegwitMultisigAccount.allDifferent at h
+  rw [List.all_eq_true] at h
+  have h1 := h i (List.mem_range.mpr hi)
+  rw [List.all_eq_true] at h1
+  have h2 := h1 j (List.mem_range.mpr hj)
+  intro heq
+  rw [heq] at h2
+  have : (keys[j]! != keys[j]!) = false := by
+    show (!(keys[j]! == keys[j]!)) = false
+    rw [(bytes_beq_iff _ _).mpr rfl]; rfl
+  rw [this] at h2
+  cases h2
+
+/-- **An admitted SegWit v0 account is what it says** (the SegWit v0 counterpart of SEC-019 and SEC-020).
+Whenever `make` admits a threshold and a list of keys, the account is that threshold over those keys, with
+two to sixteen keys, a threshold from one to the number of keys, no key listed twice (no two of them have the
+same public key, so no signer counts twice), and at least one of them extended. -/
+theorem make_admits {threshold : Int} {keys : Array Descriptor.SingleKey} {network : Tx.BitcoinNetwork}
+    {a : SegwitMultisigAccount} (h : SegwitMultisigAccount.make threshold keys network = .ok a) :
+    a = { network, threshold := threshold.toNat, keys } ∧
+      2 ≤ keys.size ∧ keys.size ≤ SegwitMultisigAccount.maxKeys ∧ 1 ≤ threshold ∧ threshold ≤ keys.size ∧
+      (∀ {i j : Nat}, i < keys.size → j < i →
+        SegwitMultisigAccount.identity keys[i]! ≠ SegwitMultisigAccount.identity keys[j]!) ∧
+      (keys.any fun k => k.base.isExtended) = true := by
+  rw [make_def] at h
+  obtain ⟨ha, h1, h2, h3, h4, h5, h6⟩ := make_model (rk := @SegwitMultisigAccount.requireKey)
+    (ad := @SegwitMultisigAccount.allDifferent) (idn := @SegwitMultisigAccount.identity) h
+  refine ⟨ha, h1, h2, h3, h4, ?_, h6⟩
+  intro i j hi hj
+  have := allDifferent_spec h5 (i := i) (j := j) (by rw [Array.size_map]; exact hi) hj
+  have hj' : j < keys.size := Nat.lt_trans hj hi
+  simpa [Array.getElem!_eq_getD, Array.getD, hi, hj', Array.size_map] using this
 
 end Winnow.Proofs.Spend

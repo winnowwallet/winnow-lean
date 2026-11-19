@@ -225,6 +225,16 @@ example : ∀ {a : SegwitMultisigAccount} {choice : Nat} {index : UInt32} {e : M
     a.usable choice index = .error e → ∃ n, e = .named n :=
   @usable_error
 
+-- An admitted SegWit v0 account is the threshold and keys given, with no key twice
+example : ∀ {threshold : Int} {keys : Array Descriptor.SingleKey} {network : Tx.BitcoinNetwork}
+    {a : SegwitMultisigAccount}, SegwitMultisigAccount.make threshold keys network = .ok a →
+    a = { network, threshold := threshold.toNat, keys } ∧
+      2 ≤ keys.size ∧ keys.size ≤ SegwitMultisigAccount.maxKeys ∧ 1 ≤ threshold ∧ threshold ≤ keys.size ∧
+      (∀ {i j : Nat}, i < keys.size → j < i →
+        SegwitMultisigAccount.identity keys[i]! ≠ SegwitMultisigAccount.identity keys[j]!) ∧
+      (keys.any fun k => k.base.isExtended) = true :=
+  @make_admits
+
 -- The send that is signed is the send that was reviewed, exactly (SEC-007, SEC-018)
 example : ∀ (r : ReviewedSend) (tx : Transaction) (fee : Int64) (changeAmount : Option Int64)
     (resolved : Array Payment),
