@@ -2,6 +2,8 @@ Winnow: the same wallet, rewritten in Lean
 
 New since 0.9.16
 
+0.9.17 could not list the backups in iCloud: "Your other devices" showed an error, and a fresh install found none to restore. Fixed here; please try both.
+
 Multisig accounts and paired Ledgers follow your devices. With iCloud backup on, they appear on your other devices under the same Apple Account. With Winnow open on both:
 1. Join or create an account on one. Within two minutes the other lists it, first as catching up, then with its balance. A device with a different wallet says "Watch-only on this device" and cannot sign; one restored from the same iCloud backup signs.
 2. Pair a Ledger on one: the other lists it as "Paired on another device" until used there.
@@ -24,7 +26,6 @@ A card for one person: they pay you at a new address each time. It holds a code 
 1. Receiving phone: Receive. Under "From one person" type the payer's name and tap the button (Face ID). It shows "An address for …" and "A card for …".
 2. Paying phone: Send → Saved recipients → Add. Type a name, paste the card, Save. Send to them twice.
 3. The receiving phone must show both as "Received from" that name, at two different addresses.
-4. Pay "An address for …" from another wallet: it must also show as "Received from" them, and the address must then change.
 
 One home: Simple and Advanced mode are gone. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger". With Bluetooth on, unlock a Ledger nearby: a card pairs it and builds a 2-of-2 whose first address must match the Ledger's.
 
@@ -38,6 +39,6 @@ Install over the current app
 One Send
 
 1. Every payment, from the wallet or from an account, starts in Send: pick the account under From. With a recovery path, Send offers "Signers now / Recovery path".
-2. Sign and continue, then collect signatures (phone, Ledger, a pasted copy) and finalize. The PSBT to share is BIP174 v0, readable by Bitcoin Core.
+2. Sign and continue, then collect signatures (phone, Ledger, a pasted copy) and finalize.
 
 Report bugs at https://github.com/winnowwallet/winnow-lean/issues with app version, device, Ledger model, network and steps. Never include recovery words, private keys or backup files.
