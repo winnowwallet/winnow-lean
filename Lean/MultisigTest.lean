@@ -2355,9 +2355,75 @@ def sendAuthorization : TM Unit := do
     (!accepts (tx #[out 5_000 0xB0, out 60_000 0xE1, out 61_000 0xE3]) (fee := 9_000) (change := none) (r := silent)
       (resolved := resolved))
 
+/-! ## Coin selection adds up (`Wallet/CoinSelection.lean`)
+
+The fee is `⌈vsize · rate / 1000⌉` in whole numbers, and what is selected is the payments, the fee and the
+change. That it adds up for every input is proved (`Winnow.Proofs.Selection.select_conserves`); here are the
+numbers a person can check by hand, and a sweep. A one-input, two-output P2TR spend is 154 vbytes. -/
+
+instance : Describe CoinSelectionError := ⟨(·.name), fun e => s!"{e.name}: {e.description}"⟩
+
+def coinSelection : TM Unit := do
+  let script (b : UInt8) : ByteArray := ByteArray.mk (#[0x51, 0x20] ++ Array.replicate 32 b)
+  let coin (amount : Int64) (b : UInt8) : WalletUTXO :=
+    { txid := ByteArray.mk (Array.replicate 32 b), vout := 0, amount, scriptPubKey := script 0x01, chain := .receive,
+      index := 0, height := 100 }
+  let pay (amount : Int64) : Payment := { amount, scriptPubKey := script 0xA0 }
+  let change := script 0xC0
+  let pick (coins : Array WalletUTXO) (payments : Array Payment) (rate : Float) :=
+    CoinSelection.select coins payments change rate
+  let adds (s : Selection) (payments : Array Payment) : Bool :=
+    s.selected.foldl (fun t u => t + u.amount.toInt) 0 ==
+      payments.foldl (fun t p => t + p.amount.toInt) 0 + s.fee.toInt + (s.changeAmount.map (·.toInt)).getD 0
+  check "a rate as sat/kvB: 2 → 2000, 1.1 → 1100, 0.07 → 70, 1.0005 → 1001"
+    (CoinSelection.satPerKvB 2 == 2000 && CoinSelection.satPerKvB 1.1 == 1100 && CoinSelection.satPerKvB 0.07 == 70 &&
+      CoinSelection.satPerKvB 1.0005 == 1001 && CoinSelection.satPerKvB 10_000 == 10_000_000)
+  check "a fee is rounded up to a whole sat: 154 vB at 1.1 sat/vB is 170, at 1 is 154, 1 vB at 0.001 is 1"
+    (CoinSelection.feeAt 154 1100 == 170 && CoinSelection.feeAt 154 1000 == 154 && CoinSelection.feeAt 1 1 == 1 &&
+      CoinSelection.feeAt 0 5000 == 0)
+  let one ← needE "one coin, 2 sat/vB" (·.name) (pick #[coin 100_000 0x11] #[pay 60_000] 2)
+  check "one coin of 100,000 paying 60,000 at 2 sat/vB: fee 308, change 39,692"
+    (one.selected.size == 1 && one.fee == 308 && one.changeAmount == some 39_692 && adds one #[pay 60_000])
+  let fractional ← needE "1.1 sat/vB" (·.name) (pick #[coin 100_000 0x11] #[pay 60_000] 1.1)
+  check "at 1.1 sat/vB: fee 170" (fractional.fee == 170 && fractional.changeAmount == some 39_830)
+  -- change below dust (330 for P2TR) goes to the fee: 60,000 + 154 + 300 leaves 300 over
+  let tight ← needE "no change" (·.name) (pick #[coin 60_454 0x11] #[pay 60_000] 1)
+  check "change that would be dust is left to the fee: fee 454, no change"
+    (tight.fee == 454 && tight.changeAmount.isNone && adds tight #[pay 60_000])
+  let largest ← needE "largest first" (·.name)
+    (pick #[coin 10_000 0x11, coin 70_000 0x22, coin 30_000 0x33] #[pay 60_000] 1)
+  check "the largest coin first, and no more coins than are needed"
+    (largest.selected.map (·.amount) == #[70_000] && adds largest #[pay 60_000])
+  let two ← needE "two coins" (·.name) (pick #[coin 10_000 0x11, coin 70_000 0x22, coin 30_000 0x33] #[pay 80_000] 1)
+  check "two coins when one does not cover it" (two.selected.map (·.amount) == #[70_000, 30_000] && adds two #[pay 80_000])
+  refused "more than the wallet holds" (pick #[coin 10_000 0x11] #[pay 60_000] 1) "insufficientFunds"
+  refused "a payment that is dust" (pick #[coin 10_000 0x11] #[pay 329] 1) "dustOutput"
+  refused "a rate of zero" (pick #[coin 10_000 0x11] #[pay 5_000] 0) "invalidFeeRate"
+  refused "a rate above 10,000 sat/vB" (pick #[coin 10_000 0x11] #[pay 5_000] 10_001) "invalidFeeRate"
+  refused "no coins" (pick #[] #[pay 5_000] 1) "noUTXOs"
+  -- a sweep: whatever is selected is the payments, the fee and the change, and the fee is the rate's
+  let mut swept := 0
+  let mut bad := 0
+  for amount in [1_000, 5_000, 20_001, 60_000, 123_456, 250_000] do
+    for milli in [1000, 1001, 1100, 2500, 7919, 33_333, 250_000] do
+      for coins in [#[coin 300_000 0x11], #[coin 50_000 0x11, coin 40_000 0x22, coin 200_000 0x33],
+                    #[coin 9_000 0x11, coin 9_000 0x22, coin 9_000 0x33, coin 9_000 0x44]] do
+        let payments := #[pay amount, pay 700]
+        match pick coins payments (milli.toFloat / 1000) with
+        | .ok s =>
+          swept := swept + 1
+          let outputs : Array Transaction.Output := (payments.map fun p => { value := p.amount, scriptPubKey := p.scriptPubKey }) ++
+            (if s.changeAmount.isSome then #[{ value := 0, scriptPubKey := change }] else #[])
+          let exact := CoinSelection.feeAt (TransactionBuilder.signedVSize s.selected.size outputs) milli
+          unless adds s payments && (if s.changeAmount.isSome then s.fee.toInt == exact else s.fee.toInt ≥ exact) do
+            bad := bad + 1
+        | .error _ => pure ()
+  check s!"a sweep of {swept} selections: each adds up, at the rate asked for" (bad == 0 && swept ≥ 60) s!"{bad} bad of {swept}"
+
 def main : IO UInt32 := runMain "multisig-test" do
   runTest "feeResolution" feeResolution
   runTest "sendAuthorization" sendAuthorization
+  runTest "coinSelection" coinSelection
   runTest "twoOfThree" twoOfThree
   runTest "everyPairCanSpend" everyPairCanSpend
   runTest "threeOfThree" threeOfThree
