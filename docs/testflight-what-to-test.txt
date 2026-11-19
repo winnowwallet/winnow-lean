@@ -2,14 +2,14 @@ Winnow: the same wallet, rewritten in Lean
 
 New since 0.9.16
 
-0.9.17 could not list the backups in iCloud: "Your other devices" showed an error, and a fresh install found none to restore. Fixed here; please try both.
+0.9.18 said "One of your devices' backups could not be read yet" and took nothing from a backup an older Winnow left. This build takes what it can, and Settings → Backup → iCloud backup says how many backups were read and why one was not: please send us that line. A fresh install should find a backup to restore again.
 
 Multisig accounts and paired Ledgers follow your devices. With iCloud backup on, they appear on your other devices under the same Apple Account. With Winnow open on both:
 1. Join or create an account on one. Within two minutes the other lists it, first as catching up, then with its balance. A device with a different wallet says "Watch-only on this device" and cannot sign; one restored from the same iCloud backup signs.
 2. Pair a Ledger on one: the other lists it as "Paired on another device" until used there.
 3. Start a payment from an account and sign on one: the other shows it awaiting signatures, and a signature added there reaches the first.
 4. Remove an empty account or a Ledger on one: it goes from the other. One with coins stays.
-5. Settings → Backup → iCloud backup says when the others were checked. With backup off nothing follows.
+5. With backup off nothing follows.
 
 The wallet's key now sits behind Face ID or the passcode in the Keychain. After updating, the balance must be the same; Send asks once, and nothing asks while Winnow only syncs.
 
@@ -27,7 +27,7 @@ A card for one person: they pay you at a new address each time. It holds a code 
 2. Paying phone: Send → Saved recipients → Add. Type a name, paste the card, Save. Send to them twice.
 3. The receiving phone must show both as "Received from" that name, at two different addresses.
 
-One home: Simple and Advanced mode are gone. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger". With Bluetooth on, unlock a Ledger nearby: a card pairs it and builds a 2-of-2 whose first address must match the Ledger's.
+One home: Simple and Advanced mode are gone. From 0.1 BTC with no Ledger paired the home offers "Protect it with a Ledger".
 
 This build is Winnow rewritten in Lean 4, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Security → Hardware wallets and keys. Please try it on a phone whose wallet you could restore from its recovery words.
 
