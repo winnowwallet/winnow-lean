@@ -30,6 +30,8 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   watchAddress : (address : String) → (seen : String → Int → IO Unit) → IO Unit
   stopWatchingAddress : IO Unit
   deleteWallet : IO Unit
+  /-- The wallets kept for the network whose directory this is, the first one first. No secret is read. -/
+  wallets : (networkDir : String) → IO (List WalletSummary) := fun _ => pure []
   startNetworking : Settings → IO Unit
   stopNetworking : IO Unit
   syncNow : IO Unit

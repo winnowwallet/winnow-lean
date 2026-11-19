@@ -299,6 +299,14 @@ structure SendReview where
   change : Option Payment
   recipient : Option (String × Option UInt32) := none
 
+/-- A wallet kept on this device for the open network: its id, its slot and directory, and its account key
+as its file gives it (public: nothing of the Keychain is read to know it). -/
+structure HeldWallet where
+  id : String
+  slot : String
+  dir : String
+  accountKey : Keys.HDKey
+
 /-- The backend's state (AppModel's stored properties that are not UI). -/
 structure Core where
   network : Option WinnowApp.Network := none
@@ -306,6 +314,9 @@ structure Core where
   dir : Option String := none
   settings : Option Settings := none
   wallet : Option Wallet := none
+  /-- The wallets kept for the open network, the open one among them, as of the last wallet opened, adopted or
+  deleted (`refreshHeld`). -/
+  held : Array HeldWallet := #[]
   /-- Moves each time `wallet` is replaced or let go (`Core.withWallet`), and as a new wallet's file is about to
   be written (`Env.replacingWallet`): the same number is Swift's `self.wallet === wallet`. A wallet ID is not enough, since importing a wallet's own backup again makes a
   new wallet with the same ID (backend-test `paymentRaceFlow`). -/

@@ -792,6 +792,67 @@ def testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes : IO Unit := do
   Real.deleteWallet env (expected := some first.id)
   check "deleting the last one deletes the key" ((← secrets.get).isEmpty)
 
+/-- Two wallets kept for one network. The first stays in the network's own directory and is not touched by
+the second, which has a directory, accounts and files of its own; each opens with its own key; a wallet
+already kept is not kept twice; and deleting the added one takes its directory and nothing of the first. -/
+def testTwoWalletsAreKeptSideBySideOnOneNetwork : IO Unit := do
+  let net := (← tempFile "x").parent.get! / "signet"
+  IO.FS.createDirAll net
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let ks := Winnow.inMemoryKeyStore secrets
+  let make (dir : System.FilePath) (byte : UInt8) : IO Wallet := do
+    IO.FS.createDirAll dir
+    match ← (Wallet.create .signet ks (some (dir / "wallet.json")) (entropy := some (zeros 16 byte))).run with
+    | .ok w => pure w
+    | .error e => throw (IO.userError s!"Wallet.create: {e.name}")
+  let a ← make net 0xA1
+  let (backend, env, _) ← Backend.realWithMultisig { keyStore := ks, fetch := fun _ => throw (.other "offline") }
+  check "the first wallet opens where it always was" ((← backend.openWallet .signet net.toString) matches .opened _)
+  check "one wallet, open, and no pointer written for it"
+    ((← backend.wallets net.toString) == [{ id := a.id, slot := "", active := true }] && !(← (Real.activeSlotPath net.toString).pathExists))
+  let before ← IO.FS.readBinFile (net / "wallet.json")
+  -- a second wallet, in the slot the backend names
+  let slot ← Real.freeSlot net.toString
+  let second := System.FilePath.mk (Real.slotDir net.toString slot)
+  let b ← make second 0xB2
+  check "the second wallet has a slot of its own" (slot == "1" && b.id != a.id)
+  check "…and opens there" ((← backend.openWallet .signet second.toString) matches .opened _)
+  check "both are listed, the second open"
+    ((← backend.wallets net.toString) == [{ id := a.id, slot := "", active := false }, { id := b.id, slot := "1", active := true }])
+    s!"{repr (← backend.wallets net.toString)}"
+  check "the one open last is the one a launch opens" ((← Real.resolveSlot net.toString) == "1")
+  check "its phrase is its own" ((← backend.revealMnemonic) != [] && (← secrets.get).size == 2)
+  -- what the second wallet does is in its own directory
+  let ms ← masters
+  let other ← keyExpression ms[2]!
+  let own ← Real.multisigKeyExpression env
+  let (account, _, _) ← backend.createMultisigAccount "Second's" 2 [([own], none), ([other], none)] none
+  check "an account built in the second wallet is the second's" ((← backend.multisigOverview).accounts.map (·.id) == [account])
+  check "the first wallet's file is as it was" ((← IO.FS.readBinFile (net / "wallet.json")) == before)
+  check "back in the first" ((← backend.openWallet .signet net.toString) matches .opened _)
+  check "the first has none of the second's accounts" ((← backend.multisigOverview).accounts.isEmpty)
+  check "…and is the one a launch opens now" ((← Real.resolveSlot net.toString) == "")
+  -- the first wallet's own backup, taken as a wallet to add
+  let bundle ← match ← (do let w ← Wallet.open (net / "wallet.json") ks; w.exportBundle true).run with
+    | .ok bundle => pure bundle
+    | .error e => throw (IO.userError s!"exportBundle: {e.name}")
+  let third := Real.slotDir net.toString (← Real.freeSlot net.toString)
+  failsWith "a wallet already kept is not kept twice" (Real.importDecoded env .signet third bundle)
+    Real.AppError.walletAlreadyHeld.text
+  check "…and nothing was written for it" (!(← Real.holdsWallet third) && (← backend.wallets net.toString).length == 2)
+  -- the second wallet is deleted
+  check "the second again" ((← backend.openWallet .signet second.toString) matches .opened _)
+  check "its account is still there" ((← backend.multisigOverview).accounts.map (·.id) == [account])
+  Real.deleteWallet env (expected := some b.id)
+  check "deleted: its directory is gone" (!(← second.pathExists))
+    s!"{(← (try second.readDir catch _ => pure #[])).map (·.fileName)}"
+  check "…and its key, and not the first's" (!(← secrets.get).contains b.id && (← secrets.get).contains a.id)
+  check "one wallet is kept, and it is the one a launch opens"
+    ((← backend.wallets net.toString) == [{ id := a.id, slot := "", active := false }] && (← Real.resolveSlot net.toString) == "")
+  check "the first opens, with its file as it was"
+    (((← backend.openWallet .signet net.toString) matches .opened _) && (← IO.FS.readBinFile (net / "wallet.json")) == before)
+  check "…and reads its phrase" ((← backend.revealMnemonic).length == 12)
+
 def flowTests : List (String × IO Unit) :=
   [ ("testBuilderMakesAccountWithAnotherWinnowAndRecovery", testBuilderMakesAccountWithAnotherWinnowAndRecovery)
   , ("testTwoPhonesSignACoSignersSpendWithBIP326Sequences", testTwoPhonesSignACoSignersSpendWithBIP326Sequences)
@@ -2437,6 +2498,7 @@ def accountTests : List (String × IO Unit) :=
   [ ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
   , ("testJoiningAnAccountFromAPastedDescriptor", testJoiningAnAccountFromAPastedDescriptor)
   , ("testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes", testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes)
+  , ("testTwoWalletsAreKeptSideBySideOnOneNetwork", testTwoWalletsAreKeptSideBySideOnOneNetwork)
   , ("testASegwitAccountIsJoinedAndAPastedPaymentSignedHere", testASegwitAccountIsJoinedAndAPastedPaymentSignedHere)
   , ("testNewAddressMovesTheAccountOn", testNewAddressMovesTheAccountOn)
   , ("testACollectionPageShowsItsDraftAndDiscardsIt", testACollectionPageShowsItsDraftAndDiscardsIt)

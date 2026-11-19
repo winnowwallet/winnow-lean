@@ -1738,6 +1738,71 @@ def devicesFlow (dir : String) (n : Node) : IO Unit := do
   a.stopNetworking
   b.stopNetworking
 
+/-- Two wallets on one device, on regtest. The second, added in a place of its own, has its own chain files;
+the first's files are not touched while the second is open, and what was paid to the first meanwhile is found
+by its own scan when it is opened again. Deleting the second leaves the first its coins and its key. -/
+def walletsFlow (dir : String) (n : Node) : IO Unit := do
+  say "wallets: two on one device"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (b, _, _) ← Backend.realWithMultisig (deps secrets "Two")
+  let first := s!"{dir}/Two/BTCSwift/regtest"
+  IO.FS.createDirAll first
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  let idA ← b.createWallet .regtest first
+  let addressA ← b.receiveAddress false
+  let pay (address : String) (sats : Nat) : IO Unit := do
+    let txid ← n.wallet #["sendtoaddress", address, btc sats]
+    discard <| waitUntil 20_000 (do return (← n.mempool).contains txid)
+    n.mine 1 mineAddr
+    n.waitFilterIndex
+  let balance (expected : Int) : IO Bool :=
+    waitUntil 90_000 (do
+      b.syncNow
+      return (← b.snapshot).1.balance == expected)
+  pay addressA 3_000_000
+  check "wallets: the first wallet is paid" (← balance 3_000_000)
+  -- a second wallet, in a place of its own
+  let second := Real.slotDir first (← Real.freeSlot first)
+  IO.FS.createDirAll second
+  check "wallets: the place beside it is empty" ((← b.openWallet .regtest second) matches .missing)
+  b.startNetworking settings
+  let idB ← b.createWallet .regtest second
+  check "wallets: a second wallet, and both are kept" (idB != idA && (← b.wallets first).map (·.id) == [idA, idB])
+    s!"{(← b.wallets first).map (·.id)}"
+  let read : IO (List ByteArray) := ["wallet.json", "filters.json", "headers.bin"].mapM fun (name : String) => do
+    try IO.FS.readBinFile (System.FilePath.mk first / name) catch _ => pure ByteArray.empty
+  let before ← read
+  check "wallets: the first wallet has its files" (before.all (!·.isEmpty))
+  -- while the second is open: it is paid, and so is the first
+  let addressB ← b.receiveAddress false
+  pay addressB 1_000_000
+  pay addressA 2_000_000
+  check "wallets: the second wallet sees its own payment and not the first's" (← balance 1_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  check "wallets: the first wallet's files are as they were while the second was open" ((← read) == before)
+  -- the first again: what was paid to it meanwhile, by its own scan
+  check "wallets: the first wallet opens" ((← b.openWallet .regtest first) matches .opened _)
+  b.startNetworking settings
+  check "wallets: it catches up with the payment made while it was closed" (← balance 5_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  -- the second is deleted; the first still spends
+  discard <| b.openWallet .regtest second
+  b.deleteWallet
+  check "wallets: the second is gone, its place with it"
+    (!(← (System.FilePath.mk second).pathExists) && (← b.wallets first).map (·.id) == [idA])
+  check "wallets: the first opens again" ((← b.openWallet .regtest first) matches .opened _)
+  b.startNetworking settings
+  check "wallets: with its coins" (← balance 5_000_000)
+  let inputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "1000000", network := .regtest }
+  let txid := (← b.sendPayment inputs (← b.previewSend inputs)).txid
+  check "wallets: and it still sends" (← waitUntil 20_000 (do return (← n.mempool).contains txid))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  b.stopNetworking
+
 /-- What `openWallet` found, for a check's detail. -/
 def bootText : BootResult → String
   | .opened id => s!"opened {id}" | .missing => "missing" | .damaged m => s!"damaged: {m}"
@@ -2276,5 +2341,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

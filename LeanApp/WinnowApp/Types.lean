@@ -14,6 +14,14 @@ inductive Network where
   | regtest
   deriving Repr, BEq, Inhabited, ToJson, FromJson
 
+/-- A wallet kept on this device for a network: its id, the slot its directory is (empty for the network's
+own), and whether it is the one open. -/
+structure WalletSummary where
+  id : String
+  slot : String
+  active : Bool := false
+  deriving Repr, BEq, Inhabited
+
 /-- How the app is drawn: as the system is, or always light or always dark (the shell's `appearance`). -/
 inductive Appearance where
   | system
@@ -216,6 +224,8 @@ structure Status where
 structure CloudBackupInfo where
   id : String
   savedAtText : String
+  /-- The wallet the backup is of, when this device could read it (its key had arrived). -/
+  walletID : Option String := none
   deriving Repr, Inhabited, BEq
 
 /-- What the screens say for a build without the iCloud entitlement (the shell's `missingEntitlement`). -/

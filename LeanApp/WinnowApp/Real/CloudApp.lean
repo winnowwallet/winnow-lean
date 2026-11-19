@@ -61,13 +61,15 @@ structure CloudApp where
   restoreNotice : IO.Ref (Option String)
   /-- Whether the scene is active (`isActive`), as the cloud flows last heard. -/
   wasActive : IO.Ref Bool
+  /-- Which wallet each saved backup is of, as far as this device could read (by backup id and save date). -/
+  labels : IO.Ref (Array (String × Float × Option String))
 
 namespace CloudApp
 
 def new (controller : CloudBackupController) (env : Env) (host : RecordsHost) (multisig : MultisigApp) (follow : SyncApp)
     (allows : Bool) (authenticate : String → IO Unit) : IO CloudApp := do
   return { controller, env, host, multisig, follow, allows, authenticate, attempted := ← IO.mkRef [], preparing := ← IO.mkRef none,
-           preparation := ← LeanNative.Native.EffectScope.new, preparationTask := ← IO.mkRef none, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false }
+           preparation := ← LeanNative.Native.EffectScope.new, preparationTask := ← IO.mkRef none, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false, labels := ← IO.mkRef #[] }
 
 def directory (a : CloudApp) : IO (Option System.FilePath) := do return (← a.env.get).dir.map System.FilePath.mk
 def walletID (a : CloudApp) : IO (Option String) := do return (← a.env.get).wallet.map (·.id)
@@ -77,11 +79,38 @@ def network (a : CloudApp) : IO (Option WinnowApp.Network) := do return (← a.e
 def configureCurrent (a : CloudApp) : IO Unit := do
   a.controller.configure (← a.directory) (← a.walletID)
 
+/-- At most this many of the newest saved backups are opened to say which wallet each is of. -/
+def maximumLabelled : Nat := 30
+
+/-- Says which wallet each backup found is of: its wallet box read for its descriptor alone, with its key from
+iCloud Keychain (never the words' box). A person with several wallets, or several devices, otherwise chooses
+among dates. One whose key has not arrived, or that does not open, stays unnamed and is tried again at the
+next search. -/
+def labelBackups (a : CloudApp) : IO Unit := do
+  let found := (← a.controller.get).available
+  let known := (← a.labels.get).filter fun (id, savedAt, _) => found.any fun b => b.id == id && b.savedAt == savedAt
+  let mut labels := known.filter (·.2.2.isSome)
+  let account ← match ← a.controller.store.account.toBaseIO with
+    | .ok account => pure account
+    | .error _ => a.labels.set labels; return
+  for b in found.extract 0 maximumLabelled do
+    if labels.any fun (id, savedAt, _) => id == b.id && savedAt == b.savedAt then continue
+    let read : IO (Option String) := do
+      let key ← a.controller.keys.load b.id
+      let backup ← a.controller.store.load b.id account
+      return (← runWM (backup.shared key)).walletID
+    match ← read.toBaseIO with
+    | .ok (some wallet) => labels := labels.push (b.id, b.savedAt, some wallet)
+    | _ => pure ()
+  a.labels.set labels
+
 /-- `discoverCloudBackups()`: onboarding's search for this network's saved backups. -/
 def discover (a : CloudApp) : IO Unit := do
   if !a.allows || (← a.walletID).isSome then return
   let some n ← a.network | return
   a.controller.discover n.name
+  a.labelBackups
+
 
 /-- `cloudAppState(for:)`: people, receive-address labels, the display name and the Advanced switch,
 validated against the bundle. -/
@@ -344,7 +373,14 @@ def status (a : CloudApp) : IO CloudStatus := do
   let now ← unixNowFloat
   -- `lastSaved` counts from 2001 (Foundation's reference date)
   let lastSavedAgo := s.lastSaved.map fun d => relativeAgo (max 0 (now - (d + 978_307_200))).toUInt64.toNat
-  let available ← s.available.toList.mapM fun b => do return ({ id := b.id, savedAtText := ← formatReferenceDate b.savedAt } : CloudBackupInfo)
+  -- a backup of a wallet already kept here is not one to restore: it is left out of the list
+  let labels ← a.labels.get
+  let held := (← a.env.get).held.map (·.id)
+  let label (b : CloudBackupSummary) : Option String :=
+    (labels.find? fun (id, savedAt, _) => id == b.id && savedAt == b.savedAt).bind (·.2.2)
+  let offered := s.available.toList.filter fun b => !((label b).map held.contains).getD false
+  let available ← offered.mapM fun b => do
+    return ({ id := b.id, savedAtText := ← formatReferenceDate b.savedAt, walletID := label b } : CloudBackupInfo)
   let follow ← a.follow.status.get
   let devicesNote ← if !a.allows || !s.automaticEnabled then pure none else
     match follow.message, follow.checkedAt with

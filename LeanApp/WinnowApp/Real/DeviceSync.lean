@@ -546,6 +546,9 @@ def journalOnce (a : SyncApp) (name : String) (fields : List (String × String))
 def round (a : SyncApp) : IO Unit := do
   let began ← a.epoch.get
   let some (wallet, network, dir) ← a.place | return
+  -- the backup is pointed at the open wallet a moment after it opens (the app's tick): until then nothing says
+  -- which of the backups is this wallet's own, nor whether its automatic backup is on
+  unless (← a.controller.get).configuredWalletID == some wallet do return
   unless (← a.controller.get).automaticEnabled do return
   let store ← a.multisig.host.read
   if store.isDamaged || store.unavailable || (← a.multisig.signers.read).isDamaged then return

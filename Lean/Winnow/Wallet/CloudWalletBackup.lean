@@ -183,14 +183,22 @@ structure Shared where
   /-- Accounts and signers the backup lists that were not kept: of a kind or a shape this build does not
   read, or past the bounds. -/
   unread : Nat := 0
+  /-- The backup's wallet, as its descriptor names it (public). Not checked here against anything. -/
+  descriptor : Option String := none
   deriving Inhabited
+
+/-- The id of the wallet the backup is of (the fingerprint its descriptor names, as `Wallet.id`), when the
+descriptor reads. It tells a person's backups apart; nothing is decided by it that a restore does not check. -/
+def Shared.walletID (s : Shared) : Option String := do
+  let parsed ← (Descriptor.parse (← s.descriptor)).toOption
+  return Wallet.hex8 (← (Wallet.origin parsed).toOption).fingerprint
 
 /-- At most this many signers are taken from one backup. -/
 def maximumSharedSigners : Nat := 1_000
 
 /-- The wallet box opened for `Shared`: `state`'s key, authentication and identity checks, and
-`ImportBundle.checkAccountsAndSigners`'s bounds on what is kept. The coins, the history and the wallet's own
-descriptor are not read. -/
+`ImportBundle.checkAccountsAndSigners`'s bounds on what is kept. The coins and the history are not read; the
+wallet's descriptor is carried as text. -/
 def shared (b : CloudWalletBackup) (key : ByteArray) : WM Shared := do
   unless b.version == 1 || b.version == 2 do invalid "unsupported cloud backup"
   let data ← aes (AESGCM.openCombined key b.sealedWallet (context b.id b.network (walletPurpose b.savedAt)))
@@ -219,8 +227,9 @@ def shared (b : CloudWalletBackup) (key : ByteArray) : WM Shared := do
       then (kept.push r, coins', history', lost) else (kept, coins, history, lost + 1)) (#[], 0, 0, lostAccounts)
     let (signers, lostSigners) := each kvs "signers" SignerRecord.ofJV
     let kept := signers.extract 0 maximumSharedSigners
+    let descriptor := match lookup kvs "descriptor" with | some (.str d) => some d | _ => none
     return (own, { lastKnownHeight := ← SwiftJSON.key kvs "lastKnownHeight" asUInt32, accounts, signers := kept, appState,
-                   unread := lostAccounts + lostSigners + (signers.size - kept.size) })
+                   unread := lostAccounts + lostSigners + (signers.size - kept.size), descriptor })
   match read with
   | .ok (true, shared) => return shared
   | .ok (false, _) => invalid "cloud backup identity does not match"

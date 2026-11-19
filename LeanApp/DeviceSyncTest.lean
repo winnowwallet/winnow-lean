@@ -649,6 +649,47 @@ def walletChangesMidRound (root : System.FilePath) : TM Unit := do
   a.stop
   b.stop
 
+/-- Two wallets on one device. Each has its own view, its own backup and its own signers; and what one adds
+reaches the other through iCloud as it would reach another device, since each wallet's backup is one of the
+others the open wallet reads. -/
+def twoWalletsOneDevice (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let d ← device root "twoWallets" cloud cloudKeys
+  let first ← d.create
+  let added := Real.slotDir d.dir (← Real.freeSlot d.dir)
+  IO.FS.createDirAll added
+  check "an empty place beside the first wallet" ((← d.backend.openWallet .signet added) matches .missing)
+  d.backend.startNetworking d.settings
+  let second ← d.backend.createWallet .signet added
+  unless ← waitUntil 5_000 (every := 10) (do return (← d.app.controller.get).lastSaved.isSome) do
+    throw "the second wallet's backup was not saved"
+  discard <| waitUntil 2_000 (every := 10) do
+    let s ← d.app.controller.get
+    return !s.scheduled && !s.busy
+  check "the second wallet is another wallet, with a backup of its own" (second != first && (← cloud.count) == 2)
+  discard <| d.backend.addSignerKeys "Dana" (← testKey 0xB2)
+  d.publish
+  check "its view is its own, in its own directory"
+    ((← d.view).wallet == second && (← (System.FilePath.mk added / "device-sync.json").pathExists))
+  -- the first wallet again: before the backup is pointed at it, a round does nothing
+  check "the first wallet opens" ((← d.backend.openWallet .signet d.dir) matches .opened _)
+  d.look
+  check "a round before the backup knows which wallet is open takes nothing" ((← d.signerNames) == [])
+  d.app.configureCurrent
+  d.look
+  check "the first wallet takes what the second added, as from another device" ((← d.signerNames) == ["Dana"])
+  check "…into its own view and its own signers" ((← d.view).wallet == first)
+  discard <| d.backend.addSignerKeys "Erin" (← testKey 0xC3)
+  d.publish
+  check "the second wallet opens" ((← d.backend.openWallet .signet added) matches .opened _)
+  d.app.configureCurrent
+  check "its signers are still only its own" ((← d.signerNames) == ["Dana"])
+  d.look
+  check "…until it looks, and takes the first wallet's" ((← d.signerNames).length == 2 && (← d.signerNames).contains "Erin")
+  check "two wallets, two backups, no more" ((← cloud.count) == 2)
+  d.stop
+
 def whenNothingFollows (root : System.FilePath) : TM Unit := do
   let cloud ← Real.MemoryCloud.new
   -- the first device's key reaches the second only when the test says so (iCloud Keychain is its own service)
@@ -860,6 +901,7 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "olderBackups" (olderBackups root)
   runTest "olderForms" (olderForms root)
   runTest "walletChangesMidRound" (walletChangesMidRound root)
+  runTest "twoWalletsOneDevice" (twoWalletsOneDevice root)
   runTest "whenNothingFollows" (whenNothingFollows root)
   runTest "threeDevices" (threeDevices root)
   runTest "leftAlone" (leftAlone root)

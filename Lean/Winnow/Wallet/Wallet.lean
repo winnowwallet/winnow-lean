@@ -1272,6 +1272,17 @@ def rollBack (w : Wallet) (forkHeight : UInt32) : WM Unit := do
 
 /-! ### Import -/
 
+/-- The id of the wallet a bundle restores, with nothing stored or read: the fingerprint its descriptor names,
+or, for a bundle of a phrase alone, that of the phrase's master key. A caller that keeps several wallets asks
+this before it writes one. -/
+def importedWalletID (bundle : ImportBundle) : WM String := do
+  if let some text := bundle.descriptor then
+    let parsed ← WM.liftE (·.name) (Descriptor.parse text)
+    return hex8 (← WM.wallet (origin parsed)).fingerprint
+  let some mnemonic := bundle.mnemonic | throw (.wallet (.invalidBundle "no usable descriptor"))
+  WM.liftE (·.name) (BIP39.validate mnemonic)
+  return hex8 (← WM.liftE (·.name) (HDKey.ofSeed (BIP39.seed mnemonic))).fingerprint
+
 /-- The descriptor and the neutered account key a bundle restores, and, when the bundle carries the recovery
 phrase, the master key (which nothing else here has, and the bundle's cards are checked against). -/
 def importedKeyMaterial (bundle : ImportBundle) (network : BitcoinNetwork) (keyStore : KeyStore IO) :

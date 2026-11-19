@@ -41,6 +41,30 @@ def secretInUseElsewhere (env : Env) (dir id : String) : IO Bool := do
       | .error _ => return true
   return false
 
+/-- The wallets kept for a network, the network's own directory first: each slot's file opened for its id and
+account key. A file that does not read is left out here (it is shown as damaged when it is opened). -/
+def heldWallets (env : Env) (networkDir : String) : IO (Array HeldWallet) := do
+  let mut held : Array HeldWallet := #[]
+  for slot in ← listSlots networkDir do
+    let dir := slotDir networkDir slot
+    match ← (Wallet.open (walletPath dir) env.deps.keyStore env.deps.random).run with
+    | .ok w => held := held.push { id := w.id, slot, dir, accountKey := w.accountKey }
+    | .error _ => pure ()
+  return held
+
+/-- `Core.held` read again from the files: after a wallet is opened, adopted or deleted. -/
+def refreshHeld (env : Env) : IO Unit := do
+  let held ← match (← env.get).dir with
+    | some dir => heldWallets env (networkDirOf dir)
+    | none => pure #[]
+  env.modify fun c => { c with held }
+
+/-- `Backend.wallets`. -/
+def wallets (env : Env) (networkDir : String) : IO (List WalletSummary) := do
+  let c ← env.get
+  return (← heldWallets env networkDir).toList.map fun h =>
+    { id := h.id, slot := h.slot, active := c.wallet.isSome && c.dir == some h.dir }
+
 /-- The network's directory becomes current; another network or directory first ends the old one
 (`switchNetwork`: stop, drop the wallet, nothing carried over). -/
 def switchTo (env : Env) (n : WinnowApp.Network) (dir : String) : IO Unit := do
@@ -71,6 +95,15 @@ def bootResult (dir walletID : String) : IO BootResult := do
   removeQuietly (backupPendingPath dir walletID)
   return .opened walletID
 
+/-- A wallet is open in `dir`: it is the one to open next time, and the wallets kept beside it are read. The
+pointer is written only now, so a wallet that failed to open is never the one a launch goes back to. -/
+def walletOpened (env : Env) (dir : String) : IO Unit := do
+  let network := networkDirOf dir
+  -- one wallet in the network's own directory needs no pointer: an install that never adds one never has it
+  if slotOf dir != "" || (← (activeSlotPath network).pathExists) then
+    try writeActiveSlot network (slotOf dir) catch _ => pure ()
+  refreshHeld env
+
 /-- A `String` as Swift's `debugDescription` quotes it (inside `String(describing:)` of an enum payload). -/
 def swiftQuoted (s : String) : String :=
   "\"" ++ String.join (s.toList.map fun c => match c with
@@ -90,21 +123,29 @@ def keyStoreErrorDescribing : Keys.KeyStoreError → String
 def openWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO BootResult := do
   switchTo env n dir
   if let some message ← env.hooks.configure n dir then return .damaged message
-  if let some w := (← env.get).wallet then return ← bootResult dir w.id
+  if let some w := (← env.get).wallet then
+    walletOpened env dir
+    return ← bootResult dir w.id
   let path := walletPath dir
-  if !(← path.pathExists) then return .missing
+  if !(← path.pathExists) then
+    -- an empty place (a new install, or a wallet about to be added): the wallets beside it are still read
+    refreshHeld env
+    return .missing
   match ← (Wallet.open path env.deps.keyStore env.deps.random).run with
   | .error _ => return .damaged damagedWalletText
   | .ok w =>
     let installed ← env.withWalletLock <| env.modifyGet fun c =>
       if c.dir == some dir && c.wallet.isNone then (true, c.withWallet (some w)) else (false, c)
     if !installed then
-      if let some w' := (← env.get).wallet then return ← bootResult dir w'.id
+      if let some w' := (← env.get).wallet then
+        walletOpened env dir
+        return ← bootResult dir w'.id
     -- `upgradeKeyProtection`: best effort, attributes only
     match ← (env.deps.keyStore.upgradeProtection w.id).run with
     | .ok true => env.journal "keychain.protectionUpgraded" [("walletID", w.id)]
     | .ok false => pure ()
     | .error e => env.journal "keychain.protectionUpgradeFailed" [("walletID", w.id), ("error", keyStoreErrorDescribing e)]
+    walletOpened env dir
     return ← bootResult dir w.id
 
 /-- `Backend.personPresent`: a search for cards that has no search key (one begun by a build that read the
@@ -234,6 +275,7 @@ def adopt (env : Env) (w : Wallet) (dir : String) (startSync : Bool) : IO Unit :
   if let some n := n then
     if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
   env.withWalletLock <| env.modify fun c => { (c.withWallet (some w)) with stack := none, reviews := #[], bumps := #[] }
+  walletOpened env dir
   if let some existing := stack then
     if (← existing.chain.startHeight) > (← w.nextScanHeight) then
       -- the windows watch the pool that stops here
@@ -265,7 +307,13 @@ def createWallet (env : Env) (n : WinnowApp.Network) (dir : String) : IO (String
   let some stack := (← env.get).stack | failWith .noStack
   let knownHeight ← creationHeightForNewWallet stack
   env.replacingWallet
-  let w ← runWM (Wallet.create (Network.tx n) env.deps.keyStore (some (walletPath dir)) (entropy := env.deps.entropy) (creationHeight := knownHeight)
+  -- a pinned seed (test mode) is the first wallet's: one added beside it is another wallet, made from the
+  -- same pin and its slot, so a run that adds a wallet is still the same run every time
+  let entropy := match env.deps.entropy, slotOf dir with
+    | some pinned, "" => some pinned
+    | some pinned, slot => some ((sha256 (pinned ++ slot.toUTF8)).extract 0 16)
+    | none, _ => none
+  let w ← runWM (Wallet.create (Network.tx n) env.deps.keyStore (some (walletPath dir)) (entropy := entropy) (creationHeight := knownHeight)
     (random := env.deps.random))
   adopt env w dir true
   let some words ← readMnemonic env w.id | failWith .mnemonicUnavailable
@@ -340,6 +388,11 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
   -- wallet half-way
   env.hooks.multisigValidate (bundle.vaults.getD #[]) (Network.tx n)
   env.hooks.signerValidate (bundle.signers.getD #[]) (Network.tx n)
+  -- a wallet this device already keeps for this network, elsewhere than here, is not kept twice: the two
+  -- would be one Keychain item with two histories. (Here itself is the wallet's own backup taken again.)
+  let id ← runWM (Wallet.importedWalletID bundle)
+  for h in ← heldWallets env (networkDirOf dir) do
+    if h.id == id && h.dir != dir then failWith .walletAlreadyHeld
   env.journal "import.started" (bundleFields bundle)
   switchTo env n dir
   env.replacingWallet
@@ -417,8 +470,9 @@ def revealMnemonic (env : Env) : IO (List String) := do
   let some words ← readMnemonic env w.id | failText WalletError.mnemonicUnavailable.description
   return words.splitOn " "
 
-/-- `destroyWallet()`: networking down, the key first, then the per-wallet files (headers and peers stay). The
-wallet is let go before its files go,
+/-- `destroyWallet()`: networking down, the key first, then the per-wallet files (in the network's own
+directory headers, peers, contacts and signers stay; an added wallet's directory goes whole). The wallet is
+let go before its files go,
 so a write through it still in flight (a sync pass) is refused rather than writing `wallet.json` back
 (backend-test `oldWalletWritesFlow`). With `expected`, only that wallet is deleted: the one open may no
 longer be the one the person was shown. The key stays while another wallet file on the device is the same
@@ -449,7 +503,18 @@ def deleteWallet (env : Env) (expected : Option String := none) : IO Unit := do
     for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json"] do
       removeQuietly (dirFile dir name)
   if let (some n, some dir) := (c.network, c.dir) then
-    if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
+    if networkDirOf dir == dir then
+      if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
+    else
+      -- an added wallet's directory goes whole, with its contacts, signers, headers and peers; no place is
+      -- current until a wallet is opened
+      discardEmptySlot dir
+      env.modify fun c => { c with dir := none }
+  let network := c.dir.map networkDirOf
+  env.modify fun c => { c with held := #[] }
+  if let some network := network then
+    let held ← heldWallets env network
+    env.modify fun c => { c with held }
   env.journal "wallet.destroyed" [("walletID", w.id)]
 
 /-! ## Receiving -/

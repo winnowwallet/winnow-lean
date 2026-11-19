@@ -590,6 +590,77 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
   check "restore: a second restore is refused" (← fails (b.backend.restoreCloudBackup .signet b.dir backup.id))
   b.backend.stopNetworking
 
+/-- A second wallet added from iCloud beside the one a phone already keeps. The restore list says which
+wallet each backup is of and leaves out the phone's own; the restored wallet goes in a slot of its own with a
+backup record of its own; the first wallet's file, its backup's record and its settings are not touched; a
+wallet already kept is refused; and "automatic backup off" is each wallet's own. -/
+def secondWalletFromICloud (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let sharedKeys ← Real.memoryCloudKeys
+  -- another device, another wallet, backed up
+  let a ← cloudPhone root "secondA" (← newKeys) true (some cloud) (some sharedKeys)
+  let other ← need "the other wallet" (Wallet.create .signet a.keys (some (System.FilePath.mk a.dir / "wallet.json")) (some (ByteArray.mk (Array.replicate 16 0xA7))))
+  discard <| a.backend.openWallet .signet a.dir
+  a.activate
+  unless ← waitUntil 5000 (every := 10) (do return (← a.app.controller.get).lastSaved.isSome) do throw "the other device's backup was not saved"
+  a.backend.cloudScene false
+  a.backend.stopNetworking
+  -- this phone and its own wallet, backed up too
+  let b ← cloudPhone root "secondB" (← newKeys) true (some cloud) (some sharedKeys)
+  discard <| b.backend.openWallet .signet b.dir
+  b.activate
+  let own ← b.backend.createWallet .signet b.dir
+  unless ← waitUntil 5000 (every := 10) (do return (← b.app.controller.get).lastSaved.isSome) do throw "this phone's backup was not saved"
+  check "two wallets, two backups" (own != other.id && (← cloud.count) == 2)
+  let ownBackup := ((← b.app.controller.get).configuration.map (·.backup.id)).getD ""
+  let walletFile := System.FilePath.mk b.dir / "wallet.json"
+  let configFile := System.FilePath.mk b.dir / "cloud-backup.json"
+  let (walletBefore, configBefore) := (← IO.FS.readBinFile walletFile, ← IO.FS.readBinFile configFile)
+  let recordBefore := ((← cloud.records.get).find? (·.id == ownBackup)).map (·.savedAt)
+  -- a place for a wallet to be added: nothing is there yet
+  let slot ← Real.freeSlot b.dir
+  let added := Real.slotDir b.dir slot
+  IO.FS.createDirAll added
+  check "the place for a second wallet is empty" (slot == "1" && ((← b.backend.openWallet .signet added) matches .missing))
+  b.backend.discoverCloudBackups
+  let found := (← b.backend.cloudStatus).available
+  check "the list offers the other wallet's backup, named, and not this phone's own"
+    (found.map (·.walletID) == [some other.id]) (reprStr found)
+  let some backup := found.head? | throw "no backup offered"
+  let (restoredID, _, _) ← b.backend.restoreCloudBackup .signet added backup.id
+  check "the other wallet is restored beside the first" (restoredID == other.id && (← Real.holdsWallet added))
+  check "both are kept, the restored one open"
+    ((← b.backend.wallets b.dir) == [{ id := own, slot := "", active := false }, { id := other.id, slot := "1", active := true }])
+    (reprStr (← b.backend.wallets b.dir))
+  check "the first wallet's file and its backup's record are as they were"
+    ((← IO.FS.readBinFile walletFile) == walletBefore && (← IO.FS.readBinFile configFile) == configBefore &&
+     ((← cloud.records.get).find? (·.id == ownBackup)).map (·.savedAt) == recordBefore)
+  let st ← b.app.controller.get
+  check "the restored wallet keeps a backup record of its own on this phone"
+    (st.enabled && (st.configuration.map (·.backup.id)) != some backup.id && (st.configuration.map (·.backup.id)) != some ownBackup)
+  -- the same wallet again, into another place
+  let again := Real.slotDir b.dir (← Real.freeSlot b.dir)
+  IO.FS.createDirAll again
+  discard <| b.backend.openWallet .signet again
+  b.backend.discoverCloudBackups
+  check "a wallet already kept is no longer offered" ((← b.backend.cloudStatus).available.isEmpty)
+    (reprStr (← b.backend.cloudStatus).available)
+  check "…and is refused if asked for, with nothing written"
+    ((← fails (b.backend.restoreCloudBackup .signet again backup.id)) && !(← Real.holdsWallet again))
+  -- "automatic backup off" is a wallet's own
+  -- (the app's tick points the backup at the wallet now open, as it does every second while the app is open)
+  discard <| b.backend.openWallet .signet added
+  b.backend.setAutomaticCloudBackup false
+  check "off for the restored wallet" (!(← b.backend.cloudStatus).automaticEnabled)
+  discard <| b.backend.openWallet .signet b.dir
+  b.backend.cloudTick
+  check "the first wallet's is still on, and its backup is still its own"
+    ((← b.backend.cloudStatus).automaticEnabled && ((← b.app.controller.get).configuration.map (·.backup.id)) == some ownBackup)
+  discard <| b.backend.openWallet .signet added
+  b.backend.cloudTick
+  check "…and the restored wallet's still off, after a switch away and back" (!(← b.backend.cloudStatus).automaticEnabled)
+  b.backend.stopNetworking
+
 /-! ## The screens: onboarding without a checklist, the home's backup line, Settings → Backup -/
 
 def rendered (h : H) : String := (LeanNative.Html.toWire h).toJson.compress
@@ -968,5 +1039,6 @@ def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
   runTest "automaticCloud" (automaticCloudTests root)
   runTest "scopedPreparation" (scopedPreparationTests root)
   runTest "restoreFromICloud" (restoreFromICloud root)
+  runTest "secondWalletFromICloud" (secondWalletFromICloud root)
   runTest "declinedDeviceCheck" (declinedDeviceCheck root)
   try IO.FS.removeDirAll root catch _ => pure ()
