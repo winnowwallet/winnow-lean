@@ -9,6 +9,92 @@ rates. (The vault, approval and MuSig2 helpers went with vaults, upstream 1cf93f
 
 namespace WinnowApp
 
+/-! ## The build's version
+
+A release's version is set on the bundle when Xcode builds it (release.yml, from the tag), after the Lean is
+compiled, so no constant here can hold it: the app reads it at launch from the `Info.plist` beside its
+executable, in either form a build writes one (XML, or a binary property list). -/
+
+namespace BundleInfo
+
+/-- A version or a build number as a release writes one: digits and dots, a digit first, at most 32
+characters. A build setting left unexpanded (`$(MARKETING_VERSION)`) is not one. -/
+def isVersion (s : String) : Bool :=
+  s.length ≤ 32 && s.all (fun c => c.isDigit || c == '.') && (s.toList.head?.map Char.isDigit).getD false
+
+/-- The string under `key` in an XML property list: `<key>…</key>` and the `<string>…</string>` after it,
+with nothing but space between. -/
+def xmlString? (text key : String) : Option String := do
+  let _ :: after :: _ := text.splitOn s!"<key>{key}</key>" | none
+  let gap :: value :: _ := after.splitOn "<string>" | none
+  guard (gap.all Char.isWhitespace)
+  let found :: _ :: _ := value.splitOn "</string>" | none
+  some found
+
+def byte? (b : ByteArray) (pos : Nat) : Option UInt8 := if pos < b.size then some (b.get! pos) else none
+
+/-- The big-endian number in the `n` bytes (1 to 8) at `pos`. -/
+def number? (b : ByteArray) (pos n : Nat) : Option Nat :=
+  if n == 0 || n > 8 || pos + n > b.size then none
+  else some ((List.range n).foldl (fun acc i => acc * 256 + (b.get! (pos + i)).toNat) 0)
+
+/-- How many items the object at `pos` holds and where they start: the marker's low four bits, or, when
+those are all set, the integer object that follows. -/
+def count? (b : ByteArray) (pos : Nat) : Option (Nat × Nat) := do
+  let low := (← byte? b pos).toNat % 16
+  if low < 15 then return (low, pos + 1)
+  let size ← byte? b (pos + 1)
+  guard (size.toNat / 16 == 1 && size.toNat % 16 ≤ 3)
+  let width := 2 ^ (size.toNat % 16)
+  return (← number? b (pos + 2) width, pos + 2 + width)
+
+/-- The string object at `pos`: ASCII (type 5) or UTF-16 without surrogates (type 6). -/
+def string? (b : ByteArray) (pos : Nat) : Option String := do
+  let kind := (← byte? b pos).toNat / 16
+  let (n, start) ← count? b pos
+  if kind == 5 then
+    guard (start + n ≤ b.size)
+    String.fromUTF8? (b.extract start (start + n))
+  else if kind == 6 then
+    guard (start + 2 * n ≤ b.size)
+    let units := (List.range n).map fun i => (b.get! (start + 2 * i)).toNat * 256 + (b.get! (start + 2 * i + 1)).toNat
+    guard (units.all fun u => u < 0xD800 || u > 0xDFFF)
+    some (String.ofList (units.map Char.ofNat))
+  else none
+
+/-- The string under `key` in a binary property list (`bplist00`) whose top object is a dictionary: the
+trailer's sizes and offset table, then the dictionary's keys until one is `key`. Every read is inside the
+bytes, so a file that is cut short or is something else answers none. -/
+def binaryString? (b : ByteArray) (key : String) : Option String := do
+  guard (b.size ≥ 40 && b.extract 0 8 == "bplist00".toUTF8)
+  let trailer := b.size - 32
+  let offsetSize := (b.get! (trailer + 6)).toNat
+  let refSize := (b.get! (trailer + 7)).toNat
+  let objects ← number? b (trailer + 8) 8
+  let top ← number? b (trailer + 16) 8
+  let table ← number? b (trailer + 24) 8
+  let offset (ref : Nat) : Option Nat := if ref < objects then number? b (table + ref * offsetSize) offsetSize else none
+  let dictionary ← offset top
+  guard ((← byte? b dictionary).toNat / 16 == 13)
+  let (n, start) ← count? b dictionary
+  guard (n ≤ 4096)
+  (List.range n).findSome? fun i => do
+    guard ((← string? b (← offset (← number? b (start + i * refSize) refSize))) == key)
+    string? b (← offset (← number? b (start + (n + i) * refSize) refSize))
+
+/-- What Settings shows as the version, `0.9.19 (26)`: the bundle's short version and its build number, from
+its `Info.plist`. None when either is missing or is not a version, and for anything that is not a bundle's
+property list. -/
+def versionText? (plist : ByteArray) : Option String := do
+  let read (key : String) : Option String :=
+    binaryString? plist key <|> (String.fromUTF8? plist).bind (xmlString? · key)
+  let version ← read "CFBundleShortVersionString"
+  let build ← read "CFBundleVersion"
+  guard (isVersion version && isVersion build)
+  some s!"{version} ({build})"
+
+end BundleInfo
+
 /-! ## Sync -/
 
 /-- `AppModel.syncStatusText` (AppModel.swift:220): one line for Settings → Network → Sync; none when there is nothing to show. -/

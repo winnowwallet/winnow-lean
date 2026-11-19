@@ -509,6 +509,8 @@ structure Model where
   the wallets kept for it, as the backend last told (`Host.walletPlace`). -/
   slot : String := ""
   wallets : List WalletSummary := []
+  /-- This build's version as its bundle says it, `0.9.19 (26)`; none until launch has read it. -/
+  appVersion : Option String := none
   records : Records := {}
   /-- Test mode's `WINNOW_E2E_NETWORK`: the network cannot be switched away from it. -/
   forcedNetwork : Option Network := none
@@ -599,6 +601,9 @@ inductive Done where
 inductive Host where
   /-- Test mode at launch (E2EMode): the forced network; sent before `settingsLoaded`. -/
   | launched (forcedNetwork : Option Network)
+  /-- The version on this build's bundle (`BundleInfo.versionText?`), read at launch; not sent when the
+  bundle has none to read (the tests' executables). -/
+  | versionRead (text : String)
   | settingsLoaded (s : Settings)
   | booted (gen : Nat) (r : BootResult)
   /-- Which place was opened and the wallets kept for the network: before `booted`, and again when one is
@@ -1064,8 +1069,6 @@ def canReview (i : SendInputs) : Bool :=
   (match i.amount.trimAscii.copy.toNat? with | some n => n > 0 | none => false)
 
 def networks : List Network := [.mainnet, .signet]
-
-def appVersionText : String := "0.1.0 (1)"
 
 /-! ## Small helpers every area uses -/
 
