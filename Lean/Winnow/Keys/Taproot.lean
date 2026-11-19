@@ -17,11 +17,7 @@ def TaprootError.name : TaprootError → String
   | .tweakFailed => "tweakFailed" | .leafNotFound => "leafNotFound"
 
 /-- `Data.lexicographicallyPrecedes`. -/
-def lexPrecedes (a b : ByteArray) : Bool := Id.run do
-  for i in [0:min a.size b.size] do
-    if a[i]! < b[i]! then return true
-    if a[i]! > b[i]! then return false
-  return a.size < b.size
+def lexPrecedes (a b : ByteArray) : Bool := ByteArray.lexLt a b
 
 namespace Taproot
 

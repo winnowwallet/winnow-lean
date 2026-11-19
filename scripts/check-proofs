@@ -21,6 +21,9 @@ LEAN_APP = REPO / "LeanApp"
 BOUNDS_CLEAN = """
 Secp.Bytes Secp.Sha256 Secp.Der Secp.Curve.Spec Secp.Signing
 SecpCt.Word SecpCt.Field SecpCt.Scalar SecpCt.Point SecpCt.Schnorr SecpCt.Ecdsa SecpCt.Keys
+Winnow.Keys.Secp256k1 Winnow.Keys.BIP32 Winnow.Keys.Taproot Winnow.Keys.BIP86
+Winnow.Keys.SilentPayments Winnow.Keys.SilentPaymentPairing
+Winnow.Tx.Script Winnow.Tx.Taproot
 """.split()
 
 PROOF_PATTERNS = (
@@ -123,6 +126,10 @@ def main() -> int:
         p = module_path(spec_mod)
         if p is not None:
             runtime[spec_mod] = p
+    spec_dir = LEAN / "Winnow" / "Spec"
+    if spec_dir.is_dir():
+        for sp in sorted(spec_dir.glob("*.lean")):
+            runtime[f"Winnow.Spec.{sp.stem}"] = sp
 
     # 1. Zero proof leakage into runtime closure
     for mod in sorted(runtime):

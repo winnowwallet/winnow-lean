@@ -8,12 +8,7 @@ opcode constants Winnow uses, minimal pushes and small script numbers. -/
 namespace Winnow
 
 /-- `Data.lexicographicallyPrecedes`: bytewise, a proper prefix first. -/
-def bytesLt (a b : ByteArray) : Bool := Id.run do
-  let n := min a.size b.size
-  for i in [0:n] do
-    if a[i]! < b[i]! then return true
-    if a[i]! > b[i]! then return false
-  return a.size < b.size
+def bytesLt (a b : ByteArray) : Bool := ByteArray.lexLt a b
 
 /-- Sort byte strings with `bytesLt` (stable). -/
 def sortBytes {α} (key : α → ByteArray) (xs : Array α) : Array α :=
@@ -70,7 +65,8 @@ def appendScriptNumber (s : Script) (value : Nat) : Script :=
     while v > 0 do
       enc := enc.push (v % 256).toUInt8
       v := v / 256
-    if enc[enc.size - 1]! &&& 0x80 != 0 then enc := enc.push 0
+    if h : 0 < enc.size then
+      if (enc[enc.size - 1]'(by omega)) &&& 0x80 != 0 then enc := enc.push 0
     return s.appendPush enc
 
 /-- `Script.build`: run a body over the empty script. -/

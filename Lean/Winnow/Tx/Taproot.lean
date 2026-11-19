@@ -31,8 +31,8 @@ def serialized (c : ControlBlock) : ByteArray :=
 
 /-- `ControlBlock(serialized:)`: 33 + 32m bytes with m ≤ 128 (`invalidControlBlock` otherwise). -/
 def parse? (b : ByteArray) : Option ControlBlock :=
-  if b.size ≥ 33 && (b.size - 33) % 32 == 0 && (b.size - 33) / 32 ≤ 128 then
-    let c := b[0]!
+  if h : 33 ≤ b.size ∧ (b.size - 33) % 32 = 0 ∧ (b.size - 33) / 32 ≤ 128 then
+    let c := b[0]'(by omega)
     some { leafVersion := c &&& 0xFE, outputKeyParity := c &&& 1 != 0, internalKey := b.extract 1 33,
            path := (List.range ((b.size - 33) / 32)).toArray.map fun i => b.extract (33 + 32 * i) (65 + 32 * i) }
   else none
