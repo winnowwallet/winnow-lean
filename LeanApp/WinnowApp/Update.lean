@@ -60,11 +60,20 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     match r with
     | .opened id =>
       let (m, scan) := { m with stage := .ready, walletID := some id }.startLedgerScan
-      (m, [.refresh g] ++ start ++ pending ++ scan)
+      -- switched to sign a payment: the account's page, where this wallet adds its signature
+      let (m, account) := match m.pendingAccount with
+        | some a => ({ m with pendingAccount := none, routes := [.multisigAccount a] }, [Cmd.multisigOverview g])
+        | none => (m, [])
+      (m, [.refresh g] ++ start ++ pending ++ scan ++ account)
     -- activation builds the stack whatever the stage, so a new wallet is dated at a synced tip; onboarding
     -- looks for this network's iCloud backups (`.task(id: model.network)`)
     | .missing => ({ m with stage := .onboarding, walletID := none }, start ++ [.discoverCloud] ++ pending)
     | .damaged msg => ({ m with stage := .storageDamaged msg }, pending)
+  | .renamed g error =>
+    if !m.sameWallet g then (m, []) else
+    match error with
+    | some e => ({ m with renameBusy := false, renameError := some e }, [])
+    | none => ({ m with renameBusy := false, sheets := m.sheets.filter (· != .renameWallet) }, [])
   | .walletPlace g slot wallets =>
     if !m.sameWallet g then (m, []) else ({ m with slot, wallets }, [])
   | .created g id =>
@@ -315,7 +324,7 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
   (m, cs ++ cs2)
 where onArea (h : Host) (m : Model) : Model × List Cmd :=
   match h with
-  | .launched .. | .versionRead .. | .settingsLoaded .. | .booted .. | .walletPlace .. | .created .. | .imported .. | .cloud ..
+  | .launched .. | .versionRead .. | .settingsLoaded .. | .booted .. | .renamed .. | .walletPlace .. | .created .. | .imported .. | .cloud ..
   | .cloudRestored ..
   | .deleted .. =>
     m.onWalletHost h
@@ -333,7 +342,7 @@ where onArea (h : Host) (m : Model) : Model × List Cmd :=
     m.onSystemHost h
   | .pasted target text => m.onPasted target text
   | .multisig .. | .multisigChecked .. | .multisigAdded .. | .multisigCreated .. | .multisigRemoved ..
-  | .drafted .. | .collected .. | .draftBroadcast .. | .spendHandled .. | .ledgerPaired ..
+  | .drafted .. | .collected .. | .handedOver .. | .draftBroadcast .. | .spendHandled .. | .ledgerPaired ..
   | .ledgerAddressShown .. | .ledgerRegistered .. =>
     m.onMultisigHost h
   | .signerSaved .. | .signerRenamed .. | .signerRemoved .. => m.onSignerHost h

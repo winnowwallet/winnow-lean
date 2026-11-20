@@ -1,17 +1,13 @@
 Winnow: the same wallet, rewritten in Lean
 
-New: Settings → Wallets → Add a wallet showed no iCloud restore, because the search was cut short; it now offers "Restore your iCloud wallet" (or "Look for iCloud backups again"). And if the home shows "Unlock with Face ID", tap it once: an earlier version locked some records' keys behind Face ID.
+New: profiles. A profile is one key and what it holds: its coins, payments, contacts, backup and the multisig accounts its key is in.
+1. The home names the open profile: tap it. Switch: instant, no "Syncing" catch-up. Rename it; the name shows on your other devices after a minute.
+2. Add a profile (new, or restore another of yours from iCloud). Pay the one that is not open; open it: the payment is already there.
+3. The home lists only this profile's accounts and counts only its money; "Watching" holds the others, each saying where it signs.
+4. A 2-of-2 of two profiles here: sign in one, tap "Switch to … and sign": the other opens on the payment; add its signature.
+5. Leave one device off a while, use the other, then open the first: it should be up to date at once, without scanning the gap.
 
 Since 0.9.21: more of the wallet is proved, and fees are whole-number arithmetic. Send once: the fee quoted must be the fee paid.
-
-Since 0.9.20: several wallets on one device
-
-A device can keep several wallets for a network, each with its own coins, history, contacts and backup. Only the open one syncs.
-1. Settings → Wallets → Add a wallet. Create one, or restore another of yours from its iCloud backup. Your first wallet must be untouched: same balance and Activity when you open it again.
-2. Settings → Wallets: tap the other wallet to open it. It catches up when opened.
-3. An account with a key of each wallet: its payment page has "Add this phone's signature" and "Add wallet …'s signature", each asking Face ID by itself. Both make a 2-of-2 complete on this device.
-4. An account that came from another device and was "Watch-only on this device" signs here once you add the wallet that holds its key.
-5. Delete the added wallet (Settings → Danger zone names it): the first wallet still opens and sends.
 
 Since 0.9.16
 

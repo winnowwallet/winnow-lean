@@ -401,6 +401,9 @@ yet to sign the payment on the screen. -/
 structure HeldKey where
   walletID : String
   unsigned : Bool
+  /-- Its place on this device, to switch to, and what it is called. -/
+  slot : String := ""
+  name : String := ""
   deriving Repr, Inhabited, BEq
 
 /-- `MultisigSigningScreen`: the review, the verified signatures per usable path, and the progress. -/
@@ -471,6 +474,11 @@ structure MultisigInfo where
   draft : Option MultisigDraftInfo := none
   /-- Spends this phone broadcast that no block has taken (display-hex txids). -/
   inFlight : List String := []
+  /-- The open wallet's key is one of the account's: it is among this wallet's accounts, and its money in
+  this wallet's balance. -/
+  signsHere : Bool := true
+  /-- Otherwise, the name of another wallet on this device whose key is one of the account's. -/
+  signsIn : Option String := none
   nextReceiveIndex : Nat := 0
   receiveAddress : Option String := none
   coins : List MultisigCoin := []

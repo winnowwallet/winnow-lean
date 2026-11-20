@@ -357,6 +357,12 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
     if seeded then authenticated fx g "import" "Import this wallet's recovery phrase" act
     else background fx g "import" act
   | .finishOnboarding _ => discard <| IO.asTask b.finishOnboarding
+  | .renameWallet g name => background fx g "rename" do
+      match ← (b.renameWallet name).toBaseIO with
+      | .ok () =>
+        tellWallets b fx g (← loadSettings).network
+        return .renamed g none
+      | .error e => return .renamed g (some (toString e))
   | .deleteWallet g => background fx g "delete" do
       -- the wallet open when this was asked: another opened since is not the one meant
       if let some (_, network, _) ← openPlace.get then discard <| placeDir g network
@@ -562,11 +568,10 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       authenticated fx g s!"collect.{e}" "Sign this multisig payment" do
         b.signDraft id
         return .collected g e id
-  | .signDraftWith g e id walletID =>
-      -- another wallet kept on this device: asked for by itself, and named in what the person is asked
-      authenticated fx g s!"collect.{e}" s!"Sign this multisig payment with wallet {walletID}" do
-        b.signDraftWith id walletID
-        return .collected g e id
+  | .handOverDraft g e id slot => background fx g s!"collect.{e}" do
+      -- no key is read: the other wallet signs once it is open, asked for there
+      b.handOverDraft id slot
+      return .handedOver g e id slot
   | .signDraftWithLedger g e id => background fx g s!"collect.{e}" do
       b.signDraftWithLedger id
       return .collected g e id
@@ -683,7 +688,7 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   match c with
   | .boot => bootApp fx
   | .saveSettings .. | .openWallet .. | .openSlot .. | .createWallet .. | .importWallet .. | .finishOnboarding ..
-  | .deleteWallet .. =>
+  | .deleteWallet .. | .renameWallet .. =>
     performWallet b fx c
   | .refresh .. | .records .. | .syncNow .. | .retryPeers .. | .reconnect .. | .startNetworking .. | .stopNetworking =>
     performSync b fx c
@@ -700,7 +705,7 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .multisigOverview .. | .checkMultisigDescriptor .. | .addMultisigAccount .. | .removeMultisigAccount ..
   | .setAsideMultisig ..
   | .newMultisigAddress .. | .createMultisigAccount .. | .registerLedger .. | .pairLedger .. | .addSignerKeys ..
-  | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft .. | .signDraftWith ..
+  | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft .. | .handOverDraft ..
   | .signDraftWithLedger .. | .adoptDraft .. | .broadcastDraft .. | .discardDraft .. | .rebroadcastSpend ..
   | .abandonSpend .. | .scanLedgers .. | .askBluetooth =>
     performMultisig b fx c

@@ -105,16 +105,21 @@ device restored from the same iCloud backup signs. It needs automatic iCloud
 backup on; with it off, or iCloud away, the app works as before. See
 [how devices keep in step](CloudKit/README.md#your-other-devices).
 
-**Several wallets on one device.** Settings → Wallets lists the wallets a device
-keeps for the network and adds one more beside them: a new one, one restored from
-its iCloud backup, or one from a backup file. Each is whole, with its own coins,
-history, contacts, signers and backup, in a directory of its own; only the one
-that is open syncs, and the others catch up when they are opened. On a multisig
-account's signing page each wallet kept on the device that holds one of the
-account's keys has its own button and its own device check, so an account is
-only watched when none of them holds a key. Keeping two wallets on one device
-means that device alone can sign for both: a 2-of-2 of your phone's wallet and
-your Mac's is then spent from one of them.
+**Profiles.** A device can keep several profiles for a network. A profile is one
+key and what it holds: its own coins, history, contacts, signers and backup, in a
+directory of its own, and the multisig accounts its key is in. The home names the
+open profile; tapped, it lists them, switches, renames, and adds one more (a new
+one, one restored from its iCloud backup, or one from a backup file). The name
+travels with the profile's backup to the person's other devices. The home lists
+only the open profile's accounts and counts only its money; the others are folded
+under "Watching", each saying where it signs. One sync serves every profile on the
+network: the chain, peers and scan are the network's, every profile is scanned for
+in every pass, and switching is instant. A device that was off takes what another
+of the person's devices scanned further, once its own chain has the block that
+device's backup names, and scans only the rest. On a payment of an account whose
+other key is another profile's here, "Switch to … and sign" hands the payment to
+that profile, which opens and signs with its own key. Keeping two profiles on one
+device means that device alone can sign for both.
 
 ## Layout
 
@@ -198,9 +203,9 @@ what was on screen, and the log shows each step's time:
 - `accountFollowsDevices`: two launches with two seeds and one directory standing in for iCloud are two
   devices of one person; an account built and paid on the first shows on the second by itself, watch-only,
   with the balance its own scan confirms;
-- `twoWalletsOneDevice`: Settings → Wallets adds a second wallet beside the first; the second builds a 2-of-2
-  of the two, the node pays it, and its payment is signed by the open wallet and then, with a button of its
-  own, by the other wallet kept on the device, and broadcast.
+- `twoWalletsOneDevice`: Settings → Profiles adds a second profile beside the first; the second builds a 2-of-2
+  of the two, the node pays it, its payment is signed by the open profile, handed to the other with "Switch to
+  … and sign", signed there, and broadcast.
 
 They run two ways, both LeanNative's runners with `scripts/ui-fixture` as their hooks. `scripts/journeys --wire`
 (LeanNative's `wire-journeys`) runs them against the app itself, headless: the journeys executable

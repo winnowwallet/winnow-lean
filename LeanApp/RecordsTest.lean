@@ -2308,9 +2308,37 @@ def walletSwitcher (root : System.FilePath) : IO Unit := do
   let two : List WalletSummary := [{ id := "aaaa1111", slot := "", active := true }, { id := "bbbb2222", slot := "1" }]
   let ready : Model := { stage := .ready, active := true, walletID := some "aaaa1111", wallets := two }
   let page := rendered { ready with routes := [.settings] }
-  check "wallets: Settings lists the wallets kept, the open one marked, and offers one more"
-    (contains page "Wallet aaaa1111" && contains page "Wallet bbbb2222" && contains page "Add a wallet" && contains page Ids.addWalletButton)
-  check "wallets: the Danger zone names the wallet it deletes" (contains page "Removes wallet aaaa1111")
+  check "wallets: Settings lists the profiles kept, the open one marked, and offers one more and a rename"
+    (contains page "Wallet aaaa1111" && contains page "Wallet bbbb2222" && contains page "Add a profile" && contains page Ids.addWalletButton &&
+     contains page Ids.renameWalletButton)
+  check "wallets: the Danger zone names the profile it deletes" (contains page "Removes Wallet aaaa1111 (aaaa1111)")
+  -- the home: the open profile's name, which opens the list; a rename goes to the backend and closes its sheet
+  let home := (LeanNative.Html.toWire (view ready)).toJson.compress
+  check "wallets: the home names the open profile" (contains home Ids.walletNameButton && contains home "Wallet aaaa1111")
+  let (listed, _) := step (.home .openWallets) ready
+  check "wallets: …and its name opens the list of profiles" (listed.sheets == [.wallets])
+  let (naming, _) := step (.settings .openRename) listed
+  let (typed, _) := step (.settings (.setRenameDraft "Household")) naming
+  let (saving, cs) := step (.settings .saveRename) typed
+  check "wallets: a name is asked for and saved" (naming.sheets.getLast? == some .renameWallet && saving.renameBusy &&
+    cs.any fun c => c matches .renameWallet _ "Household")
+  let (refused, _) := onHost (.renamed saving.generation (some "A name is one short line of text.")) saving
+  check "wallets: a refused name says why, and the sheet stays" (refused.renameError.isSome && refused.sheets.getLast? == some .renameWallet)
+  let (named, _) := onHost (.renamed saving.generation none) saving
+  check "wallets: a saved name closes its sheet" (!named.sheets.contains .renameWallet && !named.renameBusy)
+  let (renamedList, _) := onHost (.walletPlace named.generation "" [{ id := "aaaa1111", slot := "", active := true, name := "Household" },
+    { id := "bbbb2222", slot := "1" }]) named
+  check "wallets: the new name is shown" (contains (LeanNative.Html.toWire (view renamedList)).toJson.compress "Household")
+  -- accounts by key: this profile's on the home, the others folded under one row, said where they sign
+  let ours : MultisigInfo := { id := "a1", name := "Ours", descriptor := "", balance := 5 }
+  let theirs : MultisigInfo := { id := "a2", name := "Theirs", descriptor := "", balance := 7, signsHere := false, signsIn := some "Phone" }
+  let withAccounts := { ready with multisig := { accounts := [ours, theirs] } }
+  let home := (LeanNative.Html.toWire (view withAccounts)).toJson.compress
+  check "accounts: the home lists this profile's account and folds the other under Watching"
+    (contains home "Ours" && !contains home "Theirs" && contains home Ids.homeWatchingRow && contains home "Watching 1 account" &&
+     contains home "in 1 multisig account")
+  let list := (LeanNative.Html.toWire (multisigSection withAccounts)).toJson.compress
+  check "accounts: the full list says where the other one signs" (contains list "Theirs" && contains list "Signs in Phone")
   let (same, cs) := step (.settings (.selectWallet "")) ready
   check "wallets: the open wallet chosen again changes nothing" (same.generation == ready.generation && cs.isEmpty)
   let (_, cs) := step (.settings (.selectWallet "7")) ready
@@ -2331,7 +2359,7 @@ def walletSwitcher (root : System.FilePath) : IO Unit := do
   let (empty, cs) := onHost (.booted adding.generation .missing) placed
   let screen := (LeanNative.Html.toWire (view empty)).toJson.compress
   check "wallets: …where onboarding is \"Add a wallet\", with a way back and no change of network"
-    (empty.stage == .onboarding && contains screen "Add a wallet" && contains screen Ids.cancelAddWalletButton &&
+    (empty.stage == .onboarding && contains screen "Add a profile" && contains screen Ids.cancelAddWalletButton &&
      contains screen Ids.createWalletButton && !contains screen Ids.onboardingTestNetwork && cs.any (· matches .discoverCloud))
   let first : Model := { stage := .onboarding }
   check "wallets: a first wallet's onboarding is as it was"

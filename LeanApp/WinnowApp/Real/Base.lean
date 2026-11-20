@@ -80,6 +80,9 @@ structure ProfileMultisig where
   headStart : Array MultisigAccountRecord → IO Bool := fun _ => pure false
   /-- The accounts as a backup carries them. -/
   backup : IO (Array MultisigAccountRecord) := pure #[]
+  /-- An account with the payment being collected (`handOverDraft`): its draft put in place, or the account
+  filed whole where it is not yet (the scan the two wallets share has it as current). -/
+  handOver : MultisigAccountRecord → IO Unit := fun _ => pure ()
   deriving Inhabited
 
 /-- What the core needs from people and labels (the records half plugs these in). -/

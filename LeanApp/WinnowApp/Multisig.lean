@@ -352,12 +352,12 @@ def stepMultisigCollect (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
     if spend.busy || !ok then (m, []) else
     let (m', e) := m.runCollect
     (m', [.signDraft g e id])
-  | .signWith id walletID =>
+  | .switchToSign id slot =>
     let ok := ((m.multisigInfo? id).bind (·.draft)).bind (·.screen) |>.any fun s =>
-      !s.progress.complete && s.heldKeys.any fun k => k.walletID == walletID && k.unsigned
+      !s.progress.complete && s.heldKeys.any fun k => k.slot == slot && k.unsigned
     if spend.busy || !ok then (m, []) else
     let (m', e) := m.runCollect
-    (m', [.signDraftWith g e id walletID])
+    (m', [.handOverDraft g e id slot])
   | .signWithLedger id =>
     let ok := ((m.multisigInfo? id).bind (·.draft)).bind (·.screen) |>.any fun s => s.progress.ledgerUnsigned && !s.progress.complete
     if spend.busy || !ok then (m, []) else
@@ -407,7 +407,7 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .newAddress | .askRemove | .remove | .askSetAside | .setAside | .sendFrom .. | .pasteForAccount .. | .verifyAddress | .rebroadcast ..
   | .askAbandon .. | .abandon =>
     stepMultisigAccount msg m
-  | .setPasted .. | .pastePSBT | .addPasted .. | .sign .. | .signWith .. | .signWithLedger .. | .broadcast .. | .askDiscard ..
+  | .setPasted .. | .pastePSBT | .addPasted .. | .sign .. | .switchToSign .. | .signWithLedger .. | .broadcast .. | .askDiscard ..
   | .discard =>
     stepMultisigCollect msg m
   | .openLedgerPair | .setLedgerName .. | .pairLedger =>
@@ -461,6 +461,11 @@ def Model.onMultisigHost (m : Model) (h : Host) : Model × List Cmd :=
     ({ m with send := { m.send with sending := false, collecting := some id, error := none }, spendingInFlight := false,
               collect := { epoch := spend.epoch + 1, loadingDraft := true } },
      [.multisigOverview g, .refresh g])
+  | .handedOver g e id slot =>
+    if !accepts g e id then (m, []) else
+    -- the other wallet opens on the same account's page, where it adds its own signature
+    let (m', cmds) := { m with collect := { spend with busy := false } }.switchWallet fun g' => .openSlot g' m.settings.network (some slot)
+    ({ m' with pendingAccount := some id }, cmds)
   | .collected g e id fromPaste =>
     if !accepts g e id then (m, [.multisigOverview m.generation]) else
     let m' := { m with collect := { spend with busy := false, pasted := if fromPaste then "" else spend.pasted } }
@@ -507,7 +512,9 @@ def accountRow (a : MultisigInfo) : H :=
   let row : H :=
     .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
           Html.tone .secondary (body (satsText a.balance))]
-  if a.watchOnly then .col [row, .identified (Ids.multisigWatchOnly a.id) (caption watchOnlyText)] else row
+  match a.signsIn with
+  | some name => .col [row, .identified (Ids.multisigSignsIn a.id) (caption s!"Signs in {name}")]
+  | none => if a.watchOnly then .col [row, .identified (Ids.multisigWatchOnly a.id) (caption watchOnlyText)] else row
 
 /-- An account on its way from another of the person's devices: its name, and that it is being caught up. -/
 def arrivingRow (a : ArrivingInfo) : H :=
@@ -771,14 +778,14 @@ def collectSections (m : Model) (id : String) : List H :=
              [ .identified Ids.multisigWatchOnlyNote (caption "This device holds none of this account's keys, so it cannot sign. Signatures made on your other devices arrive here.") ]
             else
              -- the open wallet's key, where it holds one; then each other wallet kept on this device that
-             -- holds one: a key a tap, each asked for by itself
+             -- holds one: the payment goes to it, and it adds its own signature once it is open
              (if p.phoneHolds || s.heldKeys.isEmpty then
                [ .identified Ids.multisigSignButton (.button "Add this phone's signature" .plain
                    (if f.busy || !p.phoneUnsigned || p.complete then none else some (.multisig (.sign id)))) ]
               else []) ++
              (s.heldKeys.map fun k =>
-               .identified (Ids.multisigSignWith k.walletID) (.button s!"Add wallet {k.walletID}'s signature" .plain
-                 (if f.busy || !k.unsigned || p.complete then none else some (.multisig (.signWith id k.walletID)))))) ++
+               .identified (Ids.multisigSwitchToSign k.walletID) (.button s!"Switch to {k.name} and sign" .plain
+                 (if f.busy || !k.unsigned || p.complete then none else some (.multisig (.switchToSign id k.slot)))))) ++
            (if p.ledgerHolds then
              [.identified Ids.ledgerSignButton
                (.button (if onLedger then "Approve on the Ledger…" else "Sign with Ledger") .plain (if f.busy || !p.ledgerUnsigned || p.complete then none else some (.multisig (.signWithLedger id))))]

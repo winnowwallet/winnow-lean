@@ -140,9 +140,9 @@ the app's side is [Real/DeviceSync](../LeanApp/WinnowApp/Real/DeviceSync.lean).
   under a different account than the one the backup is bound to, nothing is
   read and nothing follows; the wallet works as before.
 
-## Several wallets on one device
+## Several profiles on one device
 
-A device can keep more than one wallet for a network (Settings → Wallets). Each
+A device can keep more than one profile (wallet) for a network (Settings → Profiles). Each
 has its own backup record, made by this device for that wallet, and its own
 "automatic backup off" switch; the list of wallets with automatic backup off is
 the network's, kept by wallet id. Restoring from iCloud while a wallet is
@@ -156,7 +156,18 @@ The automatic keeping in step still opens no recovery phrase. A second wallet
 reaches a device only by the person's own Restore, with the device check a
 restore has always asked for. Each wallet on a device reads the others' backups
 as it reads another device's, so an account one of them joins is listed under
-the others too, and is signed from its page by whichever of them holds a key.
+the others too; the home shows it only under the profile whose key is in it, and
+a payment is handed to that profile ("Switch to … and sign"). Each profile's
+backup also carries its name and when it was given; the latest name wins.
+
+The backups of profiles that are not open are kept current as their scans move
+(they are scanned in every pass), so another device can start from them: a
+device that was off takes the newest state another device saved of the same
+profile, once its own header chain has the block that backup names
+(`lastKnownBlockHash`), and its scan begins there. A backup whose block this
+chain does not have is not taken; a restore or an arriving account whose block
+it does not have goes back a day, or below the payment in the block it lacks,
+and is scanned again here.
 
 Limits worth knowing. A device's backup waits while a payment from its own
 wallet is unconfirmed, and so does what the others can take from it. Stale backups of installs that are gone stay in iCloud

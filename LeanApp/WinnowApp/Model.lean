@@ -45,6 +45,10 @@ inductive Sheet where
   | ledgerNearby
   /-- Onboarding's last card: why Winnow asks for Bluetooth, then the system's question. -/
   | bluetoothIntro
+  /-- The profiles kept on this device for the network, from the home's name of the open one. -/
+  | wallets
+  /-- "Rename this profile". -/
+  | renameWallet
   deriving Repr, BEq, Inhabited
 
 /-- Settings → Network's pushed screens. -/
@@ -508,6 +512,12 @@ structure Model where
   /-- The place that is open, among those this network's wallets are kept in (empty: the network's own), and
   the wallets kept for it, as the backend last told (`Host.walletPlace`). -/
   slot : String := ""
+  /-- An account whose page opens once the wallet being switched to is open (`switchToSign`). -/
+  pendingAccount : Option String := none
+  /-- The rename sheet's field, whether its answer is awaited, and why the last one was refused. -/
+  renameDraft : String := ""
+  renameBusy : Bool := false
+  renameError : Option String := none
   wallets : List WalletSummary := []
   /-- This build's version as its bundle says it, `0.9.19 (26)`; none until launch has read it. -/
   appVersion : Option String := none
@@ -624,6 +634,8 @@ inductive Host where
   | unconfirmed (gen : Nat) (address txid : String) (amount : Int)
   | failed (gen : Nat) (context : String) (message : String)
   | deleted (gen : Nat)
+  /-- The open profile was named, or why not. -/
+  | renamed (gen : Nat) (error : Option String)
   | resolvedRate (gen : Nat) (forInputs : SendInputs) (milli : Nat)
   | previewed (gen : Nat) (forInputs : SendInputs) (p : Preview)
   | sent (gen : Nat) (txid : String) (derivedAddresses : List String)
@@ -652,6 +664,8 @@ inductive Host where
   /-- A step of the collection (sign, Ledger, combine, a new or pasted PSBT, discard) is done; `pasted`:
   the paste field empties. -/
   | collected (gen epoch : Nat) (id : String) (pasted : Bool := false)
+  /-- The payment went to the same account in another wallet on this device (its slot), which opens next. -/
+  | handedOver (gen epoch : Nat) (id slot : String)
   | draftBroadcast (gen epoch : Nat) (id txid : String)
   /-- Rebroadcast or Give up on an in-flight account spend is done. -/
   | spendHandled (gen : Nat) (id txid : String)
@@ -719,6 +733,8 @@ inductive HomeMsg where
   | openNetwork (page : NetworkPage)
   /-- Settings → Security → Multisig accounts. -/
   | openMultisigAccounts
+  /-- The home's name of the open profile: the list of profiles. -/
+  | openWallets
   /-- The home's short warning, tapped: its alert (`Confirm.homeWarning`). -/
   | explainWarning (kind : HomeWarning)
   /-- The alert's settings button: Settings → Network → Sync, or Peers and routing. -/
@@ -769,6 +785,9 @@ inductive SettingsMsg where
   | addWallet
   /-- Leave that empty place for the wallet that was open. -/
   | cancelAddWallet
+  | openRename
+  | setRenameDraft (s : String)
+  | saveRename
   | dismissTor
   -- PeerGatewaysSection
   | setGatewayMode (i : Nat)
@@ -865,8 +884,8 @@ inductive MultisigMsg where
   /-- "Use this PSBT" (no draft) or "Combine" (a draft): the account named. -/
   | addPasted (id : String)
   | sign (id : String)
-  /-- This device's signature with another wallet it keeps, one that holds a key of the account. -/
-  | signWith (id walletID : String)
+  /-- Another wallet on this device holds one of the account's keys: the payment goes to it, and it opens. -/
+  | switchToSign (id slot : String)
   | signWithLedger (id : String)
   | broadcast (id : String)
   | askDiscard (id : String)
@@ -975,6 +994,7 @@ inductive Cmd where
   /-- The shell draws the app light, dark or as the system is (`appearance`). -/
   | setAppearance (a : Appearance)
   | deleteWallet (gen : Nat)
+  | renameWallet (gen : Nat) (name : String)
   | startNetworking (gen : Nat) (settings : Settings)
   | stopNetworking
   | resolveRate (gen : Nat) (inputs : SendInputs) (floor : Option Nat)
@@ -1025,7 +1045,7 @@ inductive Cmd where
   | signAndDraft (gen : Nat) (inputs : SendInputs) (p : Preview)
   /-- After device authentication ("Sign this multisig payment"). -/
   | signDraft (gen epoch : Nat) (id : String)
-  | signDraftWith (gen epoch : Nat) (id walletID : String)
+  | handOverDraft (gen epoch : Nat) (id slot : String)
   | signDraftWithLedger (gen epoch : Nat) (id : String)
   | adoptDraft (gen epoch : Nat) (id psbt : String)
   | broadcastDraft (gen epoch : Nat) (id : String)
@@ -1079,6 +1099,12 @@ def networks : List Network := [.mainnet, .signet]
 def Model.topSheet (m : Model) : Option Sheet := m.sheets.getLast?
 def Model.hasSheet (m : Model) (s : Sheet) : Bool := m.sheets.contains s
 def Model.present (m : Model) (s : Sheet) : Model := { m with sheets := m.sheets ++ [s], confirm := none }
+
+/-- What the open profile is called: its name, or "Wallet" and its id. -/
+def Model.walletLabel (m : Model) : String :=
+  match m.wallets.find? (·.slot == m.slot) with
+  | some w => w.label
+  | none => s!"Wallet {m.walletID.getD ""}"
 def Model.isExpanded (m : Model) (key : String) : Bool := m.expanded.contains key
 def Model.person? (m : Model) (id : String) : Option Person := m.records.people.find? (·.id == id)
 /-- The row a payment screen shows for a transaction id: the merged list's, else the wallet's own entry. -/

@@ -98,7 +98,7 @@ def feePriorityLabel (i : Nat) : String := (feePriorityLabels[i]?).getD "Normal"
 signers before it goes out. -/
 def sourceSection (m : Model) : List H :=
   -- the accounts this phone builds payments for (not a SegWit v0 one, whose payments are pasted in as PSBTs)
-  let accounts := m.multisig.accounts.filter (·.buildsPayments)
+  let accounts := m.multisig.accounts.filter fun a => a.buildsPayments && a.signsHere
   if accounts.isEmpty then [] else
   let selected := m.sendInputs.accountID
   let row (title : String) (balance : Int) (id : Option String) (identifier : String) : H :=

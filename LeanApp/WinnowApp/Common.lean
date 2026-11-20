@@ -105,7 +105,8 @@ def Model.forgetSheet (m : Model) : Sheet → Model × List Cmd
   | .signerPicker => ({ m with multisigBuild := { m.multisigBuild with pickInto := none, pasteError := none } }, [])
   -- CloudRestoreView's `onDisappear`: `cancel()` (the controller's operations end)
   | .cloudRestore => ({ m with onboarding := { m.onboarding with restoring := false, restoreError := none } }, [.suspendCloud])
-  | .cloudBackup | .readSide | .bluetoothIntro => (m, [])
+  | .cloudBackup | .readSide | .bluetoothIntro | .wallets => (m, [])
+  | .renameWallet => ({ m with renameDraft := "", renameBusy := false, renameError := none }, [])
   -- the nearby card: a setup left (Not now, or after a failure) starts again from its first step
   | .ledgerNearby => ({ m with ledgerSetup := none }, [])
 

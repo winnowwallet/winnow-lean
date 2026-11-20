@@ -47,6 +47,8 @@ def sheetView (m : Model) (s : Sheet) (inner : List H) : H :=
   | .signerPicker => signerPickerSheet m inner
   | .ledgerNearby => ledgerNearbySheet m inner
   | .bluetoothIntro => bluetoothIntroSheet inner
+  | .wallets => walletsSheet m inner
+  | .renameWallet => renameWalletSheet m inner
 
 def cancel : H := .button "Cancel" .cancel (some .dismissConfirm)
 
@@ -121,7 +123,7 @@ def onboardingView (m : Model) : H :=
   let act (msg : Msg) : Option Msg := if o.busy then none else some msg
   -- with wallets already kept for this network, this is one more being added beside them
   let adding := m.walletID.isNone && !m.wallets.isEmpty
-  .screen (if adding then "Add a wallet" else "Winnow") none
+  .screen (if adding then "Add a profile" else "Winnow") none
     ([ .list
         ((if adding then
             [ .section "" "The wallets you already keep stay as they are; this one is added beside them."

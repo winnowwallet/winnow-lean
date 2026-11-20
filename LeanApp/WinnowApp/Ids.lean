@@ -126,7 +126,17 @@ def multisigSaveButton : String := "multisigSaveButton"
 def multisigSendButton : String := "multisigSendButton"
 def multisigShareButton : String := "multisigShareButton"
 def multisigSignButton : String := "multisigSignButton"
-def multisigSignWith (walletID : String) : String := s!"multisigSignWith.{walletID}"
+def multisigSwitchToSign (walletID : String) : String := s!"multisigSwitchToSign.{walletID}"
+/-- An account's line where another wallet on this device holds its key: "Signs in …". -/
+def multisigSignsIn (id : String) : String := s!"multisigSignsIn.{id}"
+/-- The home's row for the accounts this wallet only watches. -/
+def homeWatchingRow : String := "homeWatchingRow"
+/-- The home's name of the open wallet, which opens the list of wallets. -/
+def walletNameButton : String := "walletNameButton"
+/-- The list of wallets' "Rename this wallet", and the rename sheet's field and save. -/
+def renameWalletButton : String := "renameWalletButton"
+def renameWalletField : String := "renameWalletField"
+def saveWalletNameButton : String := "saveWalletNameButton"
 def multisigSignatureCount : String := "multisigSignatureCount"
 def networkTag : String := "networkTag"
 def newPaymentButton : String := "newPaymentButton"

@@ -2591,35 +2591,48 @@ def testAnotherWalletOnTheDeviceSignsWithItsOwnKey : IO Unit := do
   let screen (id : String) : IO MultisigScreen := do
     let some s := (← infoOf id).draft.bind (·.screen) | throw (IO.userError "no signing screen")
     return s
+  let held (sc : MultisigScreen) := sc.heldKeys.map fun k => (k.walletID, k.unsigned)
+  let slotB := Real.slotOf second.toString
+  let slotC := Real.slotOf third.toString
   check "the open wallet has signed, and the other wallet kept here is still to sign"
-    ((← screen both).signatures == [(false, 1, 2)] && (← screen both).heldKeys == [{ walletID := b.id, unsigned := true }])
+    ((← screen both).signatures == [(false, 1, 2)] && held (← screen both) == [(b.id, true)])
     (reprStr (← screen both).heldKeys)
-  -- the screen and its messages: a button for the other wallet's key
+  -- the screen and its messages: a way to the other wallet, which signs with its own key once it is open
   let m : Model := { stage := .ready, walletID := some a.id, multisig := ← backend.multisigOverview, routes := [.multisigPSBT both] }
   let page := rendered m
-  check "the page offers the other wallet's signature by name, beside this phone's"
-    (contains page (Ids.multisigSignWith b.id) && contains page s!"Add wallet {b.id}'s signature" && contains page Ids.multisigSignButton)
-  let (_, cs) := step (.multisig (.signWith both b.id)) m
-  check "its tap asks for that wallet's signature and no other" (cs.any fun cmd => cmd matches .signDraftWith _ _ _ _)
-  let (_, cs) := step (.multisig (.signWith both c.id)) m
-  check "a wallet the page does not offer is not asked for" cs.isEmpty
+  check "the page offers to switch to the other wallet to sign, by its name, beside this phone's signature"
+    (contains page (Ids.multisigSwitchToSign b.id) && contains page s!"Switch to Wallet {b.id} and sign" && contains page Ids.multisigSignButton)
+  let (tapped, cs) := step (.multisig (.switchToSign both slotB)) m
+  check "its tap hands the payment over to that wallet" (cs.any fun cmd => cmd matches .handOverDraft _ _ _ _)
+  let (_, cs) := step (.multisig (.switchToSign both slotC)) m
+  check "a wallet the page does not offer is not handed anything" cs.isEmpty
+  let (switching, cs) := onHost (.handedOver tapped.generation tapped.collect.epoch both slotB) { tapped with active := true }
+  check "handed over, the other wallet is opened, and its page for the account waits"
+    (switching.pendingAccount == some both && cs.any fun cmd => cmd matches .openSlot _ _ (some _))
   loads.set #[]
-  failsWith "a wallet not kept here is refused" (backend.signDraftWith both "00000000") Real.notHeldText
-  failsWith "a wallet kept here whose key is not the account's is refused" (backend.signDraftWith both c.id) Real.notASignerText
-  check "…before anything of the Keychain is read" ((← loads.get).isEmpty) s!"{← loads.get}"
-  backend.signDraftWith both b.id
-  check "the other wallet signs with one read, of its own secret" ((← loads.get) == #[b.id]) s!"{← loads.get}"
+  failsWith "a wallet not kept here is refused" (backend.handOverDraft both "99") Real.notHeldText
+  failsWith "a wallet kept here whose key is not the account's is refused" (backend.handOverDraft both slotC) Real.notASignerText
+  backend.handOverDraft both slotB
+  check "…and handing over reads nothing of the Keychain" ((← loads.get).isEmpty) s!"{← loads.get}"
+  -- the other wallet open: the account is there, with the payment, and it adds its own signature
+  opened second
+  check "in the other wallet, the account is there with the payment and its first signature"
+    ((← screen both).signatures == [(false, 1, 2)] && (← screen both).progress.phoneUnsigned)
+  backend.signDraft both
+  check "it signs with one read, of its own secret" ((← loads.get) == #[b.id]) s!"{← loads.get}"
   let done ← screen both
-  check "both signatures: the payment is complete, and nothing is left to sign here"
-    (done.signatures == [(false, 2, 2)] && done.progress.complete && done.heldKeys == [{ walletID := b.id, unsigned := false }])
+  check "both signatures: the payment is complete" (done.signatures == [(false, 2, 2)] && done.progress.complete)
     (reprStr done.signatures)
-  let m : Model := { m with multisig := ← backend.multisigOverview }
-  let (_, cs) := step (.multisig (.signWith both b.id)) m
-  check "a wallet that has signed is not asked again" cs.isEmpty
   -- an account only the second wallet's key is in, seen from the first (as it arrives from another device)
+  opened net
   multisig.withStore fun s => do return (← s.admit multisig.host.keys multisig.host.writeData theirsRecord, ())
   check "an account another wallet kept here holds a key of is not watch-only" (!(← infoOf theirs).watchOnly)
+  check "…it is not this wallet's: it says where it signs" (!(← infoOf theirs).signsHere && (← infoOf theirs).signsIn == some s!"Wallet {b.id}")
   fund theirsDescriptor theirs 0x47
+  -- the same block reaches the second wallet's copy (one pass scans for both)
+  opened second
+  fund theirsDescriptor theirs 0x47
+  opened net
   let inputs := accountInputs theirs (← accountDestination) 20_000
   let preview ← backend.previewSend inputs
   loads.set #[]
@@ -2628,12 +2641,13 @@ def testAnotherWalletOnTheDeviceSignsWithItsOwnKey : IO Unit := do
     ((← screen theirs).signatures == [(false, 0, 2)] && !(← screen theirs).progress.phoneHolds && (← loads.get).isEmpty)
     (reprStr (← screen theirs).signatures)
   let m : Model := { stage := .ready, walletID := some a.id, multisig := ← backend.multisigOverview, routes := [.multisigPSBT theirs] }
-  check "its page offers the other wallet's signature and not this phone's"
-    (contains (rendered m) (Ids.multisigSignWith b.id) && !contains (rendered m) Ids.multisigSignButton && !contains (rendered m) Ids.multisigWatchOnlyNote)
-  backend.signDraftWith theirs b.id
+  check "its page offers to switch to the other wallet and not this phone's signature"
+    (contains (rendered m) (Ids.multisigSwitchToSign b.id) && !contains (rendered m) Ids.multisigSignButton && !contains (rendered m) Ids.multisigWatchOnlyNote)
+  backend.handOverDraft theirs slotB
+  opened second
+  backend.signDraft theirs
   check "…and that wallet signs it" ((← screen theirs).signatures == [(false, 1, 2)] && (← loads.get) == #[b.id])
   -- with the second wallet gone from the device, the account is only watched
-  opened second
   Real.deleteWallet env (expected := some b.id)
   opened net
   check "once that wallet is deleted from the device, the account is watch-only" ((← infoOf theirs).watchOnly)

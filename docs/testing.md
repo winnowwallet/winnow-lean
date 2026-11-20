@@ -77,11 +77,11 @@ CI's simulator is an iPhone 17 Pro (`ci.yml`'s `ui-device-type`).
   wallet, is told nothing: it lists the account by itself with the balance its
   own scan confirms and the next address Core derives, and says it only
   watches.
-- `twoWalletsOneDevice`: Settings → Wallets → Add a wallet makes a second
-  wallet beside the first, through the onboarding there already is. The second
+- `twoWalletsOneDevice`: Settings → Profiles → Add a profile makes a second
+  profile beside the first, through the onboarding there already is. The second
   builds a 2-of-2 of itself and the first and the node pays it. A payment from
-  it is signed by the wallet that is open, and then by the other wallet kept on
-  the device, with a button and a device check of its own; the node takes the
+  it is signed by the profile that is open, handed to the other with "Switch to
+  … and sign", which opens and signs with its own key; the node takes the
   witness with both signatures.
 - `retryAfterNoPeers`: the node goes off the network (`setnetworkactive
   false`) while the app is in the background. Back in the foreground, Home

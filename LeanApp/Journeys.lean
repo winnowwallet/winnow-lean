@@ -848,7 +848,7 @@ def twoWalletsOneDevice : Journey := ⟨"twoWalletsOneDevice", do
     backToWalletList
     pure key
 
-  step "Settings → Wallets → Add a wallet: a second one, made beside the first" do
+  step "Settings → Profiles → Add a profile: a second one, made beside the first" do
     openSettings
     scrolled addWalletButton
     shot "60-wallets-one"
@@ -860,7 +860,7 @@ def twoWalletsOneDevice : Journey := ⟨"twoWalletsOneDevice", do
     waitFor balanceText 30
     openSettings
     scrolled addWalletButton
-    waitUntil 20 "Settings does not list two wallets" do return (← exists? (.text "^Wallet [0-9a-f]{8}$"))
+    waitUntil 20 "Settings does not list two profiles" do return (← exists? (.text "^Wallet [0-9a-f]{8}$"))
     shot "62-wallets-two"
     backToWalletList
 
@@ -884,11 +884,15 @@ def twoWalletsOneDevice : Journey := ⟨"twoWalletsOneDevice", do
     Collect.countIs multisigSignatureCount "1 of 2"
     shot "63-wallets-one-signature"
 
-  step "the other wallet kept here signs with a button of its own" do
-    scrolled (.beginning "Add wallet ")
-    tap (.beginning "Add wallet ")
+  step "the other profile kept here holds the second key: the payment goes to it, it opens, and it signs" do
+    scrolled (.beginning "Switch to ")
+    tap (.beginning "Switch to ")
+    waitFor multisigSignButton 60
+    Collect.countIs multisigSignatureCount "1 of 2"
+    shot "64-wallets-switched"
+    tap multisigSignButton
     Collect.countIs multisigSignatureCount "2 of 2" 60
-    shot "64-wallets-two-signatures"
+    shot "65-wallets-two-signatures"
 
   step "the phone broadcasts, and the node takes it" do
     let txid ← Collect.broadcast h
