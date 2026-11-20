@@ -663,13 +663,16 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
             let again := if owed.isSome then nowScripts else fresh
             let applyAccounts : BlockMatch → NetM Unit := fun m => do
               for discarded in ← (env.hooks.multisigApply m net : IO _) do b.cancel discarded
-            let done ← match ← (f.scanRange low (scanned - 1) again (limits := arrivingScanLimits) (onMatch := applyAccounts)).attempt with
-              | .ok outcome => pure outcome.isComplete
+            -- what a run does not finish is owed from where it got, not from where it began: a range longer than
+            -- one run can take (a slow link, a long pass) is otherwise begun again at every pass, and never done
+            let (done, owedFrom) ← match ← (f.scanRange low (scanned - 1) again (limits := arrivingScanLimits) (onMatch := applyAccounts)).attempt with
+              | .ok outcome => pure (outcome.isComplete, (outcome.scannedThrough.map (· + 1)).getD low)
               | .error e =>
                 env.journal "multisig.rescanWaiting" [("from", toString low), ("error", e.name)]
-                pure false
+                pure (false, low)
             if done then env.journal "multisig.rescanned" [("from", toString low), ("through", toString (scanned - 1)), ("scripts", toString again.size)]
-            env.modify fun c => if c.walletSerial == serial then { c with accountRescanFrom := if done then none else some low } else c
+            else env.journal "multisig.rescanOwed" [("from", toString owedFrom), ("through", toString (scanned - 1))]
+            env.modify fun c => if c.walletSerial == serial then { c with accountRescanFrom := if done then none else some (max low owedFrom) } else c
         -- a restored wallet's search for cards, once the scan is at the tip. What it cannot do now it does on a
         -- later pass, and it is never why a pass fails
         if (← w.cardRestoreFrom).isSome && (← f.nextScanHeight) > (← s.chain.height) then
