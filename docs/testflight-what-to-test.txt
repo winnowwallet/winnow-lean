@@ -1,6 +1,6 @@
 Winnow: the same wallet, rewritten in Lean
 
-New: 0.9.17 to 0.9.21 locked the keys of some records behind Face ID, so after a relaunch Winnow said it "could not safely read its signers" (or accounts, or people) and stopped backing up. If the home shows "Unlock with Face ID", tap it once: the records come back as they were and the backup resumes.
+New: Settings → Wallets → Add a wallet showed no iCloud restore, because the search was cut short; it now offers "Restore your iCloud wallet" (or "Look for iCloud backups again"). And if the home shows "Unlock with Face ID", tap it once: an earlier version locked some records' keys behind Face ID.
 
 Since 0.9.21: more of the wallet is proved, and fees are whole-number arithmetic. Send once: the fee quoted must be the fee paid.
 

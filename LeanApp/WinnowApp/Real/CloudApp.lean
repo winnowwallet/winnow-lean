@@ -108,8 +108,23 @@ def labelBackups (a : CloudApp) : IO Unit := do
 def discover (a : CloudApp) : IO Unit := do
   if !a.allows || (← a.walletID).isSome then return
   let some n ← a.network | return
-  a.controller.discover n.name
+  -- the backup is pointed at this place before the search: the app's tick points it there too, and doing so
+  -- during the search ended the search (its generation), with nothing offered and nothing said
+  a.configureCurrent
+  for _ in [0:3] do
+    -- an update still running for the wallet that was open keeps the controller busy, and a search then does
+    -- nothing: it is waited for, a few seconds at most
+    for _ in [0:20] do
+      unless (← a.controller.get).busy do break
+      IO.sleep 250
+    let before := (← a.controller.get).generation
+    a.controller.discover n.name
+    -- a search that ran to its end, found something or not, is the answer; one cut short is made again
+    if (← a.controller.get).generation == before || (← a.walletID).isSome then break
+    a.configureCurrent
   a.labelBackups
+  -- which wallet each backup is of is not the controller's state: the screens are told again
+  a.controller.changed
 
 
 /-- `cloudAppState(for:)`: people, receive-address labels, the display name and the Advanced switch,

@@ -137,7 +137,12 @@ def onboardingView (m : Model) : H :=
                   [ .identified Ids.restoreCloudBackupButton (Html.symbol "icloud.and.arrow.down" (.button "Restore your iCloud wallet" .primary (act (.cloud .openRestore))))
                   , caption s!"{c.available.length} saved backup(s) found." ]) ++
                 [ .identified Ids.createWalletButton (Html.symbol "plus.circle" (.button "Create new wallet" .primary (act .createWallet)))
-                , .identified Ids.importWalletButton (Html.symbol "square.and.arrow.down" (.button "Restore from a file" .plain (act .openImport))) ]) ] ++
+                , .identified Ids.importWalletButton (Html.symbol "square.and.arrow.down" (.button "Restore from a file" .plain (act .openImport))) ] ++
+                -- none found, or not yet: the search can be made again, and says it is being made
+                (if !c.available.isEmpty then [] else
+                  [ .identified Ids.checkCloudAgainButton (Html.symbol "arrow.clockwise.icloud"
+                      (.button (if c.busy then "Looking in iCloud…" else "Look for iCloud backups again") .plain
+                        (if c.busy then none else act (.cloud .checkAgain)))) ])) ] ++
          (if c.busy then [.section "" "" [.progress "Checking iCloud…"]] else []) ++
          (match c.message with | some t => [.section "" "" [caption t]] | none => []) ++
          -- mainnet unless asked: the picker is folded behind "Use a test network" (open on a test network). A

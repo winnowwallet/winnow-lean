@@ -145,6 +145,7 @@ def receiveAddressLabelField : String := "receiveAddressLabelField"
 def receiveButton : String := "receiveButton"
 def resolvedRateText : String := "resolvedRateText"
 def restoreCloudBackupButton : String := "restoreCloudBackupButton"
+def checkCloudAgainButton : String := "checkCloudAgainButton"
 def resumeImportedWalletButton : String := "resumeImportedWalletButton"
 def retryPeersButton : String := "retryPeersButton"
 /-- The home's short network warning ("Offline", "Sync problem"); tapped, it explains itself. -/

@@ -459,7 +459,7 @@ structure CloudPhone where
 open Real in
 def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO) (auth : Bool) (cloud : Option MemoryCloud := none)
     (cloudKeys : Option CloudBackupKeys := none) (whileAuthenticating : IO Unit := pure ())
-    (deviceCheck : Option (String → IO Unit) := none) : TM CloudPhone := do
+    (deviceCheck : Option (String → IO Unit) := none) (store : Option CloudBackupStore := none) : TM CloudPhone := do
   let vars := [("WINNOW_E2E", "1"), ("WINNOW_E2E_RUN", "cloud"), ("WINNOW_E2E_ENTROPY", "04040404040404040404040404040404"),
                ("WINNOW_E2E_PEER", "127.0.0.1:1"), ("WINNOW_E2E_CHALLENGE", "51")]
   let .active mode := WinnowApp.E2E.resolve (fun k => vars.lookup k) | throw "test mode did not resolve"
@@ -468,7 +468,7 @@ def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO
   let attempts ← IO.mkRef 0
   let deps : Deps := { keyStore := keys, networkParams := mode.networkParams, peerCount := 1, importPeerWaitMs := 1_000,
                        fetch := fun _ => throw (.other "offline") }
-  let (backend, env, app) ← Backend.realWithCloud deps (store := cloud.store) (keys := cloudKeys)
+  let (backend, env, app) ← Backend.realWithCloud deps (store := store.getD cloud.store) (keys := cloudKeys)
     (authenticate := fun reason => do
       attempts.modify (· + 1)
       whileAuthenticating
@@ -605,8 +605,15 @@ def secondWalletFromICloud (root : System.FilePath) : TM Unit := do
   unless ← waitUntil 5000 (every := 10) (do return (← a.app.controller.get).lastSaved.isSome) do throw "the other device's backup was not saved"
   a.backend.cloudScene false
   a.backend.stopNetworking
-  -- this phone and its own wallet, backed up too
-  let b ← cloudPhone root "secondB" (← newKeys) true (some cloud) (some sharedKeys)
+  -- this phone and its own wallet, backed up too. While its iCloud is listing, the app's tick may run (it runs
+  -- every second): on 0.9.20 to 0.9.22 the tick pointed the backup at the empty place and so ended the search,
+  -- and "Add a wallet" offered no restore at all
+  let during ← IO.mkRef (pure () : IO Unit)
+  let listing : Real.CloudBackupStore := { cloud.store with list := fun n => do (← during.get); cloud.store.list n }
+  let b ← cloudPhone root "secondB" (← newKeys) true (some cloud) (some sharedKeys) (store := some listing)
+  during.set do
+    during.set (pure ())
+    b.backend.cloudTick
   discard <| b.backend.openWallet .signet b.dir
   b.activate
   let own ← b.backend.createWallet .signet b.dir
@@ -622,6 +629,9 @@ def secondWalletFromICloud (root : System.FilePath) : TM Unit := do
   let added := Real.slotDir b.dir slot
   IO.FS.createDirAll added
   check "the place for a second wallet is empty" (slot == "1" && ((← b.backend.openWallet .signet added) matches .missing))
+  during.set do
+    during.set (pure ())
+    b.backend.cloudTick
   b.backend.discoverCloudBackups
   let found := (← b.backend.cloudStatus).available
   check "the list offers the other wallet's backup, named, and not this phone's own"
@@ -673,6 +683,7 @@ def onboardingScreens : TM Unit := do
     contains plain "Restore from a file")
   check "onboarding: iCloud said up front" (contains plain "automatically backs up your wallet with iCloud when available")
   check "onboarding: no iCloud restore without a backup" (!contains plain "restoreCloudBackupButton")
+  check "onboarding: …and a way to look again" (contains plain Ids.checkCloudAgainButton && contains plain "Look for iCloud backups again")
   check "onboarding: on mainnet the network is folded behind Use a test network" (contains plain "onboardingTestNetwork" &&
     contains plain "Use a test network")
   let found := rendered (view { m with cloud := { available := [{ id := "A", savedAtText := "10/27/2026, 7:28 PM" }] } })
