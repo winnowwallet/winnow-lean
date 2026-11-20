@@ -477,6 +477,39 @@ def namesFollow (root : System.FilePath) : TM Unit := do
   a.stop
   b.stop
 
+/-- The network's saved scan behind the open wallet (0.9.24 on a phone whose open wallet had been in a slot of
+its own): the stack still opens, and scanning goes on from the saved frontier. -/
+def scanBehindWallets (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let d ← device root "scanBehind" cloud cloudKeys
+  discard <| d.create
+  let added := Real.slotDir d.dir (← Real.freeSlot d.dir)
+  IO.FS.createDirAll added
+  discard <| d.backend.openWallet .signet added
+  d.backend.startNetworking d.settings
+  discard <| d.backend.createWallet .signet added
+  Real.buildStackIfNeeded d.env
+  let some f := (← d.env.get).stack.bind (·.filters) | throw "no scan"
+  let saved ← f.nextScanHeight
+  let opened (behind : String) : TM Unit := do
+    d.backend.stopNetworking
+    d.backend.startNetworking d.settings
+    Real.buildStackIfNeeded d.env
+    let c ← d.env.get
+    check s!"the stack opens with the saved scan behind {behind}"
+      ((c.stack.bind (·.filters)).isSome && c.lastSyncError.isNone) s!"{c.lastSyncError}"
+    if let some f := c.stack.bind (·.filters) then
+      check s!"…and scanning goes on from where it was saved ({behind})" ((← f.nextScanHeight) == saved)
+  -- the open wallet further on than the saved scan, the other one not
+  let some w := (← d.env.get).wallet | throw "no wallet"
+  discard <| (w.recordScanHeight (saved + 50)).run
+  opened "the open wallet"
+  -- every wallet further on than the saved scan
+  for r in (← d.env.get).riders do discard <| (r.wallet.recordScanHeight (saved + 50)).run
+  opened "every wallet"
+  d.stop
+
 def accountsFollow (root : System.FilePath) : TM Unit := do
   let cloud ← Real.MemoryCloud.new
   let cloudKeys ← Real.memoryCloudKeys
@@ -1022,6 +1055,7 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "anchoredArrivals" (anchoredArrivals root)
   runTest "slotStacksFold" (slotStacksFold root)
   runTest "namesFollow" (namesFollow root)
+  runTest "scanBehindWallets" (scanBehindWallets root)
   runTest "removalStopsAtCoins" (removalStopsAtCoins root)
   runTest "olderBackups" (olderBackups root)
   runTest "olderForms" (olderForms root)

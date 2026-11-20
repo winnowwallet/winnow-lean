@@ -54,7 +54,7 @@ def heldWalletFiles (env : Env) (networkDir : String) : IO (Array (HeldWallet ×
       let s ← w.state
       let name := ((← readProfileName dir).map (·.1)).getD ""
       held := held.push ({ id := w.id, slot, dir, accountKey := w.accountKey,
-                           birthday := min s.creationHeight s.nextScanHeight, name }, w)
+                           birthday := min s.creationHeight s.nextScanHeight, next := s.nextScanHeight, name }, w)
     | .error _ => pure ()
   return held
 
@@ -340,7 +340,8 @@ def adopt (env : Env) (w : Wallet) (dir : String) (startSync : Bool) : IO Unit :
       existing.pool.stop
       buildStackIfNeeded env
     else if alone || existing.filters.isNone then
-      let filters ← runNet (FilterSyncIO.new existing.pool existing.chain (← w.nextScanHeight) (some (dirFile network "filters.json")))
+      let start := ((← heldWallets env network).map (·.next)).foldl min (← w.nextScanHeight)
+      let filters ← runNet (openNetworkFilters existing.pool existing.chain start (dirFile network "filters.json"))
       let broadcaster ← if alone then runNet (TxBroadcaster.new existing.pool (some (dirFile network "broadcast.json")))
         else pure existing.broadcaster
       let gen ← env.modifyGet fun c => (c.generation, { c with stack := some { existing with filters := some filters, broadcaster } })

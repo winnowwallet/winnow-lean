@@ -42,6 +42,16 @@ def openOrRebuildChain (params : NetworkParams) (path : System.FilePath) (start 
     HeaderStore.open params (some path) start
   | .error e => throw e
 
+/-- The network's scan from its file. A saved frontier behind every wallet here (the one it was last moved
+for is gone, or was left out of passes) is where scanning goes on from: more blocks are scanned, none is
+missed. -/
+def openNetworkFilters (pool : PeerPool) (chain : HeaderStore) (start : UInt32) (path : System.FilePath) :
+    NetM FilterSyncIO := do
+  match ← (FilterSyncIO.new pool chain start (some path)).attempt with
+  | .ok f => pure f
+  | .error (.filterStorage (.frontierBeforeWallet stored _)) => FilterSyncIO.new pool chain stored (some path)
+  | .error e => throw e
+
 /-- `makeBroadcaster`: a damaged relay store is set aside (renamed) and relay starts fresh. -/
 def makeBroadcaster (env : Env) (pool : PeerPool) (dir : String) : NetM TxBroadcaster := do
   let path := dirFile dir "broadcast.json"
@@ -252,7 +262,11 @@ partial def buildStackIfNeeded (env : Env) : IO Unit := do
       if (← env.get).generation != epoch then pool.stop; return
       let broadcaster ← runNet (makeBroadcaster env pool dir)
       let filters ← match c.wallet with
-        | some w => some <$> runNet (FilterSyncIO.new pool chain (← w.nextScanHeight) (some (dirFile dir "filters.json")))
+        -- the network's scan, which may be behind the open wallet (another wallet here is further back, or
+        -- the open one took another device's state): it starts no later than the wallet least far on
+        | some w => do
+          let start := (c.held.map (·.next)).foldl min (← w.nextScanHeight)
+          some <$> runNet (openNetworkFilters pool chain start (dirFile dir "filters.json"))
         | none => pure none
       let stack : Stack := { pool, chain, filters, broadcaster, key }
       let installed ← env.modifyGet fun c =>

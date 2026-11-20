@@ -361,6 +361,9 @@ structure HeldWallet where
   /-- The lowest block its scan needs (`min creationHeight nextScanHeight`): the network's chain begins at
   or below every held wallet's. -/
   birthday : UInt32 := 0
+  /-- Where its own scan is (`nextScanHeight`): the network's scan may be no further on than the wallet least
+  far on (one further on is ahead, and given only the blocks after its own). -/
+  next : UInt32 := 0
   /-- The name the person gave it (`profile.json`); empty for none. -/
   name : String := ""
 
