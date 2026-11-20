@@ -424,6 +424,27 @@ def anchoredArrivals (root : System.FilePath) : TM Unit := do
   a.stop
   b.stop
 
+/-- An added wallet's own stack, as 0.9.20 to 0.9.23 kept one, folds into the network's: its chain, scan and
+peers go, and its relay file's pending payments join the network's. -/
+def slotStacksFold (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "foldA" cloud cloudKeys
+  discard <| a.create
+  let slot := Real.slotDir a.dir "1"
+  IO.FS.createDirAll slot
+  for name in ["filters.json", "headers.bin", "peers.json", "sync.last-complete"] do
+    IO.FS.writeFile (System.FilePath.mk slot / name) "old"
+  IO.FS.writeBinFile (System.FilePath.mk slot / "broadcast.json") (Winnow.IO.TxBroadcaster.encodeStore {})
+  IO.FS.writeFile (System.FilePath.mk slot / "people.json") "kept"
+  Real.migrateSlotStacks a.env .signet a.dir
+  let gone ← ["filters.json", "headers.bin", "peers.json", "sync.last-complete", "broadcast.json"].allM fun (name : String) =>
+    do return !(← (System.FilePath.mk slot / name).pathExists)
+  check "the slot's chain, scan, peers and relay file are folded away" gone
+  check "…its own files stay" (← (System.FilePath.mk slot / "people.json").pathExists)
+  check "…and the network's relay file is there" (← (System.FilePath.mk a.dir / "broadcast.json").pathExists)
+  a.stop
+
 def accountsFollow (root : System.FilePath) : TM Unit := do
   let cloud ← Real.MemoryCloud.new
   let cloudKeys ← Real.memoryCloudKeys
@@ -954,6 +975,7 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "ledgersFollow" (ledgersFollow root)
   runTest "accountsFollow" (accountsFollow root)
   runTest "anchoredArrivals" (anchoredArrivals root)
+  runTest "slotStacksFold" (slotStacksFold root)
   runTest "removalStopsAtCoins" (removalStopsAtCoins root)
   runTest "olderBackups" (olderBackups root)
   runTest "olderForms" (olderForms root)

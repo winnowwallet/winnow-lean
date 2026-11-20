@@ -38,7 +38,7 @@ def Env.httpGet (env : Env) (url : String) (maximumBytes : Nat) : IO ByteArray :
 
 def Env.new (deps : Deps) : IO Env := do
   let http ← RoutedHTTPClient.new deps.fetch
-  return { deps, core := ← Std.Mutex.new { http }, walletLock := ← Std.Mutex.new () }
+  return { deps, core := ← Std.Mutex.new { http }, walletLock := ← Std.Mutex.new (), placeLock := ← Std.Mutex.new () }
 
 def Env.backend (env : Env) : Backend :=
   { Backend.pending with

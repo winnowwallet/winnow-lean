@@ -247,6 +247,23 @@ def catchUp (a : MultisigApp) (_network : Tx.BitcoinNetwork) (frontier : UInt32)
 def ownedScripts (a : MultisigApp) : IO (Array ByteArray) := do
   a.watchScripts (← a.host.read).network
 
+/-- `Hooks.multisigAt`: another held wallet's account store, read from its directory into a store of its own.
+Each call refuses once that directory is the open wallet's, whose store is then the one that writes the file. -/
+def at' (a : MultisigApp) (n : WinnowApp.Network) (dir : String) : IO ProfileMultisig := do
+  let host ← MultisigHost.new a.host.keys a.host.writeData
+  host.configure (Network.tx n) (some (System.FilePath.mk dir))
+  let other : MultisigApp := { a with host }
+  let file := System.FilePath.mk dir / MultisigStore.fileName
+  let guard {α} (x : IO α) : IO α := do
+    if (← a.host.read).path == some file then throw (IO.userError "this wallet is the open one now")
+    x
+  return {
+    watchScripts := fun network => guard (other.watchScripts network)
+    -- a person's payment index is the open wallet's records'; another wallet's people are told when it is opened
+    apply := fun m network => guard (other.applyMatchPaying (fun _ _ => pure ()) m network)
+    rollBack := fun fork => guard (other.rollBack fork)
+    catchUp := fun network frontier scan hashes => guard (other.catchUp network frontier scan hashes) }
+
 def hooks (a : MultisigApp) (base : Hooks) : Hooks :=
   { base with
     configure := fun n dir => do
@@ -258,6 +275,7 @@ def hooks (a : MultisigApp) (base : Hooks) : Hooks :=
     multisigApply := a.applyMatchPaying base.advancePersonIndex
     multisigCatchUp := a.catchUp
     multisigRollBack := a.rollBack
+    multisigAt := a.at'
     multisigValidate := fun rs n => RM.toIO (MultisigStore.validate rs n)
     multisigRestore := a.restore
     multisigBackup := a.backup

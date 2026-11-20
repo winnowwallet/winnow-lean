@@ -165,8 +165,9 @@ paste field empties (every signature is already in the account's draft). -/
 def CollectForm.cleared (f : CollectForm) : CollectForm :=
   { f with epoch := f.epoch + 1, busy := false, pasted := "" }
 
-/-- Leave the open wallet for another place of this network: a new generation, nothing carried over, as a
-change of network. `open'` is the command that opens the place, given the new generation. -/
+/-- Leave the open wallet for another place of this network: a new generation, nothing of the screen carried
+over. Networking goes on: the peers, the chain and the scan are the network's, and every wallet kept there is
+scanned for. `open'` is the command that opens the place, given the new generation. -/
 def Model.switchWallet (m : Model) (open' : Nat → Cmd) : Model × List Cmd :=
   let m0 := m.nextWallet
   let m' := { m0 with stage := Stage.loading, status := ({} : Status), records := ({} : Records),
@@ -174,7 +175,7 @@ def Model.switchWallet (m : Model) (open' : Nat → Cmd) : Model × List Cmd :=
                       phase := SyncPhase.idle, walletID := none, routes := [], sheets := [], confirm := none,
                       send := ({} : SendState), nearbyLedger := none, ledgerSetup := none,
                       onboarding := ({} : Onboarding) }
-  (m', [.stopNetworking, .stopWatchingAddress, open' m'.generation])
+  (m', [.stopWatchingAddress, open' m'.generation])
 
 /-- Leave the innermost multisig screen (its state goes with it). -/
 def Model.popMultisig (m : Model) : Model :=

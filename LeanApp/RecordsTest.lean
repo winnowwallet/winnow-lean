@@ -2316,9 +2316,9 @@ def walletSwitcher (root : System.FilePath) : IO Unit := do
   let (_, cs) := step (.settings (.selectWallet "7")) ready
   check "wallets: a place that keeps none is not opened" cs.isEmpty
   let (switching, cs) := step (.settings (.selectWallet "1")) ready
-  check "wallets: another one chosen: networking stops and its place is opened, in a new generation"
+  check "wallets: another one chosen: its place is opened, in a new generation, and networking goes on (it is the network's)"
     (switching.stage == .loading && switching.walletID.isNone && switching.generation > ready.generation &&
-     cs.any (· matches .stopNetworking) && cs.any fun c => c matches .openSlot _ _ (some "1"))
+     !cs.any (· matches .stopNetworking) && cs.any fun c => c matches .openSlot _ _ (some "1"))
   let (stale, _) := onHost (.booted ready.generation (.opened "aaaa1111")) switching
   check "wallets: an answer about the wallet left behind is dropped" (stale.stage == .loading && stale.walletID.isNone)
   let (placed, _) := onHost (.walletPlace switching.generation "1" [{ id := "aaaa1111", slot := "" }, { id := "bbbb2222", slot := "1", active := true }]) switching

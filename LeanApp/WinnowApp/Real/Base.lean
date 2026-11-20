@@ -67,6 +67,16 @@ def anchorFork (blockHash : ChainHashes) (height : UInt32) (anchor : ByteArray) 
     if (← blockHash h.height) != some theirs then fork := h.height - 1
   return some fork
 
+/-- The multisig store of one wallet kept on this device, as a sync pass uses it: the open wallet's through the
+hooks below, another's through `Hooks.multisigAt` (its own copy of its directory's file, which refuses once
+that wallet is the open one, whose store is then the only one that writes it). -/
+structure ProfileMultisig where
+  watchScripts : Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ => pure #[]
+  apply : Net.BlockMatch → Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ _ => pure #[]
+  rollBack : UInt32 → IO Unit := fun _ => pure ()
+  catchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → ChainHashes → IO Unit := fun _ _ _ _ => pure ()
+  deriving Inhabited
+
 /-- What the core needs from people and labels (the records half plugs these in). -/
 structure Hooks where
   /-- `configurePeople` (and the receive labels) for the network's directory: `some message` when a
@@ -93,6 +103,9 @@ structure Hooks where
   multisigCatchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → ChainHashes → IO Unit := fun _ _ _ _ => pure ()
   /-- `multisigStore.rollBack(to:)`. -/
   multisigRollBack : UInt32 → IO Unit := fun _ => pure ()
+  /-- The multisig store of another wallet kept on this network, in its directory, for the sync pass that
+  scans for every wallet on the device. -/
+  multisigAt : WinnowApp.Network → (dir : String) → IO ProfileMultisig := fun _ _ => pure {}
   /-- `MultisigStore.validate(_:network:)` of a bundle's accounts, before anything is written. -/
   multisigValidate : Array MultisigAccountRecord → Tx.BitcoinNetwork → IO Unit := fun rs _ => do
     unless rs.isEmpty do notPorted "Restoring multisig accounts"
@@ -332,6 +345,18 @@ structure HeldWallet where
   slot : String
   dir : String
   accountKey : Keys.HDKey
+  /-- The lowest block its scan needs (`min creationHeight nextScanHeight`): the network's chain begins at
+  or below every held wallet's. -/
+  birthday : UInt32 := 0
+
+/-- A wallet kept on this network that is not the open one: opened from its file without its key (watching
+reads none), and scanned for in every pass beside the open wallet. `serial` is its `walletSerial`: a write
+through a rider that is no longer one (the wallet was opened, deleted or replaced) is refused. -/
+structure Rider where
+  held : HeldWallet
+  wallet : Wallet
+  serial : Nat
+  multisig : ProfileMultisig
 
 /-- The backend's state (AppModel's stored properties that are not UI). -/
 structure Core where
@@ -346,6 +371,10 @@ structure Core where
   /-- The wallets kept for the open network, the open one among them, as of the last wallet opened, adopted or
   deleted (`refreshHeld`). -/
   held : Array HeldWallet := #[]
+  /-- The held wallets other than the open one, each scanned for in every pass (`refreshHeld`). -/
+  riders : Array Rider := #[]
+  /-- Where the next rider's serial comes from. -/
+  riderSerial : Nat := 0
   /-- Moves each time `wallet` is replaced or let go (`Core.withWallet`), and as a new wallet's file is about to
   be written (`Env.replacingWallet`): the same number is Swift's `self.wallet === wallet`. A wallet ID is not enough, since importing a wallet's own backup again makes a
   new wallet with the same ID (backend-test `paymentRaceFlow`). -/
@@ -413,6 +442,10 @@ structure Env where
   deps : Deps
   core : Std.Mutex Core
   walletLock : Std.Mutex Unit
+  /-- Held while a sync pass hands a block (or a rollback) to the wallets it scans for, and while the open
+  wallet changes: a block is never given half to the wallet that was open and half to the next. Taken before
+  `walletLock`, never inside it. -/
+  placeLock : Std.Mutex Unit
 
 namespace Env
 
@@ -437,6 +470,17 @@ def walletWrite {α} (env : Env) (serial : Nat) (what : String) (x : WM α) : IO
   env.deps.walletWriting what
   env.withWalletLock do
     if (← env.get).walletSerial != serial then failWith .walletReplaced
+    runWM x
+
+/-- `x` under the place lock (`placeLock`); not reentrant. -/
+def withPlaceLock {α} (env : Env) (x : IO α) : IO α :=
+  env.placeLock.atomically (m := IO) (liftM x : Std.AtomicT Unit IO α)
+
+/-- A write through a rider (`Rider`): refused once it is no longer one. -/
+def riderWrite {α} (env : Env) (serial : Nat) (what : String) (x : WM α) : IO α := do
+  env.deps.walletWriting what
+  env.withWalletLock do
+    unless (← env.get).riders.any (·.serial == serial) do failWith .walletReplaced
     runWM x
 
 /-- A new wallet's file is about to be written where the open wallet's is (`createWallet`, `importDecoded`):
@@ -607,6 +651,17 @@ def gatewaysUsedPath (dir : String) : System.FilePath :=
 
 /-- `DefaultsKey.lastCompleteCheck(network)`, as a file in the network's directory (Unix seconds). -/
 def lastCompleteCheckPath (dir : String) : System.FilePath := System.FilePath.mk dir / "sync.last-complete"
+
+/-- A wallet's own files beside `wallet.json`, which go with it (adopted over, deleted). -/
+def walletOwnFiles : List String :=
+  ["vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json"]
+
+/-- The network's sync state, kept in its own directory for every wallet there: the scan's frontier and
+the relay's pending payments (`headers.bin` and `peers.json` are kept even with no wallet). -/
+def sharedStackFiles : List String := ["filters.json", "broadcast.json"]
+
+/-- The files a slot's own stack kept before the stack became the network's (0.9.20 to 0.9.23). -/
+def oldSlotStackFiles : List String := ["filters.json", "headers.bin", "peers.json", "sync.last-complete", "rollback.height"]
 
 def readLastCompleteCheck (dir : String) : IO (Option Nat) := do
   try return (← IO.FS.readFile (lastCompleteCheckPath dir)).trimAscii.copy.toNat? catch _ => return none

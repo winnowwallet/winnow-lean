@@ -42,23 +42,39 @@ def secretInUseElsewhere (env : Env) (dir id : String) : IO Bool := do
       | .error _ => return true
   return false
 
-/-- The wallets kept for a network, the network's own directory first: each slot's file opened for its id and
-account key. A file that does not read is left out here (it is shown as damaged when it is opened). -/
-def heldWallets (env : Env) (networkDir : String) : IO (Array HeldWallet) := do
-  let mut held : Array HeldWallet := #[]
+/-- The wallets kept for a network, the network's own directory first: each slot's file opened, without its
+key, for its id, account key and birthday. A file that does not read is left out here (it is shown as damaged
+when it is opened). -/
+def heldWalletFiles (env : Env) (networkDir : String) : IO (Array (HeldWallet × Wallet)) := do
+  let mut held : Array (HeldWallet × Wallet) := #[]
   for slot in ← listSlots networkDir do
     let dir := slotDir networkDir slot
     match ← (Wallet.open (walletPath dir) env.deps.keyStore env.deps.random).run with
-    | .ok w => held := held.push { id := w.id, slot, dir, accountKey := w.accountKey }
+    | .ok w =>
+      let s ← w.state
+      held := held.push ({ id := w.id, slot, dir, accountKey := w.accountKey,
+                           birthday := min s.creationHeight s.nextScanHeight }, w)
     | .error _ => pure ()
   return held
 
-/-- `Core.held` read again from the files: after a wallet is opened, adopted or deleted. -/
+def heldWallets (env : Env) (networkDir : String) : IO (Array HeldWallet) := do
+  return (← heldWalletFiles env networkDir).map (·.1)
+
+/-- `Core.held` read again from the files, and the riders made from them: every held wallet but the place
+that is current, each with its own account store, scanned for in every pass beside the open wallet. After a
+wallet is opened, adopted or deleted. Nothing is installed if the place changed meanwhile. -/
 def refreshHeld (env : Env) : IO Unit := do
-  let held ← match (← env.get).dir with
-    | some dir => heldWallets env (networkDirOf dir)
-    | none => pure #[]
-  env.modify fun c => { c with held }
+  let c ← env.get
+  let (some dir, some n) := (c.dir, c.network) | env.modify fun c => { c with held := #[], riders := #[] }
+  let files ← heldWalletFiles env (networkDirOf dir)
+  let mut made : Array (HeldWallet × Wallet × ProfileMultisig) := #[]
+  for (h, w) in files do
+    if h.dir == dir then continue
+    made := made.push (h, w, ← env.hooks.multisigAt n h.dir)
+  env.withWalletLock <| env.modify fun c =>
+    if c.dir != some dir || c.network != some n then c else
+    let riders := made.mapIdx fun i (h, w, multisig) => ({ held := h, wallet := w, serial := c.riderSerial + i + 1, multisig } : Rider)
+    { c with held := files.map (·.1), riders, riderSerial := c.riderSerial + made.size + 1 }
 
 /-- `Backend.wallets`. -/
 def wallets (env : Env) (networkDir : String) : IO (List WalletSummary) := do
@@ -71,13 +87,24 @@ def wallets (env : Env) (networkDir : String) : IO (List WalletSummary) := do
 def switchTo (env : Env) (n : WinnowApp.Network) (dir : String) : IO Unit := do
   let c ← env.get
   if c.network == some n && c.dir == some dir then return
+  -- another wallet of the same network: the peers, the chain and the scan are the network's and stay; the open
+  -- wallet changes between two blocks of a pass, which from then on writes to neither (`walletSerial`, and
+  -- the riders, made again once the next one is open)
+  if c.network == some n && c.dir.map networkDirOf == some (networkDirOf dir) && c.stack.isSome then
+    env.withPlaceLock do
+      env.hooks.walletChanged
+      env.withWalletLock <| env.modify fun c =>
+        { (c.withWallet none) with dir := some dir, riders := #[], reviews := #[], bumps := #[], lastSyncError := none,
+                                   relayStoreQuarantined := none, transientSyncFailures := 0, transientSyncError := none }
+    env.journal "wallet.switched" [("slot", slotOf dir)]
+    return
   suspendAndStop env false
   -- a pass in flight still calls the stores of the place it began in (an account's coins, a card's payment):
   -- it is let finish, or run out of the peers just stopped, before those stores are pointed elsewhere. Its
   -- writes to the wallet itself are refused either way (`walletSerial`)
   discard <| env.sleepWhile switchWaitMs (·.syncing)
   env.hooks.walletChanged
-  let checked ← readLastCompleteCheck dir
+  let checked ← readLastCompleteCheck (networkDirOf dir)
   env.withWalletLock <| env.modify fun c =>
     { (c.withWallet none) with network := some n, dir := some dir, reviews := #[], bumps := #[],
                                lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
@@ -279,9 +306,14 @@ def adopt (env : Env) (w : Wallet) (dir : String) (startSync : Bool) : IO Unit :
   let (stack, n) ← env.modifyGet fun c =>
     ((c.stack, c.network), { c with loopToken := c.loopToken + 1, syncLoop := none })
   env.hooks.walletChanged
-  if let some s := stack then s.broadcaster.shutdown
-  for name in ["filters.json", "broadcast.json", "vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json"] do
-    removeQuietly (dirFile dir name)
+  -- the scan, the chain and the relay are the network's: they go with the wallet only when it is the only one
+  -- there, and otherwise it joins the scan the others are at (`syncOnce`)
+  let network := networkDirOf dir
+  let alone := (← heldWallets env network).all (·.dir == dir)
+  if alone then
+    if let some s := stack then s.broadcaster.shutdown
+    for name in sharedStackFiles do removeQuietly (dirFile network name)
+  for name in walletOwnFiles do removeQuietly (dirFile dir name)
   if let some n := n then
     if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)
   env.withWalletLock <| env.modify fun c => { (c.withWallet (some w)) with stack := none, reviews := #[], bumps := #[] }
@@ -294,11 +326,14 @@ def adopt (env : Env) (w : Wallet) (dir : String) (startSync : Bool) : IO Unit :
       for win in windows do win.close
       existing.pool.stop
       buildStackIfNeeded env
-    else
-      let filters ← runNet (FilterSyncIO.new existing.pool existing.chain (← w.nextScanHeight) (some (dirFile dir "filters.json")))
-      let broadcaster ← runNet (TxBroadcaster.new existing.pool (some (dirFile dir "broadcast.json")))
+    else if alone || existing.filters.isNone then
+      let filters ← runNet (FilterSyncIO.new existing.pool existing.chain (← w.nextScanHeight) (some (dirFile network "filters.json")))
+      let broadcaster ← if alone then runNet (TxBroadcaster.new existing.pool (some (dirFile network "broadcast.json")))
+        else pure existing.broadcaster
       let gen ← env.modifyGet fun c => (c.generation, { c with stack := some { existing with filters := some filters, broadcaster } })
-      observeBroadcasterFailures env broadcaster gen
+      if alone then observeBroadcasterFailures env broadcaster gen
+    else
+      env.modify fun c => { c with stack := some existing }
   if startSync then startSyncLoop env
 
 def readMnemonic (env : Env) (walletID : String) : IO (Option String) := do
@@ -510,8 +545,12 @@ def deleteWallet (env : Env) (expected : Option String := none) : IO Unit := do
     { (c.withWallet none) with lastSyncError := none, relayStoreQuarantined := none, phase := .idle,
                                reviews := #[], bumps := #[] }
   if let some dir := c.dir then
-    for name in ["wallet.json", "filters.json", "broadcast.json", "vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json"] do
-      removeQuietly (dirFile dir name)
+    removeQuietly (walletPath dir)
+    for name in walletOwnFiles do removeQuietly (dirFile dir name)
+    -- the network's scan, chain and relay stay while another wallet is kept there
+    let network := networkDirOf dir
+    if (← heldWallets env network).isEmpty then
+      for name in sharedStackFiles do removeQuietly (dirFile network name)
   if let (some n, some dir) := (c.network, c.dir) then
     if networkDirOf dir == dir then
       if let some message ← env.hooks.configure n dir then failWith (.storageDamaged message)

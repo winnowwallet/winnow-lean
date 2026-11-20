@@ -1886,22 +1886,70 @@ def walletsFlow (dir : String) (n : Node) : IO Unit := do
   let idB ← b.createWallet .regtest second
   check "wallets: a second wallet, and both are kept" (idB != idA && (← b.wallets first).map (·.id) == [idA, idB])
     s!"{(← b.wallets first).map (·.id)}"
-  let read : IO (List ByteArray) := ["wallet.json", "filters.json", "headers.bin"].mapM fun (name : String) => do
-    try IO.FS.readBinFile (System.FilePath.mk first / name) catch _ => pure ByteArray.empty
-  let before ← read
-  check "wallets: the first wallet has its files" (before.all (!·.isEmpty))
+  check "wallets: the network's scan, chain and peers are in its own directory, none in the second's"
+    ((← (System.FilePath.mk first / "filters.json").pathExists) && (← (System.FilePath.mk first / "headers.bin").pathExists) &&
+     !(← (System.FilePath.mk second / "filters.json").pathExists) && !(← (System.FilePath.mk second / "headers.bin").pathExists))
   -- while the second is open: it is paid, and so is the first
   let addressB ← b.receiveAddress false
   pay addressB 1_000_000
   pay addressA 2_000_000
   check "wallets: the second wallet sees its own payment and not the first's" (← balance 1_000_000)
     s!"{(← b.snapshot).1.balance}"
-  check "wallets: the first wallet's files are as they were while the second was open" ((← read) == before)
-  -- the first again: what was paid to it meanwhile, by its own scan
+  -- the first again: the pass that scanned for the second scanned for it too, so it has its payment as it opens
+  let passes := (← journaled "wallet.switched").size
+  check "wallets: the first wallet opens" ((← b.openWallet .regtest first) matches .opened _)
+  check "wallets: switching kept the network's peers and scan" ((← journaled "wallet.switched").size == passes + 1)
+  check "wallets: it already has the payment made while it was not open" ((← b.snapshot).1.balance == 5_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  b.startNetworking settings
+  -- a reorg while the first is open takes the second's coin with its block
+  pay addressB 500_000
+  let fallen ← n.height
+  discard <| waitUntil 60_000 (do b.syncNow; return (← b.snapshot).1.nextScanHeight == fallen + 1)
+  discard <| b.openWallet .regtest second
+  check "wallets: the second has the payment made while the first was open" ((← b.snapshot).1.balance == 1_500_000)
+    s!"{(← b.snapshot).1.balance}"
+  discard <| b.openWallet .regtest first
+  discard <| n.cli #["invalidateblock", ← n.cli #["getblockhash", toString fallen]]
+  let elsewhere ← n.wallet #["getnewaddress"]
+  for _ in [0:2] do discard <| n.cli #["generateblock", elsewhere, "[]"]
+  n.waitFilterIndex
+  let tip ← n.height
+  discard <| waitUntil 60_000 (do b.syncNow; return (← b.snapshot).1.nextScanHeight == tip + 1)
+  discard <| b.openWallet .regtest second
+  check "wallets: a reorg while the first was open took the second's coin with its block" ((← b.snapshot).1.balance == 1_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  -- the next block confirms it again; a background check, the first open, finds it for the second
+  discard <| b.openWallet .regtest first
+  b.stopNetworking
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  check "wallets: a background check reaches the tip" (← b.runBackgroundSync settings)
+  discard <| b.openWallet .regtest second
+  check "wallets: …scanning for the wallet that was not open" ((← b.snapshot).1.balance == 1_500_000)
+    s!"{(← b.snapshot).1.balance}"
+  -- the second's accounts cannot be read: it waits, and the first goes on
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  IO.FS.writeFile (System.FilePath.mk second / "multisig.json") "not an account file"
+  discard <| b.openWallet .regtest second
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  pay addressB 200_000
+  pay addressA 100_000
+  check "wallets: with the second's accounts unreadable, the first still syncs" (← balance 5_100_000)
+    s!"{(← b.snapshot).1.balance}"
+  checkJournal "sync.walletSetAside" ["walletID", "error"] (fun f => field f "walletID" == idB) "the second is set aside"
+  -- its file put right, it joins again and finds what was paid meanwhile
+  IO.FS.removeFile (System.FilePath.mk second / "multisig.json")
+  discard <| b.openWallet .regtest second
+  b.startNetworking settings
+  check "wallets: put right, the second catches up with the payment made while it was set aside" (← balance 1_700_000)
+    s!"{(← b.snapshot).1.balance}"
+  checkJournal "sync.walletJoined" ["walletID", "from", "through"] (fun f => field f "walletID" == idB) "it joined the scan again"
   check "wallets: the first wallet opens" ((← b.openWallet .regtest first) matches .opened _)
   b.startNetworking settings
-  check "wallets: it catches up with the payment made while it was closed" (← balance 5_000_000)
-    s!"{(← b.snapshot).1.balance}"
+  check "wallets: and has its own" (← balance 5_100_000) s!"{(← b.snapshot).1.balance}"
   -- the second is deleted; the first still spends
   discard <| b.openWallet .regtest second
   b.deleteWallet
@@ -1909,7 +1957,7 @@ def walletsFlow (dir : String) (n : Node) : IO Unit := do
     (!(← (System.FilePath.mk second).pathExists) && (← b.wallets first).map (·.id) == [idA])
   check "wallets: the first opens again" ((← b.openWallet .regtest first) matches .opened _)
   b.startNetworking settings
-  check "wallets: with its coins" (← balance 5_000_000)
+  check "wallets: with its coins" (← balance 5_100_000)
   let inputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "1000000", network := .regtest }
   let txid := (← b.sendPayment inputs (← b.previewSend inputs)).txid
   check "wallets: and it still sends" (← waitUntil 20_000 (do return (← n.mempool).contains txid))
@@ -1958,7 +2006,7 @@ def anchorFlow (dir : String) (n : Node) : IO Unit := do
   let (b, bHome) ← phone "AnchorB"
   discard <| b.importBundle .regtest bHome backup
   let (restored, _) ← syncUntil b 60_000 fun s p => s.nextScanHeight == tip + 1 && p == .synced
-  checkJournal "sync.anchorMismatch" ["fork"] (fun f => (field f "fork").toNat?.any (· < fallen))
+  checkJournal "sync.anchorMismatch" ["fork", "walletID"] (fun f => (field f "fork").toNat?.any (· < fallen))
     "the restore goes back below the fallen block"
   check "anchor: the restored wallet holds no coin from a block this chain does not have"
     (restored.balance == 0 && (history? restored txid).all (·.height == 0))
