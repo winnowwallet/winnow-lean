@@ -6,6 +6,7 @@ New: profiles. A profile is one key and what it holds: its coins, payments, cont
 3. The home lists only this profile's accounts and counts only its money; "Watching" holds the others, each saying where it signs.
 4. A 2-of-2 of two profiles here: sign in one, tap "Switch to … and sign": the other opens on the payment; add its signature.
 5. Leave one device off a while, use the other, then open the first: it should be up to date at once, without scanning the gap.
+6. Through Tor and I2P gateways the wallet now fills all three peer seats, Tor among them (before, it stopped at two, often both I2P).
 
 Since 0.9.21: more of the wallet is proved, and fees are whole-number arithmetic. Send once: the fee quoted must be the fee paid.
 

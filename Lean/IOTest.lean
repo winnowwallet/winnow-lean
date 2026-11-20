@@ -251,6 +251,14 @@ def offlineChecks (dir : String) : IO Unit := do
   check "diversity: a class may not hold every seat"
     (!pol.admits (c "9.9.9.9" .census) #[c "1.1.1.1" .census, c "2.2.2.2" .census] &&
       pol.admits (c "9.9.9.9" .manual) #[c "1.1.1.1" .manual, c "2.2.2.2" .manual])
+  let tor (n : Nat) : PeerCandidate := c s!"{String.ofList (List.replicate 56 (Char.ofNat (97 + n)))}.onion" .census
+  let i2p (n : Nat) : PeerCandidate := c s!"{String.ofList (List.replicate 52 (Char.ofNat (97 + n)))}.b32.i2p" .census
+  let overlays : DiversityPolicy := { peerCount := 3, clearnetSelected := false, overlayMix := true }
+  check "diversity: on Tor and I2P alone the census fills every seat, and the mix still holds"
+    (overlays.admits (tor 2) #[i2p 0, tor 1] && overlays.admits (tor 2) #[i2p 0, i2p 1] &&
+      !overlays.admits (i2p 2) #[i2p 0, i2p 1] && !overlays.admits (tor 2) #[tor 0, tor 1])
+  check "diversity: on one overlay alone the census fills every seat"
+    (({ peerCount := 3, clearnetSelected := false } : DiversityPolicy).admits (tor 2) #[tor 0, tor 1])
   check "cooldown doubles to the cap" (PeerPool.cooldown 1 == 30_000 && PeerPool.cooldown 2 == 60_000 &&
     PeerPool.cooldown 5 == 480_000 && PeerPool.cooldown 6 == 600_000 && PeerPool.cooldown 40 == 600_000)
   check "rebroadcast backoff" (TxBroadcaster.backoffInterval 0 60 3600 == 60 && TxBroadcaster.backoffInterval 5 60 3600 == 1920 &&

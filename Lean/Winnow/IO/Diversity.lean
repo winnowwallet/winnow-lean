@@ -188,10 +188,15 @@ end PeerNetwork
 /-- A Tor or I2P destination, reached through its gateway by name. -/
 def _root_.Winnow.Net.PeerEndpoint.isOverlay (e : PeerEndpoint) : Bool := PeerNetwork.ofHost e.host != .clearnet
 
-/-- The seating rules (`DiversityPolicy`), each a ceiling rather than a quota: one seat per netblock; no
-source class in every seat; while clearnet is selected, Tor and I2P together never in every seat (their
+/-- The seating rules (`DiversityPolicy`), each a ceiling rather than a quota: one seat per netblock; while
+clearnet is selected, no source class in every seat, and Tor and I2P together never in every seat (their
 names have no netblock); and with Tor and I2P both selected and clearnet off (`overlayMix`), neither overlay
-in every seat. Manual peers are exempt from all but the netblock rule. -/
+in every seat. Manual peers are exempt from all but the netblock rule.
+
+Without clearnet every automatic peer is the census's (DNS seeds answer with clearnet addresses, which the
+route refuses), so a source ceiling there could only leave a seat empty: a three-seat pool on Tor and I2P
+stopped at two, and the two quickest handshakes (I2P's, mostly) took both, so Tor was never used. There the
+overlay mix is the diversity. -/
 structure DiversityPolicy where
   peerCount : Nat
   clearnetSelected : Bool := true
@@ -207,7 +212,7 @@ def DiversityPolicy.admits (p : DiversityPolicy) (candidate : PeerCandidate) (se
       (seated.filter (·.endpoint.isOverlay)).size ≥ p.peerCount - 1 then false
   else if p.overlayMix && candidate.endpoint.isOverlay &&
       (seated.filter (PeerNetwork.ofHost ·.endpoint.host == PeerNetwork.ofHost candidate.endpoint.host)).size ≥ p.peerCount - 1 then false
-  else (seated.filter (·.source == candidate.source)).size < p.peerCount - 1
+  else !p.clearnetSelected || (seated.filter (·.source == candidate.source)).size < p.peerCount - 1
 
 /-! ## `peers.json` -/
 
