@@ -815,10 +815,13 @@ def accountFollowsDevices : Journey := ⟨"accountFollowsDevices", do
     waitUntil 60 "the first device's backup was not saved after the payment" (every := 0.5) do savedSince cloud marker
     shot "40-devices-first"
 
-  step "a second device, another wallet, the same iCloud: the account is there by itself" do
+  step "a second device, another wallet, the same iCloud: the account is there by itself, under Watching" do
     r.launch "devicessecond" [("WINNOW_E2E_CLOUD", cloud)]
     createWallet
-    waitFor (multisigAccount account) 120
+    waitFor homeWatchingRow 120
+    scrolled homeWatchingRow
+    tap homeWatchingRow
+    waitFor (multisigAccount account) 30
     waitFor (multisigWatchOnly account) 10
     expectEq "the account's name" (← text (multisigAccount account)) "Phone and Core"
     shot "41-devices-second-home"
@@ -895,7 +898,11 @@ def twoWalletsOneDevice : Journey := ⟨"twoWalletsOneDevice", do
     shot "65-wallets-two-signatures"
 
   step "the phone broadcasts, and the node takes it" do
-    let txid ← Collect.broadcast h
+    -- from the payment's own page (the Send sheet that began it was the other profile's)
+    scrolled multisigBroadcastButton
+    let before ← h.mempool
+    tap multisigBroadcastButton
+    let txid ← h.newMempoolTransaction before 30
     h.expectPays txid destination payment⟩
 
 def all : List Journey :=

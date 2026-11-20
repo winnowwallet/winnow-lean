@@ -60,9 +60,10 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     match r with
     | .opened id =>
       let (m, scan) := { m with stage := .ready, walletID := some id }.startLedgerScan
-      -- switched to sign a payment: the account's page, where this wallet adds its signature
+      -- switched to sign a payment: the payment's page, under its account's, where this wallet adds its signature
       let (m, account) := match m.pendingAccount with
-        | some a => ({ m with pendingAccount := none, routes := [.multisigAccount a] }, [Cmd.multisigOverview g])
+        | some a => ({ m with pendingAccount := none, routes := [.multisigAccount a, .multisigPSBT a],
+                              collect := { epoch := m.collect.epoch + 1, loadingDraft := true } }, [Cmd.multisigOverview g])
         | none => (m, [])
       (m, [.refresh g] ++ start ++ pending ++ scan ++ account)
     -- activation builds the stack whatever the stage, so a new wallet is dated at a synced tip; onboarding
