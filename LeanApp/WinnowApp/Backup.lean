@@ -18,8 +18,33 @@ def Model.export (m : Model) : Model × List Cmd :=
   ({ m with exportState := { m.exportState with busy := true, error := none, file := none }, confirm := none },
    m.discardExport ++ [.exportBundle m.generation m.epoch m.exportState.includeMnemonic name])
 
+/-- A durable acknowledgment is not evidence of a saved recovery copy. -/
+def Model.backupPromptKey (m : Model) : String :=
+  m.settings.network.name ++ ":" ++ m.walletID.getD ""
+
+/-- Preserve the original Receive action after the optional explanation. -/
+def Model.receiveNow (m : Model) : Model × List Cmd :=
+  ({ m with receive := ({} : Receive) }.present .receive, [.receiveAddress m.generation false])
+
+def Model.beginReceive (m : Model) : Model × List Cmd :=
+  if m.walletID.isNone || m.stage != .ready || !m.sheets.isEmpty then (m, []) else
+  if m.cloud.statusTitle == "Backed up" || m.settings.backupPromptShownFor.contains m.backupPromptKey then
+    m.receiveNow
+  else
+    let s := { m.settings with backupPromptShownFor := m.settings.backupPromptShownFor ++ [m.backupPromptKey] }
+    ({ m with settings := s }.present .backupIntro, [.saveSettings s])
+
 def stepBackup (msg : BackupMsg) (m : Model) : Model × List Cmd :=
   match msg with
+  | .reviewOptions =>
+    if !m.hasSheet .backupIntro then (m, []) else
+    let (m, cs) := m.closeSheet .backupIntro
+    ({ m with routes := m.routes ++ [.backup] }, cs)
+  | .receiveWithoutReview =>
+    if !m.hasSheet .backupIntro then (m, []) else
+    let (m, cs) := m.closeSheet .backupIntro
+    let (m, receive) := m.receiveNow
+    (m, cs ++ receive)
   | .openExport => (({ m with exportState := {} }.beginEpoch).present .exportBundle, [])
   | .setIncludeMnemonic b =>
     -- any change resets the export (`resetExport`): the old file must not be shared as the new one
@@ -73,31 +98,56 @@ def backupSection (m : Model) : H :=
        (Html.symbol "key" (.button "Show recovery phrase" .plain (if m.walletID.isNone || m.reveal.revealing then none else some (.backup .reveal))))] ++
      (if m.hasSheet .revealPhrase then [] else errorRows m.reveal.error))
 
-/-- BeginnerHomeView's Backup section: the iCloud backup's state, and the manual file while it is not
-backed up. -/
+/-- The visible Home reminder describes iCloud only. Manual exports do not provide a verified
+save receipt, and opening or dismissing a backup screen must never mark the wallet backed up. -/
 def beginnerBackupSection (m : Model) : H :=
   let c := m.cloud
-  .section "Backup" ""
-    ([ .identified Ids.cloudBackupStatus (Html.symbol (if c.statusTitle == "Backed up" then "checkmark.icloud" else "icloud") (body c.statusTitle)) ] ++
-     (match c.lastSavedText with | some t => [caption s!"Last saved {t}"] | none => []) ++
-     (match c.message with | some t => [caption t] | none => []) ++
-     (if c.statusTitle == "Not backed up" then
-       [ caption "Your wallet still works. Until iCloud backup works, keep a backup file yourself."
-       , .identified Ids.backupButton (navLink "Save a backup file" (some (.home .openBackup)) (symbol := "doc.badge.arrow.up")) ]
-      else []))
+  let title := if c.statusTitle == "Backed up" then "iCloud backup saved"
+    else if c.busy || c.statusTitle == "Backing up" then "iCloud backup in progress"
+    else if c.message == some cloudMissingEntitlementText then "iCloud backup unavailable"
+    else if !c.automaticEnabled then "iCloud backup is off"
+    else "iCloud backup incomplete"
+  let subtitle := if c.statusTitle == "Backed up" then
+      (c.lastSavedAgo.map fun ago => "Last saved " ++ ago ++ " ago.").getD "Review your backup options."
+    else if c.busy || c.statusTitle == "Backing up" then "Keep Winnow open while it saves."
+    else "Keep a recovery copy before adding Bitcoin."
+  .identified Ids.backupButton
+    (Html.decor { callout := true, fullWidth := true, symbol := "icloud", subtitle, accessory := "Review" }
+      (.button title .plain (some (.home .openBackup))))
+
+/-- A one-time first-Receive explanation. Continue to Receive continues to Receive; Home retains the status.
+The medium sheet can expand to large for Dynamic Type. -/
+def backupIntroSheet (m : Model) (inner : List H) : H :=
+  .sheet "Backup" (some .closeSheet)
+    ([closeBar "Close",
+      Html.decor { spacing := 16 } (.col
+        [Html.decor { symbol := "key", pointSize := 26 } (.text "Before you move more Bitcoin" .title),
+         body "You can receive now. Consider waiting until your iCloud backup is complete before moving a larger balance.",
+         Html.callout [Html.decor { pointSize := 15 } (body (if m.cloud.statusTitle == "Backed up" then "iCloud backup is now saved. You can also keep a recovery copy yourself." else "iCloud backup hasn’t completed. A completed backup helps you recover this wallet if you lose your phone."))],
+         .identified Ids.backupIntroReview (Html.decor { fullWidth := true } (.button "Review backup options" .primary (some (.backup .reviewOptions)))),
+         .identified Ids.backupIntroNotNow (Html.decor { fullWidth := true, underlined := true } (.button "Continue to Receive" .plain (some (.backup .receiveWithoutReview))))])] ++ inner)
+    false .medium
 
 /-- CloudBackupView (Settings → Backup → iCloud backup): the switch and the state. -/
 def cloudBackupSheet (m : Model) (inner : List H) : H :=
   let c := m.cloud
-  formSheet "iCloud backup" (some .closeSheet) [closeBar "Close"]
-    [ .section "" "Includes this phone’s signing key, wallet history, saved people and labels. Updates while Winnow is open, after pending payments confirm."
-         ([ .identified Ids.automaticCloudBackupToggle (.toggle "Automatic iCloud backup" c.automaticEnabled fun b => .cloud (.setAutomatic b))
-          , .identified Ids.cloudBackupStatus (.labeled "Status" (cloudRowStatus c)) ] ++
-          (match c.lastSavedText with | some t => [.labeled "Last saved to iCloud" t] | none => []) ++
-          (match c.message with | some t => [caption t] | none => []))
-     , .section "" ""
-         [ body "Restore using the same Apple Account with iCloud and Passwords & Keychain enabled. Access to the cloud backup and its synchronized key can restore spending access."
-         , body "Turning this off leaves existing copies in iCloud. Keep a backup file too." ] ] inner (largeTitle := true)
+  .sheet "iCloud backup" (some .closeSheet)
+    ([closeBar "Close", Html.decor { spacing := 24 } (.col
+      [ Html.callout
+          ([.identified Ids.cloudBackupStatus (Html.symbol "icloud" (.text (cloudRowStatus c) .headline))] ++
+           (match c.lastSavedText with | some t => [caption ("Last saved to iCloud: " ++ t)] | none => []) ++
+           (match c.message with | some t => [body t] | none => []))
+      , Html.decor { spacing := 10 } (.col
+          [ .identified Ids.automaticCloudBackupToggle (.toggle "Automatic backup" c.automaticEnabled fun b => .cloud (.setAutomatic b))
+          , caption "Saves this phone’s key, wallet history, saved people and labels." ])
+      , Html.decor { spacing := 8 } (.col
+          [ .text "Restoring your wallet" .headline
+          , body "Use the same Apple Account, with iCloud and Passwords & Keychain on."
+          , .disclosure "How backup and recovery work" (m.isExpanded "backup.details") (Msg.setExpanded "backup.details")
+              [body "Updates while Winnow is open, after pending payments confirm. Access to the cloud backup and its synchronized key can restore spending access."] ])
+      , Html.decor { spacing := 8 } (.col
+          [ .text "Keep another recovery copy" .headline
+          , body "Keep a backup file too. Turning backup off leaves existing iCloud copies." ]) ])] ++ inner)
 
 /-- CloudRestoreView: choose a saved backup; restoring never replaces a wallet already on this phone. -/
 def cloudRestoreSheet (m : Model) (inner : List H) : H :=

@@ -115,14 +115,36 @@ def labelSheet (m : Model) (inner : List H) : H :=
   formSheet "Address label" (if m.labelEditor.saving then none else some .closeSheet) [] (labelEditorView m) inner
 
 /-- `ShareMyCardView`: public keys only, plus the name others will see. -/
+def shareCardPrivacy : String :=
+  "This card carries public keys only. Anyone who has it can pay you and can see every address it derives, the same way your wallet does. People who pay you from their address book use the same list of addresses as your Receive screen, so two people paying at once can land on one address — a privacy detail, never a loss."
+
 def shareCardSheet (m : Model) (inner : List H) : H :=
-  formSheet "Share my card" (some .closeSheet) [closeBar "Done"]
-    ([ .section "" "" [.input .plain "" "Your name, as others will see it" m.settings.ownDisplayName (fun s => .receive (.setOwnName s)) none] ] ++
-     (match m.shareCard.card with
-      | some card =>
-        [.section "Your card" "This card carries public keys only. Anyone who has it can pay you and can see every address it derives, the same way your wallet does. People who pay you from their address book use the same list of addresses as your Receive screen, so two people paying at once can land on one address — a privacy detail, never a loss."
-          [ .qr card, copyableBlock m "card.text" card ]]
-      | none => [.section "" "" [caption "Add a name to make your card."]]) ++
-     errorRows m.shareCard.error) inner
+  .sheet "Share my card" (some .closeSheet)
+    ([closeBar "Done", Html.decor { spacing := 22 } (.col
+      ((if m.shareCard.card.isNone then
+          [ Html.decor { pointSize := 26 } (.text "Let people pay you" .title)
+          , body "Share a payment card that someone can save as a recipient in Winnow." ]
+        else []) ++
+       [ Html.decor { spacing := 8 } (.col
+           [ .text "Your name" .headline
+           , .identified "card.name" (.input .plain "" "Name or nickname" m.settings.ownDisplayName
+               (fun s => .receive (.setOwnName s)) none)
+           , caption "Shown to anyone who receives your card." ]) ] ++
+       (match m.shareCard.card with
+        | some card =>
+          [ Html.decor { spacing := 8 } (.col [.text "Your card" .headline, .qr card])
+          , Html.callout [body "Anyone with this card can derive your receiving addresses. Share it only with people you trust."]
+          , Html.decor { fullWidth := true } (.share "Share card" card)
+          , Html.decor { fullWidth := true } (.button (if m.copied == some "card.text" then "Copied" else "Copy card") .secondary (some (.copy "card.text" card)))
+          , .disclosure "What this card shares" (m.isExpanded "card.privacy") (Msg.setExpanded "card.privacy") [body shareCardPrivacy]
+          , .disclosure "Card text" (m.isExpanded "card.raw") (Msg.setExpanded "card.raw") [literal card] ]
+        | none =>
+          [ Html.callout
+              [ Html.symbol "person.crop.rectangle" (.text "Your payment card" .headline)
+              , caption (if m.settings.ownDisplayName.trimAscii.isEmpty then "Add a name to make your card."
+                  else if m.shareCard.error.isSome then "Your card could not be prepared."
+                  else "Preparing your card…") ]
+          , .button "Share card" .primary none ]) ++
+       errorRows m.shareCard.error))] ++ inner)
 
 end WinnowApp

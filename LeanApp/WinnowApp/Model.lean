@@ -22,6 +22,8 @@ structure PersonMode where
   deriving Repr, BEq, Inhabited
 
 inductive Sheet where
+  /-- Once per wallet, before its first Receive; the Home reminder remains after dismissal. -/
+  | backupIntro
   | send
   | receive
   | importWallet
@@ -753,6 +755,8 @@ inductive SettingsMsg where
   deriving Inhabited
 
 inductive BackupMsg where
+  | reviewOptions
+  | receiveWithoutReview
   | openExport
   | setIncludeMnemonic (b : Bool)
   | createExport

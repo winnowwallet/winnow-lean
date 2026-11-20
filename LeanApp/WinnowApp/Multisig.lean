@@ -597,9 +597,9 @@ def multisigBuildSections (m : Model) : List H :=
        [ .qr descriptor, copyableBlock m "multisig.created" descriptor Ids.multisigCreatedDescriptor
        , .identified Ids.multisigOpenAccountButton (.button "Open the account" .plain (some (.multisig (.openAccount id)))) ])]
   | none =>
-    [ .section "" "A Ledger shows the name when it registers the account: plain letters, digits and punctuation."
+    [ .section "Account name" "Use letters, numbers and punctuation."
         [.identified Ids.multisigBuildNameField (.input .plain "" "Name" f.name (fun s => .multisig (.buildSetName s)) none)]
-    , .section s!"Members · {n}" "Each member is one signer: this phone, a Ledger, someone's keys, or an account here. A member with several keys needs them all."
+    , .section s!"Members · {n}" "Choose who approves payments. A member with several keys needs them all."
         ((f.members.zipIdx.map fun (member, i) => memberRow m member i) ++
          [.identified Ids.multisigBuildAddMemberButton (.button "Add a member" .plain (some (.multisig (.openPicker none))))])
     , .section "" ""
@@ -641,56 +641,82 @@ def multisigAccountSections (m : Model) (id : String) : List H :=
     match a.policy with
     | some policy =>
       [ .section "" ""
-          ([.identified Ids.multisigBalance (.labeled "Balance" (satsText a.balance)),
-            .identified Ids.multisigPolicy (.labeled "Policy" policy)] ++
-           (match a.recovery with | some r => [.identified Ids.multisigRecovery (.labeled "Recovery" r)] | none => []) ++
-           (match a.ledgerName with
-            | some l => [.identified Ids.multisigLedgerFingerprint (.labeled "Ledger" l)]
-            | none => if a.needsLedgerRegistration then ledgerRegisterRows m a.id else []))] ++
-      (match a.membersHeader with
-       | some header =>
-         [.section header ""
-           (a.memberLines.zipIdx.map fun (line, i) => .identified (Ids.multisigMember (i)) (caption line))]
+          [caption "Account balance",
+           .identified Ids.multisigBalance (.row
+             [Html.decor { pointSize := 34 } (.text ((if a.balance < 0 then "-" else "") ++ groupDigits a.balance.natAbs) .largeTitle),
+              .spacer, Html.tone .secondary (body "sats")]),
+           .identified Ids.multisigPolicy (Html.symbol "lock.shield" (Html.tone .tint (.text policy .subheadline)))]] ++
+      (match a.recovery with
+       | some r => [.section "" ""
+           [Html.decor { callout := true, spacing := 8 } (.col
+             [Html.symbol "clock.arrow.circlepath" (.text "Recovery path" .headline),
+              .identified Ids.multisigRecovery (body r),
+              caption "From each coin’s confirmation."])]]
        | none => []) ++
-      [ .section s!"Receive · index {a.nextReceiveIndex}" "The same address on every signer's device: check it there before sharing it."
+      [ .section "" ""
           ((match a.receiveAddress with
-            | some address => [.qr address, literalRow m "multisig.receive" address Ids.multisigReceiveAddress]
-            | none => []) ++
+            | some address =>
+                [Html.centered (caption "RECEIVE BITCOIN"), .qr address,
+                 .identified Ids.multisigReceiveAddress (Html.decor { mono := true, centered := true, pointSize := 12 }
+                   (.text address .caption)),
+                 .row ([Html.symbol "doc.on.doc" (.button (if m.copied == some "multisig.receive" then "Copied" else "Copy address") .secondary
+                   (some (.copy "multisig.receive" address)))] ++
+                   (if a.draft.isSome then
+                     [.identified Ids.multisigDraftButton (Html.symbol "signature" (.button "Signatures" .primary (some (.multisig (.openPSBT a.id)))))]
+                    else if a.buildsPayments then
+                     [.identified Ids.multisigSendButton (Html.symbol "paperplane" (.button "Send" .primary (some (.multisig (.sendFrom a.id)))))]
+                    else []))]
+            | none =>
+                [caption "Receive address unavailable."] ++
+                (if a.draft.isSome then [.identified Ids.multisigDraftButton (.button "Signatures" .primary (some (.multisig (.openPSBT a.id))))]
+                 else if a.buildsPayments then [.identified Ids.multisigSendButton (.button "Send" .primary (some (.multisig (.sendFrom a.id))))] else [])) ++
            (if a.ledgerFingerprint.isNone then [] else
              let v := m.ledgerVerify
              let mine := v.id == a.id && v.index == a.nextReceiveIndex
              [.identified Ids.ledgerVerifyButton
-               (.button (if mine && v.checking then "Check the Ledger's screen…" else "Verify on Ledger") .plain
+               (.button (if mine && v.checking then "Check the Ledger's screen…" else "Verify on Ledger") .secondary
                   (if mine && v.checking then none else some (.multisig .verifyAddress)))] ++
              (match v.result with
               | some (text, _) => if mine then [.identified Ids.ledgerVerifyResult (caption text)] else []
               | none => [])) ++
-           [.identified Ids.multisigNewAddressButton (.button "New address" .plain (some (.multisig .newAddress)))])
-      -- every payment starts from Send (the recovery path too); a co-signer's PSBT is pasted, never typed
+           [.identified Ids.multisigNewAddressButton (.button "New address" .plain (some (.multisig .newAddress))),
+            caption "The same address on every signer's device: check it there before sharing it."])
       , .section "" ""
-          (if a.draft.isSome then
-            [.identified Ids.multisigDraftButton (.button "Payment awaiting signatures" .plain (some (.multisig (.openPSBT a.id))))]
-           else
-            -- a SegWit v0 account's payments are built by whoever holds its fixed key: here they are pasted
-            (if a.buildsPayments then
-              [.identified Ids.multisigSendButton (.button "Send from this account" .plain (some (.multisig (.sendFrom a.id))))]
-             else
-              [.identified Ids.multisigPaymentsElsewhere
-                (caption "Payments from this account are made by whoever holds its fixed key. Paste the PSBT they send you to check and sign it.")]) ++
-            [ .identified Ids.multisigPastePSBTButton
+          [.disclosure "Who can approve" (m.isExpanded ("multisig.members." ++ a.id)) (Msg.setExpanded ("multisig.members." ++ a.id))
+             ((match a.membersHeader with | some header => [.text header .headline] | none => []) ++
+              (a.memberLines.zipIdx.map fun (line, i) =>
+                .identified (Ids.multisigMember i) (body s!"{i + 1}.  {line}")))]] ++
+      -- every payment starts from Send (the recovery path too); a co-signer's PSBT is pasted, never typed
+      (if a.draft.isSome then [.section "" "" [caption "A payment is awaiting signatures."]]
+       else if a.buildsPayments then [] else
+         [.section "" "" [.identified Ids.multisigPaymentsElsewhere
+            (caption "Payments from this account are made by whoever holds its fixed key. Paste the PSBT they send you to check and sign it.")]]) ++
+      (if a.ledgerName.isNone && a.needsLedgerRegistration then [.section "" "" (ledgerRegisterRows m a.id)] else []) ++
+      [ .section "" ""
+          [.disclosure "Co-signer tools" (m.isExpanded ("multisig.tools." ++ a.id)) (Msg.setExpanded ("multisig.tools." ++ a.id))
+            ((if a.draft.isSome then [] else
+              [.identified Ids.multisigPastePSBTButton
                 (.button (if m.collect.busy then "Reading the PSBT…" else "Paste a PSBT from a co-signer") .plain
-                  (if m.collect.busy then none else some (.multisig (.pasteForAccount a.id)))) ] ++
-            (match m.collect.error with
-             | some e => if m.collect.busy then [] else [.identified Ids.multisigPasteError (body e)]
-             | none => []))
-      , .section "Coins" ""
-          ((if a.coins.isEmpty then [caption "No coins yet."] else []) ++
-           a.coins.map fun c =>
+                  (if m.collect.busy then none else some (.multisig (.pasteForAccount a.id))))]) ++
+             [.identified Ids.multisigShareButton (.share "Share with co-signers" a.descriptor),
+              caption "Everyone who signs needs this to see the account."])]
+      , .section "" ""
+          [.disclosure "Account details" (m.isExpanded ("multisig.details." ++ a.id)) (Msg.setExpanded ("multisig.details." ++ a.id))
+           ((match a.ledgerName with
+            | some l => [.identified Ids.multisigLedgerFingerprint (.labeled "Ledger" l)]
+            | none => []) ++
+           (match a.membersHeader with
+            | some header => [body header]
+            | none => []) ++
+           [.text "Coins" .headline] ++
+           (if a.coins.isEmpty then [caption "No coins yet."] else []) ++
+           (a.coins.map fun c =>
              .col ([body (satsText c.amount), caption c.line] ++
                    (match c.recoveryFrom with | some h => [caption s!"recovery path from block {h}"] | none => [])))
-      , .section "" "Everyone who signs needs this to see the account."
-          [.identified Ids.multisigShareButton (.share "Share with co-signers" a.descriptor)]
-      , .section "" "" [.button "Remove account" .destructive (some (.multisig .askRemove))] ] ++
+            ++ [.button "Remove account" .destructive (some (.multisig .askRemove))])]] ++
+      (match m.collect.error with
+       | some e => if m.collect.busy || a.draft.isSome then [] else [.section "" "" [.identified Ids.multisigPasteError (body e)]]
+       | none => []) ++
       errorSection m.multisigAccountError
     | none => [.section "" "" [caption "This multisig account is no longer on this phone."]] ++ errorSection m.multisigAccountError
   | none => [.section "" "" [caption "This multisig account is no longer on this phone."]] ++ errorSection m.multisigAccountError
@@ -713,13 +739,17 @@ def collectSections (m : Model) (id : String) : List H :=
         (match d.screen with
          | some s =>
            (s.outputs.map fun o =>
-              .col [.row [caption (if o.owned then "Back to this account" else "Pays"), .spacer, body (satsText o.amount)],
-                    caption o.address]) ++
-           [.labeled "Inputs" (satsText s.inputTotal), .identified Ids.multisigFee (.labeled "Fee" (satsText s.fee))] ++
-           (s.signatures.zipIdx.map fun ((recovery, approved, threshold), i) =>
-              let (title, rowID) := s.signatureTitles[i]?.getD
-                (if recovery then ("Recovery signatures", Ids.multisigRecoverySignatureCount) else ("Signatures", Ids.multisigSignatureCount))
-              .identified rowID (.labeled title s!"{approved} of {threshold}"))
+              Html.decor { spacing := 8 } (.col
+                [caption (if o.owned then "Back to this account" else "Sending"),
+                 Html.decor { pointSize := 32 } (.text (satsText o.amount) .largeTitle),
+                 Html.decor { mono := true, pointSize := 12 } (caption o.address)])) ++
+           [.labeled "Inputs" (satsText s.inputTotal), .identified Ids.multisigFee (.labeled "Fee" (satsText s.fee)),
+            Html.decor { callout := true, spacing := 12 } (.col
+             (s.signatures.zipIdx.map fun ((recovery, approved, threshold), i) =>
+               let (title, rowID) := s.signatureTitles[i]?.getD
+                 (if recovery then ("Recovery signatures", Ids.multisigRecoverySignatureCount) else ("Signatures", Ids.multisigSignatureCount))
+               .identified rowID (.col [caption title,
+                 Html.decor { pointSize := 28 } (.text s!"{approved} of {threshold}" .title)])))]
          | none =>
            [ warningRow "Winnow cannot safely review this PSBT"
            , body (d.reviewError.getD "The account or PSBT is unavailable.") ])
@@ -729,8 +759,8 @@ def collectSections (m : Model) (id : String) : List H :=
         let onLedger := f.busy && f.ledgerSigning
         [.section (if s.recoveryUsable then "Signing · signers or recovery path" else "Signing")
           (if onLedger then "Check the payment on the Ledger's screen and approve it there. Winnow waits for the Ledger." else p.nextStep)
-          ([ .identified Ids.multisigSignButton (.button "Add this phone's signature" .plain
-              (if f.busy || !p.phoneUnsigned || p.complete then none else some (.multisig (.sign id)))) ] ++
+          ([ .identified Ids.multisigSignButton (Html.symbol (if p.signedHere then "checkmark.circle" else "signature") (.button (if p.signedHere then "This phone has signed" else "Add this phone's signature") .secondary
+              (if f.busy || !p.phoneUnsigned || p.complete then none else some (.multisig (.sign id))))) ] ++
            (if p.ledgerHolds then
              [.identified Ids.ledgerSignButton
                (.button (if onLedger then "Approve on the Ledger…" else "Sign with Ledger") .plain (if f.busy || !p.ledgerUnsigned || p.complete then none else some (.multisig (.signWithLedger id))))]

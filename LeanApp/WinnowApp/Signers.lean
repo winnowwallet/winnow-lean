@@ -145,12 +145,15 @@ def signerDetailSections (m : Model) (id : String) : List H :=
 /-- LedgerPairView ("Pair a Ledger"): files the Ledger's key among the signers. -/
 def ledgerPairSections (m : Model) : List H :=
   let f := m.ledgerPair
-  [ .section "" "What this phone calls the Ledger, such as Nano X."
+  [ .section "Device name" "A name you’ll recognize, such as Nano X."
       [.identified Ids.ledgerNameField (.input .plain "" "Name" f.name (fun s => .multisig (.setLedgerName s)) none)]
   , .section "Steps" ""
-      [ body "1. Unlock the Ledger and open its Bitcoin app, version 2.1.2 or later (Bitcoin Test on signet)."
-      , body "2. Tap Pair. The first time, confirm the same pairing code on the phone and the Ledger."
-      , body "3. The Ledger's multisig key is saved here. Nothing is approved on the Ledger until an account uses it." ]
+      [ body "1. Unlock your Ledger and open Bitcoin."
+      , body "2. Tap Pair, then compare the pairing code."
+      , caption "Requires Bitcoin app 2.1.2 or later. Use Bitcoin Test on signet."
+      , .disclosure "What pairing does" (m.isExpanded "ledger.pair.details") (Msg.setExpanded "ledger.pair.details")
+          [body "The Ledger’s multisig key is saved here. Nothing is approved on the Ledger until an account uses it."]
+      , caption "Pairing alone does not protect your balance." ]
   , .section "" ""
       ([.identified Ids.ledgerPairButton
          (.button (if f.pairing then "Pairing…" else "Pair") .primary (if f.pairing || !f.nameIsUsable then none else some (.multisig .pairLedger)))] ++

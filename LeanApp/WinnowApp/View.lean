@@ -30,6 +30,7 @@ def importSheet (m : Model) (inner : List H) : H :=
 
 def sheetView (m : Model) (s : Sheet) (inner : List H) : H :=
   match s with
+  | .backupIntro => backupIntroSheet m inner
   | .receive => receiveSheet m inner
   | .send => sendSheet m inner
   | .cloudRestore => cloudRestoreSheet m inner
@@ -154,22 +155,22 @@ where routedScreen' (m : Model) : Option H :=
   | some .backup => some (backupScreen m (overlays m))
   | some .settings => some (.screen "Settings" (some (.home .pop)) ([.list (settingsSections m)] ++ overlays m))
   | some (.network .sync) =>
-    some (.screen "Sync" (some (.home .pop)) ([.list (syncSections m)] ++ overlays m) (onRefresh := some .syncNow))
-  | some (.network .peers) => some (.screen "Peers and routing" (some (.home .pop)) ([.list (peersSections m)] ++ overlays m))
+    some (.screen "Sync" (some (.home .pop)) ([editorialForm (syncSections m)] ++ overlays m) (onRefresh := some .syncNow))
+  | some (.network .peers) => some (.screen "Peers and routing" (some (.home .pop)) ([editorialForm (peersSections m)] ++ overlays m))
   | some (.network .explorer) => some (.screen "Block explorer" (some (.home .pop)) ([.list (explorerSections m)] ++ overlays m))
   | some (.network .verification) =>
     some (.screen "Chain verification" (some (.home .pop)) ([.list (verificationSections m)] ++ overlays m))
   | some .multisigAccounts => some (.screen "Multisig accounts" (some (.home .pop)) ([.list [multisigSection m]] ++ overlays m))
   | some .multisigAdd => some (multisigAddScreen m (overlays m))
   | some .ledgerPair =>
-    some (.screen "Pair a Ledger" (some (.signer .pop)) ([.list (ledgerPairSections m)] ++ overlays m))
+    some (.screen "Pair a Ledger" (some (.signer .pop)) ([editorialForm (ledgerPairSections m)] ++ overlays m))
   | some .multisigBuild =>
-    some (.screen "Create an account" (some (.multisig .pop)) ([.list (multisigBuildSections m)] ++ overlays m))
+    some (.screen "Create an account" (some (.multisig .pop)) ([editorialForm (multisigBuildSections m)] ++ overlays m))
   | some (.multisigAccount id) =>
     some (.screen ((m.multisigInfo? id).map (·.name) |>.getD "Multisig") (some (.multisig .pop))
-      ([.list (multisigAccountSections m id)] ++ overlays m))
+      ([Html.decor { spacing := 20 } (.col ((multisigAccountSections m id).map editorialSection))] ++ overlays m) (largeTitle := false))
   | some (.multisigPSBT id) =>
-    some (.screen (multisigPSBTTitle m id) (some (.multisig .pop)) ([.list (multisigPSBTSections m id)] ++ overlays m))
+    some (.screen (multisigPSBTTitle m id) (some (.multisig .pop)) ([editorialForm (multisigPSBTSections m id)] ++ overlays m))
   | some .signers => some (.screen "Signers" (some (.signer .pop)) ([.list (signersSections m)] ++ overlays m))
   | some (.signer id) =>
     some (.screen ((m.signer? id).map (·.name) |>.getD "Signer") (some (.signer .pop))
@@ -182,14 +183,16 @@ def mainScreen (m : Model) : H :=
   match routedScreen m with
   | some screen => screen
   | none =>
-    .screen "Winnow" none
-      ([ .toolbar [.identified Ids.settingsButton (.button "Settings" .plain (some (.home .openSettings)))],
-         .list (homeSections m) ] ++ overlays m)
-      (onRefresh := some .syncNow)
+    Html.decor { hideNavigationBar := true } (.screen "Winnow" none
+      ([Html.decor { spacing := 24 } (.col
+        ([.row [Html.decor { asset := "WinnowWordmark" } (.text "Winnow" .title), .spacer,
+          .identified Ids.settingsButton (Html.decor { fullWidth := true, symbol := "gearshape" }
+            (.button "Settings" .secondary (some (.home .openSettings))))]] ++ (homeSections m).map editorialSection))] ++ overlays m)
+      (onRefresh := some .syncNow) (largeTitle := false))
 
 def otherNetwork (n : Network) : Network := if n == .mainnet then .signet else .mainnet
 
-def view (m : Model) : H :=
+def unstyledView (m : Model) : H :=
   match m.stage with
   | .loading => .screen "Winnow" none ([.progress "Opening wallet…"] ++ confirms m)
   | .storageDamaged msg =>
@@ -200,5 +203,8 @@ def view (m : Model) : H :=
         , .button s!"Open the {other.name} wallet instead" .plain (some (.switchNetwork other)) ]] ++ confirms m)
   | .onboarding => onboardingView m
   | .ready => mainScreen m
+
+/-- Shared action styling applies to every existing app presentation. -/
+def view (m : Model) : H := designActions (unstyledView m)
 
 end WinnowApp

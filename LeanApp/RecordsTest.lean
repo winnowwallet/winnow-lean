@@ -1037,7 +1037,9 @@ def settingsScreen (root : System.FilePath) : IO Unit := do
 share card with a display name. -/
 def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit := do
   let m := readyModel walletID
-  let (m, left) ← sh.tap .openReceive m
+  let (prompt, _) ← sh.tap .openReceive m
+  check "receive: first use explains recovery before showing the address" (prompt.topSheet == some .backupIntro)
+  let (m, left) ← sh.tap (.backup .receiveWithoutReview) prompt
   let first := m.receive.address
   check "receive: the first address" (first.startsWith "bcrt1p" && m.topSheet == some .receive) first
   check "receive: the mempool window opens on it" (left.any fun | .watchAddress _ a => a == first | _ => false)
@@ -1120,7 +1122,9 @@ def peopleScreens (sh : Shell) (backend : Backend) (walletID cardB addressB : St
   let (m, _) ← sh.tap (.people .save) m
   let some bob := m.records.people.find? (·.name == "Bob") | check "add: Bob saved" false; return (m, "")
   check "add: the sheet closes on the list" (m.topSheet == some .savedRecipients && bob.payTo == some true)
-  check "add: the list shows Bob with Rename and Remove" (contains (rendered m) "\"Bob\"" && contains (rendered m) "Rename")
+  check "add: choosing Bob does not compete with removal" (contains (rendered m) "\"Bob\"" && !contains (rendered m) "\"Remove\"")
+  let (m, _) ← sh.tap (.setExpanded "recipients.editing" true) m
+  check "edit: Rename and Remove remain available" (contains (rendered m) "Rename" && contains (rendered m) "Remove")
   -- rename him
   let (m, _) ← sh.tap (.people (.rename bob.id)) m
   let sheet := renderedH (addPersonSheet m [])
@@ -1154,7 +1158,8 @@ def peopleScreens (sh : Shell) (backend : Backend) (walletID cardB addressB : St
   check "remove: Carol is no longer a saved recipient" (!contains (rendered m) "Carol" &&
     ((m.person? carol.id).map (·.isSavedRecipient)) == some false && m.recipientsError.isNone)
   check "remove: the backend agrees" (((← backend.records).people.find? (·.id == carol.id)).map (·.isSavedRecipient) == some false)
-  -- choose Robert to pay
+  -- leave editing before choosing Robert to pay
+  let (m, _) ← sh.tap (.setExpanded "recipients.editing" false) m
   let (m, _) ← sh.tap (.people (.choose bob.id)) m
   check "choose: back on Send, paying Robert" (m.topSheet == some .send && m.send.inputs.personID == some bob.id &&
     contains (rendered m) "Robert" && contains (rendered m) "Change")
@@ -1525,7 +1530,7 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
 
   -- Home's Save a backup file, the Back up page
   let simple := readyModel walletID
-  check "Back up: Home offers it while nothing is backed up" (contains (rendered simple) "Save a backup file")
+  check "Back up: Home offers review of the incomplete iCloud backup" (contains (rendered simple) "iCloud backup incomplete")
   let (page, _) ← sh.tap (.home .openBackup) simple
   let shown := rendered page
   check "Back up: the page" (page.routes == [.backup] && contains shown "\"Back up\"" &&
@@ -1548,7 +1553,7 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
   let (page, _) ← sh.run page cs
   let (home, _) ← sh.tap (.home .pop) page
   check "Back up: closing the sheet, then Back, is Home" (page.sheets.isEmpty && home.routes.isEmpty &&
-    contains (rendered home) "Save a backup file")
+    contains (rendered home) "iCloud backup incomplete")
 
   -- a new phone restores it: the import sheet through to the verification report
   let restoreRoot := root / "screens-restore"

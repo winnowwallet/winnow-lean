@@ -13,8 +13,8 @@ path = "../Lean"
 # .github/workflows/ci.yml.
 [[require]]
 name = "leannative"
-git = "https://github.com/LeanNative/leannative.git"
-rev = "59180b0c95c0bb94289ac2febffdaa6316917748"
+git = "https://github.com/LonnieRae/leannative.git"
+rev = "2272264d1ee7ff51331ea4c2280f52b00480dd8a"
 subDir = "framework/lean"
 
 [[lean_lib]]
@@ -66,3 +66,8 @@ name = "Journeys"
 [[lean_exe]]
 name = "journeys"
 root = "Journeys"
+
+# Presentation and action routing regression checks.
+[[lean_exe]]
+name = "home-presentation-test"
+root = "HomePresentationTest"

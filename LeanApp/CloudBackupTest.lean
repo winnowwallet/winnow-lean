@@ -627,14 +627,14 @@ def onboardingScreens : TM Unit := do
   -- the home's backup line
   let home (c : CloudStatus) := rendered (.list (homeSections { stage := .ready, cloud := c, walletID := some "w" }) : H)
   let notYet := home {}
-  check "home: not backed up offers the backup file" (contains notYet "Not backed up" && contains notYet "backupButton" &&
-    contains notYet "Your wallet still works. Until iCloud backup works, keep a backup file yourself." &&
-    contains notYet "Save a backup file")
+  check "home: incomplete backup keeps a visible recovery action" (contains notYet "iCloud backup incomplete" && contains notYet "backupButton" &&
+    contains notYet "Keep a recovery copy before adding Bitcoin." && contains notYet "Review")
   let noEntitlement := home { message := some cloudMissingEntitlementText }
-  check "home: a build without iCloud says so once" (contains noEntitlement "iCloud backup isn't available in this build of Winnow." &&
-    (noEntitlement.splitOn "Not backed up").length == 2 && !contains noEntitlement "Sign in to iCloud")
-  let done := home { statusTitle := "Backed up", lastSavedText := some "10/27/2026, 7:28 PM", enabled := true }
-  check "home: backed up, with its date, and no manual nag" (contains done "Last saved 10/27/2026, 7:28 PM" && !contains done "backupButton")
+  check "home: a build without iCloud says so once" ((noEntitlement.splitOn "iCloud backup unavailable").length == 2 &&
+    contains noEntitlement "backupButton" && !contains noEntitlement "Sign in to iCloud")
+  let done := home { statusTitle := "Backed up", lastSavedText := some "10/27/2026, 7:28 PM", lastSavedAgo := some "5 min", enabled := true }
+  check "home: saved backup keeps status and review without an incomplete warning" (contains done "iCloud backup saved" &&
+    contains done "Last saved 5 min ago." && contains done "backupButton" && !contains done "Keep a recovery copy before adding Bitcoin.")
   -- Settings → Backup: always the iCloud backup, the file and the recovery words
   let advanced : Model := { walletID := some "w" }
   let advBackup := rendered (backupSection advanced)
@@ -655,7 +655,7 @@ def onboardingScreens : TM Unit := do
   check "Backup file sheet: the phrase still asks first" (asking.confirm == some .exportWithPhrase)
   let (m6, _) := step (.cloud .openBackup) advanced
   let controls := rendered (cloudBackupSheet m6 [])
-  check "iCloud backup: the automatic switch" (contains controls "automaticCloudBackupToggle" && contains controls "Automatic iCloud backup")
+  check "iCloud backup: the automatic switch" (contains controls "automaticCloudBackupToggle" && contains controls "Automatic backup")
   check "iCloud backup: the switch asks the backend" ((step (.cloud (.setAutomatic false)) m6).2.any (· matches .setAutomaticCloud false))
 
 /-- The shell's CloudKit answers as the screens' texts: a build without the entitlement is not a sign-in

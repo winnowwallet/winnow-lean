@@ -135,7 +135,7 @@ def peerGatewaysSection (m : Model) : H :=
     .identified (Ids.peerType (n.rawValue))
       (.toggle (match n with | .clearnet => "Clearnet peers" | .tor => "Tor peers" | .i2p => "I2P peers")
         (d.gatewayNetworks.contains n) fun on => .settings (.setGatewayNetwork n on))
-  .section "Peer networks" "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does, Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Tor and I2P peers always use their gateway. The peer list ships with the app, so finding peers downloads nothing. Explorer requests use clearnet when selected, Tor otherwise; with I2P alone they are unavailable. A SOCKS check does not guarantee overlay connectivity."
+  .section "Connection" ""
     ([ .identified Ids.gatewayRoutingMode
          (.picker "Gateway routing" ["Automatic", "Direct only", "Manual"] d.gatewayMode fun i => .settings (.setGatewayMode i)) ] ++
      (if d.gatewayMode == 2 then
@@ -145,15 +145,17 @@ def peerGatewaysSection (m : Model) : H :=
        (if d.gatewayNetworks.contains .i2p then
          [.identified Ids.i2pGatewayAddress (.input .plain "" "I2P SOCKS gateway — host:port" d.i2pAddress (fun t => .settings (.setI2PAddress t)) none)] else [])
       else []) ++
-     [ .identified Ids.applyPeerRouting (.button (if off then "Applying…" else "Apply routing") .plain (act .applyGateways)) ] ++
+     [ .identified Ids.applyPeerRouting (.button (if off then "Applying…" else "Apply routing") .primary (act .applyGateways)) ] ++
      errorRows d.gatewayError ++
      (if m.status.discoveringGateways then [.progress "Checking Tailscale gateways…"] else
        (match active.torProxy with | some e => [.labeled "Active Tor gateway" (gatewayAddressText e)] | none => []) ++
        (match active.i2pProxy with | some e => [.labeled "Active I2P gateway" (gatewayAddressText e)] | none => []) ++
-       (if active.networks == [.clearnet] then [caption "Using clearnet peers."] else []) ++
+       (if active.networks == [.clearnet] then [warningRow "Direct peers can see your IP address."] else []) ++
        (if !active.isValid then errorRows (some "Gateway settings are invalid. Networking is offline.") else [])) ++
-     [ .identified Ids.checkPeerGateways (.button "Check gateways and reconnect" .plain
-         (if m.status.discoveringGateways || off then none else some (.settings .checkGateways))) ])
+     [ .identified Ids.checkPeerGateways (.button "Check gateways and reconnect" .secondary
+         (if m.status.discoveringGateways || off then none else some (.settings .checkGateways)))
+     , .disclosure "Routing details" (m.isExpanded "network.routing.details") (Msg.setExpanded "network.routing.details")
+         [body "Automatic uses only your Tailscale Tor and I2P gateways when either answers, and clearnet only when neither does, Connect Tailscale first; discovery checks winnow-tor-gateway:9050 and winnow-i2p-gateway:4447 on launch, foregrounding, and reconnect. Tor and I2P peers always use their gateway. The peer list ships with the app, so finding peers downloads nothing. Explorer requests use clearnet when selected, Tor otherwise; with I2P alone they are unavailable. A SOCKS check does not guarantee overlay connectivity."] ])
 
 /-- Settings → Network → Peers: routing, the census list, manual peers and the connected peers. -/
 def peersSections (m : Model) : List H :=
@@ -161,14 +163,15 @@ def peersSections (m : Model) : List H :=
   let d := m.settingsDraft
   let set (f : String → SettingsMsg) : String → Msg := fun v => .settings (f v)
   [ peerGatewaysSection m
-  , .section "Mainnet peer list" "Each release carries the census of its day, the list it starts from. Every selected peer still undergoes Winnow's normal checks."
+  , .section "Mainnet peer list" "Starts from the peer list bundled with this release. Every peer is checked."
       (match d.catalog with | some line => [.identified Ids.censusCatalogText (body line)] | none => [])
-  , .section "Manual peers" "Manual peers are tried first when their network is enabled. Clearnet seeds resolve over HTTPS (Cloudflare 1.1.1.1), with system DNS as the fallback. Overlay names are resolved by their SOCKS gateway. The default port is 8333 (mainnet) / 38333 (signet). Peers must advertise compact filters and pass Winnow's checks."
+  , .section "Manual peers" "Your nodes are tried first."
       ((s.manualPeers.zipIdx.map fun (p, i) => .row [literal p, .spacer, .button "Remove" .destructive (some (.settings (.removeManualPeer i)))]) ++
        [.row [.input .plain "" "host:port" d.manualPeer (set .setManualPeer) (some (.settings .addManualPeer)),
               .button "Add" .plain (if d.manualPeer.trimAscii.isEmpty then none else some (.settings .addManualPeer))]] ++
        errorRows d.error ++
-       [.button "Reconnect peers" .plain (some (.settings .reconnect))])
+       [.button "Reconnect peers" .secondary (some (.settings .reconnect)),
+        .disclosure "Manual peer requirements" (m.isExpanded "network.manual.details") (Msg.setExpanded "network.manual.details") [body "Manual peers are tried first when their network is enabled. Clearnet seeds resolve over HTTPS (Cloudflare 1.1.1.1), with system DNS as the fallback. Overlay names are resolved by their SOCKS gateway. The default port is 8333 (mainnet) / 38333 (signet). Peers must advertise compact filters and pass Winnow's checks."]])
   , .section "Connected peers" ""
       ((d.peers.map fun p =>
           .col [.identified Ids.peerNetwork (Html.tone (if p.network == .clearnet then .warning else .secondary) (caption (peerNetworkLabel p.network))),

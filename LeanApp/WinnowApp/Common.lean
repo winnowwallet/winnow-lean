@@ -103,7 +103,7 @@ def Model.forgetSheet (m : Model) : Sheet → Model × List Cmd
   | .signerPicker => ({ m with multisigBuild := { m.multisigBuild with pickInto := none, pasteError := none } }, [])
   -- CloudRestoreView's `onDisappear`: `cancel()` (the controller's operations end)
   | .cloudRestore => ({ m with onboarding := { m.onboarding with restoring := false, restoreError := none } }, [.suspendCloud])
-  | .cloudBackup | .readSide | .bluetoothIntro => (m, [])
+  | .cloudBackup | .readSide | .bluetoothIntro | .backupIntro => (m, [])
   -- the nearby card: a setup left (Not now, or after a failure) starts again from its first step
   | .ledgerNearby => ({ m with ledgerSetup := none }, [])
 
@@ -169,5 +169,35 @@ def formSheet (title : String) (onDismiss : Option Msg) (bar content inner : Lis
 disclosure chevron. -/
 def navLink (label : String) (action : Option Msg) (symbol := "") : H :=
   Html.decor { chevron := true, symbol } (.button label .plain action)
+
+/-- A compact form layout with shared gutters. Only presentation changes: original controls,
+identifiers, enabled states and messages are kept in the tree. -/
+partial def editorialSection : H → H
+  | .section title footer cs => Html.decor { spacing := 12 } (.col
+      ((if title.isEmpty then [] else [.text title .headline]) ++ cs ++
+       (if footer.isEmpty then [] else [Html.tone .secondary (.text footer .footnote)])))
+  | .identified id h => .identified id (editorialSection h)
+  | h => h
+
+def editorialForm (cs : List H) : H :=
+  Html.decor { spacing := 28 } (.col (cs.map editorialSection))
+
+/-- A consistent, visible action shape across app screens. Toolbar and alert actions keep their
+native presentation; inline Copy and disclosure links keep their compact roles. Decoration preserves
+all original event paths, enabled conditions and messages. -/
+partial def designActions : H → H
+  | .button label .primary action => Html.decor { fullWidth := true } (.button label .primary action)
+  | .button label .secondary action => Html.decor { fullWidth := true } (.button label .secondary action)
+  | .col cs => .col (cs.map designActions)
+  | .row cs => .row (cs.map designActions)
+  | .list cs => .list (cs.map designActions)
+  | .section title footer cs => .section title footer (cs.map designActions)
+  | .screen title back cs refresh large depth => .screen title back (cs.map designActions) refresh large depth
+  | .sheet title dismiss cs large size => .sheet title dismiss (cs.map designActions) large size
+  | .empty title icon message cs => .empty title icon message (cs.map designActions)
+  | .disclosure title expanded toggle cs => .disclosure title expanded toggle (cs.map designActions)
+  | .identified id h => .identified id (designActions h)
+  | .decorated d h => Html.decor d (designActions h)
+  | h => h
 
 end WinnowApp

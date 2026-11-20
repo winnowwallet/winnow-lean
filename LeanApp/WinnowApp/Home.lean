@@ -180,11 +180,11 @@ def paymentRow (m : Model) (p : DisplayedPayment) (tappable := true) : H :=
        , .spacer
        , amount ]
 
-/-- A warning the home keeps to one short line: a filled symbol and a few words in the warning colour,
-tapped for the whole message in an alert, which leads on to the Settings page with the details and Retry. -/
+/-- One full-width warning control; Details and the subtitle are part of the same tap target. -/
 def compactWarning (id label : String) (kind : HomeWarning) (symbol := "exclamationmark.triangle.fill")
-    (tone : LeanNative.Tone := .warning) : H :=
-  .identified id (Html.decor { tone, symbol } (.button label .plain (some (.home (.explainWarning kind)))))
+    (tone : LeanNative.Tone := .warning) (detail := "Balance may be out of date.") : H :=
+  .identified id (Html.decor { callout := true, subtitle := detail, accessory := "Details", symbol := symbol, tone := if tone == .warning then .standard else tone }
+    (.button label .plain (some (.home (.explainWarning kind)))))
 
 /-- The home's network problem, in a few words: no peer can be reached, or syncing keeps failing (a dropped
 peer or two stays quiet: `simpleSyncError`). -/
@@ -222,30 +222,41 @@ when any peer can see the phone's IP address, its whole message in an alert). -/
 def peerRoutingBanner (m : Model) : H :=
   let state := PeerRoutingState.current m.settings.peerGatewaySettings.mode m.status.activeGateways m.status.discoveringGateways
   if state.warns then
-    compactWarning Ids.peerRoutingBanner state.shortLabel .routing state.symbol (if state == .offline then .negative else .warning)
+    compactWarning Ids.peerRoutingBanner
+      (if state == .offline then state.shortLabel else "Connection privacy") .routing state.symbol
+      (if state == .offline then .negative else .warning)
+      (if state == .offline then "Review your routing settings."
+       else if m.phase.summary m.status.syncing == .peersUnavailable then "Peers can see your IP when connected."
+       else state.shortLabel)
   else .identified Ids.peerRoutingBanner (.row [.icon state.symbol, caption state.message])
 
 /-- The headline balance: the largest type in the app. -/
-def balanceText (m : Model) : H := .identified Ids.balanceText (.text (satsText (totalBalance m)) .largeTitle)
+def balanceText (m : Model) : H :=
+  .identified Ids.balanceText (.row [Html.decor { pointSize := 36 } (.text ((if totalBalance m < 0 then "-" else "") ++ groupDigits (totalBalance m).natAbs) .largeTitle),
+    Html.tone .secondary (.text "sats" .subheadline)])
 
-/-- The balance card: one cell, the amount large, then its status line and the network's badge; under it a row
-for each warning, its tinted words alone (a row of the list is a button with no box around it), and on mainnet
-the routing line. The error and Retry are in Settings → Network → Sync. -/
+/-- The balance card: test-network badge, amount and status in one cell, followed by a row for each warning
+control and, on mainnet, the routing line. The error and Retry are in Settings → Network → Sync. -/
 def balanceSection (m : Model) : H :=
-  let tag : List H := if m.settings.network == .mainnet then [] else
-    [.spacer, .identified Ids.networkTag (Html.badge (Html.tone .warning (caption s!"{m.settings.network.label} · test coins")))]
-  let status := syncLine m ++ tag
+  let summary := m.phase.summary m.status.syncing
+  let network : List H := if m.settings.network == .mainnet then [] else
+    [.identified Ids.networkTag (Html.badge (caption s!"{m.settings.network.label} · test coins"))]
   .section "" ""
-    ([.col ([caption "Balance", balanceText m] ++ accountsBalanceLine m ++ (if status.isEmpty then [] else [.row status]))] ++
+    ([.col (network ++
+       [Html.tone .secondary (.text (if summary == .synced then "Balance" else "Last known balance") .subheadline), balanceText m] ++
+       accountsBalanceLine m ++
+       syncLine m)] ++
+     -- Keep the latest warning → explanation → Settings flow, including quiet transient failures.
      (match networkWarningLabel m with
       | some label => [compactWarning Ids.homeNetworkWarning label .network]
       | none => []) ++
      (if m.settings.network == .mainnet then [peerRoutingBanner m] else []))
 
 def activitySection (m : Model) : H :=
-  .section "Activity" ""
-    (if m.status.payments.isEmpty then [caption "Nothing yet. Payments appear here once they are confirmed."]
-     else m.status.payments.map (paymentRow m))
+  Html.decor { spacing := 12 } (.col ([.text "Activity" .headline] ++
+    (if m.status.payments.isEmpty then [.row [Html.tone .secondary (.icon "arrow.down.left.arrow.up.right"),
+      Html.decor { spacing := 4 } (.col [.text "No payments yet" .subheadline, .text "Your payments will appear here." .footnote]), .spacer]]
+     else m.status.payments.map (paymentRow m))))
 
 /-- The home's Accounts, once this phone has a multisig account. -/
 def accountsSection (m : Model) : List H :=
@@ -256,12 +267,11 @@ def accountsSection (m : Model) : List H :=
             Html.tone .secondary (body (satsText a.balance))]))]
 
 def homeSections (m : Model) : List H :=
-  [ balanceSection m ] ++ protectionCards m ++
-  [ .section "" "" [.row [.identified Ids.receiveButton (Html.symbol "arrow.down.left" (.button "Receive" .plain (some .openReceive))),
-                          .identified Ids.openSendButton (Html.symbol "arrow.up.right" (.button "Send" .primary (some .openSend)))]] ] ++
-  accountsSection m ++
-  [ activitySection m
-  , beginnerBackupSection m ]
+  [ balanceSection m, beginnerBackupSection m ] ++
+  [ .section "" "" [.row [.identified Ids.receiveButton (Html.decor { fullWidth := true, symbol := "arrow.down.to.line" } (.button "Receive" .secondary (some .openReceive))),
+                          .identified Ids.openSendButton (Html.decor { fullWidth := true, symbol := "paperplane" } (.button "Send" .primary (some .openSend)))]] ] ++
+  protectionCards m ++ accountsSection m ++
+  [ activitySection m ]
 
 /-- `ChainCheckStatus`: when a scan last reached the tip, and whether iOS may check in the background
 (background checks are requests; iOS decides when they run). -/

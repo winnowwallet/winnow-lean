@@ -220,17 +220,20 @@ def stepLedgerCard (msg : LedgerCardMsg) (m : Model) : Model × List Cmd :=
 def protectionCards (m : Model) : List H :=
   let card (id title text action : String) (msg : Msg) (dismissID : String) (hardware : Bool) : H :=
     .identified id (.section "" ""
-      [ .row [Html.tone .warning (.icon (if hardware then "lock.shield" else "person.3")), .text title .headline]
-      , caption text
-      , .button action .primary (some msg)
-      , .identified dismissID (.button "Don't show again" .plain (some (.home (.dismissCard hardware)))) ])
+      [ Html.callout [ .row [Html.tone .warning (.icon (if hardware then "lock.shield" else "person.3")), .text title .headline]
+      , Html.tone .secondary (.text text .subheadline)
+      , (if hardware then .text "Pairing alone does not protect your balance." .subheadline else .col [])
+      , .identified (if hardware then "home.protect.setup" else "home.multiparty.setup")
+          (Html.decor { fullWidth := true } (.button action .plain (some msg)))
+      , .identified dismissID (Html.decor { fullWidth := true, underlined := true }
+          (.button "Don't show again" .plain (some (.home (.dismissCard hardware))))) ] ])
   (if m.showsHardwareCard then
-    [card Ids.hardwareWalletCard "This is more than a phone should hold alone"
-      "A phone can be lost, stolen or broken into. A Ledger keeps a second key off the phone, so a payment needs both."
-      "Protect it with a Ledger" (.home .protectWithLedger) Ids.dismissHardwareCard true] else []) ++
+    [card Ids.hardwareWalletCard "Protect this balance"
+      "Move to an account that needs your phone and Ledger to approve payments."
+      "Set up protection" (.home .protectWithLedger) Ids.dismissHardwareCard true] else []) ++
   (if m.showsMultipartyCard then
     [card Ids.multipartyCard "Large amounts invite wrench attacks"
-      "When no one person can move the money, threatening one person gets nothing. Share the signing with people you trust."
+      "Share signing with people you trust so no one person can move the money alone. This reduces reliance on one person; it does not eliminate threats or coercion."
       "Build an account with other people's keys" (.home .buildWithOthers) Ids.dismissMultipartyCard false] else [])
 
 /-- The nearby card (a medium sheet) and its Set up. -/
@@ -238,7 +241,7 @@ def ledgerNearbySheet (m : Model) (inner : List H) : H :=
   let name := (m.nearbyLedger.map (·.name)).getD "Nano X"
   let title := ledgerTitle name
   let card := fun (cs : List H) => formSheet (if m.nearbyLedger.isSome then s!"{title} nearby" else "Protect with a Ledger")
-    (if (m.ledgerSetup.map (·.busy)).getD false then none else some (.ledgerCard .notNow)) [] cs inner (size := .medium)
+    (if (m.ledgerSetup.map (·.busy)).getD false then none else some (.ledgerCard .notNow)) [] cs inner (size := if m.ledgerSetup.isSome then .large else .medium)
   match m.ledgerSetup with
   | none =>
     card
@@ -259,7 +262,13 @@ def ledgerNearbySheet (m : Model) (inner : List H) : H :=
     card <| match s.step with
       | .choose =>
         [ .section "" (if s.withRecoveryKey then "Any two of this phone, the Ledger and the recovery key can spend. Keep the recovery key somewhere else." else "Every payment needs this phone and the Ledger.")
-            ([ .identified Ids.ledgerSetupRecoveryToggle
+            ([ Html.decor { pointSize := 30 } (.text (if s.withRecoveryKey then "Two keys to approve." else "Two devices.\nBoth required.") .largeTitle),
+               Html.tone .secondary (body "Create a separate account for Bitcoin you want to protect."),
+               Html.decor { callout := true, spacing := 16 } (.col
+                 ([Html.symbol "iphone" (.text "This phone" .headline), caption "Your phone’s signing key",
+                   .divider, Html.symbol "lock.shield" (.text title .headline), caption "A separate key on your Ledger"] ++
+                  (if s.withRecoveryKey then [.divider, Html.symbol "key" (.text "Recovery key" .headline), caption "Keep it somewhere else"] else []))),
+               .identified Ids.ledgerSetupRecoveryToggle
                  (.toggle "Add a recovery key (2-of-3)" s.withRecoveryKey fun b => .ledgerCard (.setWithRecoveryKey b)) ] ++
              (if !s.withRecoveryKey then [] else
                if s.recoveryKey.isEmpty then [.button "Paste the recovery key" .plain (some (.ledgerCard .pasteRecoveryKey))]

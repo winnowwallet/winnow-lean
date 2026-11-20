@@ -151,18 +151,35 @@ def addPersonSheet (m : Model) (inner : List H) : H :=
      [.section "" "" [.button (if f.saving then "Saving…" else "Save") .primary (if f.canSave m then some (.people .save) else none)]])
     inner
 
+/-- Selection and editing have separate layouts, so a person's name always has the row's width. -/
+def savedRecipientRow (p : Person) : H :=
+  Html.decor { spacing := 5 } (.col
+    [ .identified ("recipients.choose." ++ p.id) (navLink p.name (some (.people (.choose p.id))) "person.crop.circle")
+    , caption (match p.payTo with
+        | some true => "Fresh address for each payment"
+        | some false => "Reuses the same address"
+        | none => "Add a destination before paying") ])
+
 def savedRecipientsSheet (m : Model) (inner : List H) : H :=
   let shown := m.records.people.filter (·.savedRecipient != some false)
   let locked := m.records.peopleStorageNotice.isSome
+  let editing := m.isExpanded "recipients.editing"
   formSheet "Saved recipients" (some .closeSheet)
     [ closeBar "Done"
-    , .toolbar [Html.symbol "plus" (.button "Add" .plain (if locked then none else some (.people (.openAdd {} ""))))] ]
+    , .toolbar [.identified "recipients.edit" (.button (if editing then "Done" else "Edit") .plain
+        (if locked || shown.isEmpty then none else some (.setExpanded "recipients.editing" (!editing))))] ]
     (errorRows (m.records.peopleStorageNotice <|> m.recipientsError) ++
-     (if shown.isEmpty then [caption "Save a recipient from a payment in Wallet, or add an address or card here."] else []) ++
-     (shown.map fun p =>
-        .row [ .button (if p.payTo.isNone then s!"{p.name} — add destination" else p.name) .plain (some (.people (.choose p.id)))
-             , .spacer
-             , .button "Rename" .plain (some (.people (.rename p.id)))
-             , .button "Remove" .destructive (some (.people (.remove p.id))) ])) inner
+     (if shown.isEmpty then
+       [.section "" "" [.text "No saved recipients yet" .headline,
+         caption "Save a recipient from a payment in Wallet, or add an address or card here."]]
+      else if editing then
+        shown.map fun p => .section p.name ""
+          [ .row [ .identified ("recipients.rename." ++ p.id)
+              (Html.symbol "pencil" (.button "Rename" .plain (if locked then none else some (.people (.rename p.id)))))
+          , .identified ("recipients.remove." ++ p.id)
+              (Html.symbol "person.crop.circle.badge.minus" (.button "Remove" .destructive (if locked then none else some (.people (.remove p.id))))) ] ]
+      else [.section "Choose who to pay" "" (shown.map savedRecipientRow)]) ++
+     [.section "" "" [.identified "recipients.add" (Html.symbol "plus" (.button "Add recipient" .primary
+        (if locked then none else some (.people (.openAdd {} "")))))]] ) inner
 
 end WinnowApp

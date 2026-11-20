@@ -103,8 +103,8 @@ def sourceSection (m : Model) : List H :=
   let selected := m.sendInputs.accountID
   let row (title : String) (balance : Int) (id : Option String) (identifier : String) : H :=
     .identified identifier
-      (.row ([.button s!"{title} · {satsText balance}" .plain (some (.send (.setSource id))), .spacer] ++
-             (if selected == id then [.icon "checkmark"] else [])))
+      (Html.symbol (if selected == id then "checkmark.circle.fill" else "circle")
+        (.button s!"{title} · {satsText balance}" .secondary (some (.send (.setSource id)))))
   [.section "From" ""
     ([row "Wallet" m.status.balance none Ids.sendFromWallet] ++
      (accounts.map fun a =>
@@ -250,9 +250,9 @@ def sendTitle (m : Model) : String :=
 
 /-- The Send sheet (Send on the home, a saved person, an account's "Send from this account"). -/
 def sendSheet (m : Model) (inner : List H) : H :=
-  formSheet (sendTitle m) (if m.send.sending then none else some .closeSheet)
-    [if m.send.sentTxid.isNone then closeBar "Cancel" Ids.closeSendButton
+  .sheet (sendTitle m) (if m.send.sending then none else some .closeSheet)
+    ([if m.send.sentTxid.isNone then closeBar "Cancel" Ids.closeSendButton
      else .toolbar [.identified Ids.closeSendButton (.button "Done" .primary (some .closeSheet))] .confirm]
-    (sendContent m) inner
+      ++ [editorialForm (sendContent m)] ++ inner)
 
 end WinnowApp

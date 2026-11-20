@@ -1,5 +1,5 @@
 name: CI
-# The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
+# The Lean app's checks, by LeanNative's ios-app workflow (LonnieRae/leannative, formerly posix4e/elmlean):
 # three jobs on GitHub's own macOS runners (free for a public repository) that start at once, `lean` (the Lean
 # built, every proof checked, then every test below at the same time, the regtest node's among them), `app`
 # (the Debug simulator build and the UI journeys, split across two runners; `media` joins their recordings) and
@@ -31,9 +31,9 @@ jobs:
   app:
     # a draft pull request runs nothing until it is ready for review
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
-    uses: LeanNative/leannative/.github/workflows/ios-app.yml@59180b0c95c0bb94289ac2febffdaa6316917748
+    uses: LonnieRae/leannative/.github/workflows/ios-app.yml@2272264d1ee7ff51331ea4c2280f52b00480dd8a
     with:
-      leannative: 59180b0c95c0bb94289ac2febffdaa6316917748
+      leannative: 2272264d1ee7ff51331ea4c2280f52b00480dd8a
       # GitHub's hosted macOS runner (macos-26: Xcode 26, iOS 26 simulators), the reusable workflow's default; or,
       # when the repository variable MACOS_RUNNER is set, that label (a self-hosted Mac while GitHub's are backed
       # up: delete the variable before it goes away, or the jobs wait for it). A fork's pull request always runs
@@ -42,7 +42,7 @@ jobs:
       lean-packages: Lean LeanApp
       build-targets: |
         Lean multisig-test ledger-test silent-payment-test crypto-test segwit-test secpct-test io-test multisig-differential segwit-regtest census-check fuzz
-        LeanApp records-test multisig-app-test ledger-transport-test backend-test cloud-backup-test journeys
+        LeanApp records-test multisig-app-test ledger-transport-test backend-test cloud-backup-test home-presentation-test journeys
       app-dir: LeanApp
       app-root: WinnowApp
       scheme: WinnowLean
@@ -65,6 +65,7 @@ jobs:
         LeanApp .lake/build/bin/multisig-app-test
         LeanApp .lake/build/bin/ledger-transport-test
         LeanApp .lake/build/bin/cloud-backup-test
+        LeanApp .lake/build/bin/home-presentation-test
         . scripts/ci-regtest io
         . scripts/ci-regtest backend
         . scripts/ci-regtest differential

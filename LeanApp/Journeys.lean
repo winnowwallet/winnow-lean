@@ -151,6 +151,7 @@ def multisigTwoOfThreeWithRecovery : Journey := ⟨"multisigTwoOfThreeWithRecove
       activate
 
   step "the account page: no payment form of its own, Send from this account, Paste a PSBT, Share" do
+    Account.openCoSignerTools
     scrolled multisigPastePSBTButton
     expect (!(← exists? amountField)) "the account page still has a payment form"
     shot "13a-account-page"
@@ -239,6 +240,7 @@ def ledgerPairVerifySpend : Journey := ⟨"ledgerPairVerifySpend", do
     let verified ← Ledger.verifyAddress
     expect (verified.startsWith "The Ledger derived this same address.") verified
     -- the page shares its descriptor rather than printing it; the builder showed the same one
+    Account.openCoSignerTools
     scrolled multisigShareButton
     expectEq "the account's first address (Core's)" (← h.deriveAddress descriptor 0) address
     shot "20-ledger-verified"

@@ -140,6 +140,9 @@ namespace Receive
 /-- Opens Receive and reads the address it shows (its label skipped). -/
 def address : UI String := do
   tap receiveButton
+  -- A first Receive can show the advisory backup sheet before the address-label prompt.
+  if ← exists? (.id WinnowApp.Ids.backupIntroNotNow) 2 then
+    tap (.id WinnowApp.Ids.backupIntroNotNow)
   if ← exists? skipReceiveAddressLabelButton 20 then tap skipReceiveAddressLabelButton
   waitFor receiveAddress 30
   let address ← text receiveAddress
@@ -381,6 +384,13 @@ def openAccount : UI Unit := tap multisigOpenAccountButton
 end Builder
 
 namespace Account
+
+/-- Expand the account tools only when they are collapsed. -/
+def openCoSignerTools : UI Unit := do
+  unless ← exists? multisigShareButton do
+    scrolled (.button "Co-signer tools")
+    tap (.button "Co-signer tools")
+  waitFor multisigShareButton 10
 
 /-- The account page's receive address. -/
 def receiveAddress : UI String := do

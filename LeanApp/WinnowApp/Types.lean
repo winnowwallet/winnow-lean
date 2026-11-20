@@ -81,6 +81,8 @@ structure Settings where
   ledgersNotNow : List String := []
   /-- Onboarding's Bluetooth card was shown (once, whatever was answered). -/
   bluetoothIntroShown : Bool := false
+  /-- First-Receive backup explanation shown, scoped to network and wallet identity; never a backup receipt. -/
+  backupPromptShownFor : List String := []
   deriving Repr, Inhabited, ToJson
 
 /-- Reads every field with its default when absent, so a settings file from an older build still loads. -/
@@ -105,6 +107,7 @@ instance : FromJson Settings where
       multipartyCardDismissed := (j.getObjValAs? Bool "multipartyCardDismissed").toOption.getD false
       ledgersNotNow := (j.getObjValAs? (List String) "ledgersNotNow").toOption.getD []
       bluetoothIntroShown := (j.getObjValAs? Bool "bluetoothIntroShown").toOption.getD false
+      backupPromptShownFor := (j.getObjValAs? (List String) "backupPromptShownFor").toOption.getD []
       -- absent: Automatic; present but unreadable: offline (`PeerGatewaySettings.unreadable`)
       peerGatewaySettings := match j.getObjVal? "peerGatewaySettings" with
         | .ok v => (Winnow.IO.PeerGatewaySettings.ofJson? v).getD Winnow.IO.PeerGatewaySettings.unreadable
