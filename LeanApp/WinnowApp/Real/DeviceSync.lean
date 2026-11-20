@@ -149,6 +149,8 @@ structure SyncApp where
   running : IO.Ref Bool
   /-- When the last round began (monotonic milliseconds); none before the first. -/
   lastRound : IO.Ref (Option Nat)
+  /-- The other devices' backups as the last round read them, for a head start (`headStart`). -/
+  lastFound : IO.Ref (Array Replica)
   /-- A round at most this often while the app is open. -/
   intervalMs : Nat := 60_000
   /-- Milliseconds since 1970. -/
@@ -172,7 +174,7 @@ def unixMs : IO Nat := do
 def new (controller : CloudBackupController) (env : Env) (multisig : MultisigApp) (allows : Bool)
     (intervalMs : Nat := 60_000) : IO SyncApp := do
   return { controller, env, multisig, allows, lock := ← Std.Mutex.new (), opened := ← IO.mkRef #[], unopened := ← IO.mkRef #[], epoch := ← IO.mkRef 0,
-           running := ← IO.mkRef false, lastRound := ← IO.mkRef none, intervalMs, nowMs := unixMs,
+           running := ← IO.mkRef false, lastRound := ← IO.mkRef none, lastFound := ← IO.mkRef #[], intervalMs, nowMs := unixMs,
            status := ← IO.mkRef {}, changed := ← IO.mkRef (pure ()), loop := ← IO.mkRef 0, looping := ← IO.mkRef false, noticed := ← IO.mkRef none,
            journaled := ← IO.mkRef none }
 
@@ -329,7 +331,8 @@ def openReplica (a : SyncApp) (id account : String) (network : WinnowApp.Network
       continue
     let some key ← signerKey r net | skipped := skipped + 1; continue
     unless signers.any (·.1 == key) do signers := signers.push (key, r)
-  return .ok (some { id, height := shared.lastKnownHeight, anchor := shared.lastKnownBlockHash, accounts, signers,
+  return .ok (some { id, height := shared.lastKnownHeight, anchor := shared.lastKnownBlockHash, walletID := shared.walletID,
+                     profileName := CloudAppState.profileOf shared.appState, accounts, signers,
                      sync := CloudAppState.syncOf shared.appState }, skipped)
 
 /-- What a round's reading of the other backups came to. -/
@@ -545,6 +548,140 @@ def journalOnce (a : SyncApp) (name : String) (fields : List (String × String))
   a.journaled.set (some line)
   a.env.journal name fields
 
+/-! ## A head start from another device -/
+
+/-- Each wallet here that another of the person's devices has scanned further takes that device's coins,
+history and address counters, its accounts' with them, when the block its backup names is this chain's: what is
+between is not scanned here again. Not a wallet with a payment of its own on its way (its coins are reserved
+here only), one still looking for its cards, or one whose cards differ. Then, when every wallet here is past
+the network's scan, the scan begins where they all are (`FilterSyncIO.jumpTo`). -/
+def headStart (a : SyncApp) : IO Unit := do
+  let found ← a.lastFound.get
+  let c ← a.env.get
+  let (some s, some w) := (c.stack, c.wallet) | return
+  let some account ← (try some <$> a.controller.store.account catch _ => pure none) | return
+  let places : Array (Wallet × Option Rider) := #[(w, none)] ++ c.riders.map fun r => (r.wallet, some r)
+  for (pw, rider) in places do
+    let st ← pw.state
+    unless st.pendingSends.isEmpty && st.cardRestoreFrom.isNone do continue
+    let ahead := found.filter fun r => r.walletID == some pw.id && r.height + 1 > st.nextScanHeight && r.anchor.isSome
+    let some best := ahead.foldl (fun b r => match b with
+      | some b => if r.height > b.height then some r else some b
+      | none => some r) none | continue
+    unless (← s.chain.blockHash best.height) == best.anchor do
+      a.env.journal "sync.headStartRefused" [("walletID", pw.id), ("height", toString best.height)]
+      continue
+    let loaded ← (do
+        let key ← a.controller.keys.load best.id
+        let backup ← a.controller.store.load best.id account
+        runWM (backup.state key)).toBaseIO
+    let skip (why : String) : IO Unit := a.journalOnce "sync.headStartSkipped" [("walletID", pw.id), ("why", why)]
+    let bundle ← match loaded with
+      | .ok (bundle, _) => pure bundle
+      | .error e => skip s!"the backup did not open: {e}"; continue
+    let other ← match ← (Wallet.importing bundle CloudWalletBackup.validationKeys none).run with
+      | .ok other => pure other
+      | .error e => skip s!"the backup's wallet did not read: {e.name}"; continue
+    let theirs ← other.state
+    -- the same keys (the descriptor's text may be written another way), further on, with the same cards
+    unless other.id == pw.id && other.accountKey.serialized == pw.accountKey.serialized do skip "another wallet"; continue
+    unless theirs.nextScanHeight > st.nextScanHeight do skip "no further on"; continue
+    -- a card handed out here and not there could have been paid in the blocks taken (one a restore only
+    -- searched for, `plainToo`, was handed out there if at all, and is there if it was)
+    unless st.cards.all (fun c => c.plainToo || theirs.cards.any (·.index == c.index)) do skip "a card handed out here only"; continue
+    -- under the place lock: no block of a pass reaches this wallet halfway through
+    let moved : Bool ← a.env.withPlaceLock do
+      let now ← a.env.get
+      let current := match rider with
+        | none => now.walletSerial == c.walletSerial
+        | some r => now.riders.any (·.serial == r.serial)
+      unless current do return false
+      let multisig : IO Bool := match rider with
+        | some r => r.multisig.headStart (bundle.vaults.getD #[])
+        | none => a.env.hooks.multisigHeadStart (bundle.vaults.getD #[])
+      unless ← multisig do
+        a.journalOnce "sync.headStartSkipped" [("walletID", pw.id), ("why", "the accounts here are not all in the backup")]
+        return false
+      let mine ← pw.state
+      let next : WalletState := { mine with
+        allUtxos := theirs.allUtxos, history := theirs.history,
+        nextReceiveIndex := max mine.nextReceiveIndex theirs.nextReceiveIndex,
+        nextChangeIndex := max mine.nextChangeIndex theirs.nextChangeIndex,
+        cards := mine.cards.map fun card => match theirs.cards.find? (·.index == card.index) with
+          | some t => { card with nextIndex := max card.nextIndex t.nextIndex }
+          | none => card,
+        nextScanHeight := theirs.nextScanHeight, scannedThroughHash := theirs.scannedThroughHash }
+      let write : WM Unit := do
+        pw.persist next
+        WM.io (pw.stateRef.set next)
+      match rider with
+      | none => a.env.walletWrite c.walletSerial "sync.headStart" write
+      | some r => a.env.riderWrite r.serial "sync.headStart" write
+      return true
+    if moved then
+      a.env.journal "sync.headStart" [("walletID", pw.id), ("from", toString st.nextScanHeight), ("to", toString theirs.nextScanHeight)]
+  -- every wallet here past the network's scan: it begins where they all are
+  let c ← a.env.get
+  let some f := c.stack.bind (·.filters) | return
+  let mut lowest : Option UInt32 := none
+  for pw in c.wallet.toArray ++ c.riders.map (·.wallet) do
+    let next ← pw.nextScanHeight
+    lowest := some (match lowest with | some l => min l next | none => next)
+  let some low := lowest | return
+  if low > (← f.nextScanHeight) then
+    if let .ok true ← (runNet (f.jumpTo low)).toBaseIO then
+      a.env.journal "sync.frontierJumped" [("to", toString low)]
+
+/-- Each wallet here takes the name another device gave it later than this one did. -/
+def adoptNames (a : SyncApp) (found : Array Replica) : IO Unit := do
+  let c ← a.env.get
+  let places := (c.wallet.toList.filterMap fun w => c.dir.map (w.id, ·)) ++ c.riders.toList.map fun r => (r.held.id, r.held.dir)
+  let mut renamed := false
+  for (id, dir) in places do
+    let mine := ((← readProfileName dir).map (·.2)).getD 0
+    let later := found.filterMap fun r => if r.walletID == some id then r.profileName.filter (·.2 > mine) else none
+    let some (name, stamp) := later.foldl (fun b x => match b with
+      | some b => if x.2 > b.2 then some x else some b
+      | none => some x) none | continue
+    writeProfileName dir name stamp
+    a.env.journal "wallet.renamedElsewhere" [("walletID", id)]
+    renamed := true
+  if renamed then refreshHeld a.env
+
+/-- Each other wallet kept here keeps its iCloud backup current as its scan moves, as the open one's does,
+so another device can take its head start from it: the coins, history and accounts replaced, the rest of the
+backup (the phrase's box, the app's data, the signers) as it was. Not a wallet whose automatic backup is off. -/
+def uploadRiders (a : SyncApp) : IO Unit := do
+  let c ← a.env.get
+  let disabled := (← a.controller.get).disabledWallets
+  for r in c.riders do
+    if disabled.contains r.held.id then continue
+    let path := System.FilePath.mk r.held.dir / "cloud-backup.json"
+    unless ← path.pathExists do continue
+    let attempt : IO Unit := do
+      let saved ← CloudConfiguration.decode (← IO.FS.readBinFile path)
+      unless saved.walletID == r.held.id do return
+      let key ← a.controller.keys.load saved.backup.id
+      let (old, appState) ← runWM (saved.backup.state key)
+      let exported ← runWM (r.wallet.exportBundle false)
+      let vaults ← r.multisig.backup
+      let bundle := { exported with vaults := if vaults.isEmpty then none else some vaults, signers := old.signers }
+      let contents : CloudBackupContents := { bundle, appState }
+      let digest := contents.digest
+      if digest == saved.digest && saved.pendingUpload != some true then return
+      let backup ← runWM (saved.backup.updating bundle key appState)
+      let account ← match saved.account with
+        | some x => pure x
+        | none => a.controller.store.account
+      a.controller.store.save backup account
+      -- the wallet opened meanwhile: its own controller keeps the file from here
+      unless (← a.env.get).riders.any (·.serial == r.serial) do return
+      CloudBackupController.persist { saved with backup, digest, account := some account, pendingUpload := some false } path
+      a.env.journal "cloud.riderBackedUp" [("walletID", r.held.id), ("height", toString bundle.lastKnownHeight)]
+    match ← attempt.toBaseIO with
+    | .ok () => pure ()
+    | .error e => a.journalOnce "cloud.riderBackupFailed" [("walletID", r.held.id), ("error", toString e)]
+
 /-- One look at the other devices' backups: read what changed, decide, do it, and remember. -/
 def round (a : SyncApp) : IO Unit := do
   let began ← a.epoch.get
@@ -601,6 +738,12 @@ def round (a : SyncApp) : IO Unit := do
   if changed then
     a.multisig.overviewCache.set none
     (← a.changed.get)
+  -- what another device scanned further is not scanned here again; what this one scanned for its other wallets
+  -- is there for the others
+  a.lastFound.set found
+  try a.adoptNames found catch _ => pure ()
+  try a.headStart catch e => a.journalOnce "sync.headStartFailed" [("error", toString e)]
+  a.uploadRiders
 
 /-- A round when one is due: on coming to the foreground (`force`), and then at most every `intervalMs`
 while the app is open. Runs apart from the caller; a failure is said in the status and tried again. -/
@@ -677,6 +820,7 @@ def reset (a : SyncApp) : IO Unit := a.locked do
   a.epoch.modify (· + 1)
   a.opened.set #[]
   a.unopened.set #[]
+  a.lastFound.set #[]
   a.lastRound.set none
   a.status.set {}
   a.noticed.set none

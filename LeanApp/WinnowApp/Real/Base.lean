@@ -75,6 +75,11 @@ structure ProfileMultisig where
   apply : Net.BlockMatch → Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ _ => pure #[]
   rollBack : UInt32 → IO Unit := fun _ => pure ()
   catchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → ChainHashes → IO Unit := fun _ _ _ _ => pure ()
+  /-- The accounts as another device had them, taken for what the chain gave them (`headStart`): false, and
+  nothing changed, unless every account here is among them and none has a spend of this device's in flight. -/
+  headStart : Array MultisigAccountRecord → IO Bool := fun _ => pure false
+  /-- The accounts as a backup carries them. -/
+  backup : IO (Array MultisigAccountRecord) := pure #[]
   deriving Inhabited
 
 /-- What the core needs from people and labels (the records half plugs these in). -/
@@ -106,6 +111,11 @@ structure Hooks where
   /-- The multisig store of another wallet kept on this network, in its directory, for the sync pass that
   scans for every wallet on the device. -/
   multisigAt : WinnowApp.Network → (dir : String) → IO ProfileMultisig := fun _ _ => pure {}
+  /-- What another of the person's devices scanned further, taken by each wallet here (`SyncApp.headStart`),
+once the chain has the block it names. -/
+  headStart : IO Unit := pure ()
+  /-- `ProfileMultisig.headStart` of the open wallet's accounts. -/
+  multisigHeadStart : Array MultisigAccountRecord → IO Bool := fun _ => pure false
   /-- `MultisigStore.validate(_:network:)` of a bundle's accounts, before anything is written. -/
   multisigValidate : Array MultisigAccountRecord → Tx.BitcoinNetwork → IO Unit := fun rs _ => do
     unless rs.isEmpty do notPorted "Restoring multisig accounts"
@@ -348,6 +358,8 @@ structure HeldWallet where
   /-- The lowest block its scan needs (`min creationHeight nextScanHeight`): the network's chain begins at
   or below every held wallet's. -/
   birthday : UInt32 := 0
+  /-- The name the person gave it (`profile.json`); empty for none. -/
+  name : String := ""
 
 /-- A wallet kept on this network that is not the open one: opened from its file without its key (watching
 reads none), and scanned for in every pass beside the open wallet. `serial` is its `walletSerial`: a write
@@ -654,7 +666,25 @@ def lastCompleteCheckPath (dir : String) : System.FilePath := System.FilePath.mk
 
 /-- A wallet's own files beside `wallet.json`, which go with it (adopted over, deleted). -/
 def walletOwnFiles : List String :=
-  ["vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json"]
+  ["vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json",
+   "profile.json"]
+
+/-- A wallet's name, and when it was given (milliseconds since 1970), in its directory. -/
+def profilePath (dir : String) : System.FilePath := System.FilePath.mk dir / "profile.json"
+
+def readProfileName (dir : String) : IO (Option (String × Nat)) := do
+  try
+    let text ← IO.FS.readFile (profilePath dir)
+    let read : SwiftJSON.D (String × Nat) := SwiftJSON.decodeText text fun v => do
+      let kvs ← SwiftJSON.asObject v
+      return (← SwiftJSON.key kvs "name" SwiftJSON.asString, (← SwiftJSON.key kvs "stamp" SwiftJSON.asInt).toNat)
+    match read with
+    | .ok (name, stamp) => return if name.utf8ByteSize ≤ 64 then some (name, stamp) else none
+    | .error _ => return none
+  catch _ => return none
+
+def writeProfileName (dir name : String) (stamp : Nat) : IO Unit :=
+  writeAtomic (profilePath dir) (SwiftJSON.write (Winnow.obj [("name", some (.str name)), ("stamp", some (SwiftJSON.ofInt stamp))])).toUTF8
 
 /-- The network's sync state, kept in its own directory for every wallet there: the scan's frontier and
 the relay's pending payments (`headers.bin` and `peers.json` are kept even with no wallet). -/

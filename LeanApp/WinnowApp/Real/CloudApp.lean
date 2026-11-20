@@ -136,6 +136,9 @@ def cloudAppState (a : CloudApp) (bundle : ImportBundle) : IO CloudAppState := d
   let labels ← store.labelStore st walletID
   let settings := ((← a.env.get).settings).getD {}
   let sync ← if a.allows then a.follow.publish else pure none
+  let named ← match (← a.env.get).dir with
+    | some dir => readProfileName dir
+    | none => pure none
   let state : CloudAppState := {
     network := bundle.network, descriptor := bundle.descriptor, people := ← RM.toIO st.people.backup,
     receiveLabels := ← RM.toIO labels.backup, ownDisplayName := settings.ownDisplayName,
@@ -143,7 +146,8 @@ def cloudAppState (a : CloudApp) (bundle : ImportBundle) : IO CloudAppState := d
     -- feature Advanced had, so a backup says it is on
     advancedMode := true,
     -- when each account and signer of this bundle last changed, for the person's other devices
-    sync }
+    sync,
+    profileName := named.map (·.1), profileNameStamp := named.map (·.2) }
   RM.toIO (state.validate bundle)
   return state
 
@@ -310,6 +314,9 @@ def applyAppState (a : CloudApp) (state : CloudAppState) : IO Unit := do
   let labels ← store.labelStore st walletID
   let restored ← RM.toIO (labels.restore store.writeData state.receiveLabels)
   RM.toIO (store.modify fun st => return ({ st with labels := some restored }, ()))
+  -- the name it was given on the device the backup came from
+  if let (some name, some dir) := (state.profileName, (← a.env.get).dir) then
+    try writeProfileName dir name (state.profileNameStamp.getD 0) catch _ => pure ()
 
 end CloudApp
 
@@ -455,7 +462,9 @@ def Backend.realWithCloud (deps : Real.Deps) (ledger : IO Real.LedgerSession := 
     if let some a ← appRef.get then a.walletChanged } }
   let host ← Real.RecordsHost.new deps.keyStore deps.journal
   let multisig ← Real.MultisigApp.new (RecordsReal.StoreKeyVault.ofKeyStore deps.keyStore) ledger
-  let env ← Real.Env.new { deps with hooks := multisig.allHooks host.hooks |> fun h => { h with walletChanged := deps.hooks.walletChanged } }
+  let env ← Real.Env.new { deps with hooks := multisig.allHooks host.hooks |> fun h =>
+    { h with walletChanged := deps.hooks.walletChanged
+             headStart := do if let some a ← appRef.get then a.follow.headStart } }
   multisig.env.set (some env)
   let ctx := host.ctx env
   let base := multisig.install env (ctx.install env.backend)

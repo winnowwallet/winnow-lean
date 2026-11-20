@@ -247,6 +247,23 @@ def catchUp (a : MultisigApp) (_network : Tx.BitcoinNetwork) (frontier : UInt32)
 def ownedScripts (a : MultisigApp) : IO (Array ByteArray) := do
   a.watchScripts (← a.host.read).network
 
+/-- `ProfileMultisig.headStart`: each account takes the coins, history and address counters another device
+had for it, which its backup names the block of; its name, draft and Ledger stay this device's. Nothing changes
+unless every account here is among them, none is on its way from another device, and none has a spend of this
+device's in flight. -/
+def headStart (a : MultisigApp) (theirs : Array MultisigAccountRecord) : IO Bool := do
+  unless (← a.host.arrivingAccounts).isEmpty do return false
+  a.withStore fun s => do
+    if s.records.isEmpty then return (s, true)
+    let mut next : Array MultisigAccountRecord := #[]
+    for r in s.records do
+      let some o := theirs.find? (·.id == r.id) | return (s, false)
+      unless r.inFlight.isEmpty do return (s, false)
+      next := next.push { r with allUtxos := o.allUtxos, history := o.history,
+                                 nextReceiveIndex := max r.nextReceiveIndex o.nextReceiveIndex,
+                                 nextChangeIndex := max r.nextChangeIndex o.nextChangeIndex }
+    return (← s.restore a.host.keys a.host.writeData next, true)
+
 /-- `Hooks.multisigAt`: another held wallet's account store, read from its directory into a store of its own.
 Each call refuses once that directory is the open wallet's, whose store is then the one that writes the file. -/
 def at' (a : MultisigApp) (n : WinnowApp.Network) (dir : String) : IO ProfileMultisig := do
@@ -262,7 +279,9 @@ def at' (a : MultisigApp) (n : WinnowApp.Network) (dir : String) : IO ProfileMul
     -- a person's payment index is the open wallet's records'; another wallet's people are told when it is opened
     apply := fun m network => guard (other.applyMatchPaying (fun _ _ => pure ()) m network)
     rollBack := fun fork => guard (other.rollBack fork)
-    catchUp := fun network frontier scan hashes => guard (other.catchUp network frontier scan hashes) }
+    catchUp := fun network frontier scan hashes => guard (other.catchUp network frontier scan hashes)
+    headStart := fun theirs => guard (other.headStart theirs)
+    backup := guard other.backup }
 
 def hooks (a : MultisigApp) (base : Hooks) : Hooks :=
   { base with
@@ -276,6 +295,7 @@ def hooks (a : MultisigApp) (base : Hooks) : Hooks :=
     multisigCatchUp := a.catchUp
     multisigRollBack := a.rollBack
     multisigAt := a.at'
+    multisigHeadStart := a.headStart
     multisigValidate := fun rs n => RM.toIO (MultisigStore.validate rs n)
     multisigRestore := a.restore
     multisigBackup := a.backup

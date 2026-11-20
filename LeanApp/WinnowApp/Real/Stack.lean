@@ -476,6 +476,9 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
       match ← (r.multisig.watchScripts net).toBaseIO with
       | .ok scripts => wallets := wallets.push { wallet := r.wallet, rider := some r, multisig := r.multisig, scripts, «from» := 0 }
       | .error e => env.journal "sync.walletSetAside" [("walletID", r.held.id), ("error", toString e)]
+    -- what another device scanned further is taken first, for the blocks this chain already has
+    if maxBlocks.isNone then
+      try env.hooks.headStart catch _ => pure ()
     -- a wallet behind the network's scan joins it first, by a range scan of the blocks it has not had (not in
     -- a background check); one that cannot be brought all the way waits out this pass
     let frontier ← f.nextScanHeight
@@ -594,6 +597,9 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
       -- a wallet whose state came from elsewhere names a block this chain must have, checked once the headers
       -- are in: one that does not goes back on its own and joins again at the next pass
       let afterHeaders : NetM (Option UInt32) := do
+        -- the chain has its new blocks: what another device scanned of them is taken before any is scanned here
+        if maxBlocks.isNone then
+          try (env.hooks.headStart : IO Unit) catch _ => pure ()
         for p in joined do
           let some fork ← (walletAnchorFork p.wallet s.chain : IO _) | continue
           env.journal "sync.anchorMismatch" [("fork", toString fork), ("walletID", p.wallet.id)]
@@ -605,7 +611,18 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
           | some r => dropped.modify (·.push r.serial)
           | none => dropped.modify (·.push 0)
         return none
+      -- every wallet here past the scan (each took another device's state): the scan begins where they all are
+      let forwardTo : NetM (Option UInt32) := do
+        let c ← (env.get : IO Core)
+        let mut lowest : Option UInt32 := none
+        for pw in c.wallet.toArray ++ c.riders.map (·.wallet) do
+          let next ← (pw.nextScanHeight : IO UInt32)
+          lowest := some (match lowest with | some l => min l next | none => next)
+        if let some low := lowest then
+          if low > (← f.nextScanHeight) then env.journal "sync.frontierJumped" [("to", toString low)]
+        return lowest
       f.sync scripts (maxBlocks := maxBlocks) (onReorg := some onReorg) (onMatch := applyAll) (afterHeaders := some afterHeaders)
+        (forwardTo := some forwardTo)
       let scanned ← f.nextScanHeight
       for p in joined do
         if ← isDropped p then continue

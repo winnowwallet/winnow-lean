@@ -1965,6 +1965,66 @@ def walletsFlow (dir : String) (n : Node) : IO Unit := do
   n.waitFilterIndex
   b.stopNetworking
 
+/-- A head start from another device: two devices hold one wallet; while the second is off, the first scans
+on past a payment and saves its backup; the second, back, takes that state once its chain has the block the
+backup names, and its scan begins there instead of going over those blocks again. -/
+def headStartFlow (dir : String) (n : Node) : IO Unit := do
+  say "head start: one wallet, two devices"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let boot (tag : String) : IO (Backend × Real.CloudApp × String) := do
+    let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+    let (b, _, app) ← Backend.realWithCloud (deps secrets tag) (store := cloud.store) (keys := cloudKeys)
+      (scheduleDelayMs := 50) (devicesIntervalMs := 300)
+    let d := s!"{dir}/{tag}/BTCSwift/regtest"
+    IO.FS.createDirAll d
+    discard <| b.openWallet .regtest d
+    b.startNetworking settings
+    return (b, app, d)
+  let publish (app : Real.CloudApp) : IO Unit :=
+    app.controller.update do
+      let bundle ← app.exportedBundle
+      return { bundle, appState := some (← app.cloudAppState bundle).encoded }
+  let synced (b : Backend) : IO Bool := do
+    let tip ← n.height
+    waitUntil 90_000 (do b.syncNow; return (← b.snapshot).1.nextScanHeight == tip + 1)
+  let (a, appA, _) ← boot "HsA"
+  discard <| a.createWallet .regtest s!"{dir}/HsA/BTCSwift/regtest"
+  let address ← a.receiveAddress false
+  discard <| n.wallet #["sendtoaddress", address, "0.3"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  check "head start: the first device is paid" ((← synced a) && (← a.snapshot).1.balance == 30_000_000)
+  publish appA
+  -- the second device: the same wallet, from the first's backup
+  let (b, appB, dB) ← boot "HsB"
+  discard <| b.importBundle .regtest dB (← a.exportBundle true)
+  check "head start: the second device holds it too" ((← synced b) && (← b.snapshot).1.balance == 30_000_000)
+  publish appB
+  b.stopNetworking
+  -- while the second is off, the first is paid again and scans on
+  discard <| n.wallet #["sendtoaddress", address, "0.2"]
+  n.mine 1 mineAddr
+  n.mine 30 mineAddr
+  n.waitFilterIndex
+  let tip ← n.height
+  check "head start: the first device scans on" ((← synced a) && (← a.snapshot).1.balance == 50_000_000)
+  publish appA
+  -- the second looks at the other backups, then comes back
+  appB.follow.round
+  b.startNetworking settings
+  check "head start: the second device is at the tip with the payment" ((← synced b) && (← b.snapshot).1.balance == 50_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  let took := (← journaled "sync.headStart").filter (·.1 == "HsB")
+  check "head start: it took the first device's state" (took.any fun (_, f) => field f "to" == toString (tip + 1))
+    s!"{took.map (·.2)}"
+  let jumped := (← journaled "sync.frontierJumped").filter (·.1 == "HsB")
+  check "head start: its scan began there" (jumped.any fun (_, f) => field f "to" == toString (tip + 1)) s!"{jumped.map (·.2)}"
+  a.stopNetworking
+  b.stopNetworking
+
 /-- What `openWallet` found, for a check's detail. -/
 def bootText : BootResult → String
   | .opened id => s!"opened {id}" | .missing => "missing" | .damaged m => s!"damaged: {m}"
@@ -2555,5 +2615,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; anchorFlow dir n; heldKeysFlow dir n; accountDuringPassFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; anchorFlow dir n; headStartFlow dir n; heldKeysFlow dir n; accountDuringPassFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

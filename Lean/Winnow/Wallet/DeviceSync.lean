@@ -260,6 +260,10 @@ structure Replica where
   height : UInt32
   /-- The hash of block `height` as that device had it (internal byte order), when its backup names one. -/
   anchor : Option ByteArray := none
+  /-- The wallet the backup is of (`Shared.walletID`), when its descriptor reads. -/
+  walletID : Option String := none
+  /-- The name that device gives the wallet, and when it was given (milliseconds since 1970). -/
+  profileName : Option (String × Nat) := none
   accounts : Array MultisigAccountRecord := #[]
   /-- Each signer under its key (`signerKey`). -/
   signers : Array (String × SignerRecord) := #[]

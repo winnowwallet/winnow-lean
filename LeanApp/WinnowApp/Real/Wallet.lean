@@ -52,8 +52,9 @@ def heldWalletFiles (env : Env) (networkDir : String) : IO (Array (HeldWallet ×
     match ← (Wallet.open (walletPath dir) env.deps.keyStore env.deps.random).run with
     | .ok w =>
       let s ← w.state
+      let name := ((← readProfileName dir).map (·.1)).getD ""
       held := held.push ({ id := w.id, slot, dir, accountKey := w.accountKey,
-                           birthday := min s.creationHeight s.nextScanHeight }, w)
+                           birthday := min s.creationHeight s.nextScanHeight, name }, w)
     | .error _ => pure ()
   return held
 
@@ -80,7 +81,19 @@ def refreshHeld (env : Env) : IO Unit := do
 def wallets (env : Env) (networkDir : String) : IO (List WalletSummary) := do
   let c ← env.get
   return (← heldWallets env networkDir).toList.map fun h =>
-    { id := h.id, slot := h.slot, active := c.wallet.isSome && c.dir == some h.dir }
+    { id := h.id, slot := h.slot, active := c.wallet.isSome && c.dir == some h.dir, name := h.name }
+
+/-- The longest name a wallet takes, in bytes. -/
+def maximumWalletNameBytes : Nat := 64
+
+/-- `Backend.renameWallet`: the open wallet's name, stamped now, so the latest any device gave it wins. -/
+def renameWallet (env : Env) (name : String) : IO Unit := do
+  let c ← env.get
+  let (some _, some dir) := (c.wallet, c.dir) | failWith .noWallet
+  let some name := Winnow.DisplayName.normalized name | failText "A name is one line of text."
+  unless !name.isEmpty && name.utf8ByteSize ≤ maximumWalletNameBytes do failText "A name is one short line of text."
+  writeProfileName dir name ((← Std.Time.Timestamp.now).toMillisecondsSinceUnixEpoch.val.toNat)
+  refreshHeld env
 
 /-- The network's directory becomes current; another network or directory first ends the old one
 (`switchNetwork`: stop, drop the wallet, nothing carried over). -/

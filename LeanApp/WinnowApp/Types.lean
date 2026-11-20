@@ -20,7 +20,12 @@ structure WalletSummary where
   id : String
   slot : String
   active : Bool := false
+  /-- The name the person gave it; empty for none. -/
+  name : String := ""
   deriving Repr, BEq, Inhabited
+
+/-- How a wallet is called: its name, or "Wallet" and its id. -/
+def WalletSummary.label (w : WalletSummary) : String := if w.name.isEmpty then s!"Wallet {w.id}" else w.name
 
 /-- How the app is drawn: as the system is, or always light or always dark (the shell's `appearance`). -/
 inductive Appearance where

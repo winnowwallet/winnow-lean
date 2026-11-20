@@ -105,6 +105,26 @@ private def beginRequest (f : FilterSyncIO) : NetM Unit := do
   let ok ← f.requesting.modifyGet fun r => (!r, true)
   if !ok then throw (.filters .busy)
 
+/-- Moves the frontier forward to `next`, as a scan begun there would start (`new` at that height): what is
+below it was scanned elsewhere, by a scan the caller trusts with it (another of the person's devices, its state
+anchored to a block of this chain). Pins below `next` stay; nothing moves back, and nothing moves while a run
+is under way. -/
+def jumpTo (f : FilterSyncIO) (next : UInt32) : NetM Bool := do
+  f.beginRequest
+  try
+    let p ← f.progress.get
+    if next ≤ p.nextScanHeight then return false
+    if next.toNat > (← f.chain.height).toNat + 1 then return false
+    let candidate : Progress := { nextScanHeight := next,
+                                  filterHeaders := p.filterHeaders.filter fun k _ => match parseUInt32? k with
+                                    | some h => h < next
+                                    | none => false }
+    f.persist candidate
+    f.progress.set candidate
+    return true
+  finally
+    f.requesting.set false
+
 private def noPeersError (f : FilterSyncIO) : IO NetError := do
   let cooling := (← f.pool.coolingEndpoints).size
   return if cooling > 0 then .filters (.peersCoolingDown cooling) else .filters .noPeers
@@ -386,11 +406,14 @@ private def scanFilters (f : FilterSyncIO) (batchStart batchStop : UInt32) (peer
   if seen != count then f.failedScan peer (.filters (.badPeerResponse s!"missing cfilters: {seen}/{count}"))
 
 /-- One sync run (see the module doc). `maxBlocks` bounds it; `onReorg` is awaited before any filter work.
+`forwardTo`, asked after that, may move the frontier forward to a height every watched script was scanned to
+elsewhere.
 `afterHeaders` runs once the headers are in and proven, before any filter work: a fork height it returns
 (state that came from elsewhere naming a block this chain does not have) is handled as a reorg to it. -/
 def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option UInt32 := none)
     (onReorg : Option (UInt32 → NetM Unit) := none) (onMatch : BlockMatch → NetM Unit)
-    (afterHeaders : Option (NetM (Option UInt32)) := none) : NetM Unit := do
+    (afterHeaders : Option (NetM (Option UInt32)) := none) (forwardTo : Option (NetM (Option UInt32)) := none) :
+    NetM Unit := do
   f.beginRequest
   try
     -- a pool holding seats so a signed payment can go out is not a pool to scan over
@@ -408,6 +431,17 @@ def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option
       if let some fork ← check then
         if let some cb := onReorg then cb fork
         f.rollBack fork
+    -- what was scanned elsewhere for every script the caller watches is not scanned here again (`jumpTo`)
+    if let some ask := forwardTo then
+      if let some next ← ask then
+        let p ← f.progress.get
+        if next > p.nextScanHeight && next.toNat ≤ (← f.chain.height).toNat + 1 then
+          let candidate : Progress := { nextScanHeight := next,
+                                        filterHeaders := p.filterHeaders.filter fun k _ => match parseUInt32? k with
+                                          | some h => h < next
+                                          | none => false }
+          f.persist candidate
+          f.progress.set candidate
     let peers ← f.pool.connectedPeers
     if peers.isEmpty then throw (.filters .noPeers)
     let tip ← f.chain.height

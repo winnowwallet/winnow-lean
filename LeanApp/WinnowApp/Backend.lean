@@ -32,6 +32,8 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   deleteWallet : IO Unit
   /-- The wallets kept for the network whose directory this is, the first one first. No secret is read. -/
   wallets : (networkDir : String) → IO (List WalletSummary) := fun _ => pure []
+  /-- Names the open wallet; the name travels with its backup to the person's other devices. -/
+  renameWallet : String → IO Unit := fun _ => pure ()
   startNetworking : Settings → IO Unit
   stopNetworking : IO Unit
   syncNow : IO Unit

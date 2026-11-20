@@ -445,6 +445,38 @@ def slotStacksFold (root : System.FilePath) : TM Unit := do
   check "…and the network's relay file is there" (← (System.FilePath.mk a.dir / "broadcast.json").pathExists)
   a.stop
 
+/-- A wallet's name travels with its backup: given on one device, the other device holding the same wallet
+shows it after a look; the later name wins; a restore takes it. -/
+def namesFollow (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "namesA" cloud cloudKeys
+  let b ← device root "namesB" cloud cloudKeys
+  let idA ← a.create
+  -- the second device holds the same wallet, from the first's backup
+  discard <| b.backend.openWallet .signet b.dir
+  b.backend.startNetworking b.settings
+  let (idB, _) ← b.backend.importBundle .signet b.dir (← a.backend.exportBundle true)
+  unless ← waitUntil 5_000 (every := 10) (do return (← b.app.controller.get).lastSaved.isSome) do
+    throw "the second device's backup was not saved"
+  check "the two devices hold the same wallet" (idA == idB)
+  check "a name too long is refused" (← fails (a.backend.renameWallet (String.mk (List.replicate 65 'x'))))
+  a.backend.renameWallet "Household"
+  check "named on the first device" ((← a.backend.wallets a.dir).map (·.label) == ["Household"])
+  a.publish
+  b.look
+  check "the second device shows the name after a look" ((← b.backend.wallets b.dir).map (·.label) == ["Household"])
+  IO.sleep 5
+  b.backend.renameWallet "Savings"
+  b.publish
+  a.look
+  check "the later name wins on the first device" ((← a.backend.wallets a.dir).map (·.label) == ["Savings"])
+  a.publish
+  b.look
+  check "…and stays on the second" ((← b.backend.wallets b.dir).map (·.label) == ["Savings"])
+  a.stop
+  b.stop
+
 def accountsFollow (root : System.FilePath) : TM Unit := do
   let cloud ← Real.MemoryCloud.new
   let cloudKeys ← Real.memoryCloudKeys
@@ -765,6 +797,19 @@ def twoWalletsOneDevice (root : System.FilePath) : TM Unit := do
   d.look
   check "…until it looks, and takes the first wallet's" ((← d.signerNames).length == 2 && (← d.signerNames).contains "Erin")
   check "two wallets, two backups, no more" ((← cloud.count) == 2)
+  -- the first, not open, is scanned for: its backup follows its scan, for another device's head start
+  let some r := (← d.env.get).riders.find? (·.held.id == first) | throw "the first wallet is not scanned for"
+  discard <| (r.wallet.recordScanHeight 500 (some (ByteArray.mk (Array.replicate 32 7)))).run
+  d.look
+  let heights ← (← d.app.controller.store.list "signet").filterMapM fun summary => do
+    let b ← d.app.controller.store.load summary.id (← d.app.controller.store.account)
+    let key ← cloudKeys.load b.id
+    match ← (b.shared key).run with
+    | .ok sh => pure (if sh.walletID == some first then some (sh.lastKnownHeight, sh.lastKnownBlockHash.isSome) else none)
+    | .error _ => pure none
+  check "the wallet that is not open keeps its backup current, with the block it stands on" (heights.toList == [(499, true)])
+    s!"{heights}"
+  check "…in the same backup" ((← cloud.count) == 2)
   d.stop
 
 def whenNothingFollows (root : System.FilePath) : TM Unit := do
@@ -976,6 +1021,7 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "accountsFollow" (accountsFollow root)
   runTest "anchoredArrivals" (anchoredArrivals root)
   runTest "slotStacksFold" (slotStacksFold root)
+  runTest "namesFollow" (namesFollow root)
   runTest "removalStopsAtCoins" (removalStopsAtCoins root)
   runTest "olderBackups" (olderBackups root)
   runTest "olderForms" (olderForms root)
