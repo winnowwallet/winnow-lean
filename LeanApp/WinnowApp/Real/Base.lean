@@ -45,6 +45,28 @@ order (`FilterSyncIO.scanRange`, which never moves the forward scan): the last b
 that was the range's end. -/
 abbrev RangeScanner := (fromHeight toHeight : UInt32) → Array ByteArray → (Net.BlockMatch → IO Unit) → IO (Option UInt32 × Bool)
 
+/-- This device's header chain, read: the hash of the block at a height, none past its tip or below its start. -/
+abbrev ChainHashes := UInt32 → IO (Option ByteArray)
+
+/-- How far below a handed-over height a disagreeing anchor sends the scan back when nothing in the history
+names an earlier block: a day of blocks. -/
+def anchorRewind : UInt32 := 144
+
+/-- `anchorFork`: the height to roll back to when state that came from elsewhere (a restore, an import, an
+account from another device) names a block at `height` that is not this chain's: the lower of
+`anchorRewind` below the anchor and the lowest confirmed history entry whose own block is not this chain's
+(less one). None when the anchor is this chain's, or cannot be checked yet (the chain is shorter). -/
+def anchorFork (blockHash : ChainHashes) (height : UInt32) (anchor : ByteArray) (history : Array HistoryEntry) :
+    IO (Option UInt32) := do
+  let some ours ← blockHash height | return none
+  if ours == anchor then return none
+  let mut fork := if height > anchorRewind then height - anchorRewind else 0
+  for h in history do
+    let some theirs := h.blockHash | continue
+    if h.height == 0 || h.height > fork then continue
+    if (← blockHash h.height) != some theirs then fork := h.height - 1
+  return some fork
+
 /-- What the core needs from people and labels (the records half plugs these in). -/
 structure Hooks where
   /-- `configurePeople` (and the receive labels) for the network's directory: `some message` when a
@@ -66,8 +88,9 @@ structure Hooks where
   /-- `multisigStore.apply(match:network:)`: the in-flight spends a conflict in the block beat. -/
   multisigApply : Net.BlockMatch → Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ _ => pure #[]
   /-- Before a forward pass from block `frontier`: accounts that arrived from another of the person's devices
-  are brought from the block that device had scanned to this phone's own, and then join the watched ones. -/
-  multisigCatchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → IO Unit := fun _ _ _ => pure ()
+  are brought from the block that device had scanned to this phone's own, and then join the watched ones. The
+  chain's hashes check the block each came anchored to. -/
+  multisigCatchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → ChainHashes → IO Unit := fun _ _ _ _ => pure ()
   /-- `multisigStore.rollBack(to:)`. -/
   multisigRollBack : UInt32 → IO Unit := fun _ => pure ()
   /-- `MultisigStore.validate(_:network:)` of a bundle's accounts, before anything is written. -/

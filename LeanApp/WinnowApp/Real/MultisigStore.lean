@@ -689,6 +689,9 @@ structure ArrivingAccount where
   passWatch : UInt32
   /-- Why it waits, when it is not only a matter of scanning. -/
   note : Option String := none
+  /-- The hash of block `scannedThrough` as the other device had it (internal byte order), until this
+  device's chain has been found to agree; one that does not sends the account back (`anchorFork`). -/
+  anchor : Option ByteArray := none
   deriving Inhabited, BEq
 
 namespace ArrivingAccount
@@ -699,18 +702,23 @@ def fileName : String := "multisig-arriving.json"
 def storeSeal (keys : StoreKeyVault) : StoreSeal := { store := storeName, keys }
 
 /-- As it arrives: current to `height`, its first pass from the block after. -/
-def ofSnapshot (record : MultisigAccountRecord) (height : UInt32) : ArrivingAccount :=
-  { record, scannedThrough := height, passFrom := height + 1, passWatch := MultisigStore.watchCount record }
+def ofSnapshot (record : MultisigAccountRecord) (height : UInt32) (anchor : Option ByteArray := none) : ArrivingAccount :=
+  { record, scannedThrough := height, passFrom := height + 1, passWatch := MultisigStore.watchCount record,
+    anchor := anchor.filter (·.size == 32) }
 
 def toJV (a : ArrivingAccount) : JV :=
   obj [("record", some a.record.toJV), ("scannedThrough", some (ofInt a.scannedThrough.toNat)),
-       ("passFrom", some (ofInt a.passFrom.toNat)), ("passWatch", some (ofInt a.passWatch.toNat)), ("note", a.note.map .str)]
+       ("passFrom", some (ofInt a.passFrom.toNat)), ("passWatch", some (ofInt a.passWatch.toNat)), ("note", a.note.map .str),
+       ("anchor", a.anchor.map (.str ∘ Winnow.displayHex))]
 
 def ofJV (v : JV) : D ArrivingAccount := do
   let kvs ← asObject v
+  let anchor := match ← keyIfPresent kvs "anchor" asString with
+    | some text => ((Wire.dataOfHex? text).filter (·.size == 32)).map ByteArray.reverse
+    | none => none
   return { record := ← key kvs "record" MultisigAccountRecord.ofJV, scannedThrough := ← key kvs "scannedThrough" asUInt32,
            passFrom := ← key kvs "passFrom" asUInt32, passWatch := ← key kvs "passWatch" asUInt32,
-           note := ← keyIfPresent kvs "note" asString }
+           note := ← keyIfPresent kvs "note" asString, anchor }
 
 def encode (accounts : Array ArrivingAccount) : ByteArray := (write (.arr (accounts.map toJV))).toUTF8
 
@@ -739,7 +747,8 @@ def save (keys : StoreKeyVault) (writeData : WriteData) (path : System.FilePath)
 current to, so the blocks of the new branch are scanned for it. -/
 def rollBack (a : ArrivingAccount) (fork : UInt32) : ArrivingAccount :=
   if a.scannedThrough ≤ fork then a else
-    { a with record := MultisigStore.rewindRecord fork a.record, scannedThrough := fork, passFrom := min a.passFrom (fork + 1) }
+    { a with record := MultisigStore.rewindRecord fork a.record, scannedThrough := fork, passFrom := min a.passFrom (fork + 1),
+             anchor := none }
 
 /-- The scripts a pass looks for: both chains below the record's watch count. -/
 def scripts (a : ArrivingAccount) (caches : MultisigStore) : RM (Array ByteArray × MultisigStore) := do

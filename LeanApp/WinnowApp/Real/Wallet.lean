@@ -464,7 +464,7 @@ def exportBundle (env : Env) (includeMnemonic : Bool) : IO String := do
   let c ← env.get
   let some w := c.wallet | failWith .noWallet
   if let some f := c.stack.bind (·.filters) then
-    env.walletWrite c.walletSerial "export.recordScanHeight" (w.recordScanHeight (← f.nextScanHeight))
+    recordFrontier env c.walletSerial "export.recordScanHeight" w f
   let b ← runWM (w.exportBundle includeMnemonic)
   let accounts ← env.hooks.multisigBackup
   let signers ← env.hooks.signerBackup

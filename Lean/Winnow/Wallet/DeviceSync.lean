@@ -258,6 +258,8 @@ structure Replica where
   id : String
   /-- The block its accounts' coins and history are current to (`ImportBundle.lastKnownHeight`). -/
   height : UInt32
+  /-- The hash of block `height` as that device had it (internal byte order), when its backup names one. -/
+  anchor : Option ByteArray := none
   accounts : Array MultisigAccountRecord := #[]
   /-- Each signer under its key (`signerKey`). -/
   signers : Array (String × SignerRecord) := #[]

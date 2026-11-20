@@ -176,7 +176,7 @@ blocks after the one the account is current to are scanned for its scripts and a
 moved its frontier is followed by another from where the first began; and once a pass ends at `target` having
 found no new address, the account joins the kept ones. A run that stops early (its minute, its bytes, a peer)
 leaves the account current to where it got. -/
-def catchUpOne (a : MultisigApp) (id : String) (target : UInt32) (scan : RangeScanner) : IO Unit := do
+def catchUpOne (a : MultisigApp) (id : String) (target : UInt32) (scan : RangeScanner) (blockHash : ChainHashes) : IO Unit := do
   let caches ← IO.mkRef ({ network := (← a.host.read).network } : MultisigStore)
   let current : IO (Option ArrivingAccount) := do return (← a.host.arrivingAccounts).find? (·.record.id == id)
   let update (f : ArrivingAccount → RM ArrivingAccount) : IO Unit :=
@@ -187,6 +187,19 @@ def catchUpOne (a : MultisigApp) (id : String) (target : UInt32) (scan : RangeSc
     let some entry ← current | return
     -- this phone's own scan has not reached the block the account is current to
     if entry.scannedThrough > target then return
+    -- the block the other device had it current to must be this chain's: one that is not is a reorg that
+    -- device saw, and the account goes back far enough for this chain's blocks to be scanned for it
+    if let some anchor := entry.anchor then
+      match ← anchorFork blockHash entry.scannedThrough anchor entry.record.history with
+      | some fork =>
+        update fun e => pure (if e.scannedThrough == entry.scannedThrough then { e.rollBack fork with anchor := none } else e)
+        if let some env ← a.env.get then
+          env.journal "multisig.anchorMismatch" [("id", id), ("from", toString entry.scannedThrough), ("fork", toString fork)]
+      | none =>
+        -- agreed, or this chain does not reach that block yet (it does: `scannedThrough ≤ target`)
+        if (← blockHash entry.scannedThrough).isNone then return
+        update fun e => pure (if e.scannedThrough == entry.scannedThrough then { e with anchor := none } else e)
+      continue
     if entry.scannedThrough == target then
       let watch := MultisigStore.watchCount entry.record
       if watch > entry.passWatch && entry.passFrom ≤ target then
@@ -220,10 +233,11 @@ def catchUpOne (a : MultisigApp) (id : String) (target : UInt32) (scan : RangeSc
 
 /-- The `multisigCatchUp` hook: every arriving account, one after another; one that cannot go on says why in
 its note and waits for the next pass. -/
-def catchUp (a : MultisigApp) (_network : Tx.BitcoinNetwork) (frontier : UInt32) (scan : RangeScanner) : IO Unit := do
+def catchUp (a : MultisigApp) (_network : Tx.BitcoinNetwork) (frontier : UInt32) (scan : RangeScanner)
+    (blockHash : ChainHashes) : IO Unit := do
   if frontier == 0 then return
   for entry in ← a.host.arrivingAccounts do
-    try a.catchUpOne entry.record.id (frontier - 1) scan
+    try a.catchUpOne entry.record.id (frontier - 1) scan blockHash
     catch e =>
       let note := toString e
       discard <| (a.host.modifyArriving fun all =>

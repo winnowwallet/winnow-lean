@@ -1921,6 +1921,58 @@ def walletsFlow (dir : String) (n : Node) : IO Unit := do
 def bootText : BootResult → String
   | .opened id => s!"opened {id}" | .missing => "missing" | .damaged m => s!"damaged: {m}"
 
+/-- A backup names the block its state stands on, and a restore checks it against its own chain: here the
+block that confirmed a payment fell after the backup was made, so the restored wallet goes back below it,
+holds the payment as unconfirmed rather than in a block this chain does not have, and finds it again where the
+chain now confirms it. -/
+def anchorFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let phone (name : String) : IO (Backend × String) := do
+    let (b, _) ← Backend.realWithEnv (deps (← IO.mkRef ({} : Keys.InMemorySecrets)) name)
+    let home := s!"{dir}/{name}/BTCSwift/regtest"
+    IO.FS.createDirAll home
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    return (b, home)
+  let (a, aHome) ← phone "AnchorA"
+  discard <| a.createWallet .regtest aHome
+  let txid ← n.wallet #["sendtoaddress", ← a.receiveAddress false, "0.5"]
+  n.mine 1 mineAddr
+  let fallen ← n.height
+  n.waitFilterIndex
+  let (paid, _) ← syncUntil a 60_000 fun s p => (history? s txid).any (·.height == fallen) && p == .synced
+  check "anchor: the payment confirmed" ((history? paid txid).any (·.height == fallen))
+  let backup ← a.exportBundle true
+  let named ← n.cli #["getblockhash", toString fallen]
+  check "anchor: the backup names the block its state stands on" (match ImportBundle.decode backup with
+    | .ok b => b.lastKnownHeight.toNat == fallen && b.lastKnownBlockHash == some named
+    | .error _ => false) s!"{(ImportBundle.decode backup).toOption.map (·.lastKnownBlockHash)} vs {named}"
+  a.stopNetworking
+  -- the block falls; a heavier branch leaves the payment out
+  discard <| n.cli #["invalidateblock", named]
+  let elsewhere ← n.wallet #["getnewaddress"]
+  for _ in [0:2] do discard <| n.cli #["generateblock", elsewhere, "[]"]
+  n.waitFilterIndex
+  let tip ← n.height
+  let (b, bHome) ← phone "AnchorB"
+  discard <| b.importBundle .regtest bHome backup
+  let (restored, _) ← syncUntil b 60_000 fun s p => s.nextScanHeight == tip + 1 && p == .synced
+  checkJournal "sync.anchorMismatch" ["fork"] (fun f => (field f "fork").toNat?.any (· < fallen))
+    "the restore goes back below the fallen block"
+  check "anchor: the restored wallet holds no coin from a block this chain does not have"
+    (restored.balance == 0 && (history? restored txid).all (·.height == 0))
+    s!"{restored.balance} sat, {(history? restored txid).map (·.height)}"
+  -- the next block confirms the payment: the restored wallet finds it there
+  n.mine 1 mineAddr
+  let again ← n.height
+  n.waitFilterIndex
+  let (found, _) ← syncUntil b 60_000 fun s p => (history? s txid).any (·.height == again) && p == .synced
+  check "anchor: it finds the payment where this chain confirms it"
+    ((history? found txid).any (·.height == again) && found.balance == 50_000_000)
+    s!"{(history? found txid).map (·.height)} vs {again}, {found.balance} sat"
+  b.stopNetworking
+
 /-- Writes through a wallet that is erased or replaced while they are on their way (`Deps.walletWriting` is the
 moment a sync pass is about to write). A phone with a coin is copied to three phones; on each a block arrives and
 `syncNow` scans it, and as the pass is about to write, the wallet is replaced by another wallet's backup (at the
@@ -2455,5 +2507,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; heldKeysFlow dir n; accountDuringPassFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; anchorFlow dir n; heldKeysFlow dir n; accountDuringPassFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

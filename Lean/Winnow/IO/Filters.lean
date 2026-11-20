@@ -385,9 +385,12 @@ private def scanFilters (f : FilterSyncIO) (batchStart batchStop : UInt32) (peer
     seen := seen + (← f.scanChunk cs ce peer watchScripts filterHeaders onMatch).size
   if seen != count then f.failedScan peer (.filters (.badPeerResponse s!"missing cfilters: {seen}/{count}"))
 
-/-- One sync run (see the module doc). `maxBlocks` bounds it; `onReorg` is awaited before any filter work. -/
+/-- One sync run (see the module doc). `maxBlocks` bounds it; `onReorg` is awaited before any filter work.
+`afterHeaders` runs once the headers are in and proven, before any filter work: a fork height it returns
+(state that came from elsewhere naming a block this chain does not have) is handled as a reorg to it. -/
 def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option UInt32 := none)
-    (onReorg : Option (UInt32 → NetM Unit) := none) (onMatch : BlockMatch → NetM Unit) : NetM Unit := do
+    (onReorg : Option (UInt32 → NetM Unit) := none) (onMatch : BlockMatch → NetM Unit)
+    (afterHeaders : Option (NetM (Option UInt32)) := none) : NetM Unit := do
   f.beginRequest
   try
     -- a pool holding seats so a signed payment can go out is not a pool to scan over
@@ -401,6 +404,10 @@ def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option
     -- a chain held from genesis that has not reached the checkpoint may be a peer's invention: nothing is
     -- scanned on it, and the pass ends as one that did not reach the tip
     if !(← f.chain.proven) then return
+    if let some check := afterHeaders then
+      if let some fork ← check then
+        if let some cb := onReorg then cb fork
+        f.rollBack fork
     let peers ← f.pool.connectedPeers
     if peers.isEmpty then throw (.filters .noPeers)
     let tip ← f.chain.height

@@ -251,8 +251,8 @@ def overview (d : Device) : IO MultisigOverview := d.backend.multisigOverview
 def signerNames (d : Device) : IO (List String) := do return (← d.overview).signers.map (·.name)
 
 /-- The accounts on their way are brought to block `frontier - 1` by a scan that finds nothing. -/
-def catchUp (d : Device) (frontier : UInt32) : IO Unit :=
-  d.app.multisig.catchUp .signet frontier fun _ toHeight _ _ => pure (some toHeight, true)
+def catchUp (d : Device) (frontier : UInt32) (chain : Real.ChainHashes := fun _ => pure none) : IO Unit :=
+  d.app.multisig.catchUp .signet frontier (fun _ toHeight _ _ => pure (some toHeight, true)) chain
 
 /-- The arriving accounts caught up to the block after the one they are current to. -/
 def settle (d : Device) : IO Unit := do
@@ -367,6 +367,62 @@ def sharedAccount (d : Device) (name : String := "Shared") (other : UInt8 := 0xB
   let own := (← d.overview).keyExpression.getD ""
   let (id, _, _) ← d.backend.createMultisigAccount name 2 [([own], none), ([← testKey other], none)] none
   return id
+
+/-- An account arrives anchored to the block its backup names. This device's chain agreeing, it is caught up
+from there; disagreeing (a reorg the other device saw), it goes back far enough to be scanned again here. -/
+def anchoredArrivals (root : System.FilePath) : TM Unit := do
+  -- the fork rule itself: a day below the anchor, or below the lowest history entry this chain disagrees with
+  let theirs := ByteArray.mk (Array.replicate 32 0xAA)
+  let ours := ByteArray.mk (Array.replicate 32 0xBB)
+  let chainOf (f : UInt32 → ByteArray) : Real.ChainHashes := fun h => pure (if h ≤ 1_000 then some (f h) else none)
+  let entry (height : UInt32) (hash : ByteArray) : HistoryEntry := { txid := ByteArray.mk (Array.replicate 32 1), height, received := 1, spent := 0, blockHash := some hash }
+  check "an anchor this chain has: nothing to do" ((← Real.anchorFork (chainOf fun _ => theirs) 900 theirs #[]) == none)
+  check "one past this chain's tip: not checked yet" ((← Real.anchorFork (chainOf fun _ => ours) 1_200 theirs #[]) == none)
+  check "one this chain does not have: a day back" ((← Real.anchorFork (chainOf fun _ => ours) 900 theirs #[]) == some (900 - Real.anchorRewind))
+  check "…or to below the lowest payment in a block this chain does not have"
+    ((← Real.anchorFork (chainOf fun _ => ours) 900 theirs #[entry 700 theirs, entry 600 ours, entry 850 theirs]) == some 699)
+  check "…never below block zero" ((← Real.anchorFork (chainOf fun _ => ours) 100 theirs #[]) == some 0)
+  -- on the devices
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "anchorA" cloud cloudKeys
+  let b ← device root "anchorB" cloud cloudKeys
+  discard <| a.create
+  discard <| b.create
+  let some w := (← a.env.get).wallet | throw "no wallet on the first device"
+  -- the first device scanned to block 499, the last block of which it names (its own stack put away, so
+  -- that what it saves is what it recorded)
+  a.backend.stopNetworking
+  let next : UInt32 := 500
+  discard <| (w.recordScanHeight next (some theirs)).run
+  let id ← sharedAccount a
+  a.publish
+  b.look
+  let arriving ← b.app.multisig.host.arrivingAccounts
+  check "the account arrives with the block its backup names" (arriving.toList.map (·.anchor) == [some theirs])
+  let height := arriving[0]!.scannedThrough
+  check "…the block before the first device's next" (height + 1 == next)
+  -- this chain names another block there: the account goes back a day and is scanned again
+  let scanned ← IO.mkRef (#[] : Array UInt32)
+  let scanner : Real.RangeScanner := fun fromHeight toHeight _ _ => do
+    scanned.modify (·.push fromHeight)
+    pure (some toHeight, true)
+  b.app.multisig.catchUp .signet (height + 1) scanner (fun h => pure (if h ≤ height then some ours else none))
+  let back := if height > Real.anchorRewind then height - Real.anchorRewind else 0
+  check "a disagreeing anchor sends it back a day, and it is scanned here from there" ((← scanned.get) == #[back + 1])
+  check "…and, scanned again, it joins this device's accounts" ((← b.overview).accounts.map (·.id) == [id])
+  -- another account, anchored to a block this chain agrees on: caught up from where it was
+  let id2 ← sharedAccount a "Second" 0xB3
+  a.publish
+  b.look
+  let arriving ← b.app.multisig.host.arrivingAccounts
+  check "the second arrives anchored" (arriving.toList.map (·.anchor) == [some theirs])
+  scanned.set #[]
+  b.app.multisig.catchUp .signet (height + 1) scanner (fun h => pure (if h ≤ height then some theirs else none))
+  check "an agreeing anchor: nothing below it scanned again" ((← scanned.get).isEmpty)
+  check "…and it joins this device's accounts" ((← b.overview).accounts.map (·.id) |>.contains id2)
+  a.stop
+  b.stop
 
 def accountsFollow (root : System.FilePath) : TM Unit := do
   let cloud ← Real.MemoryCloud.new
@@ -897,6 +953,7 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "signersFollow" (signersFollow root)
   runTest "ledgersFollow" (ledgersFollow root)
   runTest "accountsFollow" (accountsFollow root)
+  runTest "anchoredArrivals" (anchoredArrivals root)
   runTest "removalStopsAtCoins" (removalStopsAtCoins root)
   runTest "olderBackups" (olderBackups root)
   runTest "olderForms" (olderForms root)

@@ -176,6 +176,8 @@ account of the shared-account Winnow, a signer list of an older shape), so that 
 account in silence. Nothing is restored from this: what does not read is counted and left where it is. -/
 structure Shared where
   lastKnownHeight : UInt32
+  /-- The hash of block `lastKnownHeight` (internal byte order), when the backup names one that reads. -/
+  lastKnownBlockHash : Option ByteArray := none
   accounts : Array MultisigAccountRecord := #[]
   signers : Array SignerRecord := #[]
   /-- The app's own data, as it was sealed. -/
@@ -228,7 +230,10 @@ def shared (b : CloudWalletBackup) (key : ByteArray) : WM Shared := do
     let (signers, lostSigners) := each kvs "signers" SignerRecord.ofJV
     let kept := signers.extract 0 maximumSharedSigners
     let descriptor := match lookup kvs "descriptor" with | some (.str d) => some d | _ => none
-    return (own, { lastKnownHeight := ← SwiftJSON.key kvs "lastKnownHeight" asUInt32, accounts, signers := kept, appState,
+    let lastKnownBlockHash := match lookup kvs "lastKnownBlockHash" with
+      | some (.str h) => ((Wire.dataOfHex? h).filter (·.size == 32)).map ByteArray.reverse
+      | _ => none
+    return (own, { lastKnownHeight := ← SwiftJSON.key kvs "lastKnownHeight" asUInt32, lastKnownBlockHash, accounts, signers := kept, appState,
                    unread := lostAccounts + lostSigners + (signers.size - kept.size), descriptor })
   match read with
   | .ok (true, shared) => return shared

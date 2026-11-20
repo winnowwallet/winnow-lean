@@ -68,6 +68,25 @@ def observeBroadcasterFailures (env : Env) (b : TxBroadcaster) (gen : Nat) : IO 
       | .value _ => pure ()
       | .finished _ => break
 
+/-- The filter frontier mirrored into the wallet file with the hash of the last block scanned, so a backup
+names the block its state stands on and another device can check that block is in its own chain. A
+frontier that has not moved leaves a recorded hash alone: it is either this chain's already, or one that
+came with a restore and is checked before anything is scanned (`anchorFork`), which this must not paper over. -/
+def recordFrontier (env : Env) (serial : Nat) (what : String) (w : Wallet) (f : FilterSyncIO) : IO Unit := do
+  let (next, hash) ← f.frontier
+  let s ← runWM w.state
+  if next == s.nextScanHeight && s.scannedThroughHash.isSome then return
+  env.walletWrite serial what (w.recordScanHeight next hash)
+
+/-- The open wallet's anchor checked against the chain just synced: the fork to roll back to, if any. -/
+def walletAnchorFork (w : Wallet) (chain : HeaderStore) : IO (Option UInt32) := do
+  let s ← runWM w.state
+  let some anchor := s.scannedThroughHash | return none
+  if s.nextScanHeight == 0 then return none
+  -- never below where this chain begins: nothing under it can be scanned
+  let start ← chain.startHeight
+  return (← anchorFork (fun h => chain.blockHash h) (s.nextScanHeight - 1) anchor s.history).map (max start)
+
 /-! ## Rollback marker -/
 
 def finishRollback (dir : String) : IO Unit := removeQuietly (dirFile dir rollbackMarkerName)
@@ -358,7 +377,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
         | .ok outcome => return (outcome.scannedThrough, outcome.isComplete)
         | .error (.range (.rangeBelowChain ..)) => throw (IO.userError waitingForNewerCopyText)
         | .error e => throw (IO.userError e.description)
-      try env.hooks.multisigCatchUp w.network (← f.nextScanHeight) scanner catch _ => pure ()
+      try env.hooks.multisigCatchUp w.network (← f.nextScanHeight) scanner (fun h => s.chain.blockHash h) catch _ => pure ()
     -- the accounts' scripts first, outside the pass: an account file that cannot be read now (a locked phone in
     -- a background launch) stops the pass before anything is scanned, so the scan height stays where the
     -- accounts' payments are, and the next pass reads the file again; it is a transient failure, not the wallet's
@@ -391,8 +410,16 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
         let pending ← b.pendingTxids
         for tx in m.block.transactions do
           if pending.contains tx.txid then b.markConfirmed tx.txid m.height
-      f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w serial b fork : IO Unit)) (onMatch := applyMatch)
-      env.walletWriteNet serial "sync.recordScanHeight" (w.recordScanHeight (← f.nextScanHeight))
+      -- a restored or imported wallet stands on the block its backup named: one this chain does not have is a
+      -- reorg the other device saw and this one never will, handled as one
+      let afterHeaders : NetM (Option UInt32) := do
+        let fork ← (walletAnchorFork w s.chain : IO _)
+        if let some at' := fork then
+          env.journal "sync.anchorMismatch" [("fork", toString at')]
+        return fork
+      f.sync scripts (maxBlocks := maxBlocks) (onReorg := some fun fork => (rollBackStores env dir w serial b fork : IO Unit))
+        (onMatch := applyMatch) (afterHeaders := some afterHeaders)
+      (recordFrontier env serial "sync.recordScanHeight" w f : IO Unit)
       -- An account made or joined while this pass ran is not among the scripts it began with, and the pass has
       -- moved the frontier past the blocks it scanned: a payment to the account that one of them confirmed
       -- would never be looked for again. Those blocks are scanned once more, for the scripts the pass did not
@@ -445,7 +472,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
           try IO.FS.writeFile (lastCompleteCheckPath d) (toString now) catch _ => pure ()
       return complete
     | .error e =>
-      try env.walletWrite serial "sync.recordScanHeight" (w.recordScanHeight (← f.nextScanHeight)) catch _ => pure ()
+      try recordFrontier env serial "sync.recordScanHeight" w f catch _ => pure ()
       -- a suspend, network switch or expired background check ended this generation, or the wallet was erased or
       -- replaced: nothing failed
       let transient := isTransientSyncError e

@@ -329,7 +329,8 @@ def openReplica (a : SyncApp) (id account : String) (network : WinnowApp.Network
       continue
     let some key ← signerKey r net | skipped := skipped + 1; continue
     unless signers.any (·.1 == key) do signers := signers.push (key, r)
-  return .ok (some { id, height := shared.lastKnownHeight, accounts, signers, sync := CloudAppState.syncOf shared.appState }, skipped)
+  return .ok (some { id, height := shared.lastKnownHeight, anchor := shared.lastKnownBlockHash, accounts, signers,
+                     sync := CloudAppState.syncOf shared.appState }, skipped)
 
 /-- What a round's reading of the other backups came to. -/
 structure Reading where
@@ -399,8 +400,8 @@ def changeRecord (a : SyncApp) (id : String) (kept : MultisigStore → RM Multis
 
 /-- One account's decision carried out. The view, whether anything of this device's changed, and whether
 anything is left to do later (a change that could not be made yet). -/
-def applyAccount (a : SyncApp) (view : SyncView) (d : AccountDecision) (here : Option LocalAccount) :
-    IO (SyncView × Bool × Bool) := do
+def applyAccount (a : SyncApp) (view : SyncView) (d : AccountDecision) (here : Option LocalAccount)
+    (found : Array Replica := #[]) : IO (SyncView × Bool × Bool) := do
   let host := a.multisig.host
   let keys := host.keys
   let writeData := host.writeData
@@ -416,7 +417,9 @@ def applyAccount (a : SyncApp) (view : SyncView) (d : AccountDecision) (here : O
       unless store.records.size + (← host.arrivingAccounts).size < MultisigStore.maximumAccounts do throw (.multisig .tooMany)
     if admissible.isNone || store.records.any (·.id == d.id) then return (view, false, true)
     let filed ← attempt <| RM.toIO <| host.modifyArriving fun all =>
-      pure ((all.filter (·.record.id != d.id)).push (ArrivingAccount.ofSnapshot record height), ())
+      -- the copy chosen is anchored to the block its backup names, which this device's chain must have
+      let anchor := (found.find? fun r => r.height == height && (r.account? d.id).isSome).bind (·.anchor)
+      pure ((all.filter (·.record.id != d.id)).push (ArrivingAccount.ofSnapshot record height anchor), ())
     if filed.isNone then return (view, false, true)
     a.env.journal "multisig.accountArriving" [("id", d.id), ("height", toString height)]
     let seen : AccountSeen :=
@@ -526,14 +529,14 @@ def renewWaiting (a : SyncApp) (found : Array Replica) : IO Unit := do
   for entry in ← a.multisig.host.arrivingAccounts do
     unless entry.note.isSome do continue
     let later := found.filterMap fun r => (r.account? entry.record.id).bind fun record =>
-      if r.height > entry.scannedThrough then some (record, r.height) else none
-    let some (record, height) := later.foldl (fun best x => match best with
-      | some b => if x.2 > b.2 then some x else some b
+      if r.height > entry.scannedThrough then some (record, r.height, r.anchor) else none
+    let some (record, height, anchor) := later.foldl (fun best x => match best with
+      | some b => if x.2.1 > b.2.1 then some x else some b
       | none => some x) none | continue
     let record := { record with draft := none, name := entry.record.name }
     if (← (MultisigStore.validate #[record] network).run).toOption.isNone then continue
     discard <| attempt <| RM.toIO <| a.multisig.host.modifyArriving fun all =>
-      pure (all.map fun e => if e.record.id == entry.record.id then ArrivingAccount.ofSnapshot record height else e, ())
+      pure (all.map fun e => if e.record.id == entry.record.id then ArrivingAccount.ofSnapshot record height anchor else e, ())
 
 /-- Test mode's journal, once per distinct outcome: a look every minute that finds the same says it once. -/
 def journalOnce (a : SyncApp) (name : String) (fields : List (String × String)) : IO Unit := do
@@ -575,7 +578,7 @@ def round (a : SyncApp) : IO Unit := do
     let mut changed := false
     let mut pending := false
     for d in decideAccounts fresh (·.txid.toOption) accounts known found do
-      let (next, did, later) ← a.applyAccount view d (accounts.find? (·.record.id == d.id))
+      let (next, did, later) ← a.applyAccount view d (accounts.find? (·.record.id == d.id)) found
       view := next
       changed := changed || did
       pending := pending || later
