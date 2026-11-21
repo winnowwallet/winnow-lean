@@ -350,12 +350,13 @@ private def failedScan {α} (f : FilterSyncIO) (peer : PeerConnection) (e : NetE
   | _ => if (← f.pool.connectedPeers).contains peer then f.pool.transportFailure peer e.description
   throw e
 
-/-- One chunk: the burst is bounded (`chunkByteBound`; past it the connection is torn down and the peer
-marked misbehaving), every filter is verified against its pinned header before any is matched, the range
-budget is charged for the chunk, then each filter is matched and each hit's block fetched and delivered. -/
-private def scanChunk (f : FilterSyncIO) (chunkStart chunkStop : UInt32) (peer : PeerConnection)
-    (watchScripts : Array ByteArray) (filterHeaders : Std.HashMap String String)
-    (onMatch : BlockMatch → NetM Unit) : NetM (Std.HashMap UInt32 Unit) := do
+/-- One chunk's filters from one peer: the burst is bounded (`chunkByteBound`; past it the connection is torn
+down and the peer marked misbehaving), every filter is verified against its pinned header and the chunk must
+be whole before any is matched, the range budget is charged for the chunk, and the heights whose filters
+match come back with their block hashes. The filters themselves are not kept. -/
+private def fetchChunk (f : FilterSyncIO) (chunkStart chunkStop : UInt32) (peer : PeerConnection)
+    (watchScripts : Array ByteArray) (filterHeaders : Std.HashMap String String) :
+    NetM (Array (UInt32 × ByteArray)) := do
   f.checkRangeDeadline
   let some stopHash ← f.chain.blockHash chunkStop | throw (.filters (.badPeerResponse s!"missing header at {chunkStop}"))
   let count := (chunkStop - chunkStart).toNat + 1
@@ -379,31 +380,76 @@ private def scanChunk (f : FilterSyncIO) (chunkStart chunkStop : UInt32) (peer :
     seen := seen'
     chunkBytes := chunkBytes + m.filter.size
     verified := verified.push (height, m)
+  if seen.size != count then f.failedScan peer (.filters (.badPeerResponse s!"missing cfilters: {seen.size}/{count}"))
   f.peakChunkFilterBytes.modify (max · chunkBytes)
   f.chargeRange chunkBytes 0
-  if watchScripts.isEmpty then return seen
+  let mut hits := #[]
   for (height, m) in verified do
-    f.checkRangeDeadline
     let hit ← match filterMatches m watchScripts with
       | .ok b => pure b
       | .error e => f.failedScan peer (.other s!"filter decode: {e}")
-    if !hit then continue
-    let block ← match ← (f.verifiedBlock peer height m.blockHash).toBaseIO with
-      | .ok b => pure b
-      | .error e => f.failedScan peer e
-    onMatch { height, blockHash := m.blockHash, block }
-    -- serialising again only when a range budget is counting
-    if (← f.rangeRun.get).isSome then f.chargeRange 0 block.serialized.size
-  return seen
+    if hit then hits := hits.push (height, m.blockHash)
+  return hits.qsort (·.1 < ·.1)
 
-private def scanFilters (f : FilterSyncIO) (batchStart batchStop : UInt32) (peer : PeerConnection)
+/-- Errors that end the batch for every peer rather than for the one that met them: a cancelled scan, and a
+range run's deadline or byte budget. -/
+private def endsBatch : NetError → Bool
+  | .cancelled | .range _ => true
+  | _ => false
+
+/-- A batch's filters, from every approved peer at once. Each peer takes the next chunk as it finishes one
+(one `getcfilters` at a time per connection: a second would cancel the first's collector), so a slow peer
+holds up only its own chunk; a chunk a peer fails (it is rested, as `failedScan` says) goes back for the
+others, and the batch fails only when no peer is left to take what remains. Then, in height order, each hit's
+block is fetched from the peer that served its filter, checked and delivered, so `onMatch` sees blocks in the
+order a single peer would have given them.
+
+One peer used to serve every chunk: over Tor and I2P a batch of mainnet filters took as long as that
+peer's tunnel, whatever the other seats could carry. -/
+private def scanFilters (f : FilterSyncIO) (batchStart batchStop : UInt32) (peers : Array PeerConnection)
     (watchScripts : Array ByteArray) (filterHeaders : Std.HashMap String String)
     (onMatch : BlockMatch → NetM Unit) : NetM Unit := do
-  let count := (batchStop - batchStart).toNat + 1
-  let mut seen : Nat := 0
-  for (cs, ce) in chunks batchStart batchStop f.filtersPerChunk do
-    seen := seen + (← f.scanChunk cs ce peer watchScripts filterHeaders onMatch).size
-  if seen != count then f.failedScan peer (.filters (.badPeerResponse s!"missing cfilters: {seen}/{count}"))
+  if peers.isEmpty then throw (.filters .noPeers)
+  let work := chunks batchStart batchStop f.filtersPerChunk
+  -- the chunks not yet taken, and how many are being fetched: one cell, so a worker that finds nothing to
+  -- take waits while a chunk could still come back, and leaves only when none can
+  let queue : IO.Ref (List Nat × Nat) ← IO.mkRef (List.range work.size, 0)
+  let results : IO.Ref (Array (Option (PeerConnection × Array (UInt32 × ByteArray)))) ←
+    IO.mkRef (Array.replicate work.size none)
+  let failure : IO.Ref (Option NetError) ← IO.mkRef none
+  let halted ← IO.mkRef false
+  let worker (peer : PeerConnection) : BaseIO Unit := do
+    repeat
+      if ← halted.get then break
+      let taken ← queue.modifyGet fun (l, active) => match l with
+        | i :: rest => (some (some i), (rest, active + 1))
+        | [] => (if active == 0 then none else some none, ([], active))
+      let some next := taken | break
+      let some i := next | (IO.sleep 50 : BaseIO Unit); continue
+      let (cs, ce) := work[i]!
+      match ← (f.fetchChunk cs ce peer watchScripts filterHeaders).toBaseIO with
+      | .ok hits =>
+        results.modify (·.set! i (some (peer, hits)))
+        queue.modify fun (l, active) => (l, active - 1)
+      | .error e =>
+        failure.modify (·.orElse fun _ => some e)
+        if endsBatch e then halted.set true
+        queue.modify fun (l, active) => (i :: l, active - 1)
+        break
+  let tasks ← peers.mapM fun peer => BaseIO.asTask (prio := .dedicated) (worker peer)
+  for t in tasks do discard <| IO.wait t
+  let collected ← results.get
+  if collected.any (·.isNone) then throw ((← failure.get).getD (.filters .noPeers))
+  for entry in collected do
+    let some (peer, hits) := entry | continue
+    for (height, blockHash) in hits do
+      f.checkRangeDeadline
+      let block ← match ← (f.verifiedBlock peer height blockHash).toBaseIO with
+        | .ok b => pure b
+        | .error e => f.failedScan peer e
+      onMatch { height, blockHash, block }
+      -- serialising again only when a range budget is counting
+      if (← f.rangeRun.get).isSome then f.chargeRange 0 block.serialized.size
 
 /-- One sync run (see the module doc). `maxBlocks` bounds it; `onReorg` is awaited before any filter work.
 `forwardTo`, asked after that, may move the frontier forward to a height every watched script was scanned to
@@ -465,8 +511,7 @@ def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option
           return
       if let .error e := checkPinnedBoundaries proposed reference tip then throw (.filters e)
       peers ← f.approved approvedEndpoints
-      let some first := peers[0]? | throw (.filters .noPeers)
-      f.scanFilters batchStart batchStop first watchScripts proposed onMatch
+      f.scanFilters batchStart batchStop peers watchScripts proposed onMatch
       -- the receipt is written on every batch, so the corroboration on disk never describes an older pass
       let candidate : Progress := { nextScanHeight := batchStop + 1,
                                     filterHeaders := prunedFilterHeaders proposed (batchStop + 1),
@@ -552,8 +597,7 @@ private def runRange (f : FilterSyncIO) (initial : RangeScanProgress) (tip : UIn
     if !anchored then
       if let .error e := RangeScan.requireComparedBoundary proposed batchStart batchStop tip then throw (.filters e)
     peers ← f.approved approvedEndpoints
-    let some first := peers[0]? | throw (.filters .noPeers)
-    f.scanFilters batchStart batchStop first watchScripts proposed collect
+    f.scanFilters batchStart batchStop peers watchScripts proposed collect
     let candidate := { record with nextScanHeight := batchStop + 1,
                                    filterHeaders := RangeScan.prunedRangeHeaders proposed (batchStop + 1) initial.fromHeight,
                                    crossCheck := some receipt }

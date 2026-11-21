@@ -984,6 +984,54 @@ def restedScanPeerChecks : IO Unit := do
     ((← pool.isCoolingDown node) && (← pool.connectedPeers).isEmpty && (← filters.nextScanHeight) == 0)
   pool.stop
 
+/-- A batch's filters come from every approved seat: two peers share the chunks of one batch, and a chunk a
+peer fails goes to the other, so the pass finishes and only the peer that failed is rested. -/
+def sharedScanChecks : IO Unit := do
+  let blocks := 250
+  let headers := minedHeaders blocks
+  let hashes := #[(HeaderChain.genesisHeader regtest).hash] ++ headers.map (·.hash)
+  let heightOf : Std.HashMap ByteArray Nat := (List.range hashes.size).foldl (fun m i => m.insert hashes[i]! i) {}
+  let filter := filled 40 9
+  -- a node whose filters are the ones its own headers commit to, counting the chunks it was asked for
+  let node (asked : IO.Ref Nat) (honest : Bool) : IO PeerEndpoint := fakeNode regtest (startHeight := blocks.toInt32)
+    (answer := fun send m => do
+      match m with
+      | .getheaders _ => send (.headers #[])
+      | .getcfcheckpt r => send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := #[] })
+      | .getcfheaders r =>
+        let stop := heightOf[r.stopHash]?.getD 0
+        send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := filled 32 0,
+                           filterHashes := Array.replicate (stop + 1 - r.startHeight.toNat) (GCSFilter.filterHash filter) })
+      | .getcfilters r =>
+        asked.modify (· + 1)
+        let stop := heightOf[r.stopHash]?.getD 0
+        for h in [r.startHeight.toNat:stop + 1] do
+          send (.cfilter { blockHash := hashes[h]!, filter := if honest then filter else filled 40 8 })
+      | _ => pure ())
+  let run (secondHonest : Bool) : IO (Except NetError Unit × Nat × Nat × Bool × Bool × UInt32) := do
+    let a ← IO.mkRef 0
+    let b ← IO.mkRef 0
+    let first ← node a true
+    let second ← node b secondHonest
+    let pool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[first, second]) (seedResolver := some noSeeds)
+    pool.start
+    discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 2)
+    let store ← runNet "shared headers" (HeaderStore.open regtest none)
+    discard <| runNet "shared chain" (store.connect headers)
+    let filters ← runNet "shared filters" (FilterSyncIO.new pool store 0)
+    let r ← (filters.sync #[] (onMatch := fun _ => pure ())).attempt
+    let out := (r, ← a.get, ← b.get, ← pool.isCoolingDown first, ← pool.isCoolingDown second, ← filters.nextScanHeight)
+    pool.stop
+    return out
+  let (r, a, b, restedA, restedB, next) ← run true
+  check "shared scan: two honest seats share one batch's chunks, and the pass reaches the tip"
+    (r matches .ok () && a ≥ 1 && b ≥ 1 && a + b == 3 && !restedA && !restedB && next == (blocks + 1).toUInt32)
+    s!"{match r with | .ok () => "synced" | .error e => e.description}; asked {a} and {b}; next {next}"
+  let (r, a, _, restedA, restedB, next) ← run false
+  check "shared scan: a chunk one seat fails goes to the other, and only the one that failed is rested"
+    (r matches .ok () && a ≥ 3 && !restedA && restedB && next == (blocks + 1).toUInt32)
+    s!"{match r with | .ok () => "synced" | .error e => e.description}; honest asked {a}; next {next}"
+
 /-- Finding 9: a pin above the last checkpoint boundary that an answer agreed across source classes
 contradicts is rewound, and the scan starts again below it; one class's word rewinds nothing. -/
 def disputedPinChecks (dir : String) : IO Unit := do
@@ -1057,6 +1105,7 @@ def hardeningChecks (dir : String) : IO Unit := do
   broadcastRaceChecks dir
   headerTurnChecks
   restedScanPeerChecks
+  sharedScanChecks
   disputedPinChecks dir
 
 /-- The broadcaster giving up on peers that take the inv and never ask for the transaction (#39), over an
