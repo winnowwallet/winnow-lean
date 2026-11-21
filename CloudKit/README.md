@@ -2,7 +2,8 @@
 
 Winnow automatically uploads an encrypted wallet backup when iCloud is
 available. It is on by default. Settings → Backup shows **Backing up**,
-**Backed up** or **Not backed up** and holds the backup switch, the backup file
+**Backed up** or **Not backed up** (its Settings row also says **Off**, and
+**Not available** in a build without the iCloud entitlement) and holds the backup switch, the backup file
 and the recovery words; while nothing is backed up, the home offers a backup
 file instead. The wallet remains usable without an Apple Account.
 
@@ -17,21 +18,27 @@ and its limits.
 The backup includes this phone's recovery phrase, wallet descriptor, tracked
 funds, payment history and address counters. Its app context
 also includes saved people and payment cards, sender names, receive-address
-labels, display name and interface mode. Watch-only and xprv-only wallets use manual files because
+labels, display name and the Advanced switch (still written and read, no
+longer applied: the app has one mode). Watch-only and xprv-only wallets use manual files because
 this automatic format requires a mnemonic. Peer and explorer endpoints stay
 device-local. Manual file export does not include the extra app context.
 
-The implementation lives in the app:
+The implementation is in Lean:
 
-- [CloudWalletBackup](../Sources/WinnowApp/CloudWalletBackup.swift) encodes and
+- [CloudWalletBackup](../Lean/Winnow/Wallet/CloudWalletBackup.lean) encodes and
   authenticates the encrypted envelope.
-- [CloudBackupController](../Sources/WinnowApp/CloudBackupController.swift) owns
-  preferences, preparation, retries, account binding and successful-save state.
-- [ICloudBackupStore](../Sources/WinnowApp/ICloudBackupStore.swift) writes private
-  CloudKit records and provides a separate wrapping-key store.
+- [CloudBackup](../LeanApp/WinnowApp/Real/CloudBackup.lean) is the controller: it
+  owns preferences, preparation, retries, account binding and successful-save
+  state. The CloudKit store (private records) and the separate wrapping-key
+  store come in as interfaces: on the phone LeanNative's shell capabilities
+  `cloudkit.*` and `keychain.*`, in tests memory versions.
+- [CloudAppState](../LeanApp/WinnowApp/Real/CloudAppState.lean) is the app
+  context inside the encrypted copy, and
+  [CloudApp](../LeanApp/WinnowApp/Real/CloudApp.lean) the app's side: when a
+  backup is prepared and updated.
 
-WalletCore owns the wallet import format and the contact-card rules; it has no
-CloudKit dependency.
+The wallet library (`Lean/Winnow`) owns the wallet import format and the
+contact-card rules; it has no CloudKit dependency.
 
 ## Encryption and update behavior
 
@@ -58,7 +65,8 @@ the foreground with backoff from 60 seconds up to five minutes. The first
 available account is pinned before upload; later account changes cannot
 overwrite that copy. Failure, cancellation, a wallet switch or an account
 mismatch cannot advance the successful-save date. Backup records have independent
-IDs; the feature is not live multi-device wallet synchronization.
+IDs, one per device; the wallet itself is not synchronized between devices. Its
+multisig accounts and signers are: see [Your other devices](#your-other-devices).
 
 Version 2 includes authenticated app context. Version 1 remains readable and
 lacks that context; an automatic update can upgrade it without rereading the
@@ -68,6 +76,112 @@ or Keychain state.
 
 Disabling automatic updates keeps the existing cloud copy. Deleting the local
 wallet also leaves that copy.
+
+## Your other devices
+
+Multisig accounts and signers (paired Ledgers, saved keys) follow a person
+between their devices through these same records. Nothing else is stored for
+it: no new record type, no new key, no schema change. Each device's wallet box
+already lists its accounts and signers; a device keeps in step by opening the
+wallet boxes of the other backups on its network, with their keys from iCloud
+Keychain, and taking what it lacks. It never opens another backup's phrase box,
+so no key or recovery phrase reaches a device this way. A device whose wallet
+is a different one shows an account it took as watch-only; one restored from the
+same backup holds the same key and signs.
+
+The rules are [DeviceSync](../Lean/Winnow/Wallet/DeviceSync.lean) (what one
+device does with what another's backup says, with no file or network in it);
+the app's side is [Real/DeviceSync](../LeanApp/WinnowApp/Real/DeviceSync.lean).
+
+- **What follows.** An account's descriptor, name, address counters, the
+  Ledger's registration of it, and a payment awaiting signatures; a signer's
+  keys and name. An account arrives with the other device's coins and history,
+  current to the block that device had scanned; the receiving device scans the
+  blocks between that one and its own itself before it watches the account, and
+  shows it as catching up until then.
+- **What does not.** The wallet's own key and coins, peer and explorer
+  settings, and a payment already broadcast but not yet confirmed (the other
+  device sees it when a block takes it).
+- **Stamps.** The backup's app context carries, for each account and signer,
+  when it was added, removed, renamed, registered or its draft changed, and on
+  which device (`sync`). The later change wins; address counters take the
+  highest; two copies of one payment are combined, so signatures made on two
+  devices add up. A device never stamps behind a stamp it has seen, so two
+  clocks that disagree do not reorder changes one device made after seeing the
+  other's.
+- **Removal.** Only the app's own Remove removes elsewhere; a deleted wallet or
+  a file set aside removes nothing. A removal that reaches a device still
+  seeing coins or a payment in the account is not followed there: that device
+  keeps the account and the others take it back.
+- **Older backups.** One written before this carries no stamps. Its accounts
+  and signers are still taken, as added at the beginning of time, so a removal
+  made since beats them, and its names never replace a device's own.
+- **Read apart from a restore.** A restore refuses a whole backup for one thing
+  this wallet does not keep (a MuSig2 account of the shared-account Winnow, a
+  signer list of an older shape), so that it never loses an account in
+  silence. A device keeping in step restores nothing, and reads each account
+  and signer by itself (`CloudWalletBackup.shared`): the ones that read are
+  taken and the rest are counted. The stamps are read from the app context by
+  themselves, whether or not the rest of it still reads. 0.9.17 and 0.9.18
+  used the restore's reading, and said of any such backup only that it "could
+  not be read yet", every minute, on every device.
+- **What Settings says.** Settings → Backup → iCloud backup gives when the
+  other backups were checked and how many were read. For one that was not: when
+  it was saved and why. Its key has not arrived from iCloud Keychain (looked
+  for again each round, before anything is downloaded); it does not open, or is
+  no backup this build reads (not fetched again while the app runs unless it is
+  saved again); or iCloud did not hand it over this time.
+- **When.** There is no push: the app's shell has CloudKit's records and no
+  subscriptions. A device looks when it comes to the foreground and then about
+  once a minute while open, and saves its own backup a few seconds after a
+  change. A backup already read is not downloaded again until it is saved
+  again.
+- **Off.** With automatic backup off for a wallet, without an Apple Account, or
+  under a different account than the one the backup is bound to, nothing is
+  read and nothing follows; the wallet works as before.
+
+## Several profiles on one device
+
+A device can keep more than one profile (wallet) for a network (Settings → Profiles). Each
+has its own backup record, made by this device for that wallet, and its own
+"automatic backup off" switch; the list of wallets with automatic backup off is
+the network's, kept by wallet id. Restoring from iCloud while a wallet is
+already kept adds the restored one beside it, in a directory of its own
+(`wallets/<number>/` under the network's), and never replaces one: the restore
+list names the wallet each backup is of, read from the backup's wallet box with
+its key from iCloud Keychain, and leaves out the backups of wallets the device
+already keeps. A wallet already kept is refused if it is asked for anyway.
+
+The automatic keeping in step still opens no recovery phrase. A second wallet
+reaches a device only by the person's own Restore, with the device check a
+restore has always asked for. Each wallet on a device reads the others' backups
+as it reads another device's, so an account one of them joins is listed under
+the others too; the home shows it only under the profile whose key is in it, and
+a payment is handed to that profile ("Switch to … and sign"). Each profile's
+backup also carries its name and when it was given; the latest name wins.
+
+The backups of profiles that are not open are kept current as their scans move
+(they are scanned in every pass), so another device can start from them: a
+device that was off takes the newest state another device saved of the same
+profile, once its own header chain has the block that backup names
+(`lastKnownBlockHash`), and its scan begins there. A backup whose block this
+chain does not have is not taken; a restore or an arriving account whose block
+it does not have goes back a day, or below the payment in the block it lacks,
+and is scanned again here.
+
+Limits worth knowing. A device's backup waits while a payment from its own
+wallet is unconfirmed, and so does what the others can take from it. Stale backups of installs that are gone stay in iCloud
+(nothing here deletes a record) and are read once each. An account whose
+arriving copy is older than the first header the receiving device holds waits
+for the other device to save a newer one. Two devices that build payments from
+the same account at the same moment each see the other's only after a look; the
+later one wins and the earlier is replaced.
+
+Validation: `device-sync-test` holds the rules case by case and runs two and
+three phones over one in-memory iCloud; `backend-test`'s `devicesFlow` runs two
+on regtest, where the second finds a coin paid after the first one's backup by
+its own scan and a payment gathers its signatures across both. Real iCloud
+between two real devices has not been tried by any test.
 
 ## Apple setup
 
@@ -97,12 +211,14 @@ and [iCloud configuration](https://developer.apple.com/documentation/xcode/confi
 
 ## Validation
 
-[AppTests/CloudWalletBackupTests.swift](../AppTests/CloudWalletBackupTests.swift)
-checks encrypted round trips, restored signing material, counters, updates,
-tampering, wrong keys and bounded decoding in the iOS app test host. It is no
-longer a SwiftPM package suite. Other app tests use in-memory cloud and key
-stores for defaults, retries, account changes, cancellation and persistent
-opt-out. See the [testing guide](../docs/testing.md) for commands and CI evidence.
+`cloud-backup-test` ([LeanApp/CloudBackupTest.lean](../LeanApp/CloudBackupTest.lean),
+a line of CI's `lean` job) is the Swift app's CloudWalletBackupTests,
+CloudAppStateTests, CloudBackupTests and AutomaticCloudBackupTests in Lean. It
+checks encrypted round trips, updates that keep the phrase box, tampering, wrong
+keys, bounded decoding and the upgrade from version 1, and it reads backups the
+Swift app wrote (`Lean/Vectors/cloud-backup.json`). The controller's tests use
+in-memory cloud and key stores. See the [testing guide](../docs/testing.md) for
+commands and CI evidence.
 
 Actual CloudKit transport, provisioning, account behavior and wrapping-key
 synchronization require physical-device validation. End-to-end two-device

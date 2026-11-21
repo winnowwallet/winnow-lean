@@ -52,8 +52,8 @@ def journal (name : String) (fields : List (String × String) := []) : IO Unit :
 def e2eVariables : List String :=
   ["WINNOW_E2E", "WINNOW_E2E_ENTROPY", "WINNOW_E2E_RUN", "WINNOW_E2E_PEER",
    "WINNOW_E2E_CHALLENGE", "WINNOW_E2E_RESET", "WINNOW_E2E_CLIPBOARD", "WINNOW_E2E_NETWORK",
-   "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
-   "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS"]
+   "WINNOW_E2E_DEVICE_AUTH", "WINNOW_E2E_KEYCHAIN_PROTECTION", "WINNOW_E2E_CONTROL_FILE", "WINNOW_E2E_PEER_COUNT",
+   "WINNOW_E2E_SYNC_INTERVAL", "WINNOW_E2E_LEDGER", "WINNOW_E2E_LIVE_GATEWAYS", "WINNOW_E2E_CLOUD"]
 
 /-- `E2EMode.current` in a Debug build: inactive, active, or — without pinned entropy — a stop, because a
 capture run that generated a real seed would publish it. -/
@@ -73,7 +73,42 @@ def resolveE2E : IO (Option E2E.Mode) := do
     IO.Process.exit 1
 
 def settingsPath : IO System.FilePath := return System.FilePath.mk (← rootDir.get) / "settings.json"
-def walletDir (n : Network) : IO String := return ((System.FilePath.mk (← rootDir.get)) / n.name).toString
+/-- The network's directory: its first wallet's own, and the one the wallets added beside it are kept under. -/
+def networkDir (n : Network) : IO String := return ((System.FilePath.mk (← rootDir.get)) / n.name).toString
+
+/-- The place the last `openWallet` or `openSlot` opened: the generation it was asked in, the network, the
+slot. What makes, imports, restores or deletes a wallet acts there and nowhere else. -/
+initialize openPlace : IO.Ref (Option (Nat × Network × String)) ← IO.mkRef none
+
+/-- The directory a command of generation `gen` for `n` acts in: the place open, when it was opened no later
+than the command was given. A command given before another place was opened is of the wallet that was open
+then, and is refused rather than run where it was not meant. -/
+def placeDir (gen : Nat) (n : Network) : IO String := do
+  match ← openPlace.get with
+  | some (opened, network, slot) =>
+    unless network == n && opened ≤ gen do Real.failWith .walletReplaced
+    return Real.slotDir (← networkDir n) slot
+  -- nothing was opened by a command yet (the app always opens first; a test may not): the network's own place
+  | none => networkDir n
+
+/-- Opens `slot` of `n` for generation `gen` and says which place it is and what is kept (`walletPlace`) before
+the answer. An added place left empty (an addition given up) is taken away once another is open. -/
+def openPlaceAt (b : Backend) (fx : Effects Host) (gen : Nat) (n : Network) (slot : String) : IO BootResult := do
+  let network ← networkDir n
+  let dir := Real.slotDir network slot
+  IO.FS.createDirAll dir
+  let before ← openPlace.get
+  let r ← b.openWallet n dir
+  openPlace.set (some (gen, n, slot))
+  if let some (_, was, old) := before then
+    if was != n || old != slot then Real.discardEmptySlot (Real.slotDir (← networkDir was) old)
+  fx.post (.walletPlace gen slot (← b.wallets network))
+  return r
+
+/-- The wallets kept for the place open, told again (one was made, imported or restored there). -/
+def tellWallets (b : Backend) (fx : Effects Host) (gen : Nat) (n : Network) : IO Unit := do
+  if let some (_, network, slot) ← openPlace.get then
+    if network == n then fx.post (.walletPlace gen slot (← b.wallets (← networkDir n)))
 
 def loadSettings : IO Settings := do
   let p ← settingsPath
@@ -98,8 +133,19 @@ def background (fx : Effects Host) (gen : Nat) (ctx : String) (act : IO Host) : 
   discard <| IO.asTask do
     try fx.post (← act) catch e => do trace s!"failed {gen} {ctx}: {e}"; fx.post (.failed gen ctx (toString e))
 
+/-- How long the shell keeps an authentication for the Keychain reads of the action it was asked for, at
+most (seconds; the shell's own ceiling). The action ends it sooner (`Real.withKeychainContext`). -/
+def authenticationKeptFor : Nat := 60
+
+/-- The `auth` request: the reason, and that a yes be kept for the reads that follow, so the Keychain, which
+holds the wallet's secret behind the person's presence, is satisfied by this one prompt. -/
+def authRequest (reason : String) : Json :=
+  Json.mkObj [("reason", Json.str reason), ("keep", toJson authenticationKeptFor)]
+
 /-- `authenticateSensitiveAction`: device-owner authentication before `act` (inside a task). A
-cancelled prompt is a decision, not a failure: `ctx ++ ".cancelled"` clears the busy state quietly. -/
+cancelled prompt is a decision, not a failure: `ctx ++ ".cancelled"` clears the busy state quietly. `act`
+runs under the authentication the shell kept, which ends with it; a search for cards that waits for the
+wallet's secret gets what it needs of it first (`Backend.personPresent`). -/
 def authenticated (fx : Effects Host) (gen : Nat) (ctx reason : String) (act : IO Host) : IO Unit :=
   discard <| IO.asTask do
     -- automated Debug runs skip it unless they ask for it (`WINNOW_E2E_DEVICE_AUTH=1`)
@@ -107,9 +153,11 @@ def authenticated (fx : Effects Host) (gen : Nat) (ctx reason : String) (act : I
       if !m.requireDeviceAuthentication then
         try fx.post (← act) catch e => fx.post (.failed gen ctx (toString e))
         return
-    let auth ← IO.wait (← fx.ask "auth" (Json.mkObj [("reason", Json.str reason)]))
+    let auth ← IO.wait (← fx.ask "auth" (authRequest reason))
     if (auth.getObjValAs? Bool "ok").toOption.getD false then
-      try fx.post (← act) catch e => fx.post (.failed gen ctx (toString e))
+      Real.withKeychainContext fx.ask (auth.getObjValAs? String "context").toOption do
+        try (← backendRef.get).personPresent catch _ => pure ()
+        try fx.post (← act) catch e => fx.post (.failed gen ctx (toString e))
     else
       let err := (auth.getObjValAs? String "error").toOption.getD "Device authentication failed."
       let cancelled := (err.toLower.splitOn "cancel").length > 1
@@ -122,9 +170,12 @@ test mode with and without `WINNOW_E2E_DEVICE_AUTH=1`. -/
 def authenticateNow (fx : Effects Host) (reason : String) : IO Unit := do
   if let some m ← e2eRef.get then
     if !m.requireDeviceAuthentication then return
-  let auth ← IO.wait (← fx.ask "auth" (Json.mkObj [("reason", Json.str reason)]))
+  let auth ← IO.wait (← fx.ask "auth" (authRequest reason))
   unless (auth.getObjValAs? Bool "ok").toOption.getD false do
     throw (IO.userError ((auth.getObjValAs? String "error").toOption.getD "Device authentication failed."))
+  -- what follows (the words for a first iCloud copy; a restore) reads under this authentication. Nothing
+  -- brackets it here, so it ends at its time, when the app leaves the front, or when the next one is asked for
+  Real.keychainContext.set (auth.getObjValAs? String "context").toOption
 
 /-- What the shell's `clipboard.set` is asked for: the recovery phrase stays on this device and expires after
 two minutes, anything else may sync and lasts five (records-test's `backupScreens`). -/
@@ -143,7 +194,9 @@ def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit
     backendRef.set { Backend.sample with scanLedgers := pure (if ledger then [sampleNearbyLedger] else []) }
   else
     let service := (mode.map (·.keychainService)).getD Real.walletService
-    let deps : Real.Deps := { keyStore := Real.shellKeyStore fx.ask service, fetch := Real.shellFetch fx.ask,
+    -- the wallet's secret is behind the person's presence; a test run's is only when it asks
+    let userPresence := (mode.map (·.keychainProtection)).getD true
+    let deps : Real.Deps := { keyStore := Real.shellKeyStore fx.ask service userPresence, fetch := Real.shellFetch fx.ask,
                               discoverGateways := some (Winnow.IO.discoverGateways) }
     let deps := match mode with
       | none => deps
@@ -170,9 +223,15 @@ def chooseBackend (fx : Effects Host) (mode : Option E2E.Mode := none) : IO Unit
           | .error _ => pure Real.noLedger
         | .error _ => pure Real.noLedger
       | none => pure (Real.openLedger fx.ask)
-    -- automatic iCloud backup through the shell's CloudKit and iCloud Keychain; never in test mode
-    let (b, _, _) ← Backend.realWithCloud deps ledger (Real.shellCloudStore fx.ask) (Real.shellCloudKeys fx.ask)
-      (allows := mode.isNone) (authenticate := authenticateNow fx)
+    -- automatic iCloud backup through the shell's CloudKit and iCloud Keychain; never in test mode, which has
+    -- none, or a directory a journey gives two runs to be two devices of one person (`WINNOW_E2E_CLOUD`)
+    let (b, _, _) ← match mode.bind (·.cloudDirectory) with
+      | some dir =>
+        Backend.realWithCloud deps ledger (Real.directoryCloudStore dir) (Real.directoryCloudKeys dir)
+          (allows := true) (authenticate := authenticateNow fx) (scheduleDelayMs := 1_000) (devicesIntervalMs := 2_000)
+      | none =>
+        Backend.realWithCloud deps ledger (Real.shellCloudStore fx.ask) (Real.shellCloudKeys fx.ask)
+          (allows := mode.isNone) (authenticate := authenticateNow fx)
     -- nearby Ledgers: the radio through the shell; under test mode the simulated Ledger advertises when there
     -- is one, and nothing touches Bluetooth either way
     let b := match mode with
@@ -190,13 +249,23 @@ def traceCmd : Cmd → IO Unit
   | .startNetworking g _ => trace s!"startNetworking {g}"
   | .stopNetworking => trace "stopNetworking"
   | .openWallet g _ _ => trace s!"openWallet {g}"
+  | .openSlot g _ slot => trace s!"openSlot {g} {slot}"
   | _ => pure ()
 
 /-- People and labels changed: the records after `r`, with what the screen does next. -/
 def recordsAfter (g : Nat) (d : Done) (r : IO Records) : IO Host := do return .updated g d (← r)
 
+/-- This build's version, from the `Info.plist` beside the executable (on iOS the bundle's root, where
+`CensusCatalog.bundled` finds `peers.json`). None outside an app bundle, as in the tests. -/
+def readBundleVersion : IO (Option String) := do
+  try
+    let some dir := (← IO.appPath).parent | return none
+    return BundleInfo.versionText? (← IO.FS.readBinFile (dir / "Info.plist"))
+  catch _ => return none
+
 /-- `boot()`: the build and paths, test mode, the backend, the storage directory and the settings. -/
 def bootApp (fx : Effects Host) : IO Unit := discard <| IO.asTask do
+  if let some text ← readBundleVersion then fx.post (.versionRead text)
   let build := (← IO.wait (← fx.ask "build" Json.null))
   let debug := (build.getObjValAs? Bool "debug").toOption.getD false
   debugBuild.set debug
@@ -252,9 +321,8 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
           IO.FS.writeFile (← settingsPath) (toJson s).pretty
           b.updateSettings s
   | .openWallet g n isBoot => background fx g "open" do
-      let dir ← walletDir n
-      IO.FS.createDirAll dir
-      let r ← b.openWallet n dir
+      -- the wallet that was open last, or the network's own place while it keeps none
+      let r ← openPlaceAt b fx g n (← Real.resolveSlot (← networkDir n))
       if isBoot then
         -- `boot()`: a resumed backup, then the stage it lands on (a damaged store journals nothing)
         match r with
@@ -262,11 +330,25 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         | .missing => journal "app.booted" [("stage", "onboarding"), ("walletID", "")]
         | .damaged _ => pure ()
       return .booted g r
+  | .openSlot g n slot => background fx g "open" do
+      let network ← networkDir n
+      let slot ← match slot with
+        | some slot =>
+          unless (← Real.listSlots network).contains slot do Real.failWith .noWallet
+          pure slot
+        | none => Real.freeSlot network
+      return .booted g (← openPlaceAt b fx g n slot)
   | .createWallet g n => authenticated fx g "create" "Create and protect your wallet" do
-      return .created g (← b.createWallet n (← walletDir n))
+      let id ← b.createWallet n (← placeDir g n)
+      tellWallets b fx g n
+      return .created g id
   | .importWallet g n json =>
     let act : IO Host := do
-      let (id, report) ← b.importBundle n (← walletDir n) json
+      let dir ← placeDir g n
+      -- onboarding offers this only where no wallet is: one that is there is never written over from here
+      if ← Real.holdsWallet dir then Real.failWith .walletAlreadyHere
+      let (id, report) ← b.importBundle n dir json
+      tellWallets b fx g n
       return .imported g id report
     -- a bundle carrying recovery words is imported only after device authentication, as AppModel
     let seeded := match Winnow.Text.parseJson json with
@@ -275,7 +357,15 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
     if seeded then authenticated fx g "import" "Import this wallet's recovery phrase" act
     else background fx g "import" act
   | .finishOnboarding _ => discard <| IO.asTask b.finishOnboarding
+  | .renameWallet g name => background fx g "rename" do
+      match ← (b.renameWallet name).toBaseIO with
+      | .ok () =>
+        tellWallets b fx g (← loadSettings).network
+        return .renamed g none
+      | .error e => return .renamed g (some (toString e))
   | .deleteWallet g => background fx g "delete" do
+      -- the wallet open when this was asked: another opened since is not the one meant
+      if let some (_, network, _) ← openPlace.get then discard <| placeDir g network
       b.deleteWallet
       return .deleted g
   | _ => pure ()
@@ -291,6 +381,7 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       background fx g "multisigOverview" do return .multisig g (← b.multisigOverview)
       -- `refresh()` ends by scheduling the iCloud backup's update (and a preparation when due)
       discard <| IO.asTask (try b.cloudTick catch _ => pure ())
+  | .records g => background fx g "refresh" do return .records g (← b.records)
   | .syncNow g => background fx g "sync" do
       b.syncNow
       let (s, p) ← b.snapshot
@@ -399,7 +490,17 @@ def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         let required := (← e2eRef.get).any (·.requireDeviceAuthentication)
         journal "backup.phraseRevealReady" [("deviceAuthenticationRequired", toString required)]
         return .revealed g e words
-  | .ownCard g name => background fx g "card" do return .card g name (← b.ownCard name)
+  | .personCard g personID personName ownName =>
+    let act : IO Host := do
+      let (card, records) ← b.personCard personID personName ownName
+      -- the address is an extra beside the card: a failure to derive it does not keep the card back
+      let address ← try some <$> b.personAddress personID personName catch _ => pure none
+      return .personCard g personName card address records
+    -- making a card reads the wallet's private key, so the device's owner is asked, as before every read of
+    -- it; a card already made is read back without a key
+    discard <| IO.asTask do
+      if ← (try b.hasPersonCard personID personName catch _ => pure false) then background fx g "personCard" act
+      else authenticated fx g "personCard" s!"Make {personName}’s address and card" act
   | _ => pure ()
 
 /-- People and sender labels. -/
@@ -467,6 +568,10 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       authenticated fx g s!"collect.{e}" "Sign this multisig payment" do
         b.signDraft id
         return .collected g e id
+  | .handOverDraft g e id slot => background fx g s!"collect.{e}" do
+      -- no key is read: the other wallet signs once it is open, asked for there
+      b.handOverDraft id slot
+      return .handedOver g e id slot
   | .signDraftWithLedger g e id => background fx g s!"collect.{e}" do
       b.signDraftWithLedger id
       return .collected g e id
@@ -508,10 +613,16 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .openURL url => fx.cap "open" (Json.mkObj [("url", Json.str url)]) fun _ => .copiedExpired ""
   | .setAppearance a => discard <| IO.asTask (discard <| fx.ask "appearance" (Json.mkObj [("style", Json.str a.style)]))
   | .journal name fields => journal name fields
+  | .unlockRecords g => authenticated fx g "unlock" "Unlock Winnow's records" do
+      let (s, p) ← b.snapshot
+      return .snapshot g s p
   | .discoverCloud => discard <| IO.asTask (try b.discoverCloudBackups catch _ => pure ())
   | .setAutomaticCloud enabled => discard <| IO.asTask (try b.setAutomaticCloudBackup enabled catch _ => pure ())
   | .restoreCloud g n id => background fx g "cloudRestore" do
-      let (walletID, verified, context) ← b.restoreCloudBackup n (← walletDir n) id
+      let dir ← placeDir g n
+      if ← Real.holdsWallet dir then Real.failWith .walletAlreadyHere
+      let (walletID, verified, context) ← b.restoreCloudBackup n dir id
+      tellWallets b fx g n
       return .cloudRestored g walletID verified context
   | .suspendCloud => discard <| IO.asTask b.suspendCloud
   | .cloudScene active => discard <| IO.asTask (try b.cloudScene active catch _ => pure ())
@@ -576,17 +687,17 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   let b ← backendRef.get
   match c with
   | .boot => bootApp fx
-  | .saveSettings .. | .openWallet .. | .createWallet .. | .importWallet .. | .finishOnboarding ..
-  | .deleteWallet .. =>
+  | .saveSettings .. | .openWallet .. | .openSlot .. | .createWallet .. | .importWallet .. | .finishOnboarding ..
+  | .deleteWallet .. | .renameWallet .. =>
     performWallet b fx c
-  | .refresh .. | .syncNow .. | .retryPeers .. | .reconnect .. | .startNetworking .. | .stopNetworking =>
+  | .refresh .. | .records .. | .syncNow .. | .retryPeers .. | .reconnect .. | .startNetworking .. | .stopNetworking =>
     performSync b fx c
   | .receiveAddress .. | .watchAddress .. | .stopWatchingAddress | .setReceiveLabel .. | .resolveRate ..
   | .previewSend .. | .sendPayment .. | .rawTransaction .. | .watchRelay .. | .loadPaymentDetails ..
   | .pendingFeeRate .. | .previewFeeBump .. | .bumpFee .. =>
     performPayments b fx c
   | .catalogStatus .. | .connectedPeers .. | .resetPeers .. | .exportBundle .. | .removeExport ..
-  | .revealPhrase .. | .ownCard .. =>
+  | .revealPhrase .. | .personCard .. =>
     performSettings b fx c
   | .parsePaste .. | .addPerson .. | .editPerson .. | .updateRecipient .. | .labelSender ..
   | .removeSenderLabel .. | .lookupSender .. =>
@@ -594,11 +705,11 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
   | .multisigOverview .. | .checkMultisigDescriptor .. | .addMultisigAccount .. | .removeMultisigAccount ..
   | .setAsideMultisig ..
   | .newMultisigAddress .. | .createMultisigAccount .. | .registerLedger .. | .pairLedger .. | .addSignerKeys ..
-  | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft ..
+  | .renameSigner .. | .removeSigner .. | .verifyLedgerAddress .. | .signAndDraft .. | .signDraft .. | .handOverDraft ..
   | .signDraftWithLedger .. | .adoptDraft .. | .broadcastDraft .. | .discardDraft .. | .rebroadcastSpend ..
   | .abandonSpend .. | .scanLedgers .. | .askBluetooth =>
     performMultisig b fx c
-  | .copy .. | .timer .. | .openURL .. | .setAppearance .. | .journal .. | .discoverCloud | .setAutomaticCloud .. | .restoreCloud ..
+  | .copy .. | .timer .. | .openURL .. | .setAppearance .. | .journal .. | .unlockRecords .. | .discoverCloud | .setAutomaticCloud .. | .restoreCloud ..
   | .suspendCloud | .cloudScene .. | .scheduleBackgroundTasks | .runBackgroundTask .. | .expireBackgroundTask ..
   | .completeBackgroundTask ..
   | .backgroundRefreshStatus | .paste .. =>

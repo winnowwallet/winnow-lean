@@ -30,12 +30,28 @@ def bumpSignButton : String := "bumpSignButton"
 def censusCatalogText : String := "censusCatalogText"
 def checkPeerGateways : String := "checkPeerGateways"
 def closeReceiveButton : String := "closeReceiveButton"
+/-- The card sheet's "A card for one person": the person's name, the button that makes or shows their card,
+and the card's text. -/
+def personCardNameField : String := "personCardNameField"
+def makePersonCardButton : String := "makePersonCardButton"
+def personCardText : String := "personCardText"
+def personAddressText : String := "personAddressText"
+/-- Under "From one person": the wallet's own name, as a card says who it is from; and Done on the sheet that
+shows one saved person's address and card. -/
+def ownNameField : String := "ownNameField"
+def closeShareCardButton : String := "closeShareCardButton"
 def closeSendButton : String := "closeSendButton"
 def cloudBackupRow : String := "cloudBackupRow"
+/-- Settings → About: this build's version. -/
+def appVersion : String := "appVersion"
 def cloudBackupRowStatus : String := "cloudBackupRowStatus"
 def cloudBackupStatus : String := "cloudBackupStatus"
 def collectSignaturesButton : String := "collectSignaturesButton"
 def createWalletButton : String := "createWalletButton"
+def addWalletButton : String := "addWalletButton"
+def unlockRecordsButton : String := "unlockRecordsButton"
+def cancelAddWalletButton : String := "cancelAddWalletButton"
+def walletRow (walletID : String) : String := s!"walletRow.{walletID}"
 def derivedOutputAddress : String := "derivedOutputAddress"
 def destinationField : String := "destinationField"
 def exportBundleButton : String := "exportBundleButton"
@@ -110,6 +126,17 @@ def multisigSaveButton : String := "multisigSaveButton"
 def multisigSendButton : String := "multisigSendButton"
 def multisigShareButton : String := "multisigShareButton"
 def multisigSignButton : String := "multisigSignButton"
+def multisigSwitchToSign (walletID : String) : String := s!"multisigSwitchToSign.{walletID}"
+/-- An account's line where another wallet on this device holds its key: "Signs in …". -/
+def multisigSignsIn (id : String) : String := s!"multisigSignsIn.{id}"
+/-- The home's row for the accounts this wallet only watches. -/
+def homeWatchingRow : String := "homeWatchingRow"
+/-- The home's name of the open wallet, which opens the list of wallets. -/
+def walletNameButton : String := "walletNameButton"
+/-- The list of wallets' "Rename this wallet", and the rename sheet's field and save. -/
+def renameWalletButton : String := "renameWalletButton"
+def renameWalletField : String := "renameWalletField"
+def saveWalletNameButton : String := "saveWalletNameButton"
 def multisigSignatureCount : String := "multisigSignatureCount"
 def networkTag : String := "networkTag"
 def newPaymentButton : String := "newPaymentButton"
@@ -128,6 +155,7 @@ def receiveAddressLabelField : String := "receiveAddressLabelField"
 def receiveButton : String := "receiveButton"
 def resolvedRateText : String := "resolvedRateText"
 def restoreCloudBackupButton : String := "restoreCloudBackupButton"
+def checkCloudAgainButton : String := "checkCloudAgainButton"
 def resumeImportedWalletButton : String := "resumeImportedWalletButton"
 def retryPeersButton : String := "retryPeersButton"
 /-- The home's short network warning ("Offline", "Sync problem"); tapped, it explains itself. -/
@@ -180,12 +208,19 @@ def paymentAccount (txid : String) : String := s!"paymentAccount-{txid}"
 def transactionDraft (txid : String) : String := s!"transactionDraft-{txid}"
 /-- An account on the home's Accounts and Settings → Security → Multisig accounts. -/
 def multisigAccount (id : String) : String := s!"multisigAccount-{id}"
+/-- An account's "Watch-only on this device" line, on its row and its page; an account on its way from another
+of the person's devices; a Ledger's "paired on another device" line; the backup page's line on the other devices. -/
+def multisigWatchOnly (id : String) : String := s!"multisigWatchOnly-{id}"
+def multisigWatchOnlyNote : String := "multisigWatchOnlyNote"
+def multisigArriving (id : String) : String := s!"multisigArriving-{id}"
+def signerElsewhere (id : String) : String := s!"signerElsewhere-{id}"
+def cloudDevicesNote : String := "cloudDevicesNote"
 /-- A member row of an account, and of the builder, by index. -/
 def multisigMember (i : Nat) : String := s!"multisigMember-{i}"
 def multisigBuildMember (i : Nat) : String := s!"multisigBuildMember-{i}"
 def multisigBuildMemberAddKey (i : Nat) : String := s!"multisigBuildMemberAddKey-{i}"
 def multisigBuildMemberRemove (i : Nat) : String := s!"multisigBuildMemberRemove-{i}"
-/-- A signer's row under Settings → Signers. -/
+/-- A signer's row under Settings → Security → Hardware wallets and keys. -/
 def signerRow (id : String) : String := s!"signerRow-{id}"
 /-- An account offered by the signer picker. -/
 def signerPickAccount (id : String) : String := s!"signerPickAccount-{id}"
@@ -227,5 +262,18 @@ def onboardingTestNetwork : String := "onboardingTestNetwork"
 def paymentBlock : String := "paymentBlock"
 def paymentFee : String := "paymentFee"
 def paymentReplacedBy : String := "paymentReplacedBy"
+
+/-! ## Saved recipients, Add person, and iCloud restore rows -/
+
+def savedRecipientsButton : String := "savedRecipientsButton"
+def addPersonToolbarButton : String := "addPersonToolbarButton"
+def personNameField : String := "personNameField"
+def personPastedField : String := "personPastedField"
+def personPasteButton : String := "personPasteButton"
+def personSaveButton : String := "personSaveButton"
+def personPayToCaption : String := "personPayToCaption"
+def savedRecipientButton (id : String) : String := s!"savedRecipient-{id}"
+def savedRecipientCardButton (id : String) : String := s!"savedRecipientCard-{id}"
+def cloudRestoreBackupButton (id : String) : String := s!"cloudRestoreBackup-{id}"
 
 end WinnowApp.Ids

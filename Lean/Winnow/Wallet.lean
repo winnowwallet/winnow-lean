@@ -13,9 +13,11 @@ import Winnow.Wallet.MultisigSpendRecords
 import Winnow.Wallet.SpendReview
 import Winnow.Wallet.MultisigAccount
 import Winnow.Wallet.SegwitSpendReview
+import Winnow.Wallet.SendAuthorization
 import Winnow.Wallet.SegwitMultisigAccount
 import Winnow.Wallet.AnyMultisigAccount
 import Winnow.Wallet.SignerRecord
+import Winnow.Wallet.DeviceSync
 import Winnow.Wallet.HistoryLedger
 import Winnow.Wallet.Characters
 import Winnow.Wallet.ImportBundle

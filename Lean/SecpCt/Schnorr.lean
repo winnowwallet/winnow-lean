@@ -19,11 +19,10 @@ namespace SecpCt
 
 open Secp (Sha256.tagged)
 
-def xor32 (a b : ByteArray) : ByteArray := Id.run do
-  let mut out := ByteArray.emptyWithCapacity 32
-  for i in [0:32] do
-    out := out.push (a[i]! ^^^ b[i]!)
-  return out
+def xor32 (a b : ByteArray) : ByteArray :=
+  if h : a.size = 32 ∧ b.size = 32 then
+    ⟨Array.ofFn fun (i : Fin 32) => a[i.val]'(by omega) ^^^ b[i.val]'(by omega)⟩
+  else ByteArray.empty
 
 /-! ## The work, with nothing decided by a secret
 
@@ -63,7 +62,7 @@ are not a key. -/
 def publicKey (secret : ByteArray) : Option (ByteArray × UInt64) :=
   if secret.size != 32 then none else
   let (x, y, ok) := publicRaw secret
-  if ok == 1 then some (x, y[31]!.toUInt64 &&& 1) else none
+  if h : ok == 1 ∧ 31 < y.size then some (x, (y[31]'h.2).toUInt64 &&& 1) else none
 
 /-- The BIP 340 signature of `message` under `secret`, 64 bytes, with `aux` as the 32 bytes of fresh
 randomness. `none` if `secret` is not a key or `aux` is not 32 bytes. -/

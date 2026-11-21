@@ -370,6 +370,13 @@ private def personPaste : Target := {
     utf8 "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
     utf8 "{\"winnow\":\"person-card\",\"version\":1,\"network\":\"signet\",\"name\":\"Alice\"}",
     utf8 "{\"winnow\":\"person-card\",\"version\":1,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr\"}",
+    -- a card for one person: the first code of Vectors/card-keys-vectors.json, in a card and on its own
+    utf8 "{\"winnow\":\"person-card\",\"version\":3,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"winnowcard1pqg5hxnvegnjvp4tehu9r36fwn2jgq5pmxdk984sx495jh3rhvjdajqlx4nf6p0pn4lnfzk906ahje3n0rrrd3nvnrzznl9k3sel4sppkdslqdc3k\"}",
+    utf8 "winnowcard1pqg5hxnvegnjvp4tehu9r36fwn2jgq5pmxdk984sx495jh3rhvjdajqlx4nf6p0pn4lnfzk906ahje3n0rrrd3nvnrzznl9k3sel4sppkdslqdc3k",
+    -- a card of 0.9.12: the first keys and tweak of the same vectors
+    utf8 "{\"winnow\":\"person-card\",\"version\":2,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"winnowcard1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vk6arlx\",\"tweak\":\"02c5352dbcd635ad5b93834861d28554d651de364268c522bd81b3977b55951c\"}",
+    -- the same keys written as a silent payment address, which no card carries: refused
+    utf8 "{\"winnow\":\"person-card\",\"version\":2,\"network\":\"mainnet\",\"name\":\"Alice\",\"payTo\":\"sp1qqwjnwdugzyeqe6xhj7unvjy7aw984l2v08kgcn8aypqthf00tckd6qu3hlqqjy9y523c4vyll6hz9svyjmdlppfwsxh7hdzj99kh859z9vc56rgj\",\"tweak\":\"02c5352dbcd635ad5b93834861d28554d651de364268c522bd81b3977b55951c\"}",
     utf8 ("".pushn '[' 16000)]
   tokens := jsonTokens
   check := fun _ data => do
@@ -377,6 +384,11 @@ private def personPaste : Target := {
     let mut took := false
     for network in [Tx.BitcoinNetwork.mainnet, .signet] do
       if (PersonPaste.parse text network).toBool then took := true
+    if let .ok code := CardCode.decode text.trimAscii.toString then
+      took := true
+      require (code.sharedSecret.size == 33 && code.spendKey.size == 33) "a card's code with malformed points"
+      let .ok again := code.encoded | throw (IO.userError "a card's code does not encode")
+      require ((CardCode.decode again).toOption == some code) "a card's code does not read back"
     if let .ok card := PersonCard.decode text then
       took := true
       let .ok again := PersonCard.decode card.serialized
@@ -785,10 +797,48 @@ private def segwitSpend : Target := {
     | .error _ => throw (IO.userError "a reviewed spend that a member cannot sign")
     return true }
 
+/-! ## What another device's backup says of its accounts (`Winnow.DeviceSync`)
+
+The stamps come out of a backup's wallet box, which only this person's devices can write; a device with a bug, or
+a later version, still must not make this one take back what was removed or remove what was never removed. -/
+
+private def deviceSync : Target := {
+  name := "device-sync"
+  seeds := #[.empty,
+    utf8 "{\"version\":1,\"deviceID\":7,\"accounts\":[{\"id\":\"a\",\"added\":[5,7],\"name\":[6,7]},{\"id\":\"b\",\"added\":[5,7],\"removed\":[9,7]}],\"signers\":[{\"key\":\"02ab\",\"added\":[3,7],\"removed\":[4,7]}]}"]
+  tokens := jsonTokens
+  check := fun _ data => do
+    let .ok said := SwiftJSON.decodeText (lossy data) DeviceSync.SyncMeta.ofJV | return false
+    let .ok again := SwiftJSON.decodeText (SwiftJSON.write said.toJV) DeviceSync.SyncMeta.ofJV
+      | throw (IO.userError "a backup's stamps do not parse in their canonical form")
+    require (again == said) "the stamps' canonical round trip changed them"
+    require (said.accounts.size ≤ DeviceSync.maximumEntries && said.signers.size ≤ DeviceSync.maximumEntries)
+      "more entries than a backup remembers were read"
+    -- the other device has every account it names; this one has none, or all of them with nothing in them
+    let records : Array MultisigAccountRecord := said.accounts.map fun m =>
+      { id := m.id, name := "n", descriptor := "d", createdAtHeight := 1 }
+    let there : DeviceSync.Replica := { id := "R", height := 9, accounts := records, sync := some said }
+    let fresh := DeviceSync.Stamp.after said.latest 0 1
+    let removedThere (id : String) : Bool := (said.account? id).any (·.isRemoved)
+    for d in DeviceSync.decideAccounts fresh (fun _ => none) #[] #[] #[there] do
+      match d.existence with
+      | .adopt record _ _ _ =>
+        require (record.id == d.id && !removedThere d.id) "an account removed on the other device was taken from it"
+      | .unchanged => require (removedThere d.id || !records.any (·.id == d.id)) "an account the other device has was not taken"
+      | _ => throw (IO.userError "a device with no accounts was told to remove one")
+    let here : Array DeviceSync.LocalAccount := records.map fun r =>
+      { record := r, seen := { stamps := { id := r.id }, name := r.name }, removable := true }
+    for d in DeviceSync.decideAccounts fresh (fun _ => none) here #[] #[there] do
+      match d.existence with
+      | .remove => require (removedThere d.id) "an account was removed that the other device had not removed"
+      | .unchanged => require (!removedThere d.id) "a removal made on the other device was not followed"
+      | _ => throw (IO.userError "an account already here was taken or kept against a removal it could follow")
+    return true }
+
 private def targets : Array Target :=
   #[psbt, descriptor, transaction, block, messages, framing, filter, address, importBundle, census, dnsJSON,
     fundingSources, controlBlock, personPaste, silentPaymentAddress, addressProgram, silentPaymentKeys,
     persistedPeers, rangeScan, broadcastStore, walletState, ledgerFrames, ledgerCommands,
-    ecdsaDer, ecdsaVerify, ecdsaSign, schnorrSign, constantTimeArithmetic, segwitDescriptor, segwitSpend]
+    ecdsaDer, ecdsaVerify, ecdsaSign, schnorrSign, constantTimeArithmetic, segwitDescriptor, segwitSpend, deviceSync]
 
 def main (args : List String) : IO UInt32 := TestKit.Fuzz.main targets "Vectors/fuzz" args

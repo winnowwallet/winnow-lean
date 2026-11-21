@@ -44,16 +44,12 @@ abbrev Point := SecpCt.Affine
 /-- A secret key: a number from 1 to N − 1. -/
 structure Secret where
   private mk ::
-  private scalar : SecpCt.Sc
+  scalar : SecpCt.Sc
 
-private def found {α} (o : Option α) : PK α :=
+def found {α} (o : Option α) : PK α :=
   match o with
   | some a => pure a
   | none => throw .underlyingCryptoError
-
-/-- A scalar that must not be zero, as a key. -/
-private def key (s : SecpCt.Sc) : PK Secret :=
-  if s.isZero == 1 then throw .underlyingCryptoError else pure ⟨s⟩
 
 /-- `secp256k1_ec_seckey_verify`: 32 bytes, nonzero, below the order. -/
 def isValidSecret (b : ByteArray) : Bool := b.size == 32 && SecpCt.Sc.isKey b == 1
@@ -96,16 +92,21 @@ def tweak32 (t : ByteArray) : PK SecpCt.Sc :=
 
 /-- `Signing.PrivateKey.add`: `secp256k1_ec_seckey_tweak_add`; a tweak ≥ N or a zero sum fails. -/
 def privateAdd (d : Secret) (tw : ByteArray) : PK Secret := do
-  key (SecpCt.Sc.add d.scalar (← tweak32 tw))
+  let s := SecpCt.Sc.add d.scalar (← tweak32 tw)
+  if s.isZero == 1 then throw .underlyingCryptoError else pure ⟨s⟩
 
 /-- `PrivateKey.negation`: `N − d`. -/
 def privateNegate (d : Secret) : Secret := ⟨SecpCt.Sc.neg d.scalar⟩
 
 /-- The sum of two keys modulo N; a zero sum fails. -/
-def Secret.add (a b : Secret) : PK Secret := key (SecpCt.Sc.add a.scalar b.scalar)
+def Secret.add (a b : Secret) : PK Secret :=
+  let s := SecpCt.Sc.add a.scalar b.scalar
+  if s.isZero == 1 then throw .underlyingCryptoError else pure ⟨s⟩
 
 /-- The product of two keys modulo N. -/
-def Secret.multiply (a b : Secret) : PK Secret := key (SecpCt.Sc.mul a.scalar b.scalar)
+def Secret.multiply (a b : Secret) : PK Secret :=
+  let s := SecpCt.Sc.mul a.scalar b.scalar
+  if s.isZero == 1 then throw .underlyingCryptoError else pure ⟨s⟩
 
 /-- `Signing.PublicKey.add`: `t·G + P` (`secp256k1_ec_pubkey_tweak_add`); infinity fails. -/
 def publicAdd (p : Point) (tw : ByteArray) : PK Point := do
@@ -138,7 +139,8 @@ def xonlyAdd (x : ByteArray) (tw : ByteArray) : PK (ByteArray × Bool) := do
 odd y, then add). -/
 def keypairXonlyAdd (d : Secret) (tw : ByteArray) : PK Secret := do
   let t ← tweak32 tw
-  key (SecpCt.Sc.add (SecpCt.evenKey d.scalar) t)
+  let s := SecpCt.Sc.add (SecpCt.evenKey d.scalar) t
+  if s.isZero == 1 then throw .underlyingCryptoError else pure ⟨s⟩
 
 /-- `Schnorr.PrivateKey.signature(message:auxiliaryRand:)`: BIP 340 with 32 bytes of auxiliary randomness,
 over a message of any length. The signature is verified under the signer's own key before it is returned.

@@ -241,7 +241,7 @@ def multisigFlow (n : Node) (a : Backend) (msA : Real.MultisigApp) (mineAddr : S
   check "the headline sums the wallet and the account" (st.accountsBalance ≥ change + 1_000_000)
   return { id, balance := change + 1_000_000, txid, firstAddress := address }
 
-/-- Pair a simulated Ledger (Settings → Signers), build the 2-of-2 of this phone and it and a 2-of-3 with
+/-- Pair a simulated Ledger (Settings → Security → Hardware wallets and keys), build the 2-of-2 of this phone and it and a 2-of-3 with
 another key, the Ledger and a recovery path (the paired Ledger registers each),
 verify an address of each on the Ledger, fund both, and spend from each with the phone's and the
 Ledger's signatures. The two accounts' ids. -/
@@ -477,6 +477,237 @@ def personNamed (b : Backend) (name : String) : IO Person := do
   | some p => return p
   | none => throw (IO.userError s!"no person {name}")
 
+/-- A version 1 card, as other wallets hand one out (upstream's, and Winnow's own before issue #94): the
+account key as the pay-to key. The app no longer makes one; it still reads one and pays it. Built here from
+the descriptor in the phone's backup. -/
+def accountKeyCard (b : Backend) (name : String) : IO String := do
+  let bundle ← match Winnow.ImportBundle.decode (← b.exportBundle false) with
+    | .ok bundle => pure bundle
+    | .error _ => throw (IO.userError "accountKeyCard: the backup does not decode")
+  let some text := bundle.descriptor | throw (IO.userError "accountKeyCard: the backup has no descriptor")
+  let descriptor ← match Winnow.Descriptor.parse text with
+    | .ok d => pure d
+    | .error e => throw (IO.userError s!"accountKeyCard: {e.name}")
+  match ← (WinnowApp.RecordsReal.ownPersonCardOf descriptor .regtest name).run with
+  | .ok card => return card.serialized
+  | .error _ => throw (IO.userError "accountKeyCard: no card")
+
+/-- A card per person between two phones (issue #94). Bob makes a card for Alice alone; Alice saves it and
+pays it twice. Bob's wallet finds both payments through the node's filters, names them as Alice's without
+being told, and spends them. The addresses she paid are none Bob's account key derives, and
+Bob's backup carries the card. -/
+def cardFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let phone (name : String) : IO Backend := do
+    let (b, _) ← Backend.realWithEnv (deps (← IO.mkRef ({} : Keys.InMemorySecrets)) name)
+    let home := s!"{dir}/{name}/BTCSwift/regtest"
+    IO.FS.createDirAll home
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    discard <| b.createWallet .regtest home
+    return b
+  let bob ← phone "CardBob"
+  let alice ← phone "CardAlice"
+  discard <| n.wallet #["sendtoaddress", ← alice.receiveAddress false, "1.0"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (funded, _) ← syncUntil alice 60_000 fun s p => s.balance == 100_000_000 && p == .synced
+  check "card: Alice is funded" (funded.balance == 100_000_000) s!"{funded.balance}"
+  -- Bob's card for Alice
+  check "card: before it is made, Alice has none" !(← bob.hasPersonCard none "Alice")
+  let (card, records) ← bob.personCard none "Alice" "Bob"
+  let has (text part : String) := (text.splitOn part).length > 1
+  check "card: a code under Bob's name, with no tweak and no account key in it"
+    (has card "\"payTo\":\"twinnowcard1p" && !has card "tweak" && has card "\"name\":\"Bob\"" && has card "\"version\":3" &&
+     !has card "tpub") card
+  check "card: Alice is Bob's contact, with a card" ((records.people.any fun p => p.name == "Alice" && p.hasCard) &&
+    (← bob.hasPersonCard none "Alice"))
+  check "card: asked again, the same card" ((← bob.personCard none "Alice" "Bob").1 == card)
+  checkJournal "card.issued" ["card", "personID"] (fun f => field f "card" == "0")
+  -- Alice saves it and pays it twice
+  let read ← alice.parsePaste card
+  check "card: Alice's phone reads Bob and a fresh address each payment" (read.name == some "Bob" && read.payTo == some true)
+  -- a card is paid through its person, who counts its payments: Send does not take its code as a destination
+  let cardCode := ((PersonCard.decode card).toOption.bind (·.payTo)).getD ""
+  let lone ← attempt (alice.previewSend { destination := cardCode, amount := "300000", network := .regtest })
+  check "card: Send refuses the card's code typed as a destination, and says to save it as a recipient"
+    (cardCode.startsWith "twinnowcard1p" && (match lone with
+      | .error e => e == Wallet.cardCodeInSendText | .ok _ => false))
+  -- the two keys out of a 0.9.12 card (these are Vectors/card-keys-vectors.json's), without their tweak
+  let loneKeys ← attempt (alice.previewSend { destination := "twinnowcard1qq2rgvjvxx2cw6lypf0a7fg2djgcns5jqz5l7a37mvlkjr35vcpfn7qctm6tjq6hp23kshua0sagxxazl8u8g3ss6z4tmk0p6s35ecgnc0utn7hv2", amount := "300000", network := .regtest })
+  check "card: Send refuses the two keys of a 0.9.12 card on their own, and says to paste the card"
+    (match loneKeys with | .error e => e == Wallet.cardAddressAloneText | .ok _ => false)
+  discard <| alice.addPerson "Bob" (some card) none none none
+  let bobID := (← personNamed alice "Bob").id
+  let payBob : SendInputs := { personID := some bobID, amount := "300000", network := .regtest }
+  let first ← alice.previewSend payBob
+  check "card: the review names Bob, and has no warning" ((first.recipient.map (·.name)) == some "Bob" && reviewWarnings first == [])
+    s!"{reviewWarnings first}"
+  let paidOnce := (← alice.sendPayment payBob first).txid
+  let second ← alice.previewSend payBob
+  check "card: the next payment goes to another address" (second.destination != first.destination &&
+    (← personNamed alice "Bob").nextPaymentIndex == 1)
+  let paidTwice := (← alice.sendPayment payBob second).txid
+  -- neither address is one Bob's account key derives (what a version 1 card carried)
+  let sharedScripts : Array ByteArray := match PersonCard.decode (← accountKeyCard bob "Bob") with
+    | .ok shared => ((shared.payTo.bind fun t => (PersonPayTo.ofDescriptor t .regtest).toOption).bind
+        fun payTo => (payTo.scripts 200 .regtest).toOption).getD #[]
+    | .error _ => #[]
+  let paidScripts := [first.destination, second.destination].filterMap fun a => (AddressDecoder.scriptPubKey a .regtest).toOption
+  check "card: Bob's account key derives neither address Alice paid"
+    (sharedScripts.size == 200 && paidScripts.length == 2 && paidScripts.all fun script => !sharedScripts.contains script)
+  let mined ← waitUntil 20_000 (do let mp ← n.mempool; return mp.contains paidOnce && mp.contains paidTwice)
+  check "card: both payments reach the node" mined
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  check "card: the chain shows the two addresses"
+    ((← paidAddresses n paidOnce).contains first.destination && (← paidAddresses n paidTwice).contains second.destination)
+  -- Bob's wallet finds them, and knows whose they are
+  let (atBob, _) ← syncUntil bob 60_000 fun s _ => s.balance == 600_000
+  check "card: Bob's wallet finds both payments, as two coins" (atBob.balance == 600_000 && atBob.utxoCount == 2)
+    s!"{atBob.balance} sat, {atBob.utxoCount} coin(s)"
+  let aliceAtBob := (← personNamed bob "Alice").id
+  let senders := (← bob.records).senderByTxid
+  check "card: both are named as Alice's, without Bob labelling either"
+    (senders.lookup paidOnce == some aliceAtBob && senders.lookup paidTwice == some aliceAtBob) s!"{senders}"
+  -- and spends them
+  let toNode : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "550000", network := .regtest }
+  let review ← bob.previewSend toNode
+  let spent := (← bob.sendPayment toNode review).txid
+  check "card: the node takes Bob's spend of the card's coins" (← waitUntil 20_000 (do return (← n.mempool).contains spent))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (after, _) ← syncUntil bob 60_000 fun s p => (history? s spent).any (·.height > 0) && p == .synced
+  check "card: confirmed, Bob holds what the payment and its fee left"
+    (after.balance == 600_000 - 550_000 - review.fee && (history? after spent).any (·.height > 0)) s!"{after.balance}"
+  -- a payer that reads no card, an exchange say: Bob gives them Alice's ordinary address, and the node, which
+  -- knows nothing of cards, pays it
+  let plain ← bob.personAddress none "Alice"
+  let third ← alice.previewSend payBob
+  check "address: Alice's ordinary address is the one her own phone would pay next"
+    (plain.startsWith "bcrt1p" && plain == third.destination && plain != first.destination && plain != second.destination) plain
+  let fromOutside := (← n.wallet #["sendtoaddress", plain, "0.002"]).trimAscii.toString
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (credited, _) ← syncUntil bob 60_000 fun s _ => s.balance == after.balance + 200_000
+  check "address: paid by the node, Bob's wallet finds it" (credited.balance == after.balance + 200_000) s!"{credited.balance}"
+  check "address: and names it as Alice's, without Bob labelling it"
+    ((← bob.records).senderByTxid.lookup fromOutside == some aliceAtBob) fromOutside
+  check "address: once paid, Alice's ordinary address is another" ((← bob.personAddress none "Alice") != plain)
+  check "address: a person Bob made no card for has none" ((← attempt (bob.personAddress none "Nobody")).toOption.isNone)
+  -- the backup carries the card
+  check "card: Bob's backup is version 4, with the card and its spend key" (match ImportBundle.decode (← bob.exportBundle true) with
+    | .ok bundle => bundle.version == 4 && bundle.cards.size == 1 && bundle.cards.all (·.spendKey.isSome)
+    | .error _ => false)
+  check "card: Alice, who issued none, still writes version 2" (match ImportBundle.decode (← alice.exportBundle false) with
+    | .ok bundle => bundle.version == 2 && bundle.cards.isEmpty
+    | .error _ => false)
+  bob.stopNetworking
+  alice.stopNetworking
+
+/-- A phone restored from a backup made before its cards (issue #94). Bob backs up with his phrase and then
+makes twenty-three cards. Alice is handed two of them, the sixth and the twenty-third, and pays both; the
+node pays an ordinary address of Bob's in the same block. A new phone has only the old backup. Its scan
+forward watches the twenty cards the wallet could have made, and finds the payment to the sixth; the search
+then looks further, and finds the payment to the twenty-third in a block the scan had already passed, which
+is applied a second time and counted once. Twenty cards past the last one paid stay recorded, so the next
+card it makes has an index nobody was handed. -/
+def cardRestoreFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let phone (name : String) : IO (Backend × String) := do
+    let (b, _) ← Backend.realWithEnv (deps (← IO.mkRef ({} : Keys.InMemorySecrets)) name)
+    let home := s!"{dir}/{name}/BTCSwift/regtest"
+    IO.FS.createDirAll home
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    return (b, home)
+  let (bob, bobHome) ← phone "RestoreBob"
+  discard <| bob.createWallet .regtest bobHome
+  let (alice, aliceHome) ← phone "RestoreAlice"
+  discard <| alice.createWallet .regtest aliceHome
+  discard <| n.wallet #["sendtoaddress", ← alice.receiveAddress false, "1.0"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (funded, _) ← syncUntil alice 60_000 fun s p => s.balance == 100_000_000 && p == .synced
+  check "restore: Alice is funded" (funded.balance == 100_000_000) s!"{funded.balance}"
+  discard <| syncUntil bob 60_000 fun _ p => p == .synced
+  -- the backup, before any card
+  let backup ← bob.exportBundle true
+  check "restore: the backup has the phrase and no card" (match ImportBundle.decode backup with
+    | .ok bundle => bundle.version == 2 && bundle.cards.isEmpty && bundle.mnemonic.isSome
+    | .error _ => false)
+  -- twenty-three cards made after it
+  let mut cards : Array String := #[]
+  for k in [0:23] do
+    cards := cards.push (← bob.personCard none s!"Person {k}" "Bob").1
+  check "restore: twenty-three cards, no two alike" (cards.size == 23 && (Std.HashSet.ofArray cards).size == 23)
+  -- Alice pays the sixth and the twenty-third; the node pays an ordinary address in the same block
+  let mut paid : Array String := #[]
+  for (k, amount) in [(5, "200000"), (22, "300000")] do
+    let name := s!"Bob, card {k}"
+    discard <| alice.addPerson name (some (cards[k]?.getD "")) none none none
+    let pay : SendInputs := { personID := some (← personNamed alice name).id, amount, network := .regtest }
+    let review ← alice.previewSend pay
+    paid := paid.push (← alice.sendPayment pay review).txid
+  let ordinary ← n.wallet #["sendtoaddress", ← bob.receiveAddress false, "0.004"]
+  check "restore: the three payments reach the node"
+    (← waitUntil 20_000 (do let mp ← n.mempool; return paid.all mp.contains && mp.contains ordinary))
+  n.mine 1 mineAddr
+  n.mine 3 mineAddr
+  n.waitFilterIndex
+  let (atBob, _) ← syncUntil bob 60_000 fun s p => s.balance == 900_000 && p == .synced
+  check "restore: the phone that made the cards holds all three" (atBob.balance == 900_000 && atBob.utxoCount == 3)
+    s!"{atBob.balance} sat, {atBob.utxoCount} coin(s)"
+  bob.stopNetworking
+  -- the new phone, from the old backup
+  let (restored, restoredHome) ← phone "RestoreBobNew"
+  discard <| restored.importBundle .regtest restoredHome backup
+  checkJournal "cards.restoreBegun" ["cards", "fromHeight"] (fun f => field f "cards" == "20")
+    "the twenty cards it could have made are recorded before the scan"
+  let (found, _) ← syncUntil restored 90_000 fun s p => s.balance == 900_000 && p == .synced
+  check "restore: it finds the payment to a card past the twenty, in a block its scan had passed"
+    (found.balance == 900_000 && found.utxoCount == 3) s!"{found.balance} sat, {found.utxoCount} coin(s)"
+  check "restore: each payment is in its history once"
+    ((paid.push ordinary).all fun txid => (found.history.filter (·.txid == txid)).length == 1)
+    s!"{found.history.map (·.txid)}"
+  -- card 5 paid: six more; card 22 paid: seventeen more; then a round that records none
+  discard <| syncUntil restored 30_000 fun _ _ => false
+  checkJournal "cards.restored" ["cards", "fromHeight", "rounds"]
+    (fun f => field f "rounds" == "2" && field f "cards" == "43") "two rounds, forty-three cards"
+  let ended := (← journaled "cards.restored").size
+  discard <| syncUntil restored 2_000 fun _ _ => false
+  check "restore: the search ends once" ((← journaled "cards.restored").size == ended) s!"{ended}"
+  -- the next card is one nobody was handed
+  let (next, _) ← restored.personCard none "Zed" "Bob"
+  check "restore: its next card is none of the twenty-three" (!cards.contains next)
+  checkJournal "card.issued" ["card", "personID"] (fun f => field f "card" == "43") "the next card is index 43"
+  check "restore: its backup now carries the cards, the restored ones in both forms" (match ImportBundle.decode (← restored.exportBundle true) with
+    | .ok bundle => bundle.version == 4 && bundle.cards.size == 44 && bundle.cards.all (·.spendKey.isSome) &&
+        (bundle.cards.filter (·.plainToo)).size == 43
+    | .error _ => false)
+  -- and it spends what it found
+  let toNode : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "850000", network := .regtest }
+  let review ← restored.previewSend toNode
+  let spent := (← restored.sendPayment toNode review).txid
+  check "restore: the node takes its spend of all three coins"
+    (← waitUntil 20_000 (do return (← n.mempool).contains spent))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let (after, _) ← syncUntil restored 60_000 fun s p => (history? s spent).any (·.height > 0) && p == .synced
+  check "restore: confirmed, it holds what the payment and its fee left"
+    (after.balance == 900_000 - 850_000 - review.fee) s!"{after.balance}"
+  -- a backup without the phrase restores a wallet that cannot derive a card, and is left as it is
+  let (watching, watchingHome) ← phone "RestoreWatching"
+  let begun := (← journaled "cards.restoreBegun").size
+  discard <| watching.importBundle .regtest watchingHome (← alice.exportBundle false)
+  check "restore: a backup without the phrase begins no search"
+    ((← journaled "cards.restoreBegun").size == begun && (← journaled "cards.restoreSkipped").isEmpty)
+  watching.stopNetworking
+  restored.stopNetworking
+  alice.stopNetworking
+
 /-- Alice saves Bob from the card his phone made, pays him twice and he finds both payments, at two addresses;
 someone inferred from a payment's funding is paid with the warning that it is unverified, from the wallet's own
 record and from a fake explorer's answer; a saved address warns of reuse and is reused; a large fee warns; a
@@ -491,7 +722,7 @@ def peopleFlow (dir : String) (n : Node) : IO Unit := do
   discard <| bob.openWallet .regtest dirBob
   bob.startNetworking settings
   discard <| bob.createWallet .regtest dirBob
-  let card ← bob.ownCard "Bob"
+  let card ← accountKeyCard bob "Bob"
   -- the explorer Alice's phone reaches: answers one transaction's funding, and nothing else goes to it
   let explorerAnswer ← IO.mkRef ""
   let explorerAsked ← IO.mkRef (#[] : Array String)
@@ -1214,6 +1445,11 @@ def paymentRaceFlow (dir : String) (n : Node) : IO Unit := do
     b.deleteWallet
     b.startNetworking settings
     discard <| b.createWallet .regtest home
+    -- the new wallet's own sync writes its file too (the scan height, as its first pass ends). It is stopped
+    -- and its pass in flight let finish, so that what the file gains from here on is the late answer's or
+    -- nobody's; without this the check below failed once in CI on a write that was the new wallet's own
+    b.stopNetworking
+    discard <| waitUntil 10_000 (do return !(← b.snapshot).1.syncing)
   check "payment race, Erased: the new wallet shows nothing of the old payment" (history? s sent).isNone
   b.stopNetworking
 
@@ -1345,9 +1581,512 @@ def segwitFlow (dir : String) (n : Node) : IO Unit := do
   check "segwit account: Core and the phone agree on what the account holds" (theirBalance == change) s!"{theirBalance} vs {change}"
   phone.stopNetworking
 
+/-! ## Two devices of one person (`Real/DeviceSync.lean`)
+
+Device A builds a 2-of-2 and is paid; its iCloud backup is saved; it is closed, and the account is paid again.
+Device B, a different wallet under the same Apple Account (one in-memory iCloud and Keychain between them),
+syncs to the tip and only then comes to the foreground: its own loop reads A's backup, takes the account with
+the first coin, finds the second by scanning the blocks since A's backup itself, and shows the account
+watch-only. Then a payment: A starts and signs it, B receives it through A's backup, the other signer's copy is
+pasted on B, and A, through B's backup, has both signatures, broadcasts, and the node confirms. -/
+
+def devicesFlow (dir : String) (n : Node) : IO Unit := do
+  say "devices: two wallets, one iCloud"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let boot (tag : String) : IO (Backend × Real.CloudApp) := do
+    let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+    let (b, _, app) ← Backend.realWithCloud (deps secrets tag) (store := cloud.store) (keys := cloudKeys)
+      (scheduleDelayMs := 50) (devicesIntervalMs := 300)
+    let d := s!"{dir}/{tag}/BTCSwift/regtest"
+    IO.FS.createDirAll d
+    discard <| b.openWallet .regtest d
+    b.startNetworking settings
+    discard <| b.createWallet .regtest d
+    return (b, app)
+  let publish (app : Real.CloudApp) : IO Unit :=
+    app.controller.update do
+      let bundle ← app.exportedBundle
+      return { bundle, appState := some (← app.cloudAppState bundle).encoded }
+  -- 1. Device A: the account, its first coin, its backup.
+  let (a, appA) ← boot "DevA"
+  let (otherMaster, otherKey) ← testSigner 0xB2
+  let own := (← a.multisigOverview).keyExpression.getD ""
+  let (id, descriptor, _) ← a.createMultisigAccount "Family" 2 [([own], none), ([otherKey], none)] none
+  let account ← match MultisigAccount.parse descriptor .regtest with
+    | .ok acc => pure acc
+    | .error e => throw (IO.userError s!"account: {e.name}")
+  let some first := (account.address 0).toOption | throw (IO.userError "address 0")
+  let some second := (account.address 1).toOption | throw (IO.userError "address 1")
+  let fund1 ← n.wallet #["sendtoaddress", first, "0.5"]
+  discard <| waitUntil 20_000 (do return (← n.mempool).contains fund1)
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let saved ← n.height
+  let credited ← waitUntil 90_000 (do
+    a.syncNow
+    return ((← multisigAccount? a id).map (·.balance)) == some 50_000_000 && (← a.snapshot).1.nextScanHeight > saved)
+  check "devices: the first device sees the account's coin" credited
+  publish appA
+  check "devices: its backup is saved" ((← a.cloudStatus).statusTitle == "Backed up") (← a.cloudStatus).statusTitle
+  check "devices: the saved copy shows neither the descriptor nor a key in the clear" (
+    !(← cloud.records.get).any fun b =>
+      let text := SwiftJSON.write b.toJV
+      (text.splitOn "sortedmulti").length > 1 || (text.splitOn "tpub").length > 1)
+  -- 2. A is closed; the account is paid again, three blocks on.
+  a.stopNetworking
+  let fund2 ← n.wallet #["sendtoaddress", second, "0.25"]
+  discard <| waitUntil 20_000 (do return (← n.mempool).contains fund2)
+  n.mine 3 mineAddr
+  n.waitFilterIndex
+  let tip ← n.height
+  -- 3. Device B: another wallet. It syncs to the tip before it ever looks at iCloud.
+  let (b, appB) ← boot "DevB"
+  let (sb, _) ← syncUntil b 90_000 fun s _ => s.nextScanHeight > tip
+  check "devices: the second device has synced past the first one's backup" (sb.nextScanHeight > saved + 1) s!"{sb.nextScanHeight} vs {saved}"
+  check "devices: before it looks it has no account" ((← b.multisigOverview).accounts.isEmpty && (← b.multisigOverview).arriving.isEmpty)
+  -- the foreground: its loop looks at the other device's backup by itself
+  b.cloudScene true
+  let arrived ← waitUntil 90_000 (do
+    b.syncNow
+    return ((← multisigAccount? b id).map (·.balance)) == some 75_000_000)
+  let overview ← b.multisigOverview
+  check "devices: the account arrives on the second device with both coins" arrived
+    s!"accounts {overview.accounts.map fun x => (x.name, x.balance)}, arriving {overview.arriving.map fun x => (x.name, x.note)}"
+  let some onB ← multisigAccount? b id | throw (IO.userError "the account did not arrive")
+  check "devices: the coin paid after the backup was found by this device's own scan"
+    (onB.coins.length == 2 && onB.coins.any fun c => c.amount == 25_000_000 && (c.line.splitOn s!"receive 1 · block {saved + 1}").length > 1)
+    s!"{onB.coins.map (·.line)}"
+  check "devices: the same account and the same next address" (onB.descriptor == descriptor && onB.name == "Family" &&
+    onB.nextReceiveIndex == 2 && onB.receiveAddress == (account.address 2).toOption)
+  check "devices: watch-only on the device whose wallet is another" onB.watchOnly
+  let arriving := (← journaled "multisig.accountArriving").filter (·.1 == "DevB")
+  check "devices: it arrived current to the first device's block" (arriving.any fun (_, f) => field f "id" == id && field f "height" == toString saved)
+    s!"{arriving.map (·.2)}"
+  check "devices: and joined the watched accounts at this device's own" ((← journaled "multisig.accountArrived").any fun (tag, f) =>
+    tag == "DevB" && field f "id" == id)
+  -- 4. A opens again and catches up by its own scan, as ever.
+  a.startNetworking settings
+  a.cloudScene true
+  let caught ← waitUntil 90_000 (do
+    a.syncNow
+    return ((← multisigAccount? a id).map (·.balance)) == some 75_000_000)
+  check "devices: the first device sees both coins too, and signs for the account" (caught &&
+    ((← multisigAccount? a id).map (·.watchOnly)) == some false)
+  -- 5. A payment: started and signed on A.
+  let dest ← n.wallet #["getnewaddress"]
+  a.createDraft id dest 20_000_000 2.0 false
+  a.signDraft id
+  let reached ← waitUntil 90_000 (do
+    a.cloudTick
+    return (((← multisigAccount? b id).bind (·.draft)).map (·.signatures)) == some "1 of 2")
+  check "devices: a payment awaiting signatures follows to the second device, with the first's signature" reached
+    s!"{((← multisigAccount? b id).bind (·.draft)).map fun d => (d.signatures, d.reviewError)}"
+  let some draftB := (← multisigAccount? b id).bind (·.draft) | throw (IO.userError "no draft on the second device")
+  check "devices: reviewed there from that device's own coins" ((draftB.screen.map fun s =>
+    s.outputs.any (fun o => !o.owned && o.address == dest && o.amount == 20_000_000) && s.inputTotal ≥ 20_000_000) == some true)
+  check "devices: which cannot sign it" ((draftB.screen.map (·.progress.phoneHolds)) == some false)
+  check "devices: nor does its own signature get asked for" (← (do
+    match ← attempt (b.signDraft id) with
+    | .ok () => return (((← multisigAccount? b id).bind (·.draft)).map (·.signatures)) == some "1 of 2"
+    | .error _ => return true))
+  -- the other signer's copy is pasted on B
+  let recordB ← Real.record appB.multisig id
+  let unsigned ← match PSBT.ofBase64 draftB.psbt with
+    | .ok p => pure p
+    | .error _ => throw (IO.userError "psbt")
+  let theirs ← match account.sign unsigned otherMaster recordB.utxos (Real.ownedCoordinates recordB) (← n.height).toUInt32
+      (← IO.getRandomBytes 32) with
+    | .ok p => pure p
+    | .error e => throw (IO.userError s!"other signer: {e.name}")
+  let some theirText := theirs.base64V0.toOption | throw (IO.userError "v0")
+  b.adoptDraft id theirText
+  check "devices: combined on the second device, enough signatures verify there"
+    ((((← multisigAccount? b id).bind (·.draft)).bind (·.screen)).map (·.progress.complete) == some true)
+  -- …and reach A through B's backup
+  let complete ← waitUntil 90_000 (do
+    b.cloudTick
+    return ((((← multisigAccount? a id).bind (·.draft)).bind (·.screen)).map (·.progress.complete)) == some true)
+  check "devices: signatures made on two devices add up on the first" complete
+    s!"{((← multisigAccount? a id).bind (·.draft)).map (·.signatures)}"
+  let txid ← a.broadcastDraft id
+  check "devices: the first device broadcasts, the node's mempool holds the spend" (← waitUntil 20_000 (do return (← n.mempool).contains txid))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let settled ← waitUntil 90_000 (do
+    a.syncNow
+    b.syncNow
+    a.cloudTick
+    b.cloudTick
+    let onA ← multisigAccount? a id
+    let onB ← multisigAccount? b id
+    return (onA.map (·.balance)) == (onB.map (·.balance)) && (onA.map (·.draft.isNone)) == some true &&
+      (onB.map (·.draft.isNone)) == some true && (onA.map (decide <| ·.balance < 55_000_000)) == some true)
+  check "devices: confirmed, both show the same balance and no payment waiting" settled
+    s!"A {(← multisigAccount? a id).map fun x => (x.balance, x.draft.isSome)}, B {(← multisigAccount? b id).map fun x => (x.balance, x.draft.isSome)}"
+  -- left open, they stay in step: nothing is taken twice, and nothing goes back and forth
+  let before ← cloud.saves.get
+  for _ in [0:10] do
+    a.cloudTick
+    b.cloudTick
+    IO.sleep 150
+  let after ← cloud.saves.get
+  for _ in [0:10] do
+    a.cloudTick
+    b.cloudTick
+    IO.sleep 150
+  check "devices: in step, the backups stop changing" ((← cloud.saves.get) == after) s!"{before} → {after} → {← cloud.saves.get}"
+  a.cloudScene false
+  b.cloudScene false
+  a.stopNetworking
+  b.stopNetworking
+
+/-- An account made while a sync pass is running. A pass scans with the scripts it began with, so a block it
+scans after the account exists is scanned without the account's scripts, and the frontier moves past it. The
+pass then scans its blocks once more for the scripts it did not have, and the payment is found
+(`Deps.syncScriptsChosen` is the moment between choosing the scripts and scanning). -/
+def accountDuringPassFlow (dir : String) (n : Node) : IO Unit := do
+  say "an account made while a pass runs"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let during ← IO.mkRef (pure () : IO Unit)
+  let racing : Real.Deps := { deps secrets "During" with syncScriptsChosen := do (← during.get) }
+  let (b, _, _) ← Backend.realWithMultisig racing
+  let home := s!"{dir}/During/BTCSwift/regtest"
+  IO.FS.createDirAll home
+  discard <| b.openWallet .regtest home
+  b.startNetworking settings
+  discard <| b.createWallet .regtest home
+  let atTip ← waitUntil 90_000 (do
+    b.syncNow
+    let s := (← b.snapshot).1
+    return !s.syncing && s.nextScanHeight > (← n.height))
+  check "during a pass: the wallet is at the tip, nothing running" atTip
+  let (_, otherKey) ← testSigner 0xB2
+  let made ← IO.mkRef (none : Option String)
+  let before := (← journaled "multisig.rescanned").size
+  -- the next pass: once it has chosen its scripts, an account is made and the node confirms a payment to it
+  during.set do
+    during.set (pure ())
+    let own := (← b.multisigOverview).keyExpression.getD ""
+    let (id, descriptor, _) ← b.createMultisigAccount "Made mid-pass" 2 [([own], none), ([otherKey], none)] none
+    let account ← match MultisigAccount.parse descriptor .regtest with
+      | .ok acc => pure acc
+      | .error e => throw (IO.userError s!"account: {e.name}")
+    let some address := (account.address 0).toOption | throw (IO.userError "address 0")
+    let txid ← n.wallet #["sendtoaddress", address, "0.3"]
+    discard <| waitUntil 20_000 (do return (← n.mempool).contains txid)
+    n.mine 1 mineAddr
+    n.waitFilterIndex
+    made.set (some id)
+  let found ← waitUntil 90_000 (do
+    b.syncNow
+    match ← made.get with
+    | some id => return ((← multisigAccount? b id).map (·.balance)) == some 30_000_000
+    | none => return false)
+  check "during a pass: a payment confirmed in the pass that did not know the account is found" found
+    s!"{(← made.get)} {(← b.multisigOverview).accounts.map (·.balance)} next {(← b.snapshot).1.nextScanHeight} node {← n.height}"
+  check "during a pass: by the pass scanning its blocks again for the account's scripts"
+    ((← journaled "multisig.rescanned").size > before)
+  b.stopNetworking
+
+/-- A 2-of-2 of two wallets kept on one device, on regtest: the account built with both wallets' keys is paid,
+a payment from it is signed by the open wallet and then by the other, each by itself, and the node confirms
+it. No other device, and no other signer, takes part. -/
+def heldKeysFlow (dir : String) (n : Node) : IO Unit := do
+  say "held keys: two wallets on one device sign one account's payment, one after the other"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (b, env, _) ← Backend.realWithMultisig (deps secrets "Held")
+  let first := s!"{dir}/Held/BTCSwift/regtest"
+  IO.FS.createDirAll first
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  let idA ← b.createWallet .regtest first
+  let second := Real.slotDir first (← Real.freeSlot first)
+  IO.FS.createDirAll second
+  discard <| b.openWallet .regtest second
+  b.startNetworking settings
+  let idB ← b.createWallet .regtest second
+  let keyB ← Real.multisigKeyExpression env
+  check "held keys: two wallets are kept" ((← b.wallets first).map (·.id) == [idA, idB])
+  -- the first wallet, open: an account of the two
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  let keyA ← Real.multisigKeyExpression env
+  let (id, descriptor, _) ← b.createMultisigAccount "Both wallets" 2 [([keyA], none), ([keyB], none)] none
+  let account ← match MultisigAccount.parse descriptor .regtest with
+    | .ok acc => pure acc
+    | .error e => throw (IO.userError s!"account: {e.name}")
+  let some address := (account.address 0).toOption | throw (IO.userError "address 0")
+  let funded ← n.wallet #["sendtoaddress", address, "0.4"]
+  discard <| waitUntil 20_000 (do return (← n.mempool).contains funded)
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let credited ← waitUntil 90_000 (do
+    b.syncNow
+    return ((← multisigAccount? b id).map (·.balance)) == some 40_000_000)
+  check "held keys: the account is paid, and is not watch-only" (credited && ((← multisigAccount? b id).map (·.watchOnly)) == some false)
+    s!"{(← multisigAccount? b id).map fun i => (i.balance, i.watchOnly)}"
+  let inputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "1500000", network := .regtest, accountID := some id }
+  discard <| b.signAndDraft inputs (← b.previewSend inputs)
+  let screen : IO (Option MultisigScreen) := do return ((← multisigAccount? b id).bind (·.draft)).bind (·.screen)
+  let held (s : MultisigScreen) := s.heldKeys.map fun k => (k.walletID, k.unsigned)
+  check "held keys: the open wallet has signed; the other one kept here has not"
+    (((← screen).map fun s => (s.signatures, held s)) == some ([(false, 1, 2)], [(idB, true)]))
+    (reprStr ((← screen).map (·.heldKeys)))
+  -- the payment goes to the other wallet, which is opened and adds its own signature
+  b.handOverDraft id (Real.slotOf second)
+  check "held keys: the other wallet opens" ((← b.openWallet .regtest second) matches .opened _)
+  b.startNetworking settings
+  check "held keys: there, the account has the payment with the first signature"
+    (((← screen).map (·.signatures)) == some [(false, 1, 2)])
+  b.signDraft id
+  check "held keys: the other wallet's own signature completes it" (((← screen).map (·.progress.complete)) == some true)
+  let txid ← b.broadcastDraft id
+  check "held keys: the node's mempool holds the payment" (← waitUntil 20_000 (do return (← n.mempool).contains txid))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  let settled ← waitUntil 90_000 (do
+    b.syncNow
+    let now ← multisigAccount? b id
+    return (now.map (·.draft.isNone)) == some true && (now.map (decide <| ·.balance < 39_000_000)) == some true)
+  check "held keys: confirmed, with no payment waiting" settled
+  b.stopNetworking
+
+/-- Two wallets on one device, on regtest. The network's chain, scan and peers are in its own directory; every
+wallet kept there is scanned for in every pass, so what was paid to the first while the second was open is in
+it as it opens; a reorg and a background check reach the wallet that is not open; one whose accounts cannot be
+read waits and joins again. Deleting the second leaves the first its coins and its key. -/
+def walletsFlow (dir : String) (n : Node) : IO Unit := do
+  say "wallets: two on one device"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let (b, _, _) ← Backend.realWithMultisig (deps secrets "Two")
+  let first := s!"{dir}/Two/BTCSwift/regtest"
+  IO.FS.createDirAll first
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  let idA ← b.createWallet .regtest first
+  let addressA ← b.receiveAddress false
+  let pay (address : String) (sats : Nat) : IO Unit := do
+    let txid ← n.wallet #["sendtoaddress", address, btc sats]
+    discard <| waitUntil 20_000 (do return (← n.mempool).contains txid)
+    n.mine 1 mineAddr
+    n.waitFilterIndex
+  let balance (expected : Int) : IO Bool :=
+    waitUntil 90_000 (do
+      b.syncNow
+      return (← b.snapshot).1.balance == expected)
+  pay addressA 3_000_000
+  check "wallets: the first wallet is paid" (← balance 3_000_000)
+  -- a second wallet, in a place of its own
+  let second := Real.slotDir first (← Real.freeSlot first)
+  IO.FS.createDirAll second
+  check "wallets: the place beside it is empty" ((← b.openWallet .regtest second) matches .missing)
+  b.startNetworking settings
+  let idB ← b.createWallet .regtest second
+  check "wallets: a second wallet, and both are kept" (idB != idA && (← b.wallets first).map (·.id) == [idA, idB])
+    s!"{(← b.wallets first).map (·.id)}"
+  check "wallets: the network's scan, chain and peers are in its own directory, none in the second's"
+    ((← (System.FilePath.mk first / "filters.json").pathExists) && (← (System.FilePath.mk first / "headers.bin").pathExists) &&
+     !(← (System.FilePath.mk second / "filters.json").pathExists) && !(← (System.FilePath.mk second / "headers.bin").pathExists))
+  -- while the second is open: it is paid, and so is the first
+  let addressB ← b.receiveAddress false
+  pay addressB 1_000_000
+  pay addressA 2_000_000
+  check "wallets: the second wallet sees its own payment and not the first's" (← balance 1_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  -- the first again: the pass that scanned for the second scanned for it too, so it has its payment as it opens
+  let passes := (← journaled "wallet.switched").size
+  check "wallets: the first wallet opens" ((← b.openWallet .regtest first) matches .opened _)
+  check "wallets: switching kept the network's peers and scan" ((← journaled "wallet.switched").size == passes + 1)
+  check "wallets: it already has the payment made while it was not open" ((← b.snapshot).1.balance == 5_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  b.startNetworking settings
+  -- a reorg while the first is open takes the second's coin with its block
+  pay addressB 500_000
+  let fallen ← n.height
+  discard <| waitUntil 60_000 (do b.syncNow; return (← b.snapshot).1.nextScanHeight == fallen + 1)
+  discard <| b.openWallet .regtest second
+  check "wallets: the second has the payment made while the first was open" ((← b.snapshot).1.balance == 1_500_000)
+    s!"{(← b.snapshot).1.balance}"
+  discard <| b.openWallet .regtest first
+  discard <| n.cli #["invalidateblock", ← n.cli #["getblockhash", toString fallen]]
+  let elsewhere ← n.wallet #["getnewaddress"]
+  for _ in [0:2] do discard <| n.cli #["generateblock", elsewhere, "[]"]
+  n.waitFilterIndex
+  let tip ← n.height
+  discard <| waitUntil 60_000 (do b.syncNow; return (← b.snapshot).1.nextScanHeight == tip + 1)
+  discard <| b.openWallet .regtest second
+  check "wallets: a reorg while the first was open took the second's coin with its block" ((← b.snapshot).1.balance == 1_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  -- the next block confirms it again; a background check, the first open, finds it for the second
+  discard <| b.openWallet .regtest first
+  b.stopNetworking
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  check "wallets: a background check reaches the tip" (← b.runBackgroundSync settings)
+  discard <| b.openWallet .regtest second
+  check "wallets: …scanning for the wallet that was not open" ((← b.snapshot).1.balance == 1_500_000)
+    s!"{(← b.snapshot).1.balance}"
+  -- the second's accounts cannot be read: it waits, and the first goes on
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  IO.FS.writeFile (System.FilePath.mk second / "multisig.json") "not an account file"
+  discard <| b.openWallet .regtest second
+  discard <| b.openWallet .regtest first
+  b.startNetworking settings
+  pay addressB 200_000
+  pay addressA 100_000
+  check "wallets: with the second's accounts unreadable, the first still syncs" (← balance 5_100_000)
+    s!"{(← b.snapshot).1.balance}"
+  checkJournal "sync.walletSetAside" ["walletID", "error"] (fun f => field f "walletID" == idB) "the second is set aside"
+  -- its file put right, it joins again and finds what was paid meanwhile
+  IO.FS.removeFile (System.FilePath.mk second / "multisig.json")
+  discard <| b.openWallet .regtest second
+  b.startNetworking settings
+  check "wallets: put right, the second catches up with the payment made while it was set aside" (← balance 1_700_000)
+    s!"{(← b.snapshot).1.balance}"
+  checkJournal "sync.walletJoined" ["walletID", "from", "through"] (fun f => field f "walletID" == idB) "it joined the scan again"
+  check "wallets: the first wallet opens" ((← b.openWallet .regtest first) matches .opened _)
+  b.startNetworking settings
+  check "wallets: and has its own" (← balance 5_100_000) s!"{(← b.snapshot).1.balance}"
+  -- the second is deleted; the first still spends
+  discard <| b.openWallet .regtest second
+  b.deleteWallet
+  check "wallets: the second is gone, its place with it"
+    (!(← (System.FilePath.mk second).pathExists) && (← b.wallets first).map (·.id) == [idA])
+  check "wallets: the first opens again" ((← b.openWallet .regtest first) matches .opened _)
+  b.startNetworking settings
+  check "wallets: with its coins" (← balance 5_100_000)
+  let inputs : SendInputs := { destination := ← n.wallet #["getnewaddress"], amount := "1000000", network := .regtest }
+  let txid := (← b.sendPayment inputs (← b.previewSend inputs)).txid
+  check "wallets: and it still sends" (← waitUntil 20_000 (do return (← n.mempool).contains txid))
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  b.stopNetworking
+
+/-- A head start from another device: two devices hold one wallet; while the second is off, the first scans
+on past a payment and saves its backup; the second, back, takes that state once its chain has the block the
+backup names, and its scan begins there instead of going over those blocks again. -/
+def headStartFlow (dir : String) (n : Node) : IO Unit := do
+  say "head start: one wallet, two devices"
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let settings := regtestSettings n
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let boot (tag : String) : IO (Backend × Real.CloudApp × String) := do
+    let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+    let (b, _, app) ← Backend.realWithCloud (deps secrets tag) (store := cloud.store) (keys := cloudKeys)
+      (scheduleDelayMs := 50) (devicesIntervalMs := 300)
+    let d := s!"{dir}/{tag}/BTCSwift/regtest"
+    IO.FS.createDirAll d
+    discard <| b.openWallet .regtest d
+    b.startNetworking settings
+    return (b, app, d)
+  let publish (app : Real.CloudApp) : IO Unit :=
+    app.controller.update do
+      let bundle ← app.exportedBundle
+      return { bundle, appState := some (← app.cloudAppState bundle).encoded }
+  let synced (b : Backend) : IO Bool := do
+    let tip ← n.height
+    waitUntil 90_000 (do b.syncNow; return (← b.snapshot).1.nextScanHeight == tip + 1)
+  let (a, appA, _) ← boot "HsA"
+  discard <| a.createWallet .regtest s!"{dir}/HsA/BTCSwift/regtest"
+  let address ← a.receiveAddress false
+  discard <| n.wallet #["sendtoaddress", address, "0.3"]
+  n.mine 1 mineAddr
+  n.waitFilterIndex
+  check "head start: the first device is paid" ((← synced a) && (← a.snapshot).1.balance == 30_000_000)
+  publish appA
+  -- the second device: the same wallet, from the first's backup
+  let (b, appB, dB) ← boot "HsB"
+  discard <| b.importBundle .regtest dB (← a.exportBundle true)
+  check "head start: the second device holds it too" ((← synced b) && (← b.snapshot).1.balance == 30_000_000)
+  publish appB
+  b.stopNetworking
+  -- while the second is off, the first is paid again and scans on
+  discard <| n.wallet #["sendtoaddress", address, "0.2"]
+  n.mine 1 mineAddr
+  n.mine 30 mineAddr
+  n.waitFilterIndex
+  let tip ← n.height
+  check "head start: the first device scans on" ((← synced a) && (← a.snapshot).1.balance == 50_000_000)
+  publish appA
+  -- the second looks at the other backups, then comes back
+  appB.follow.round
+  b.startNetworking settings
+  check "head start: the second device is at the tip with the payment" ((← synced b) && (← b.snapshot).1.balance == 50_000_000)
+    s!"{(← b.snapshot).1.balance}"
+  let took := (← journaled "sync.headStart").filter (·.1 == "HsB")
+  check "head start: it took the first device's state" (took.any fun (_, f) => field f "to" == toString (tip + 1))
+    s!"{took.map (·.2)}"
+  let jumped := (← journaled "sync.frontierJumped").filter (·.1 == "HsB")
+  check "head start: its scan began there" (jumped.any fun (_, f) => field f "to" == toString (tip + 1)) s!"{jumped.map (·.2)}"
+  a.stopNetworking
+  b.stopNetworking
+
 /-- What `openWallet` found, for a check's detail. -/
 def bootText : BootResult → String
   | .opened id => s!"opened {id}" | .missing => "missing" | .damaged m => s!"damaged: {m}"
+
+/-- A backup names the block its state stands on, and a restore checks it against its own chain: here the
+block that confirmed a payment fell after the backup was made, so the restored wallet goes back below it,
+holds the payment as unconfirmed rather than in a block this chain does not have, and finds it again where the
+chain now confirms it. -/
+def anchorFlow (dir : String) (n : Node) : IO Unit := do
+  let settings := regtestSettings n
+  let mineAddr ← n.wallet #["getnewaddress"]
+  let phone (name : String) : IO (Backend × String) := do
+    let (b, _) ← Backend.realWithEnv (deps (← IO.mkRef ({} : Keys.InMemorySecrets)) name)
+    let home := s!"{dir}/{name}/BTCSwift/regtest"
+    IO.FS.createDirAll home
+    discard <| b.openWallet .regtest home
+    b.startNetworking settings
+    return (b, home)
+  let (a, aHome) ← phone "AnchorA"
+  discard <| a.createWallet .regtest aHome
+  let txid ← n.wallet #["sendtoaddress", ← a.receiveAddress false, "0.5"]
+  n.mine 1 mineAddr
+  let fallen ← n.height
+  n.waitFilterIndex
+  let (paid, _) ← syncUntil a 60_000 fun s p => (history? s txid).any (·.height == fallen) && p == .synced
+  check "anchor: the payment confirmed" ((history? paid txid).any (·.height == fallen))
+  let backup ← a.exportBundle true
+  let named ← n.cli #["getblockhash", toString fallen]
+  check "anchor: the backup names the block its state stands on" (match ImportBundle.decode backup with
+    | .ok b => b.lastKnownHeight.toNat == fallen && b.lastKnownBlockHash == some named
+    | .error _ => false) s!"{(ImportBundle.decode backup).toOption.map (·.lastKnownBlockHash)} vs {named}"
+  a.stopNetworking
+  -- the block falls; a heavier branch leaves the payment out
+  discard <| n.cli #["invalidateblock", named]
+  let elsewhere ← n.wallet #["getnewaddress"]
+  for _ in [0:2] do discard <| n.cli #["generateblock", elsewhere, "[]"]
+  n.waitFilterIndex
+  let tip ← n.height
+  let (b, bHome) ← phone "AnchorB"
+  discard <| b.importBundle .regtest bHome backup
+  let (restored, _) ← syncUntil b 60_000 fun s p => s.nextScanHeight == tip + 1 && p == .synced
+  checkJournal "sync.anchorMismatch" ["fork", "walletID"] (fun f => (field f "fork").toNat?.any (· < fallen))
+    "the restore goes back below the fallen block"
+  check "anchor: the restored wallet holds no coin from a block this chain does not have"
+    (restored.balance == 0 && (history? restored txid).all (·.height == 0))
+    s!"{restored.balance} sat, {(history? restored txid).map (·.height)}"
+  -- the next block confirms the payment: the restored wallet finds it there
+  n.mine 1 mineAddr
+  let again ← n.height
+  n.waitFilterIndex
+  let (found, _) ← syncUntil b 60_000 fun s p => (history? s txid).any (·.height == again) && p == .synced
+  check "anchor: it finds the payment where this chain confirms it"
+    ((history? found txid).any (·.height == again) && found.balance == 50_000_000)
+    s!"{(history? found txid).map (·.height)} vs {again}, {found.balance} sat"
+  b.stopNetworking
 
 /-- Writes through a wallet that is erased or replaced while they are on their way (`Deps.walletWriting` is the
 moment a sync pass is about to write). A phone with a coin is copied to three phones; on each a block arrives and
@@ -1866,6 +2605,15 @@ def main (args : List String) : IO UInt32 := do
   if let ["--fixture", dir] := args then IO.Process.exit (← fixture dir).toUInt8
   -- for the UI journey: the test receiver's code, and the output it finds in a transaction on a fixture
   if let ["--sp-code"] := args then IO.println (← testReceiverCode); return 0
+  -- the address a person card's code derives for payment `index` (the journeys' payer, who holds only the card)
+  if let ["--card-address", card, index] := args then
+    let address := do
+      let payTo ← (← (PersonPaste.parse card .regtest).toOption).payTo
+      unless payTo.isCard do none
+      (payTo.addressAt index.toNat!.toUInt32 .regtest).toOption
+    match address with
+    | some a => IO.println a; return 0
+    | none => IO.eprintln "not a person card with a test-network code"; return 1
   if let ["--sp-expected", datadir, rpc, txid] := args then
     let n ← Node.attach datadir rpc.toNat!.toUInt16
     IO.println (hex (← testReceiverScript n (← n.json #["getrawtransaction", txid, "true"])))
@@ -1874,5 +2622,5 @@ def main (args : List String) : IO UInt32 := do
     let tmp ← IO.FS.createTempDir
     let dir := tmp.toString
     say s!"backend-test: work dir {dir}"
-    try withNode dir fun n => do flow dir n; segwitFlow dir n; peopleFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
+    try withNode dir fun n => do flow dir n; segwitFlow dir n; devicesFlow dir n; walletsFlow dir n; anchorFlow dir n; headStartFlow dir n; heldKeysFlow dir n; accountDuringPassFlow dir n; peopleFlow dir n; cardFlow dir n; cardRestoreFlow dir n; oldPaymentFlow dir n; paymentRaceFlow dir n; oldWalletWritesFlow dir n; resetPeersFlow dir n; resetPeersFailureFlow dir n; retryPeersFlow dir n; refusalsFlow dir n
     finally try IO.FS.removeDirAll tmp catch _ => pure ()

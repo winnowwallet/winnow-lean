@@ -1,4 +1,5 @@
 import WinnowApp.Real.Wallet
+import Winnow.Wallet.SendAuthorization
 
 /-! # Fees, sending, fee bumps, payment details, and the mempool windows
 
@@ -49,25 +50,18 @@ def requireRelayFloors (env : Env) (rate : Float) : IO Unit := do
   requireRelayFee rate (← feeFloor s.pool .seatMajority)
   requireRelayFee rate (← feeFloor s.pool .mostLenient)
 
+/-- What the review holds a transaction to: the part of a `SendReview` that `ReviewedSend` is. -/
+def SendReview.reviewed (r : SendReview) : ReviewedSend :=
+  { payments := r.payments, silentAmounts := r.silentPayments.map (·.amount), fee := r.fee,
+    changeAmount := r.changeAmount, selected := r.selected, change := r.change }
+
 /-- `authorizes(transaction:fee:changeAmount:resolvedSilentPayments:)`: the same check on a transaction
 that is not yet signed, such as a multisig account's PSBT, whose inputs, outputs and fee are fixed
-before any signature. -/
+before any signature. The check itself is the core library's (`ReviewedSend.authorizesTransaction`), which
+is proved to accept exactly the reviewed transaction (`Winnow.Proofs.Spend.authorizesTransaction_iff`). -/
 def SendReview.authorizesTransaction (r : SendReview) (tx : Transaction) (fee : Int64) (changeAmount : Option Int64)
-    (resolved : Array Payment := #[]) : Bool := Id.run do
-  if !(fee == r.fee && changeAmount == r.changeAmount &&
-      tx.inputs.map (·.previousOutput) == r.selected) then return false
-  if !(resolved.size == r.silentPayments.size &&
-      (r.silentPayments.zip resolved).all fun (s, p) => s.amount == p.amount) then return false
-  let reviewed := r.payments ++ resolved
-  let expected := match r.change with | some c => reviewed.push c | none => reviewed
-  if tx.outputs.size != expected.size then return false
-  let mut unmatched := tx.outputs
-  for p in expected do
-    match unmatched.findIdx? (fun o => o.value == p.amount && o.scriptPubKey == p.scriptPubKey) with
-    | some i => unmatched := unmatched.eraseIdx! i
-    | none => return false
-  if !unmatched.isEmpty then return false
-  return r.change.isNone == r.changeAmount.isNone
+    (resolved : Array Payment := #[]) : Bool :=
+  r.reviewed.authorizesTransaction tx fee changeAmount resolved
 
 /-- `SendPreview.authorizes(_:resolvedSilentPayments:)`: fee, change, inputs in order, and the outputs
 exactly. A silent payment's script comes from the wallet (`resolved`, one per reviewed silent payment, same
@@ -99,6 +93,8 @@ def previewSend (env : Env) (inputs : SendInputs) : IO Preview := do
   let c ← env.get
   let some n := c.network | failWith .noWallet
   -- `parseDestination`: a silent payment code (its HRP checked against this network), else an address
+  if Keys.SilentPaymentPairing.looksLikeCardCode destination then failText Wallet.cardCodeInSendText
+  if Keys.SilentPaymentPairing.looksLikeCardAddress destination then failText Wallet.cardAddressAloneText
   let (payments, silent) ← if SilentPaymentAddress.looksLikeCode destination then
       match Keys.SilentPayment.ofCode sats destination (Network.tx n) with
       | .ok p => pure (#[], #[p])

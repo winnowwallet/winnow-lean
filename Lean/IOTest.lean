@@ -251,6 +251,14 @@ def offlineChecks (dir : String) : IO Unit := do
   check "diversity: a class may not hold every seat"
     (!pol.admits (c "9.9.9.9" .census) #[c "1.1.1.1" .census, c "2.2.2.2" .census] &&
       pol.admits (c "9.9.9.9" .manual) #[c "1.1.1.1" .manual, c "2.2.2.2" .manual])
+  let tor (n : Nat) : PeerCandidate := c s!"{String.ofList (List.replicate 56 (Char.ofNat (97 + n)))}.onion" .census
+  let i2p (n : Nat) : PeerCandidate := c s!"{String.ofList (List.replicate 52 (Char.ofNat (97 + n)))}.b32.i2p" .census
+  let overlays : DiversityPolicy := { peerCount := 3, clearnetSelected := false, overlayMix := true }
+  check "diversity: on Tor and I2P alone the census fills every seat, and the mix still holds"
+    (overlays.admits (tor 2) #[i2p 0, tor 1] && overlays.admits (tor 2) #[i2p 0, i2p 1] &&
+      !overlays.admits (i2p 2) #[i2p 0, i2p 1] && !overlays.admits (tor 2) #[tor 0, tor 1])
+  check "diversity: on one overlay alone the census fills every seat"
+    (({ peerCount := 3, clearnetSelected := false } : DiversityPolicy).admits (tor 2) #[tor 0, tor 1])
   check "cooldown doubles to the cap" (PeerPool.cooldown 1 == 30_000 && PeerPool.cooldown 2 == 60_000 &&
     PeerPool.cooldown 5 == 480_000 && PeerPool.cooldown 6 == 600_000 && PeerPool.cooldown 40 == 600_000)
   check "rebroadcast backoff" (TxBroadcaster.backoffInterval 0 60 3600 == 60 && TxBroadcaster.backoffInterval 5 60 3600 == 1920 &&
@@ -976,6 +984,264 @@ def restedScanPeerChecks : IO Unit := do
     ((← pool.isCoolingDown node) && (← pool.connectedPeers).isEmpty && (← filters.nextScanHeight) == 0)
   pool.stop
 
+/-- A batch's filters come from every approved seat: two peers share the chunks of one batch, and a chunk a
+peer fails goes to the other, so the pass finishes and only the peer that failed is rested. -/
+def sharedScanChecks : IO Unit := do
+  let blocks := 250
+  let headers := minedHeaders blocks
+  let hashes := #[(HeaderChain.genesisHeader regtest).hash] ++ headers.map (·.hash)
+  let heightOf : Std.HashMap ByteArray Nat := (List.range hashes.size).foldl (fun m i => m.insert hashes[i]! i) {}
+  let filter := filled 40 9
+  -- a node whose filters are the ones its own headers commit to, counting the chunks it was asked for
+  let node (asked : IO.Ref Nat) (honest : Bool) : IO PeerEndpoint := fakeNode regtest (startHeight := blocks.toInt32)
+    (answer := fun send m => do
+      match m with
+      | .getheaders _ => send (.headers #[])
+      | .getcfcheckpt r => send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := #[] })
+      | .getcfheaders r =>
+        let stop := heightOf[r.stopHash]?.getD 0
+        send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := filled 32 0,
+                           filterHashes := Array.replicate (stop + 1 - r.startHeight.toNat) (GCSFilter.filterHash filter) })
+      | .getcfilters r =>
+        asked.modify (· + 1)
+        let stop := heightOf[r.stopHash]?.getD 0
+        for h in [r.startHeight.toNat:stop + 1] do
+          send (.cfilter { blockHash := hashes[h]!, filter := if honest then filter else filled 40 8 })
+      | _ => pure ())
+  let run (secondHonest : Bool) : IO (Except NetError Unit × Nat × Nat × Bool × Bool × UInt32) := do
+    let a ← IO.mkRef 0
+    let b ← IO.mkRef 0
+    let first ← node a true
+    let second ← node b secondHonest
+    let pool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[first, second]) (seedResolver := some noSeeds)
+    pool.start
+    discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 2)
+    let store ← runNet "shared headers" (HeaderStore.open regtest none)
+    discard <| runNet "shared chain" (store.connect headers)
+    let filters ← runNet "shared filters" (FilterSyncIO.new pool store 0)
+    let r ← (filters.sync #[] (onMatch := fun _ => pure ())).attempt
+    let out := (r, ← a.get, ← b.get, ← pool.isCoolingDown first, ← pool.isCoolingDown second, ← filters.nextScanHeight)
+    pool.stop
+    return out
+  let (r, a, b, restedA, restedB, next) ← run true
+  check "shared scan: two honest seats share one batch's chunks, and the pass reaches the tip"
+    (r matches .ok () && a ≥ 1 && b ≥ 1 && a + b == 3 && !restedA && !restedB && next == (blocks + 1).toUInt32)
+    s!"{match r with | .ok () => "synced" | .error e => e.description}; asked {a} and {b}; next {next}"
+  let (r, a, _, restedA, restedB, next) ← run false
+  check "shared scan: a chunk one seat fails goes to the other, and only the one that failed is rested"
+    (r matches .ok () && a ≥ 3 && !restedA && restedB && next == (blocks + 1).toUInt32)
+    s!"{match r with | .ok () => "synced" | .error e => e.description}; honest asked {a}; next {next}"
+
+/-- A range scan cut by its byte or time cap keeps the contiguous prefix of verified chunks it finished:
+with `stopAtCaps := true` it returns cleanly incomplete at the chunk end, a second run resumes from `h + 1`
+without re-fetching earlier heights, and with `stopAtCaps := false` it still throws while persisting the
+chunk end on disk. -/
+def cappedRangeKeepsChunks (dir : String) : IO Unit := do
+  let blocks := 2_500
+  let headers := minedHeaders blocks
+  let hashes := #[(HeaderChain.genesisHeader regtest).hash] ++ headers.map (·.hash)
+  let heightOf : Std.HashMap ByteArray Nat := (List.range hashes.size).foldl (fun m i => m.insert hashes[i]! i) {}
+  let filter := ByteArray.mk #[0]
+  let fhash := GCSFilter.filterHash filter
+  let fheaders : Array ByteArray := Id.run do
+    let mut out := Array.mkEmpty hashes.size
+    let mut prev := filled 32 0
+    for _ in [0:hashes.size] do
+      let next := sha256d (fhash ++ prev)
+      out := out.push next
+      prev := next
+    return out
+  let asked ← IO.mkRef (#[] : Array UInt32)
+  let node : IO PeerEndpoint := fakeNode regtest (startHeight := blocks.toInt32)
+    (answer := fun send m => do
+      match m with
+      | .getheaders _ => send (.headers #[])
+      | .getcfcheckpt r =>
+        let stop := heightOf[r.stopHash]?.getD 0
+        let checkpoints := (Array.range (stop / 1000)).map fun k => fheaders[(k + 1) * 1000]!
+        send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := checkpoints })
+      | .getcfheaders r =>
+        let stop := heightOf[r.stopHash]?.getD 0
+        let prev := if r.startHeight == 0 then filled 32 0 else fheaders[r.startHeight.toNat - 1]!
+        send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := prev,
+                           filterHashes := Array.replicate (stop + 1 - r.startHeight.toNat) fhash })
+      | .getcfilters r =>
+        asked.modify (·.push r.startHeight)
+        let stop := heightOf[r.stopHash]?.getD 0
+        for h in [r.startHeight.toNat:stop + 1] do
+          send (.cfilter { blockHash := hashes[h]!, filter })
+      | _ => pure ())
+  let first ← node
+  let second ← node
+  let pool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[first, second]) (seedResolver := some noSeeds)
+  pool.start
+  discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 2)
+  let store ← runNet "capped headers" (HeaderStore.open regtest none)
+  discard <| runNet "capped chain" (store.connect headers)
+  let filters ← runNet "capped filters" (FilterSyncIO.new pool store 0)
+  let spk := ByteArray.mk #[0x51, 0x20] ++ filled 32 0x11
+  let cap := RangeScanLimits.make (maxFilterBytes := 3 * 100 * filter.size + 50)
+  let path1 : System.FilePath := s!"{dir}/capped-range-stop.json"
+  let out1 ← runNet "capped range stopAtCaps" (filters.scanRange 0 2_499 #[spk] (limits := cap) (path := some path1)
+    (onMatch := fun _ => pure ()) (stopAtCaps := true))
+  let h := out1.scannedThrough.getD 0
+  check "capped range: stopAtCaps returns incomplete at a chunk end"
+    (!out1.isComplete && out1.scannedThrough.isSome && h ≥ 299 && h < 999 && (h + 1) % 100 == 0)
+    s!"complete {out1.isComplete}, scannedThrough {out1.scannedThrough}"
+  asked.set #[]
+  let out2 ← runNet "capped range resume" (filters.scanRange 0 2_499 #[spk] (path := some path1)
+    (onMatch := fun _ => pure ()) (stopAtCaps := true))
+  let starts ← asked.get
+  check "capped range: a second run resumes from h + 1, asks only past h, and finishes complete"
+    (out2.isComplete && out2.scannedThrough == some 2_499 && !starts.isEmpty && starts.all (· > h) && starts.contains (h + 1))
+    s!"complete {out2.isComplete}, scannedThrough {out2.scannedThrough}, starts {starts.qsort (· < ·)}"
+  let path2 : System.FilePath := s!"{dir}/capped-range-throw.json"
+  let r3 ← (filters.scanRange 0 2_499 #[spk] (limits := cap) (path := some path2) (onMatch := fun _ => pure ())).attempt
+  let saved3 ← if ← fileExists path2 then some <$> IO.FS.readFile path2 else pure none
+  let loaded3 := saved3.bind fun s => (RangeScanProgress.load (some s)).toOption.join
+  check "capped range: without stopAtCaps the cap still throws and persists the chunk end"
+    ((r3 matches .error (.range (.filterBytesExhausted ..))) && (loaded3.map (·.nextScanHeight)) == some (h + 1))
+    s!"{match r3 with | .ok _ => "ok" | .error e => e.description}; saved next {loaded3.map (·.nextScanHeight)}"
+  let out4 ← runNet "capped range zero time" (filters.scanRange 0 2_499 #[spk]
+    (limits := RangeScanLimits.make (maxDurationMs := 0)) (onMatch := fun _ => pure ()) (stopAtCaps := true))
+  check "capped range: stopAtCaps with no time left ends cleanly without reading a filter"
+    (!out4.isComplete && out4.scannedThrough.isNone && out4.filterBytesRead == 0)
+    s!"complete {out4.isComplete}, scannedThrough {out4.scannedThrough}, read {out4.filterBytesRead}"
+  pool.stop
+
+/-- A one-item BIP158 basic filter for `item` in the block `blockHash`, serialized (N, then the Golomb-Rice
+bits): what a node would serve for a block that pays the script. -/
+def oneItemFilter (blockHash item : ByteArray) : ByteArray := Id.run do
+  let (k0, k1) := GCSFilter.keyWords (blockHash.extract 0 16)
+  let v := GCSFilter.mulHi (sipHash k0 k1 item) GCSFilter.defaultM.toUInt64
+  let p := GCSFilter.defaultP.toNat
+  let mut bits : Array Bool := (Array.replicate (v >>> p.toUInt64).toNat true).push false
+  for k in [0:p] do bits := bits.push (((v >>> (p - 1 - k).toUInt64) &&& 1) == 1)
+  let mut bytes := ByteArray.empty
+  let mut i := 0
+  while i < bits.size do
+    let mut b : UInt8 := 0
+    for j in [0:8] do
+      if bits[i + j]?.getD false then b := b ||| ((0x80 : UInt8) >>> j.toUInt8)
+    bytes := bytes.push b
+    i := i + 8
+  return compactSize 1 ++ bytes
+
+/-- Regtest headers on genesis whose blocks at `paying` heights hold one transaction each (their merkle root is
+its txid), with those blocks: a chain whose filters can match and whose matched blocks check. -/
+def payingChain (count : Nat) (paying : List Nat) : Array BlockHeader × Std.HashMap ByteArray Block := Id.run do
+  let mut previous := HeaderChain.genesisHeader regtest
+  let mut out := #[]
+  let mut blocks : Std.HashMap ByteArray Block := {}
+  for i in [0:count] do
+    let height := i + 1
+    let tx? := if paying.contains height then (Transaction.decode (fakeRawTx (height % 250).toUInt8)).toOption else none
+    let root := (tx?.map (·.txid)).getD (filled 32 0)
+    let time := regtest.genesisTime + (i.toUInt32 + 1) * 600
+    let mut nonce : UInt32 := 0
+    let mut h := BlockHeader.mk' 1 previous.hash root time regtest.genesisBits nonce
+    while !(HeaderChain.checkedWork h regtest 1).isOk do
+      nonce := nonce + 1
+      h := BlockHeader.mk' 1 previous.hash root time regtest.genesisBits nonce
+    out := out.push h
+    if let some tx := tx? then blocks := blocks.insert h.hash { header := h, transactions := #[tx] }
+    previous := h
+  return (out, blocks)
+
+/-- A node for `payingChain`: filters that match `spk` at the paying heights and are empty elsewhere, headers
+that commit to them, each `getcfilters` answered after `delayMs`, and the paying blocks given or, with
+`blocks := false`, refused as not found. -/
+def payingNode (headers : Array BlockHeader) (blocks : Std.HashMap ByteArray Block) (spk : ByteArray)
+    (delayMs : Nat := 0) (giveBlocks : Bool := true) (asked : Option (IO.Ref Nat) := none) : IO PeerEndpoint := do
+  let hashes := #[(HeaderChain.genesisHeader regtest).hash] ++ headers.map (·.hash)
+  let heightOf : Std.HashMap ByteArray Nat := (List.range hashes.size).foldl (fun m i => m.insert hashes[i]! i) {}
+  let filters := hashes.map fun h => if blocks.contains h then oneItemFilter h spk else ByteArray.mk #[0]
+  let fheaders : Array ByteArray := Id.run do
+    let mut out := Array.mkEmpty hashes.size
+    let mut prev := filled 32 0
+    for f in filters do
+      let next := sha256d (GCSFilter.filterHash f ++ prev)
+      out := out.push next
+      prev := next
+    return out
+  fakeNode regtest (startHeight := headers.size.toInt32) (answer := fun send m => do
+    match m with
+    | .getheaders _ => send (.headers #[])
+    | .getcfcheckpt r => send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := #[] })
+    | .getcfheaders r =>
+      let stop := heightOf[r.stopHash]?.getD 0
+      let prev := if r.startHeight == 0 then filled 32 0 else fheaders[r.startHeight.toNat - 1]!
+      send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := prev,
+                         filterHashes := (filters.extract r.startHeight.toNat (stop + 1)).map GCSFilter.filterHash })
+    | .getcfilters r =>
+      if let some a := asked then a.modify (· + 1)
+      if delayMs > 0 then IO.sleep delayMs.toUInt32
+      let stop := heightOf[r.stopHash]?.getD 0
+      for h in [r.startHeight.toNat:stop + 1] do
+        send (.cfilter { blockHash := hashes[h]!, filter := filters[h]! })
+    | .getdata p =>
+      match p.vectors[0]?.bind (fun v => blocks[v.hash]?) with
+      | some b => if giveBlocks then send (.block b) else send (.notfound p)
+      | none => send (.notfound p)
+    | _ => pure ())
+
+/-- A run cut by its minute while fetching still keeps the batch's first chunk, its payment delivered, so the
+next run starts past it: before, the deadline refused the first hit it came to, nothing past it was kept, and
+an account with a payment in a range longer than a run stopped at that payment on every run. -/
+def timeCappedHitChecks : IO Unit := do
+  let spk := ByteArray.mk #[0x51, 0x20] ++ filled 32 0x22
+  let (headers, blocks) := payingChain 250 [50, 150]
+  let first ← payingNode headers blocks spk (delayMs := 700)
+  let second ← payingNode headers blocks spk (delayMs := 700)
+  let pool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[first, second]) (seedResolver := some noSeeds)
+  pool.start
+  discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 2)
+  let store ← runNet "minute headers" (HeaderStore.open regtest none)
+  discard <| runNet "minute chain" (store.connect headers)
+  let filters ← runNet "minute filters" (FilterSyncIO.new pool store 0)
+  let seen ← IO.mkRef (#[] : Array UInt32)
+  let limits := RangeScanLimits.make (maxDurationMs := 400)
+  let out1 ← runNet "minute run" (filters.scanRange 0 250 #[spk] (limits := limits)
+    (onMatch := fun m => seen.modify (·.push m.height)) (stopAtCaps := true))
+  let first1 ← seen.get
+  check "time cap: a run cut while fetching keeps its first chunk and delivers the payment in it"
+    (!out1.isComplete && out1.scannedThrough == some 99 && first1 == #[50])
+    s!"complete {out1.isComplete}, scannedThrough {out1.scannedThrough}, delivered {first1}"
+  seen.set #[]
+  let out2 ← runNet "minute run again" (filters.scanRange 100 250 #[spk] (limits := limits)
+    (onMatch := fun m => seen.modify (·.push m.height)) (stopAtCaps := true))
+  let second2 ← seen.get
+  check "time cap: the next run starts past it and reaches the next payment"
+    ((out2.scannedThrough.getD 0) ≥ 199 && second2 == #[150])
+    s!"complete {out2.isComplete}, scannedThrough {out2.scannedThrough}, delivered {second2}"
+  pool.stop
+
+/-- A matched block the seat that served its filter will not give comes from another seat, and only the seat
+that withheld it is rested. -/
+def blockFallbackChecks : IO Unit := do
+  let spk := ByteArray.mk #[0x51, 0x20] ++ filled 32 0x33
+  let (headers, blocks) := payingChain 250 [50, 150, 240]
+  let a ← IO.mkRef 0
+  -- the withholding seat answers filters at once, so it serves at least one of the three chunks
+  let withholding ← payingNode headers blocks spk (giveBlocks := false) (asked := some a)
+  let giving ← payingNode headers blocks spk (delayMs := 300)
+  let pool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[withholding, giving]) (seedResolver := some noSeeds)
+  pool.start
+  discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 2)
+  let store ← runNet "fallback headers" (HeaderStore.open regtest none)
+  discard <| runNet "fallback chain" (store.connect headers)
+  let filters ← runNet "fallback filters" (FilterSyncIO.new pool store 0)
+  let seen ← IO.mkRef (#[] : Array UInt32)
+  let r ← (filters.sync #[spk] (onMatch := fun m => seen.modify (·.push m.height))).attempt
+  let delivered ← seen.get
+  let asked ← a.get
+  check "block fallback: a block one seat withholds comes from the other, and the pass reaches the tip"
+    (r matches .ok () && delivered == #[50, 150, 240] && asked ≥ 1 && (← filters.nextScanHeight) == 251)
+    s!"{match r with | .ok () => "synced" | .error e => e.description}; delivered {delivered}; withholding asked {asked}"
+  check "block fallback: only the seat that withheld it is rested"
+    ((← pool.isCoolingDown withholding) && !(← pool.isCoolingDown giving))
+  pool.stop
+
 /-- Finding 9: a pin above the last checkpoint boundary that an answer agreed across source classes
 contradicts is rewound, and the scan starts again below it; one class's word rewinds nothing. -/
 def disputedPinChecks (dir : String) : IO Unit := do
@@ -1049,6 +1315,10 @@ def hardeningChecks (dir : String) : IO Unit := do
   broadcastRaceChecks dir
   headerTurnChecks
   restedScanPeerChecks
+  sharedScanChecks
+  cappedRangeKeepsChunks dir
+  timeCappedHitChecks
+  blockFallbackChecks
   disputedPinChecks dir
 
 /-- The broadcaster giving up on peers that take the inv and never ask for the transaction (#39), over an
@@ -1209,9 +1479,10 @@ def rangeChecks (dir : String) (pool : PeerPool) (store : HeaderStore) (fs : Fil
   let refused {α} (x : NetM α) (ok : RangeScanError → Bool) : IO Bool := do
     match ← x.toBaseIO with | .error (.range e) => return ok e | _ => return false
   let budgetPath : System.FilePath := s!"{dir}/range-budget.json"
+  let overBudget ← (rfs.scanRange 1 rtip #[spk] (RangeScanLimits.make (maxFilterBytes := 1)) (some budgetPath) (fun _ => pure ())).attempt
   check "range: a run past its byte budget refuses, the batch committing nothing"
-    ((← refused (rfs.scanRange 1 rtip #[spk] (RangeScanLimits.make (maxFilterBytes := 1)) (some budgetPath) (fun _ => pure ()))
-      (fun | .filterBytesExhausted r 1 => r > 1 | _ => false)) && !(← fileExists budgetPath))
+    ((match overBudget with | .error (.range (.filterBytesExhausted r 1)) => r > 1 | _ => false) && !(← fileExists budgetPath))
+    (match overBudget with | .ok o => s!"ok {repr o}" | .error e => e.description)
   check "range: and resumes with a budget" ((← runNet "scanRange budget" (rfs.scanRange 1 rtip #[spk]
     (path := some budgetPath) (onMatch := fun _ => pure ()))).isComplete)
   check "range: no time budget is refused before a filter is read"

@@ -45,6 +45,10 @@ inductive Sheet where
   | ledgerNearby
   /-- Onboarding's last card: why Winnow asks for Bluetooth, then the system's question. -/
   | bluetoothIntro
+  /-- The profiles kept on this device for the network, from the home's name of the open one. -/
+  | wallets
+  /-- "Rename this profile". -/
+  | renameWallet
   deriving Repr, BEq, Inhabited
 
 /-- Settings → Network's pushed screens. -/
@@ -74,9 +78,9 @@ inductive Route where
   build, an account, its PSBT screen. -/
   | multisigAdd
   | multisigBuild
-  /-- LedgerPairView (Settings → Signers → "Pair a Ledger"). -/
+  /-- LedgerPairView (Settings → Security → Hardware wallets and keys → "Pair a Ledger"). -/
   | ledgerPair
-  /-- SignersView, SignerDetailView, SignerKeysAddView (Settings → Signers). -/
+  /-- SignersView, SignerDetailView, SignerKeysAddView (Settings → Security → Hardware wallets and keys). -/
   | signers
   | signer (id : String)
   | signerKeysAdd
@@ -320,8 +324,16 @@ structure PersonForm where
   deriving Repr, Inhabited
 
 structure ShareCard where
-  card : Option String := none
   error : Option String := none
+  /-- The name typed under "A card for one person". -/
+  forName : String := ""
+  /-- The saved person the sheet was opened for; none once the name is typed over. -/
+  forPerson : Option String := none
+  /-- That person's card, with the name it was made for. -/
+  personCard : Option (String × String) := none
+  /-- An ordinary address for that person, for a payer that does not read cards; shown with the card. -/
+  personAddress : Option String := none
+  making : Bool := false
   deriving Repr, Inhabited
 
 /-- MultisigAddView's state. -/
@@ -497,6 +509,18 @@ structure Model where
   status : Status := {}
   phase : SyncPhase := .idle
   walletID : Option String := none
+  /-- The place that is open, among those this network's wallets are kept in (empty: the network's own), and
+  the wallets kept for it, as the backend last told (`Host.walletPlace`). -/
+  slot : String := ""
+  /-- An account whose page opens once the wallet being switched to is open (`switchToSign`). -/
+  pendingAccount : Option String := none
+  /-- The rename sheet's field, whether its answer is awaited, and why the last one was refused. -/
+  renameDraft : String := ""
+  renameBusy : Bool := false
+  renameError : Option String := none
+  wallets : List WalletSummary := []
+  /-- This build's version as its bundle says it, `0.9.19 (26)`; none until launch has read it. -/
+  appVersion : Option String := none
   records : Records := {}
   /-- Test mode's `WINNOW_E2E_NETWORK`: the network cannot be switched away from it. -/
   forcedNetwork : Option Network := none
@@ -587,8 +611,14 @@ inductive Done where
 inductive Host where
   /-- Test mode at launch (E2EMode): the forced network; sent before `settingsLoaded`. -/
   | launched (forcedNetwork : Option Network)
+  /-- The version on this build's bundle (`BundleInfo.versionText?`), read at launch; not sent when the
+  bundle has none to read (the tests' executables). -/
+  | versionRead (text : String)
   | settingsLoaded (s : Settings)
   | booted (gen : Nat) (r : BootResult)
+  /-- Which place was opened and the wallets kept for the network: before `booted`, and again when one is
+  created, imported or restored. -/
+  | walletPlace (gen : Nat) (slot : String) (wallets : List WalletSummary)
   /-- The wallet is created and onboarding finished (its iCloud backup prepared when iCloud allows). -/
   | created (gen : Nat) (walletID : String)
   | imported (gen : Nat) (walletID : String) (report : String)
@@ -604,6 +634,8 @@ inductive Host where
   | unconfirmed (gen : Nat) (address txid : String) (amount : Int)
   | failed (gen : Nat) (context : String) (message : String)
   | deleted (gen : Nat)
+  /-- The open profile was named, or why not. -/
+  | renamed (gen : Nat) (error : Option String)
   | resolvedRate (gen : Nat) (forInputs : SendInputs) (milli : Nat)
   | previewed (gen : Nat) (forInputs : SendInputs) (p : Preview)
   | sent (gen : Nat) (txid : String) (derivedAddresses : List String)
@@ -618,7 +650,7 @@ inductive Host where
   | peersReset (gen : Nat)
   | exported (gen epoch : Nat) (file : String)
   | revealed (gen epoch : Nat) (words : List String)
-  | card (gen : Nat) (name : String) (card : String)
+  | personCard (gen : Nat) (personName : String) (card : String) (address : Option String) (records : Records)
   | pasteParsed (gen : Nat) (text : String) (r : Except String PastePreview)
   | senderLookup (gen : Nat) (txid source : String) (addresses : List String)
   | multisig (gen : Nat) (o : MultisigOverview)
@@ -632,6 +664,8 @@ inductive Host where
   /-- A step of the collection (sign, Ledger, combine, a new or pasted PSBT, discard) is done; `pasted`:
   the paste field empties. -/
   | collected (gen epoch : Nat) (id : String) (pasted : Bool := false)
+  /-- The payment went to the same account in another wallet on this device (its slot), which opens next. -/
+  | handedOver (gen epoch : Nat) (id slot : String)
   | draftBroadcast (gen epoch : Nat) (id txid : String)
   /-- Rebroadcast or Give up on an in-flight account spend is done. -/
   | spendHandled (gen : Nat) (id txid : String)
@@ -686,8 +720,9 @@ inductive ReceiveMsg where
   | saveLabel
   | removeLabel
   | finishLabel
-  | openCard
   | setOwnName (s : String)
+  | setCardFor (s : String)
+  | makePersonCard
   deriving Inhabited
 
 inductive HomeMsg where
@@ -698,6 +733,8 @@ inductive HomeMsg where
   | openNetwork (page : NetworkPage)
   /-- Settings → Security → Multisig accounts. -/
   | openMultisigAccounts
+  /-- The home's name of the open profile: the list of profiles. -/
+  | openWallets
   /-- The home's short warning, tapped: its alert (`Confirm.homeWarning`). -/
   | explainWarning (kind : HomeWarning)
   /-- The alert's settings button: Settings → Network → Sync, or Peers and routing. -/
@@ -742,6 +779,15 @@ inductive SettingsMsg where
   | resetPeers
   | askDelete
   | deleteWallet
+  /-- Open another of the wallets kept for this network. -/
+  | selectWallet (slot : String)
+  /-- Open an empty place beside them, where onboarding makes or restores one more. -/
+  | addWallet
+  /-- Leave that empty place for the wallet that was open. -/
+  | cancelAddWallet
+  | openRename
+  | setRenameDraft (s : String)
+  | saveRename
   | dismissTor
   -- PeerGatewaysSection
   | setGatewayMode (i : Nat)
@@ -774,6 +820,8 @@ inductive PeopleMsg where
   | choose (personID : String)
   | rename (personID : String)
   | remove (personID : String)
+  /-- The card sheet, for this person. -/
+  | card (personID : String)
   deriving Inhabited
 
 inductive SignerMsg where
@@ -836,6 +884,8 @@ inductive MultisigMsg where
   /-- "Use this PSBT" (no draft) or "Combine" (a draft): the account named. -/
   | addPasted (id : String)
   | sign (id : String)
+  /-- Another wallet on this device holds one of the account's keys: the payment goes to it, and it opens. -/
+  | switchToSign (id slot : String)
   | signWithLedger (id : String)
   | broadcast (id : String)
   | askDiscard (id : String)
@@ -878,6 +928,8 @@ inductive CloudMsg where
 
 inductive Msg where
   | createWallet
+  /-- Face ID once, for the records' keys an earlier build locked behind it (`Status.recordsLocked`). -/
+  | unlockRecords
   | openImport
   | setImportText (s : String)
   | pasteImport
@@ -918,10 +970,17 @@ inductive Cmd where
   | saveSettings (s : Settings)
   /-- `boot()` when `isBoot` (launch, Retry), `switchNetwork` otherwise: only a boot journals `app.booted`. -/
   | openWallet (gen : Nat) (network : Network) (isBoot : Bool)
+  /-- Open the wallet kept in `slot`, or with none an empty place for one to be added (`openWallet` opens the
+  one that was open last). -/
+  | openSlot (gen : Nat) (network : Network) (slot : Option String)
   | createWallet (gen : Nat) (network : Network)
   | importWallet (gen : Nat) (network : Network) (json : String)
   | finishOnboarding (gen : Nat)
   | refresh (gen : Nat)
+  /-- An authentication and nothing else: the backend frees what waited for one (`Backend.personPresent`). -/
+  | unlockRecords (gen : Nat)
+  /-- The people and labels alone, read again: a payment to a person's card arrives already named. -/
+  | records (gen : Nat)
   | syncNow (gen : Nat)
   | retryPeers (gen : Nat)
   | reconnect (gen : Nat) (settings : Settings)
@@ -935,6 +994,7 @@ inductive Cmd where
   /-- The shell draws the app light, dark or as the system is (`appearance`). -/
   | setAppearance (a : Appearance)
   | deleteWallet (gen : Nat)
+  | renameWallet (gen : Nat) (name : String)
   | startNetworking (gen : Nat) (settings : Settings)
   | stopNetworking
   | resolveRate (gen : Nat) (inputs : SendInputs) (floor : Option Nat)
@@ -954,7 +1014,8 @@ inductive Cmd where
   /-- `ExportStagingFile.remove` for that file: its staging directory goes. -/
   | removeExport (file : String)
   | revealPhrase (gen epoch : Nat)
-  | ownCard (gen : Nat) (name : String)
+  /-- A card for one person alone (the saved person `personID`, else by name), under the wallet's own name. -/
+  | personCard (gen : Nat) (personID : Option String) (personName ownName : String)
   | parsePaste (gen : Nat) (text : String)
   | addPerson (gen : Nat) (name : String) (paste : Option String)
       (provenance : Option Provenance) (source : Option String) (labelTxid : Option String)
@@ -984,6 +1045,7 @@ inductive Cmd where
   | signAndDraft (gen : Nat) (inputs : SendInputs) (p : Preview)
   /-- After device authentication ("Sign this multisig payment"). -/
   | signDraft (gen epoch : Nat) (id : String)
+  | handOverDraft (gen epoch : Nat) (id slot : String)
   | signDraftWithLedger (gen epoch : Nat) (id : String)
   | adoptDraft (gen epoch : Nat) (id psbt : String)
   | broadcastDraft (gen epoch : Nat) (id : String)
@@ -1032,13 +1094,17 @@ def canReview (i : SendInputs) : Bool :=
 
 def networks : List Network := [.mainnet, .signet]
 
-def appVersionText : String := "0.1.0 (1)"
-
 /-! ## Small helpers every area uses -/
 
 def Model.topSheet (m : Model) : Option Sheet := m.sheets.getLast?
 def Model.hasSheet (m : Model) (s : Sheet) : Bool := m.sheets.contains s
 def Model.present (m : Model) (s : Sheet) : Model := { m with sheets := m.sheets ++ [s], confirm := none }
+
+/-- What the open profile is called: its name, or "Wallet" and its id. -/
+def Model.walletLabel (m : Model) : String :=
+  match m.wallets.find? (·.slot == m.slot) with
+  | some w => w.label
+  | none => s!"Wallet {m.walletID.getD ""}"
 def Model.isExpanded (m : Model) (key : String) : Bool := m.expanded.contains key
 def Model.person? (m : Model) (id : String) : Option Person := m.records.people.find? (·.id == id)
 /-- The row a payment screen shows for a transaction id: the merged list's, else the wallet's own entry. -/

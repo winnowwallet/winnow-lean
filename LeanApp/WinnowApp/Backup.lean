@@ -90,14 +90,24 @@ def beginnerBackupSection (m : Model) : H :=
 def cloudBackupSheet (m : Model) (inner : List H) : H :=
   let c := m.cloud
   formSheet "iCloud backup" (some .closeSheet) [closeBar "Close"]
-    [ .section "" "Includes this phone’s signing key, wallet history, saved people and labels. Updates while Winnow is open, after pending payments confirm."
+    [ .section "" "Includes this phone’s signing key, wallet history, saved people and labels. Updates while Winnow is open."
          ([ .identified Ids.automaticCloudBackupToggle (.toggle "Automatic iCloud backup" c.automaticEnabled fun b => .cloud (.setAutomatic b))
           , .identified Ids.cloudBackupStatus (.labeled "Status" (cloudRowStatus c)) ] ++
           (match c.lastSavedText with | some t => [.labeled "Last saved to iCloud" t] | none => []) ++
           (match c.message with | some t => [caption t] | none => []))
+     , .section "Your other devices" "Multisig accounts and paired Ledgers follow you: each device reads the others’ backups while Winnow is open and takes what it lacks. A device none of whose wallets holds one of an account’s keys shows it as watch-only. Keys and recovery words never travel this way."
+         (match c.devicesNote with
+          | some t => [.identified Ids.cloudDevicesNote (caption t)]
+          | none => [.identified Ids.cloudDevicesNote (caption (if c.automaticEnabled then "Not checked yet." else "Off while automatic backup is off."))])
      , .section "" ""
          [ body "Restore using the same Apple Account with iCloud and Passwords & Keychain enabled. Access to the cloud backup and its synchronized key can restore spending access."
          , body "Turning this off leaves existing copies in iCloud. Keep a backup file too." ] ] inner (largeTitle := true)
+
+/-- A saved backup as the restore list names it: which wallet, where that could be read, and when it was saved. -/
+def restoreLabel (b : CloudBackupInfo) : String :=
+  match b.walletID with
+  | some wallet => s!"Wallet {wallet} · {b.savedAtText}"
+  | none => b.savedAtText
 
 /-- CloudRestoreView: choose a saved backup; restoring never replaces a wallet already on this phone. -/
 def cloudRestoreSheet (m : Model) (inner : List H) : H :=
@@ -112,7 +122,8 @@ def cloudRestoreSheet (m : Model) (inner : List H) : H :=
       else
        [.section "Choose a saved backup" "Use the same Apple Account and enable Passwords & Keychain. Backups may take time to appear on a new device. Restoring never replaces a wallet already on this phone."
          ((c.available.map fun b =>
-             Html.symbol "icloud.and.arrow.down" (.button b.savedAtText .plain (if o.restoring then none else some (.cloud (.restore b.id))))) ++
+             .identified (Ids.cloudRestoreBackupButton b.id)
+               (Html.symbol "icloud.and.arrow.down" (.button (restoreLabel b) .plain (if o.restoring then none else some (.cloud (.restore b.id)))))) ++
           (if c.available.isEmpty && !c.busy then [body "No backup found for this network yet."] else []) ++
           [ .button "Check again" .plain (if o.restoring || c.busy then none else some (.cloud .checkAgain)) ])]) ++
      (if o.restoring || c.busy then [.progress (if o.restoring then "Restoring wallet…" else "Checking iCloud…")] else []) ++

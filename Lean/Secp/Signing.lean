@@ -113,32 +113,5 @@ def signWith (g : MulG) (digest : ByteArray) (d : Nat) (aux : ByteArray) : Optio
 /-- A signature as 64 bytes: `r` then `s`. -/
 def encode (signature : Nat × Nat) : ByteArray := toBE32 signature.1 ++ toBE32 signature.2
 
-/-! ## The division is a power -/
-
-/-- What one bit does to an exponent read from the top: double, and add one if the bit is set. -/
-def exponentOfBits (e : Nat) (bit : Bool) : Nat := if bit then 2 * e + 1 else 2 * e
-
-/-- Along the bits of an exponent, the running power keeps being `a` to the exponent read so far. -/
-theorem power_fold (a m : Nat) (bits : List Bool) (acc e : Nat) (h : acc = a ^ e % m) :
-    bits.foldl (powerStep a m) acc = a ^ (bits.foldl exponentOfBits e) % m := by
-  induction bits generalizing acc e with
-  | nil => exact h
-  | cons bit bits ih =>
-    rw [List.foldl_cons, List.foldl_cons]
-    apply ih
-    have squared : acc * acc % m = a ^ (2 * e) % m := by
-      rw [h, ← Nat.mul_mod, ← Nat.pow_add, Nat.two_mul]
-    cases bit
-    · simpa [powerStep, exponentOfBits] using squared
-    · simp only [powerStep, exponentOfBits, ↓reduceIte]
-      rw [squared, Nat.mod_mul_mod, Nat.pow_succ]
-
-/-- The signer's `1/k` is `k` to the power N − 2, modulo N. -/
-theorem inverse_eq (k : Nat) : inverse k = k ^ (N - 2) % N := by
-  have exponent : ((List.range 256).reverse.map (fun i => (N - 2).testBit i)).foldl exponentOfBits 0
-      = N - 2 := by decide +kernel
-  unfold inverse
-  rw [power_fold k N _ 1 0 (by rw [Nat.pow_zero]; decide), exponent]
-
 end Ecdsa
 end Secp

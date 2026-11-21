@@ -48,6 +48,20 @@ def ByteArray.eq (a b : ByteArray) : Bool := a.data == b.data
 
 instance : BEq ByteArray := ⟨ByteArray.eq⟩
 
+/-- Bytewise lexicographic `<` (`Data.lexicographicallyPrecedes`), without heap allocation or `!`-indexing. -/
+def ByteArray.lexLt (a b : ByteArray) : Bool :=
+  let rec go (i : Nat) : Nat → Bool
+    | 0 => a.size < b.size
+    | fuel + 1 =>
+      if h : i < a.size ∧ i < b.size then
+        let ai := a[i]'h.1
+        let bi := b[i]'h.2
+        if ai < bi then true
+        else if bi < ai then false
+        else go (i + 1) fuel
+      else a.size < b.size
+  go 0 (min a.size b.size)
+
 /-! ## Reading -/
 
 /-- A cursor over bytes; every read fails with a message rather than panicking. -/

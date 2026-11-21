@@ -7,7 +7,7 @@ import Winnow.Ledger.Multisig
 
 /-! # The signers a phone knows (port of `Sources/WinnowApp/SignerStore.swift`, upstream d2ca878)
 
-The list under Settings → Signers, from which the multisig builder takes its members and the Join
+The list under Settings → Security → Hardware wallets and keys, from which the multisig builder takes its members and the Join
 screen its member share: a Ledger the phone paired, or keys other people sent (`SignerRecord`). One
 sealed JSON file per network, `signers.json`, read under the same seal as the other stores (store name
 `signers`) and carried in every backup. Public keys only, so the file is not a wallet's: it survives
@@ -198,6 +198,17 @@ def addKeys (s : SignerStore) (keys : StoreKeyVault) (writeData : WriteData) (na
   let r : SignerRecord := { id, kind := .keys, name := ← usableName name, keys := signerKeys, addedAt }
   unless 1 ≤ signerKeys.size && signerKeys.size ≤ SignerRecord.maximumKeysPerSigner do
     invalid "a signer has no keys, or too many"
+  return (← s.append keys writeData r, r)
+
+/-- A signer another of the person's devices has (`Winnow.DeviceSync`): filed as it is there, under a new id
+when this phone already uses that one. Refused, like any other, when one of its keys is already held. -/
+def adopt (s : SignerStore) (keys : StoreKeyVault) (writeData : WriteData) (r : SignerRecord) (spareID : String) :
+    RM (SignerStore × SignerRecord) := do
+  s.requireReadable
+  let r := if s.records.any (·.id == r.id) || r.id.isEmpty then { r with id := spareID } else r
+  let r := { r with name := ← usableName r.name }
+  unless 1 ≤ r.keys.size && r.keys.size ≤ SignerRecord.maximumKeysPerSigner do invalid "a signer has no keys, or too many"
+  validateKind r s.network
   return (← s.append keys writeData r, r)
 
 def rename (s : SignerStore) (keys : StoreKeyVault) (writeData : WriteData) (id name : String) : RM SignerStore := do

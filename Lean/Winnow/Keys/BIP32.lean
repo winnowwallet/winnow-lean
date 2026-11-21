@@ -156,29 +156,30 @@ def serialized (k : HDKey) (network : Network := .mainnet) : String :=
 invariants (zero depth implies zero fingerprint/index). -/
 def deserialize (s : String) : Except HDKeyParseError HDKey := do
   let payload ← (Base58Check.decode s).mapError .base58
-  if payload.size != 78 then throw (.bip32 .invalidSerializedKey)
-  let version := (readBE payload 0 4).toUInt32
-  let depth := payload[4]!
-  let parentFingerprint := (readBE payload 5 4).toUInt32
-  let childIndex := (readBE payload 9 4).toUInt32
-  let chainCode := payload.extract 13 45
-  let keyData := payload.extract 45 78
-  let known := [Network.mainnet.privateVersion, Network.mainnet.publicVersion,
-                Network.testnet.privateVersion, Network.testnet.publicVersion]
-  if !known.contains version then throw (.bip32 .invalidVersion)
-  if depth == 0 && (parentFingerprint != 0 || childIndex != 0) then throw (.bip32 .invalidSerializedKey)
-  if version == Network.mainnet.privateVersion || version == Network.testnet.privateVersion then
-    if keyData[0]! != 0 then throw (.bip32 .invalidSerializedKey)
-    let secret := keyData.extract 1 33
-    match publicKeyOf secret with
-    | .error _ => throw (.bip32 .invalidSerializedKey)
-    | .ok pub => return { depth, parentFingerprint, childIndex, chainCode, privateKey := some secret,
-                          publicKey := pub }
-  else
-    match parsePublicKey keyData with
-    | .error _ => throw (.bip32 .invalidSerializedKey)
-    | .ok _ => return { depth, parentFingerprint, childIndex, chainCode, privateKey := none,
-                        publicKey := keyData }
+  if hsz : payload.size = 78 then
+    let version := (readBE payload 0 4).toUInt32
+    let depth := payload[4]'(by omega)
+    let parentFingerprint := (readBE payload 5 4).toUInt32
+    let childIndex := (readBE payload 9 4).toUInt32
+    let chainCode := payload.extract 13 45
+    let keyData := payload.extract 45 78
+    let known := [Network.mainnet.privateVersion, Network.mainnet.publicVersion,
+                  Network.testnet.privateVersion, Network.testnet.publicVersion]
+    if !known.contains version then throw (.bip32 .invalidVersion)
+    if depth == 0 && (parentFingerprint != 0 || childIndex != 0) then throw (.bip32 .invalidSerializedKey)
+    if version == Network.mainnet.privateVersion || version == Network.testnet.privateVersion then
+      if keyData[0]? != some 0 then throw (.bip32 .invalidSerializedKey)
+      let secret := keyData.extract 1 33
+      match publicKeyOf secret with
+      | .error _ => throw (.bip32 .invalidSerializedKey)
+      | .ok pub => return { depth, parentFingerprint, childIndex, chainCode, privateKey := some secret,
+                            publicKey := pub }
+    else
+      match parsePublicKey keyData with
+      | .error _ => throw (.bip32 .invalidSerializedKey)
+      | .ok _ => return { depth, parentFingerprint, childIndex, chainCode, privateKey := none,
+                          publicKey := keyData }
+  else throw (.bip32 .invalidSerializedKey)
 
 end HDKey
 end Winnow.Keys

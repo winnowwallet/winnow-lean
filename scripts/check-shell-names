@@ -1,0 +1,21 @@
+#!/bin/sh
+# Prepares the iOS project as CI's Xcode jobs do, without Xcode, to run the one check those jobs make before
+# they compile anything: a string in the app's compiled C that equals the name of a shell capability the app's
+# manifest (LeanApp/WinnowApp/Project.lean, `uses`) does not list. The shell is generated with only the
+# capabilities listed, and the build takes such a string for a call to one that is not there: a JSON key
+# `"device"` and a derived `Repr` naming a field `device` stopped all three Xcode jobs of 0.9.17's first run.
+# This says so in the `lean` job, in seconds. Needs LeanApp built (`lake build` in LeanApp/) and the census
+# list imported; imports it if it is not there.
+set -eu
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+OUT=$(mktemp -d)
+trap 'rm -rf "$OUT"' EXIT
+cd "$ROOT"
+[ -f build/census/peers.json ] || scripts/import-census >"$OUT/census.log" 2>&1
+if ! PREPARE_ONLY=1 APP_DIR=LeanApp APP_ROOT=WinnowApp SCHEME=WinnowLean OUT="$OUT/project" \
+    LeanApp/.lake/packages/leannative/framework/native/ci/build-ios Debug iossim >"$OUT/log" 2>&1; then
+  tail -40 "$OUT/log" >&2
+  echo "check-shell-names: the iOS project cannot be prepared (LeanNative's reason is above)" >&2
+  exit 1
+fi
+echo "check-shell-names: the iOS project prepares; no string in the app's C is a shell capability the manifest does not list"

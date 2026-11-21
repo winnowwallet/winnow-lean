@@ -85,6 +85,11 @@ structure OverviewKey where
   signerNotice : Option String
   key : Option String
   tip : UInt32
+  arriving : Array ArrivingAccount := #[]
+  elsewhere : Array UInt32 := #[]
+  /-- The wallets kept on this device for the network (their ids): an account is only watched when none of
+  them holds one of its keys. -/
+  held : Array String := #[]
   deriving BEq
 
 /-- The store and a cache of the overview the screens poll (each address costs a derivation). -/
@@ -100,6 +105,11 @@ structure MultisigApp where
   /-- `ledgerConnector`: opens one Ledger connection (Bluetooth through the shell, or test mode's
   simulated device); swappable, as Swift's `var ledgerConnector` is. -/
   ledger : IO.Ref (IO LedgerSession)
+  /-- Ledgers (master fingerprints) that came from another of the person's devices and have not answered on
+  this one, as the list under Settings says of them; and those that have answered since that was last filed
+  (`SyncApp` keeps both). -/
+  elsewhere : IO.Ref (Array UInt32)
+  answered : IO.Ref (Array UInt32)
 
 /-- Without a connector, every Ledger operation fails as a Ledger the phone cannot reach. -/
 def noLedger : IO LedgerSession :=
@@ -107,7 +117,8 @@ def noLedger : IO LedgerSession :=
 
 def MultisigApp.new (keys : StoreKeyVault) (ledger : IO LedgerSession := noLedger) : IO MultisigApp := do
   return { host := ← MultisigHost.new keys, signers := ← SignerHost.new keys, overviewCache := ← IO.mkRef none,
-           env := ← IO.mkRef none, draftCache := ← IO.mkRef #[], ledger := ← IO.mkRef ledger }
+           env := ← IO.mkRef none, draftCache := ← IO.mkRef #[], ledger := ← IO.mkRef ledger,
+           elsewhere := ← IO.mkRef #[], answered := ← IO.mkRef #[] }
 
 namespace MultisigApp
 
@@ -118,7 +129,7 @@ def withStore {α} (a : MultisigApp) (f : MultisigStore → RM (MultisigStore ×
 def withSigners {α} (a : MultisigApp) (f : SignerStore → RM (SignerStore × α)) : IO α := RM.toIO (a.signers.modify f)
 
 /-- `mergeRestoredSigners(_:)`: the signer list is not the wallet's, so a bundle's joins the phone's own;
-a damaged local list is already reported under Settings → Signers and must not stop the wallet from
+a damaged local list is already reported under Settings → Security → Hardware wallets and keys and must not stop the wallet from
 restoring. -/
 def mergeSigners (a : MultisigApp) (restored : Array SignerRecord) : IO Unit := do
   let r ← (a.signers.modify fun s => do
@@ -150,28 +161,147 @@ def applyMatchPaying (a : MultisigApp) (advance : String → UInt32 → IO Unit)
       env.journal "person.paid" [("personID", person), ("paymentIndex", toString index), ("confirmedAt", toString m.height)]
   return discarded
 
-def rollBack (a : MultisigApp) (fork : UInt32) : IO Unit :=
+def rollBack (a : MultisigApp) (fork : UInt32) : IO Unit := do
   a.withStore fun s => do return (← s.rollBack a.host.keys a.host.writeData fork, ())
+  -- the accounts on their way from another device hold blocks too
+  RM.toIO (a.host.modifyArriving fun all => pure (all.map (·.rollBack fork), ()))
 
 def restore (a : MultisigApp) (records : Array MultisigAccountRecord) : IO Unit :=
   a.withStore fun s => do return (← s.restore a.host.keys a.host.writeData records, ())
 
 def backup (a : MultisigApp) : IO (Array MultisigAccountRecord) := do RM.toIO (← a.host.read).backupRecords
 
+/-- One arriving account brought toward block `target`, the last one this phone's forward scan has done: the
+blocks after the one the account is current to are scanned for its scripts and applied to it; a pass that
+moved its frontier is followed by another from where the first began; and once a pass ends at `target` having
+found no new address, the account joins the kept ones. A run that stops early (its minute, its bytes, a peer)
+leaves the account current to where it got. -/
+def catchUpOne (a : MultisigApp) (id : String) (target : UInt32) (scan : RangeScanner) (blockHash : ChainHashes) : IO Unit := do
+  let caches ← IO.mkRef ({ network := (← a.host.read).network } : MultisigStore)
+  let current : IO (Option ArrivingAccount) := do return (← a.host.arrivingAccounts).find? (·.record.id == id)
+  let update (f : ArrivingAccount → RM ArrivingAccount) : IO Unit :=
+    RM.toIO (a.host.modifyArriving fun all => do
+      let some i := all.findIdx? (·.record.id == id) | return (all, ())
+      return (all.set! i (← f all[i]!), ()))
+  for _ in [0:8] do
+    let some entry ← current | return
+    -- this phone's own scan has not reached the block the account is current to
+    if entry.scannedThrough > target then return
+    -- the block the other device had it current to must be this chain's: one that is not is a reorg that
+    -- device saw, and the account goes back far enough for this chain's blocks to be scanned for it
+    if let some anchor := entry.anchor then
+      match ← anchorFork blockHash entry.scannedThrough anchor entry.record.history with
+      | some fork =>
+        update fun e => pure (if e.scannedThrough == entry.scannedThrough then { e.rollBack fork with anchor := none } else e)
+        if let some env ← a.env.get then
+          env.journal "multisig.anchorMismatch" [("id", id), ("from", toString entry.scannedThrough), ("fork", toString fork)]
+      | none =>
+        -- agreed, or this chain does not reach that block yet (it does: `scannedThrough ≤ target`)
+        if (← blockHash entry.scannedThrough).isNone then return
+        update fun e => pure (if e.scannedThrough == entry.scannedThrough then { e with anchor := none } else e)
+      continue
+    if entry.scannedThrough == target then
+      let watch := MultisigStore.watchCount entry.record
+      if watch > entry.passWatch && entry.passFrom ≤ target then
+        update fun e => pure { e with scannedThrough := e.passFrom - 1, passWatch := watch }
+        continue
+      -- (one already among the kept accounts only leaves the arriving ones)
+      unless (← a.host.read).records.any (·.id == id) do
+        a.withStore fun s => do return (← s.admit a.host.keys a.host.writeData entry.record, ())
+      RM.toIO (a.host.modifyArriving fun all => pure (all.filter (·.record.id != id), ()))
+      if let some env ← a.env.get then
+        env.journal "multisig.accountArrived" [("id", id), ("height", toString target)]
+      return
+    let (scripts, next) ← RM.toIO (entry.scripts (← caches.get))
+    caches.set next
+    let (through, complete) ← scan (entry.scannedThrough + 1) target scripts fun m => do
+      let (applied, next) ← RM.toIO do
+        let some e := (← a.host.arrivingAccounts).find? (·.record.id == id)
+          | throw (.multisig (.invalidState "the arriving account is gone"))
+        e.applyBlock m (← caches.get)
+      caches.set next
+      update fun _ => pure applied
+    -- only the copy this run began with is current to where the run got: one replaced meanwhile (a later copy
+    -- from the other device, a reorg) starts from its own block
+    let same ← IO.mkRef false
+    update fun e => do
+      if e.scannedThrough == entry.scannedThrough && e.passFrom == entry.passFrom then
+        same.set true
+        pure { e with scannedThrough := max e.scannedThrough (through.getD e.scannedThrough), note := none }
+      else pure e
+    unless complete && (← same.get) do return
+
+/-- The `multisigCatchUp` hook: every arriving account, one after another; one that cannot go on says why in
+its note and waits for the next pass. -/
+def catchUp (a : MultisigApp) (_network : Tx.BitcoinNetwork) (frontier : UInt32) (scan : RangeScanner)
+    (blockHash : ChainHashes) : IO Unit := do
+  if frontier == 0 then return
+  for entry in ← a.host.arrivingAccounts do
+    try a.catchUpOne entry.record.id (frontier - 1) scan blockHash
+    catch e =>
+      let note := toString e
+      discard <| (a.host.modifyArriving fun all =>
+        pure (all.map fun e => if e.record.id == entry.record.id then { e with note := some note } else e, ())).run
+
 /-- `ownedMultisigScripts`: the scripts the accounts watch, on the store's network. -/
 def ownedScripts (a : MultisigApp) : IO (Array ByteArray) := do
   a.watchScripts (← a.host.read).network
+
+/-- `ProfileMultisig.headStart`: each account takes the coins, history and address counters another device
+had for it, which its backup names the block of; its name, draft and Ledger stay this device's. Nothing changes
+unless every account here is among them, none is on its way from another device, and none has a spend of this
+device's in flight. -/
+def headStart (a : MultisigApp) (theirs : Array MultisigAccountRecord) : IO Bool := do
+  unless (← a.host.arrivingAccounts).isEmpty do return false
+  a.withStore fun s => do
+    if s.records.isEmpty then return (s, true)
+    let mut next : Array MultisigAccountRecord := #[]
+    for r in s.records do
+      let some o := theirs.find? (·.id == r.id) | return (s, false)
+      unless r.inFlight.isEmpty do return (s, false)
+      next := next.push { r with allUtxos := o.allUtxos, history := o.history,
+                                 nextReceiveIndex := max r.nextReceiveIndex o.nextReceiveIndex,
+                                 nextChangeIndex := max r.nextChangeIndex o.nextChangeIndex }
+    return (← s.restore a.host.keys a.host.writeData next, true)
+
+/-- `Hooks.multisigAt`: another held wallet's account store, read from its directory into a store of its own.
+Each call refuses once that directory is the open wallet's, whose store is then the one that writes the file. -/
+def at' (a : MultisigApp) (n : WinnowApp.Network) (dir : String) : IO ProfileMultisig := do
+  let host ← MultisigHost.new a.host.keys a.host.writeData
+  host.configure (Network.tx n) (some (System.FilePath.mk dir))
+  let other : MultisigApp := { a with host }
+  let file := System.FilePath.mk dir / MultisigStore.fileName
+  let guard {α} (x : IO α) : IO α := do
+    if (← a.host.read).path == some file then throw (IO.userError "this wallet is the open one now")
+    x
+  return {
+    watchScripts := fun network => guard (other.watchScripts network)
+    -- a person's payment index is the open wallet's records'; another wallet's people are told when it is opened
+    apply := fun m network => guard (other.applyMatchPaying (fun _ _ => pure ()) m network)
+    rollBack := fun fork => guard (other.rollBack fork)
+    catchUp := fun network frontier scan hashes => guard (other.catchUp network frontier scan hashes)
+    headStart := fun theirs => guard (other.headStart theirs)
+    backup := guard other.backup
+    handOver := fun r => guard (other.withStore fun s => do
+      if s.records.any (·.id == r.id) then return (← s.setDraft other.host.keys other.host.writeData r.id r.draft, ())
+      return (← s.admit other.host.keys other.host.writeData r, ())) }
 
 def hooks (a : MultisigApp) (base : Hooks) : Hooks :=
   { base with
     configure := fun n dir => do
       let r ← base.configure n dir
+      -- what was reviewed was for the wallet open then: which keys are this phone's changes with it
+      a.draftCache.set #[]
+      a.overviewCache.set none
       a.host.configure (Network.tx n) (some (System.FilePath.mk dir))
       a.signers.configure (Network.tx n) (some (System.FilePath.mk dir))
       return r
     multisigWatchScripts := a.watchScripts
     multisigApply := a.applyMatchPaying base.advancePersonIndex
+    multisigCatchUp := a.catchUp
     multisigRollBack := a.rollBack
+    multisigAt := a.at'
+    multisigHeadStart := a.headStart
     multisigValidate := fun rs n => RM.toIO (MultisigStore.validate rs n)
     multisigRestore := a.restore
     multisigBackup := a.backup
@@ -289,15 +419,23 @@ def reviewSpend (env : Env) (r : MultisigAccountRecord) (account : AnyMultisigAc
     IO MultisigAccount.SpendReview := do
   runMAM (account.reviewSpend psbt r.utxos (ownedCoordinates r) (← chainTip env))
 
+/-- Where on `path` an account key (a wallet's, public) is one of the account's signers. -/
+def positionsOf (key : Keys.HDKey) (account : AnyMultisigAccount) (path : SpendPath) : Array Nat :=
+  let keys := account.keysOn path
+  (List.range keys.size).toArray.filter fun i => match MultisigAccount.extendedKey? keys[i]! with
+    | some (base, _) => base.publicKey == key.publicKey
+    | none => false
+
 /-- `multisigOwnSignerPositions(_:path:)`. -/
 def ownSignerPositions (w : Wallet) (account : AnyMultisigAccount) (path : SpendPath) : Array Nat :=
   match walletAccountKey? w with
   | none => #[]
-  | some key =>
-    let keys := account.keysOn path
-    (List.range keys.size).toArray.filter fun i => match MultisigAccount.extendedKey? keys[i]! with
-      | some (base, _) => base.publicKey == key.publicKey
-      | none => false
+  | some key => positionsOf key account path
+
+/-- The other wallets kept on this device for the network: not the one that is open. -/
+def otherHeld (env : Env) : IO (Array HeldWallet) := do
+  let c ← env.get
+  return c.held.filter fun h => some h.dir != c.dir && some h.id != c.wallet.map (·.id)
 
 /-- `multisigApprovals(_:record:path:)`. -/
 def approvals (r : MultisigAccountRecord) (account : AnyMultisigAccount) (psbt : PSBT) (path : SpendPath) : Array Nat :=
@@ -348,11 +486,18 @@ def signingScreen (env : Env) (r : MultisigAccountRecord) (psbt : PSBT) : IO Mul
                                 phoneUnsigned := progress.phoneUnsigned || !own.all approved.contains }
     if let some ledger := ledgerPosition r (account.keysOn path) then
       progress := { progress with ledgerHolds := true, ledgerUnsigned := progress.ledgerUnsigned || !approved.contains ledger }
+  -- the other wallets kept here that hold one of the account's keys, each with whether it has signed
+  let mut heldKeys : List HeldKey := []
+  for h in ← otherHeld env do
+    let places := paths.map fun path => (positionsOf h.accountKey account path, approvals r account psbt path)
+    if places.any (!·.1.isEmpty) then
+      heldKeys := heldKeys ++ [{ walletID := h.id, unsigned := places.any fun (own, approved) => !own.all approved.contains,
+                                 slot := h.slot, name := if h.name.isEmpty then s!"Wallet {h.id}" else h.name }]
   let outputs := review.outputs.toList.map fun o =>
     { owned := o.isAccountOwned, amount := natOf o.amount,
       address := (AddressDecoder.address o.scriptPubKey network).getD (hex o.scriptPubKey) : MultisigOutputLine }
   return { outputs, inputTotal := natOf review.inputTotal, fee := natOf review.fee, signatures, signatureTitles := titles,
-           progress }
+           progress, heldKeys }
 
 /-- The screen's `install` + `refreshReview`: the PSBT in hand, its v0 text to share, and its review. -/
 def present (env : Env) (r : MultisigAccountRecord) (psbt : PSBT) : IO MultisigPSBT := do
@@ -481,6 +626,10 @@ def runOn {α} (session : LedgerSession) (p : Ledger.Program α) : IO α := do
   | .ok v => pure v
   | .error e => failText e.description
 
+/-- The Ledger with this master fingerprint answered on this device. -/
+def MultisigApp.ledgerAnswered (a : MultisigApp) (fingerprint : UInt32) : IO Unit :=
+  a.answered.modify fun seen => if seen.contains fingerprint then seen else seen.push fingerprint
+
 /-- `setLedger(id:registration:)` through the store. -/
 def setLedger (a : MultisigApp) (id : String) (registration : LedgerRegistration) : IO Unit :=
   a.withStore fun s => do return (← s.setLedger a.host.keys a.host.writeData id registration, ())
@@ -491,7 +640,7 @@ def existingOrNew (env : Env) (a : MultisigApp) (name text : String) : IO Multis
   if let some existing := (← a.host.read).record? id then return existing
   addMultisigAccount env a name text
 
-/-! ## Signers (Settings → Signers) -/
+/-! ## Signers (Settings → Security → Hardware wallets and keys) -/
 
 /-- `SignerLabel.fingerprint(of:network:)`: "6824f543", or "?" for text that is not a signer key. -/
 def signerFingerprint (key : String) (network : Tx.BitcoinNetwork) : String :=
@@ -505,8 +654,9 @@ def signerFingerprint (key : String) (network : Tx.BitcoinNetwork) : String :=
 def signerKeysText (r : SignerRecord) (network : Tx.BitcoinNetwork) : String :=
   " · ".intercalate (r.keys.toList.map (signerFingerprint · network))
 
-def signerInfo (r : SignerRecord) (network : Tx.BitcoinNetwork) : SignerInfo :=
-  { id := r.id, isLedger := r.isLedger, name := r.name, keys := r.keys.toList, keysText := signerKeysText r network }
+def signerInfo (r : SignerRecord) (network : Tx.BitcoinNetwork) (elsewhere : Array UInt32 := #[]) : SignerInfo :=
+  { id := r.id, isLedger := r.isLedger, name := r.name, keys := r.keys.toList, keysText := signerKeysText r network,
+    elsewhere := r.isLedger && r.masterFingerprint.any elsewhere.contains }
 
 /-- `text.split(whereSeparator: \.isWhitespace)`: the keys of a pasted share. -/
 def splitKeys (text : String) : List String :=
@@ -523,6 +673,7 @@ def pairLedger (env : Env) (a : MultisigApp) (name : String) : IO SignerRecord :
   let (expression, fingerprint) ← a.withSession fun session => runOn session (Ledger.Multisig.signerExpression network)
   let id ← uuidString
   let addedAt ← referenceDateNow
+  a.ledgerAnswered fingerprint
   let record ← a.withSigners fun s => s.addLedger a.signers.keys a.signers.writeData name expression fingerprint id addedAt
   env.journal "signer.ledgerPaired" [("id", record.id), ("fingerprint", Wallet.hex8 fingerprint)]
   return record
@@ -609,6 +760,7 @@ def registerLedger (env : Env) (a : MultisigApp) (id : String) : IO MultisigAcco
   let registration ← a.withSession fun session => do
     let fingerprint ← runOn session Ledger.Client.masterFingerprint
     runOn session (Ledger.Multisig.register account r.name fingerprint)
+  a.ledgerAnswered registration.masterFingerprint
   setLedger a r.id registration
   env.journal "multisig.ledgerRegistered" [("id", r.id)]
   record a id
@@ -639,7 +791,9 @@ def verifyLedgerAddress (env : Env) (a : MultisigApp) (id : String) (index : Nat
   let r ← record a id
   let some registration := r.ledger | failText notPairedText
   let account ← taprootAccount (← accountOf r (← currentNetwork env)) noLedgerForAccountText
-  a.withSession fun session => runOn session (Ledger.Multisig.displayAddress account registration 0 index.toUInt32)
+  let address ← a.withSession fun session => runOn session (Ledger.Multisig.displayAddress account registration 0 index.toUInt32)
+  a.ledgerAnswered registration.masterFingerprint
+  return address
 
 def signErrorText : Ledger.SignError → String
   | .ledger e => e.description
@@ -659,6 +813,7 @@ def signMultisigSpendWithLedger (env : Env) (a : MultisigApp) (id text : String)
     match ← runOn session (Ledger.Multisig.sign psbt taproot registration) with
     | .ok (signed, _) => pure signed
     | .error e => failText (signErrorText e)
+  a.ledgerAnswered registration.masterFingerprint
   discard <| reviewSpend env r account signed
   journalPSBT env "multisig-ledger-signed" signed
   present env r signed
@@ -696,7 +851,7 @@ def checkMultisigDescriptor (env : Env) (a : MultisigApp) (text : String) : IO M
 
 /-- `MultisigActionError` cases of #259. -/
 def draftInProgressText : String :=
-  "This account has a payment awaiting signatures. Finish or discard it under Transactions before starting another."
+  "This account has a payment awaiting signatures. Finish or discard it under Activity before starting another."
 def noDraftText : String := "This account has no payment awaiting signatures."
 def draftMismatchText : String := "That PSBT is for a different payment than the one awaiting signatures."
 def silentPaymentUnsupportedText : String :=
@@ -772,6 +927,8 @@ def previewAccountSend (env : Env) (a : MultisigApp) (inputs : SendInputs) : IO 
       pure (address, some (pid, index, rec))
     | none => pure (inputs.destination.trimAscii.copy, none)
   if SilentPaymentAddress.looksLikeCode destination then failText silentPaymentUnsupportedText
+  if Keys.SilentPaymentPairing.looksLikeCardCode destination then failText Wallet.cardCodeInSendText
+  if Keys.SilentPaymentPairing.looksLikeCardAddress destination then failText Wallet.cardAddressAloneText
   let network ← currentNetwork env
   let amount := inputs.amount.trimAscii.copy.toNat?.getD 0
   let payment ← match Payment.ofAddress (← satsOf amount) destination network with
@@ -825,7 +982,11 @@ def signAndDraft (env : Env) (a : MultisigApp) (inputs : SendInputs) (p : Previe
     | .ok t => pure t
     | .error e => failText (psbtErrorText e)
   unless review.authorizesTransaction unsigned review.fee review.changeAmount do failWith .sendReviewChanged
-  let signed ← signWithPhone env r psbt
+  -- the open wallet signs when one of the account's keys is its own; where none is (an account another
+  -- wallet's key is in), the payment is filed as it is and signed on its page, by whichever wallet holds a key
+  let w ← needWallet env
+  let account ← accountOf r w.network
+  let signed ← if (walletAccountKey? w).any account.includes then signWithPhone env r psbt else pure psbt
   let d ← draftOf signed (← chainTip env) (review.recipient.map (·.1)) (review.recipient.bind (·.2))
   fileDraft a r.id (some d)
   env.modify fun c => { c with reviews := c.reviews.filter (·.inputs != inputs) }
@@ -837,6 +998,23 @@ def signDraft (env : Env) (a : MultisigApp) (id : String) : IO Unit := do
   let r ← record a id
   let (_, psbt) ← draftPSBT r
   updateDraft env a r (← signWithPhone env r psbt)
+
+def notHeldText : String := "That wallet is not kept on this device."
+
+/-- `Backend.handOverDraft`: the payment being collected goes, as it is, to the same account in another wallet
+kept on this device, which holds one of its keys: switched to, that wallet adds its own signature with its own
+key. Whether the wallet is kept here and its key is one of the account's is checked first; no key is read. -/
+def handOverDraft (env : Env) (a : MultisigApp) (id slot : String) : IO Unit := do
+  let w ← needWallet env
+  let r ← record a id
+  unless r.draft.isSome do failText "There is no payment to hand over."
+  let some h := (← otherHeld env).find? (·.slot == slot) | failText notHeldText
+  let account ← accountOf r w.network
+  unless account.includes h.accountKey do failText notASignerText
+  let some n := (← env.get).network | failWith .noWallet
+  let other ← env.hooks.multisigAt n h.dir
+  other.handOver r
+  env.journal "multisig.handedOver" [("id", r.id), ("walletID", h.id)]
 
 /-- The draft signed by the Ledger (`signMultisigSpendWithLedger` then `updateMultisigDraft`). -/
 def signDraftWithLedger (env : Env) (a : MultisigApp) (id : String) : IO Unit := do
@@ -962,7 +1140,14 @@ Transactions list over the wallet's rows, each account's history and each review
 def snapshotPayments (a : MultisigApp) (owned : Std.HashSet ByteArray) (net : Tx.BitcoinNetwork)
     (wallet : List HistoryItem) : IO (Int × List DisplayedPayment) := do
   let store ← a.host.read
-  let balance := store.records.foldl (fun t r => t + r.balance.toInt) 0
+  -- the open wallet's money: the accounts its key is in (another wallet's are that wallet's)
+  let own ← match (← a.env.get) with
+    | some env => pure ((← env.get).wallet.bind walletAccountKey?)
+    | none => pure none
+  let counts (r : MultisigAccountRecord) : Bool := match own, AnyMultisigAccount.parse r.descriptor store.network with
+    | some k, .ok account => account.includes k
+    | _, _ => true
+  let balance := store.records.foldl (fun t r => if counts r then t + r.balance.toInt else t) 0
   let accounts := store.records.toList.map fun r => (r.id, r.name, r.history.toList.map (historyItem · owned net))
   let mut drafts : List DisplayedPayment := []
   if let some env ← a.env.get then
@@ -1031,7 +1216,10 @@ def info (r : MultisigAccountRecord) (network : Tx.BitcoinNetwork) (signers : Ar
     let (membersHeader, memberLines) := match taproot with
       | some taproot => groupsSection taproot ownKey names
       | none => (none, [])
+    -- the receive address shown: at the counter, or past an index where the account has no address
+    let shown := (MultisigStore.shownReceiveIndex account r).toOption
     { base with
+      nextReceiveIndex := (shown.getD r.nextReceiveIndex).toNat
       policy := some account.policySummary
       recovery := taproot.bind fun taproot => taproot.recovery.map (recoveryText · taproot)
       buildsPayments := taproot.isSome
@@ -1045,7 +1233,7 @@ def info (r : MultisigAccountRecord) (network : Tx.BitcoinNetwork) (signers : Ar
       isNested := account.isNested, membersHeader, memberLines
       signerExpressions := (taproot.map (·.signerExpressions.toList)).getD []
       threshold := account.threshold.toNat, signerCount := account.signers.size
-      receiveAddress := (account.address r.nextReceiveIndex).toOption
+      receiveAddress := shown.bind fun index => (account.address index).toOption
       coins := r.utxos.toList.map fun u =>
         { amount := natOf u.amount, line := coinLine u,
           recoveryFrom := (taproot.bind (·.recoveryUnlockHeight u)).map (·.toNat) } }
@@ -1059,19 +1247,41 @@ def overview (env : Env) (a : MultisigApp) : IO MultisigOverview := do
     | some w => pure (((← (ownKeyExpression w true).run).toOption))
     | none => pure none
   let ownKey := (← env.get).wallet.bind walletAccountKey? |>.map (·.publicKey)
+  let walletKey := (← env.get).wallet.bind walletAccountKey?
+  let held ← otherHeld env
+  let answered ← a.answered.get
   let k : OverviewKey :=
     { records := store.records, signers := signers.records, notice := ← a.host.notice.get,
-      signerNotice := ← a.signers.notice.get, key, tip := ← chainTip env }
+      signerNotice := ← a.signers.notice.get, key, tip := ← chainTip env, arriving := ← a.host.arrivingAccounts,
+      elsewhere := (← a.elsewhere.get).filter (!answered.contains ·), held := held.map (·.id) }
+  -- an account none of whose keys is a wallet's kept on this device: it came from another device, and is
+  -- only watched here. One whose key another wallet here holds is signed from its page, with that wallet's key
+  let watchOnly (r : MultisigAccountRecord) : Bool :=
+    match walletKey, AnyMultisigAccount.parse r.descriptor store.network with
+    | some own, .ok account => !account.includes own && !held.any fun h => account.includes h.accountKey
+    | _, _ => false
+  -- whose key the account holds: the open wallet's (its account, its money), or another's kept here
+  let signsHere (r : MultisigAccountRecord) : Bool :=
+    match walletKey, AnyMultisigAccount.parse r.descriptor store.network with
+    | some own, .ok account => account.includes own
+    | _, _ => true
+  let signsIn (r : MultisigAccountRecord) : Option String :=
+    match AnyMultisigAccount.parse r.descriptor store.network with
+    | .ok account => (held.find? fun h => account.includes h.accountKey).map fun h =>
+        if h.name.isEmpty then s!"Wallet {h.id}" else h.name
+    | .error _ => none
   if let some (k', o) ← a.overviewCache.get then
     if k' == k then return o
   let o : MultisigOverview :=
     { accounts := ← store.records.toList.mapM fun r => do
         return { info r store.network signers.records ownKey with
                  draft := (← draftDetails env a r).map (·.info),
-                 inFlight := r.inFlight.toList.map (Winnow.displayHex ·.txid) },
+                 inFlight := r.inFlight.toList.map (Winnow.displayHex ·.txid),
+                 watchOnly := watchOnly r, signsHere := signsHere r, signsIn := if signsHere r then none else signsIn r },
       notice := k.notice, keyExpression := key,
       ownFingerprint := key.map (signerFingerprint · store.network),
-      signers := signers.records.toList.map (signerInfo · store.network), signerNotice := k.signerNotice }
+      signers := signers.records.toList.map (signerInfo · store.network k.elsewhere), signerNotice := k.signerNotice,
+      arriving := k.arriving.toList.map fun e => { id := e.record.id, name := e.record.name, note := e.note } }
   a.overviewCache.set (some (k, o))
   return o
 

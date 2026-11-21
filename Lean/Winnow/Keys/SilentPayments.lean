@@ -136,11 +136,14 @@ structure Context where
 
 /-! ## Script templates -/
 
-def isP2TR (s : ByteArray) : Bool := s.size == 34 && s[0]! == 0x51 && s[1]! == 0x20
-def isP2WPKH (s : ByteArray) : Bool := s.size == 22 && s[0]! == 0x00 && s[1]! == 0x14
+def isP2TR (s : ByteArray) : Bool :=
+  if h : s.size = 34 then s[0] == 0x51 && s[1] == 0x20 else false
+def isP2WPKH (s : ByteArray) : Bool :=
+  if h : s.size = 22 then s[0] == 0x00 && s[1] == 0x14 else false
 def isP2PKH (s : ByteArray) : Bool :=
-  s.size == 25 && s[0]! == 0x76 && s[1]! == 0xA9 && s[2]! == 0x14 && s[23]! == 0x88 && s[24]! == 0xAC
-def isP2SH (s : ByteArray) : Bool := s.size == 23 && s[0]! == 0xA9 && s[1]! == 0x14 && s[22]! == 0x87
+  if h : s.size = 25 then s[0] == 0x76 && s[1] == 0xA9 && s[2] == 0x14 && s[23] == 0x88 && s[24] == 0xAC else false
+def isP2SH (s : ByteArray) : Bool :=
+  if h : s.size = 23 then s[0] == 0xA9 && s[1] == 0x14 && s[22] == 0x87 else false
 
 /-! ## Scalars and points -/
 
@@ -237,7 +240,7 @@ def Input.eligiblePublicKey (i : Input) : Option ByteArray :=
 /-! ## Deriving the outputs -/
 
 /-- Lexicographic order of byte strings (a prefix first), as Swift's `lexicographicallyPrecedes`. -/
-def bytesLess (a b : ByteArray) : Bool := a.toList < b.toList
+def bytesLess (a b : ByteArray) : Bool := ByteArray.lexLt a b
 
 /-- The eligible inputs, a (each P2TR key for its even-Y point first; a = 0 fails) and the input hash over
 the smallest outpoint of all inputs and A = a·G. -/
@@ -248,7 +251,7 @@ def context (inputs : List Input) : SP Context := do
     let some key := input.eligiblePublicKey | continue
     let mut secret := input.privateKey
     if isP2TR input.prevoutScriptPubKey then
-      if (← publicKeyPoint secret)[0]! == 0x03 then secret ← negate secret
+      if (← publicKeyPoint secret)[0]? == some 0x03 then secret ← negate secret
     sum ← scalarAdd sum secret
     keys := keys.push key
   if keys.isEmpty then throw .noEligibleInputs
@@ -295,11 +298,13 @@ def outputScripts (inputs : List Input) (recipients : List SilentPaymentAddress)
     | some g => groups := groups.modify g fun (s, is) => (s, is.push index)
     | none => groups := groups.push (r.scanKey, #[index])
   if groups.any (·.2.size > maxRecipientsPerGroup) then throw .tooManyRecipientsPerGroup
-  let mut scripts : Array ByteArray := Array.replicate recipients.length .empty
+  let recArr := recipients.toArray
+  let mut scripts : Array ByteArray := Array.replicate recArr.size .empty
   for (scanKey, indices) in groups do
     let secret ← sharedSecret c scanKey
     for (index, k) in indices.toList.zipIdx do
-      scripts := scripts.set! index (← outputScript secret recipients[index]!.spendKey k.toUInt32)
+      if h : index < recArr.size ∧ index < scripts.size then
+        scripts := scripts.set index (← outputScript secret (recArr[index]'h.1).spendKey k.toUInt32) h.2
   return scripts.toList
 
 end SilentPaymentSending

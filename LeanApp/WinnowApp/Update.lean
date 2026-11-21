@@ -43,6 +43,7 @@ def Model.sensitive (m : Model) (g e : Nat) : Bool := g == m.generation && e == 
 def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
   | .launched forced => ({ m with forcedNetwork := forced }, [])
+  | .versionRead text => ({ m with appVersion := some text }, [])
   | .settingsLoaded s =>
     let m := { m with settings := s }.loadGatewayDraft
     (m, [.setAppearance s.appearance, .openWallet m.generation s.network true])
@@ -59,11 +60,23 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     match r with
     | .opened id =>
       let (m, scan) := { m with stage := .ready, walletID := some id }.startLedgerScan
-      (m, [.refresh g] ++ start ++ pending ++ scan)
+      -- switched to sign a payment: the payment's page, under its account's, where this wallet adds its signature
+      let (m, account) := match m.pendingAccount with
+        | some a => ({ m with pendingAccount := none, routes := [.multisigAccount a, .multisigPSBT a],
+                              collect := { epoch := m.collect.epoch + 1, loadingDraft := true } }, [Cmd.multisigOverview g])
+        | none => (m, [])
+      (m, [.refresh g] ++ start ++ pending ++ scan ++ account)
     -- activation builds the stack whatever the stage, so a new wallet is dated at a synced tip; onboarding
     -- looks for this network's iCloud backups (`.task(id: model.network)`)
     | .missing => ({ m with stage := .onboarding, walletID := none }, start ++ [.discoverCloud] ++ pending)
     | .damaged msg => ({ m with stage := .storageDamaged msg }, pending)
+  | .renamed g error =>
+    if !m.sameWallet g then (m, []) else
+    match error with
+    | some e => ({ m with renameBusy := false, renameError := some e }, [])
+    | none => ({ m with renameBusy := false, sheets := m.sheets.filter (· != .renameWallet) }, [])
+  | .walletPlace g slot wallets =>
+    if !m.sameWallet g then (m, []) else ({ m with slot, wallets }, [])
   | .created g id =>
     -- creation finishes onboarding by itself: no phrase checklist, and neither iCloud nor a manual backup
     -- decides whether the wallet can be used
@@ -94,10 +107,12 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
     -- the wallet is gone whether or not the scene left the front meanwhile
     if !m.sameWallet g then (m, []) else
     let m' := m.nextWallet
-    let m' := { m' with stage := Stage.onboarding, walletID := none, status := ({} : Status), records := ({} : Records),
+    let m' := { m' with stage := Stage.loading, walletID := none, status := ({} : Status), records := ({} : Records),
                         multisig := ({} : MultisigOverview), collect := m'.collect.cleared }
     let m' := { m' with phase := SyncPhase.idle, confirm := none, sheets := [], routes := [], nearbyLedger := none, ledgerSetup := none }
-    (m', [.stopNetworking])
+    -- what is kept now is asked of the backend: another of this network's wallets opens, or with none left
+    -- the empty place onboarding begins in
+    (m', [.stopNetworking, .openWallet m'.generation m'.settings.network false])
   | _ => (m, [])
 
 /-- What the sync and the records report: a snapshot, records, the receive window, a failure. -/
@@ -107,6 +122,13 @@ def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
     if !m.current g then (m, []) else
     let wasSyncing := m.status.syncing
     let s := { s with history := historyForDisplay s.history }
+    -- in a wallet that has made someone a card, the sync names a payment to that card as the person's as it
+    -- finds it: the people and labels are read again when a payment appears that was not here before, and
+    -- when the pass that found it ends (the name is written just after the payment is, so the first read can
+    -- come too early)
+    let arrived := s.history.any fun e => e.net > 0 && !(m.status.history.any (·.txid == e.txid))
+    let named : List Cmd :=
+      if (arrived || (wasSyncing && !s.syncing)) && m.records.people.any (·.hasCard) then [.records g] else []
     let m := { m with status := s, phase := p }
     -- the mempool window owns only the temporary rows: a payment seen in a block drops its row
     let m := { m with receive := { m.receive with unconfirmed := m.receive.unconfirmed.filter fun (t, _) =>
@@ -119,7 +141,8 @@ def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
           | none => m
         else m
       | none => m
-    if wasSyncing && !s.syncing then m.loadPayment else (m, [])
+    let (m, cs) := if wasSyncing && !s.syncing then m.loadPayment else (m, [])
+    (m, cs ++ named)
   | .records g r => if m.current g then m.onRecords r else (m, [])
   | .updated g d r =>
     if !m.sameWallet g then (m, []) else
@@ -194,8 +217,14 @@ def Model.onSettingsHost (m : Model) (h : Host) : Model × List Cmd :=
   | .revealed g e words =>
     if m.sensitive g e then ({ m with reveal := { words } }.present .revealPhrase, [])
     else (m, [])
-  | .card g name card =>
-    if m.current g && m.settings.ownDisplayName.trimAscii.copy == name then ({ m with shareCard := { card := some card } }, []) else (m, [])
+  | .personCard g personName card address records =>
+    if !m.current g then (m, []) else
+    -- the person may be new, and now has a card: the records are current either way
+    let m := { m with records }
+    if m.shareCard.forName.trimAscii.copy == personName then
+      let shown : ShareCard := { m.shareCard with personCard := some (personName, card), personAddress := address, making := false, error := none }
+      ({ m with shareCard := shown }, [])
+    else ({ m with shareCard := { m.shareCard with making := false } }, [])
   | _ => (m, [])
 
 /-- Adding a person: the parsed paste and the sender lookup. -/
@@ -296,7 +325,8 @@ def onHost (h : Host) (m : Model) : Model × List Cmd :=
   (m, cs ++ cs2)
 where onArea (h : Host) (m : Model) : Model × List Cmd :=
   match h with
-  | .launched .. | .settingsLoaded .. | .booted .. | .created .. | .imported .. | .cloud .. | .cloudRestored ..
+  | .launched .. | .versionRead .. | .settingsLoaded .. | .booted .. | .renamed .. | .walletPlace .. | .created .. | .imported .. | .cloud ..
+  | .cloudRestored ..
   | .deleted .. =>
     m.onWalletHost h
   | .snapshot .. | .records .. | .updated .. | .receiveAddress .. | .unconfirmed .. | .failed .. =>
@@ -304,7 +334,7 @@ where onArea (h : Host) (m : Model) : Model × List Cmd :=
   | .resolvedRate .. | .previewed .. | .sent .. | .rawTransaction .. | .relay .. | .paymentLoaded .. | .pendingRate ..
   | .bumpPreviewed .. | .bumped .. =>
     m.onSendHost h
-  | .catalogStored .. | .peers .. | .peersReset .. | .exported .. | .revealed .. | .card .. =>
+  | .catalogStored .. | .peers .. | .peersReset .. | .exported .. | .revealed .. | .personCard .. =>
     m.onSettingsHost h
   | .pasteParsed .. | .senderLookup .. =>
     m.onPeopleHost h
@@ -313,7 +343,7 @@ where onArea (h : Host) (m : Model) : Model × List Cmd :=
     m.onSystemHost h
   | .pasted target text => m.onPasted target text
   | .multisig .. | .multisigChecked .. | .multisigAdded .. | .multisigCreated .. | .multisigRemoved ..
-  | .drafted .. | .collected .. | .draftBroadcast .. | .spendHandled .. | .ledgerPaired ..
+  | .drafted .. | .collected .. | .handedOver .. | .draftBroadcast .. | .spendHandled .. | .ledgerPaired ..
   | .ledgerAddressShown .. | .ledgerRegistered .. =>
     m.onMultisigHost h
   | .signerSaved .. | .signerRenamed .. | .signerRemoved .. => m.onSignerHost h
@@ -337,6 +367,7 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
   | .createWallet =>
     ({ m with onboarding := { m.onboarding with busy := true, error := none } }, [.createWallet g m.settings.network])
   | .openImport => ({ m with onboarding := { m.onboarding with importReport := none, error := none } }.present .importWallet, [])
+  | .unlockRecords => if m.status.recordsLocked then (m, [.unlockRecords g]) else (m, [])
   | .setImportText s => ({ m with onboarding := { m.onboarding with importText := s } }, [])
   | .pasteImport => (m, [.paste .importBundle])
   | .importWallet =>
@@ -353,7 +384,7 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
     | none => (m, [])
   | .switchNetwork net => m.switchNetwork net
   | .dismissConfirm => ({ m with confirm := none }, [])
-  | .openReceive => ({ m with receive := ({} : Receive) }.present .receive, [.receiveAddress g false])
+  | .openReceive => ({ m with receive := ({} : Receive), shareCard := {} }.present .receive, [.receiveAddress g false])
   | .openSend =>
     let m := { m with send := { inputs := { network := m.settings.network } } }.present .send
     (m, [.resolveRate g m.sendInputs m.status.feeFloorMilli])

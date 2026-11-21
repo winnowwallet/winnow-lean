@@ -2,7 +2,8 @@
 
 Winnow 0.9.x is written in Lean 4. This guide describes how this repository's
 app is tested and what its journey media show. The Swift app's suites
-(WalletCoreTests, AppTests, the single signet journey) ended with 0.8.13; their
+(WalletCoreTests, AppTests, the single signet journey) ended with the Swift app,
+whose main stopped at 0.8.13 and whose tags on branches ran to v0.8.21; their
 history stays in [winnowwallet/winnow](https://github.com/winnowwallet/winnow).
 [PORT.md](../PORT.md) lists how each ported part is verified, and the
 [script index](../scripts/README.md) describes the helpers named below.
@@ -15,13 +16,16 @@ Every pull request that is ready for review and changes more than the docs (`*.m
 and so does main: on every push, and by hand (after a push whose run failed, or
 a force-push, which starts no run, before tagging). Every run is the same full run, and
 `release.yml` looks for one on the tag's tree that is not a pull request's.
+While the repository variable `MACOS_RUNNER` is set, this repository's own
+branches run on that label (a self-hosted Mac) instead; a fork's pull request
+always runs on GitHub's.
 Three jobs start at once, and each builds the Lean from the cache.
 
 | Job | What it runs |
 | --- | --- |
-| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/gen-scalar-mul-proofs --check`, `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, and `scripts/ci-regtest`'s four suites as four lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested) and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the eight journeys headless against the app itself (LeanNative's `wire-journey`). |
-| `app` (two at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split in two (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump and Retry on one runner; Ledger, census, silent payments and spent-elsewhere on the other). |
-| `media` | Once both parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
+| `lean` | Builds `Lean/` and `LeanApp/`, which checks every proof, and the test executables; imports the census peer list (`scripts/import-census`). Then, all at the same time: `scripts/check-core` (the core library's imports held to their list), `scripts/check-proofs` (nothing that runs imports a proof, modules that run state no theorem, no `sorry` or new axiom, no `!` indexing in the modules listed as bounds-clean), `scripts/check-shell-names` (the iOS project prepared without Xcode: no string in the app's C is a shell capability the manifest does not list), `census-check` on that list, the scripts' unit tests (`scripts/tests`), `multisig-test`, `ledger-test`, `silent-payment-test`, `card-keys-test`, `crypto-test`, `segwit-test`, `secpct-test` (2,000 keys), `scripts/secp-vectors --check`, `fuzz`, `records-test`, `multisig-app-test`, `ledger-transport-test`, `cloud-backup-test`, `device-sync-test`, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest Bitcoin Core (the pinned release `scripts/install-bitcoin` downloads): `io-test`, `backend-test`, `multisig-differential` (`MULTISIG_CASES`, 9, six of them nested), `card-regtest` and `segwit-regtest` (a `wsh(sortedmulti(2, …))` account with one fixed key: Core's wallets and this one sign together, and Core's chain confirms; `backend-test` has the app's side of the same: the account joined from its descriptor, a payment Core built and co-signed checked, signed and broadcast by the app); and the fourteen journeys headless against the app itself (LeanNative's `wire-journey`). |
+| `app` (three at once) | The same build and import; the Debug simulator build, checked for Swift; the UI journeys split across three runners, four or five each (`ui-journey-shards`: create-receive-send, the 2-of-3, the fee bump and Retry on the first; the two Ledger journeys, census, silent payments and spent-elsewhere on the second; the card for one person, post-backup card restore, SegWit v0 multisig, the account that follows devices and two wallets on one device on the third). |
+| `media` | Once all three parts pass: their evidence joined into the `journey-media` artifact (one video, the journeys in order). |
 | `release` | The same build and import; the Debug and Release simulator builds and the Release device build, each checked for Swift; the test-mode check. |
 
 The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
@@ -29,14 +33,15 @@ The test-mode check (LeanNative's `test-mode-check`, set by `ci.yml`'s
 Debug must start the test run and journal it, Release must ignore it and boot
 into its ordinary storage.
 
-## The eight journeys
+## The fourteen journeys
 
-The UI journeys are Lean (`LeanApp/Journeys.lean`), run on the Mac. Each step
-is one command to LeanNative's journey driver, the one XCUITest in the app's UI
-test target; each check is Lean, against the node. Each journey launches the
-app in test mode on an iPhone Duo simulator against a regtest node, finds
-controls by the identifiers the views give them, and checks the app's results
-against the node.
+The UI journeys are Lean (`LeanApp/Journeys.lean` and `LeanApp/Journeys/`), run
+on the Mac. Each step is one command to LeanNative's journey driver, the one
+XCUITest in the app's UI test target; each check is Lean, against the node. Each
+journey launches the app in test mode in a simulator against a regtest node,
+finds controls by the identifiers the views give them, and checks the app's
+results against the node. CI's simulator is an iPhone 17 Pro (`ci.yml`'s
+`ui-device-type`).
 
 - `createReceiveSendConfirm`: create a wallet, receive from the node,
   review and send a payment the node accepts, see it confirm.
@@ -66,16 +71,88 @@ against the node.
   finds out from the block: Send and the Transactions row say replaced, the
   balance drops and the fee bump goes. A payment of two coins, one of them
   spent the same way, gives the other coin back, and the phone spends it.
+- `accountFollowsDevices`: two launches with two seeds are two devices of one
+  person, and a directory both are given stands in for their iCloud
+  (`WINNOW_E2E_CLOUD`; test mode has no iCloud otherwise). The first pairs test
+  mode's simulated Ledger (`Nano X`), builds a 2-of-2 with a Core key, is paid
+  and saves its backup. The second, a different wallet with no Ledger attached,
+  is told nothing: it lists the account by itself under Watching with the
+  balance its own scan confirms and the next address Core derives, says it only
+  watches, lists the paired Ledger under Hardware wallets and keys as paired on
+  another device, and confirms reading the other device's backup under iCloud
+  backup (`cloudDevicesNote`).
+- `twoWalletsOneDevice`: Settings → Profiles → Add a profile makes a second
+  profile beside the first, through the onboarding there already is, and Home's
+  profile pill renames it to `Savings`. While `Savings` stays open, the node
+  pays the inactive first profile; global sync scans through the tip in the
+  background, `Savings`'s balance stays `0`, and switching to the first profile
+  shows the payment already there. `Savings` then builds a 2-of-2 of itself and
+  the first profile and the node pays it. A payment from it is signed by the
+  profile that is open, handed to the other with "Switch to … and sign", which
+  opens and signs with its own key; the node takes the witness with both
+  signatures.
 - `retryAfterNoPeers`: the node goes off the network (`setnetworkactive
   false`) while the app is in the background. Back in the foreground, Home
   says it couldn't reach the network and offers Retry. With the node back,
   Retry reconnects before the pool's own redial would, and the wallet finds
   a payment. The node goes back on the network however the journey ends.
+- `ledgerCardTwoOfTwo`: onboarding ends with the Bluetooth card and test
+  mode's simulated Ledger brings the Ledger card over the home. Set up pairs
+  it, creates the 2-of-2 of this phone and the Ledger, registers it on the
+  Ledger and has the Ledger show the account's first address to compare. The
+  node pays that address and the account sees the coin.
+- `cardForOnePerson`: on Receive, Bob makes a card for one person, Dana
+  (issue #94): a code under a card's prefix (`twinnowcard1p…`), with no tweak
+  and neither of the wallet's keys in it, shown the same when asked again, and
+  an ordinary address for her that is the card's first and distinct from his
+  own. A second wallet (Dana) tests that pasting the bare `twinnowcard1p…` code
+  into Send is refused with guidance to Saved recipients, saves Bob from the
+  full card under Saved recipients, and pays him twice at two distinct derived
+  addresses (`0` and `1`) without an address-reuse warning. Bob reopens his
+  wallet, sees both payments named `"Received from Dana"` in Activity, verifies
+  Dana's ordinary address on Receive rotated past both paid indices to index
+  `2`, and spends both card coins back to Core. The headless run answers the
+  device-authentication prompt itself; that making a card asks, and that
+  declining makes none, is `records-test`'s.
+- `cardRestoreFromBackup`: Bob creates a wallet, waits for its pre-card iCloud
+  backup (over `WINNOW_E2E_CLOUD`) and turns automatic backup off so the cloud
+  copy stays frozen before any card exists, then issues Dana's card on Receive
+  and receives funding to it. A fresh device restores that pre-card backup from
+  iCloud, discovers the post-backup card coin through card-restore scanning,
+  shows it in Activity, and spends it back to Core.
+- `segwitMultisigJoinSign`: reads this phone's key, builds a SegWit v0 2-of-3
+  descriptor (`wsh(sortedmulti(2, …))`) with two Bitcoin Core wallets, and
+  joins it from its pasted descriptor under Settings → Security → Multisig
+  accounts (checking the `2 of 3` policy, Core's first `bcrt1q…` address, and
+  that a join-only SegWit v0 account offers Paste a PSBT and no Send from this
+  account). Core funds it, builds and pre-signs a PSBT (`1 of 2` at Core's fee,
+  broadcast disabled); the phone adds its ECDSA signature (`2 of 2`), finalizes
+  and broadcasts, Core accepts the 4-item P2WSH witness (empty dummy, two DER
+  `SIGHASH_ALL` signatures and the `sortedmulti` witnessScript), and Activity
+  shows the spend confirmed under the account.
+
+Multisig accounts and signers that follow a person between devices have one
+journey, `accountFollowsDevices`, over a directory standing in for iCloud, and
+the rest headless. `device-sync-test` holds the rules
+(`Lean/Winnow/Wallet/DeviceSync.lean`) case by case, then runs two and three
+phones, each the real backend with its iCloud flows, over one in-memory iCloud
+and Keychain: signers and Ledgers follow, are renamed and removed; an account
+arrives, is caught up and shown watch-only; a removal travels, and does not
+where coins are; nothing follows with backup off, under another Apple
+Account or from a backup whose key has not arrived; and a backup in a form a
+restore refuses (an account of another kind, a signer of another shape, a
+context that no longer reads) still gives its accounts and signers, while one
+that does not open is said so by its date and not fetched again. `backend-test`'s
+`devicesFlow` runs two on regtest: the second device finds a coin paid after the
+first one's backup by its own scan, and a payment started on one gathers its
+signatures across both and confirms. Real iCloud between two real devices is
+outside every test here: CloudKit's own transport, the wrapping key's arrival
+through iCloud Keychain, and how long either takes.
 
 What the journeys do not cover: a physical Ledger (CI's is simulated; the
 owner's Nano X co-signed a mainnet 2-of-2 on 26 October 2026 with the Swift
 app), receiving silent payments (Winnow does not), live Tor and I2P gateways,
-iCloud, background tasks scheduled by iOS, and iPad layouts. Two of those
+real iCloud, background tasks scheduled by iOS, and iPad layouts. Two of those
 paths run headless instead: `records-test` sends a background task's launch and
 expiry through the app's `perform` with a fake shell, and `cloud-backup-test`
 declines the device check before the iCloud backup's preparation and restore.
@@ -116,10 +193,12 @@ app's `Tools/Fuzz`. It runs in the `lean` job on every run, with a seed taken fr
 the commit, so each commit tries new inputs and a failure replays from the line it
 prints. There is no separate job and no schedule.
 
-It mutates known-good inputs for 30 targets: the fifteen upstream had, the same
+It mutates known-good inputs for 31 targets: the fifteen upstream had, the same
 address and silent payment rules past their checksums, the files and Ledger
-replies upstream's harness could not reach, and seven for ECDSA and SegWit v0
-multisig accounts (below). A check parses the input and holds what
+replies upstream's harness could not reach, seven for ECDSA and SegWit v0
+multisig accounts (below), and `device-sync`, which reads the stamps another
+device's backup carries and requires that they never make a device take back an
+account removed there or remove one that was not. A check parses the input and holds what
 parsed to what the wallet relies on, mostly that the canonical form parses back to
 the same value. A refusal is not a finding. These are:
 

@@ -35,6 +35,56 @@ def Network.net : WinnowApp.Network → Net.BitcoinNetwork
 
 /-! ## The seam for the records half -/
 
+/-- What an arriving account's row says while the blocks it needs are older than the headers this phone holds:
+no scan from here reaches them, and only a later copy from the other device can be caught up from. -/
+def waitingForNewerCopyText : String :=
+  "Waiting for a newer copy from your other device. Open Winnow there and let it sync."
+
+/-- One run of a bounded scan of blocks `fromHeight … toHeight` for `scripts`, each matched block handed over in
+order (`FilterSyncIO.scanRange`, which never moves the forward scan): the last block it reached, and whether
+that was the range's end. -/
+abbrev RangeScanner := (fromHeight toHeight : UInt32) → Array ByteArray → (Net.BlockMatch → IO Unit) → IO (Option UInt32 × Bool)
+
+/-- This device's header chain, read: the hash of the block at a height, none past its tip or below its start. -/
+abbrev ChainHashes := UInt32 → IO (Option ByteArray)
+
+/-- How far below a handed-over height a disagreeing anchor sends the scan back when nothing in the history
+names an earlier block: a day of blocks. -/
+def anchorRewind : UInt32 := 144
+
+/-- `anchorFork`: the height to roll back to when state that came from elsewhere (a restore, an import, an
+account from another device) names a block at `height` that is not this chain's: the lower of
+`anchorRewind` below the anchor and the lowest confirmed history entry whose own block is not this chain's
+(less one). None when the anchor is this chain's, or cannot be checked yet (the chain is shorter). -/
+def anchorFork (blockHash : ChainHashes) (height : UInt32) (anchor : ByteArray) (history : Array HistoryEntry) :
+    IO (Option UInt32) := do
+  let some ours ← blockHash height | return none
+  if ours == anchor then return none
+  let mut fork := if height > anchorRewind then height - anchorRewind else 0
+  for h in history do
+    let some theirs := h.blockHash | continue
+    if h.height == 0 || h.height > fork then continue
+    if (← blockHash h.height) != some theirs then fork := h.height - 1
+  return some fork
+
+/-- The multisig store of one wallet kept on this device, as a sync pass uses it: the open wallet's through the
+hooks below, another's through `Hooks.multisigAt` (its own copy of its directory's file, which refuses once
+that wallet is the open one, whose store is then the only one that writes it). -/
+structure ProfileMultisig where
+  watchScripts : Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ => pure #[]
+  apply : Net.BlockMatch → Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ _ => pure #[]
+  rollBack : UInt32 → IO Unit := fun _ => pure ()
+  catchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → ChainHashes → IO Unit := fun _ _ _ _ => pure ()
+  /-- The accounts as another device had them, taken for what the chain gave them (`headStart`): false, and
+  nothing changed, unless every account here is among them and none has a spend of this device's in flight. -/
+  headStart : Array MultisigAccountRecord → IO Bool := fun _ => pure false
+  /-- The accounts as a backup carries them. -/
+  backup : IO (Array MultisigAccountRecord) := pure #[]
+  /-- An account with the payment being collected (`handOverDraft`): its draft put in place, or the account
+  filed whole where it is not yet (the scan the two wallets share has it as current). -/
+  handOver : MultisigAccountRecord → IO Unit := fun _ => pure ()
+  deriving Inhabited
+
 /-- What the core needs from people and labels (the records half plugs these in). -/
 structure Hooks where
   /-- `configurePeople` (and the receive labels) for the network's directory: `some message` when a
@@ -45,6 +95,9 @@ structure Hooks where
     fun _ => notPorted "Paying a saved person"
   /-- `advancePersonPaymentIndex(id:past:)` after a send to a person commits. -/
   advancePersonIndex : (personID : String) → UInt32 → IO Unit := fun _ _ => pure ()
+  /-- A block paid an issued card (`IssuedCard.index`) in the transaction `txid` (display hex): the payment
+  is named as the person's the card was issued for. -/
+  cardPayment : (card : UInt32) → (txid : String) → IO Unit := fun _ _ => pure ()
   -- The multisig account store (`MultisigStore`), which the scan, rollbacks, import, export and the
   -- history's ownership read. Without it no account is watched, and a bundle carrying accounts is refused
   -- rather than restored without them.
@@ -52,8 +105,20 @@ structure Hooks where
   multisigWatchScripts : Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ => pure #[]
   /-- `multisigStore.apply(match:network:)`: the in-flight spends a conflict in the block beat. -/
   multisigApply : Net.BlockMatch → Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ _ => pure #[]
+  /-- Before a forward pass from block `frontier`: accounts that arrived from another of the person's devices
+  are brought from the block that device had scanned to this phone's own, and then join the watched ones. The
+  chain's hashes check the block each came anchored to. -/
+  multisigCatchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → ChainHashes → IO Unit := fun _ _ _ _ => pure ()
   /-- `multisigStore.rollBack(to:)`. -/
   multisigRollBack : UInt32 → IO Unit := fun _ => pure ()
+  /-- The multisig store of another wallet kept on this network, in its directory, for the sync pass that
+  scans for every wallet on the device. -/
+  multisigAt : WinnowApp.Network → (dir : String) → IO ProfileMultisig := fun _ _ => pure {}
+  /-- What another of the person's devices scanned further, taken by each wallet here (`SyncApp.headStart`),
+once the chain has the block it names. -/
+  headStart : IO Unit := pure ()
+  /-- `ProfileMultisig.headStart` of the open wallet's accounts. -/
+  multisigHeadStart : Array MultisigAccountRecord → IO Bool := fun _ => pure false
   /-- `MultisigStore.validate(_:network:)` of a bundle's accounts, before anything is written. -/
   multisigValidate : Array MultisigAccountRecord → Tx.BitcoinNetwork → IO Unit := fun rs _ => do
     unless rs.isEmpty do notPorted "Restoring multisig accounts"
@@ -110,6 +175,9 @@ structure Deps where
   /-- Runs inside `loadPaymentDetails`'s one locked step, after that check and before the write; nothing in the
   app. backend-test's `paymentRaceFlow` tries a wallet change here, which must wait for the write. -/
   paymentChecked : (txid : String) → IO Unit := fun _ => pure ()
+  /-- A sync pass has chosen the scripts it scans for and has not yet scanned (a test's moment: an account
+  made here is one the pass does not know of). -/
+  syncScriptsChosen : IO Unit := pure ()
   /-- Runs as a write through a wallet (`Env.walletWrite`, named by `what`, such as "sync.apply") is about to
   take the wallet lock; nothing in the app. backend-test's `oldWalletWritesFlow` erases or replaces the wallet
   here, which the write must not outlive. -/
@@ -132,10 +200,16 @@ inductive AppError where
   /-- Not in Swift, whose actor writes through whichever wallet it was handed: a write through a wallet that
   was erased or replaced since it was read (`Env.walletWrite`). -/
   | walletReplaced
+  /-- Not in Swift, which kept one wallet: a new wallet asked for where one is kept. Creating never replaces. -/
+  | walletAlreadyHere
+  /-- Not in Swift: the wallet a backup or a file holds is one this device already keeps on this network. -/
+  | walletAlreadyHeld
 
 def AppError.text : AppError → String
   | .noWallet => "No wallet is open."
   | .walletReplaced => "The wallet changed before this finished, so nothing was saved to it."
+  | .walletAlreadyHere => "A wallet is already kept here, and nothing was changed. Add another wallet beside it from Settings."
+  | .walletAlreadyHeld => "This wallet is already on this device. Choose it under Settings → Wallets."
   | .paymentDetailsUnavailable => "Payment details aren’t available on this phone."
   | .feeDecisionRequired rate floor =>
     s!"Connected peers require at least {SwiftDouble.description floor} sat/vB to relay this payment, above the selected {SwiftDouble.description rate} sat/vB. " ++
@@ -277,6 +351,31 @@ structure SendReview where
   change : Option Payment
   recipient : Option (String × Option UInt32) := none
 
+/-- A wallet kept on this device for the open network: its id, its slot and directory, and its account key
+as its file gives it (public: nothing of the Keychain is read to know it). -/
+structure HeldWallet where
+  id : String
+  slot : String
+  dir : String
+  accountKey : Keys.HDKey
+  /-- The lowest block its scan needs (`min creationHeight nextScanHeight`): the network's chain begins at
+  or below every held wallet's. -/
+  birthday : UInt32 := 0
+  /-- Where its own scan is (`nextScanHeight`): the network's scan may be no further on than the wallet least
+  far on (one further on is ahead, and given only the blocks after its own). -/
+  next : UInt32 := 0
+  /-- The name the person gave it (`profile.json`); empty for none. -/
+  name : String := ""
+
+/-- A wallet kept on this network that is not the open one: opened from its file without its key (watching
+reads none), and scanned for in every pass beside the open wallet. `serial` is its `walletSerial`: a write
+through a rider that is no longer one (the wallet was opened, deleted or replaced) is refused. -/
+structure Rider where
+  held : HeldWallet
+  wallet : Wallet
+  serial : Nat
+  multisig : ProfileMultisig
+
 /-- The backend's state (AppModel's stored properties that are not UI). -/
 structure Core where
   network : Option WinnowApp.Network := none
@@ -284,6 +383,16 @@ structure Core where
   dir : Option String := none
   settings : Option Settings := none
   wallet : Option Wallet := none
+  /-- The lowest block a pass scanned for scripts that did not yet include every account's (one was made or
+  joined while it ran) and that has not been scanned for them since. The next pass begins by doing so. -/
+  accountRescanFrom : Option UInt32 := none
+  /-- The wallets kept for the open network, the open one among them, as of the last wallet opened, adopted or
+  deleted (`refreshHeld`). -/
+  held : Array HeldWallet := #[]
+  /-- The held wallets other than the open one, each scanned for in every pass (`refreshHeld`). -/
+  riders : Array Rider := #[]
+  /-- Where the next rider's serial comes from. -/
+  riderSerial : Nat := 0
   /-- Moves each time `wallet` is replaced or let go (`Core.withWallet`), and as a new wallet's file is about to
   be written (`Env.replacingWallet`): the same number is Swift's `self.wallet === wallet`. A wallet ID is not enough, since importing a wallet's own backup again makes a
   new wallet with the same ID (backend-test `paymentRaceFlow`). -/
@@ -344,12 +453,17 @@ structure Core where
 
 /-- `w` (or none) becomes the open wallet, and `walletSerial` moves: opening, adopting a created or imported
 wallet, switching network, erasing. -/
-def Core.withWallet (c : Core) (w : Option Wallet) : Core := { c with wallet := w, walletSerial := c.walletSerial + 1 }
+def Core.withWallet (c : Core) (w : Option Wallet) : Core :=
+  { c with wallet := w, walletSerial := c.walletSerial + 1, accountRescanFrom := none }
 
 structure Env where
   deps : Deps
   core : Std.Mutex Core
   walletLock : Std.Mutex Unit
+  /-- Held while a sync pass hands a block (or a rollback) to the wallets it scans for, and while the open
+  wallet changes: a block is never given half to the wallet that was open and half to the next. Taken before
+  `walletLock`, never inside it. -/
+  placeLock : Std.Mutex Unit
 
 namespace Env
 
@@ -374,6 +488,17 @@ def walletWrite {α} (env : Env) (serial : Nat) (what : String) (x : WM α) : IO
   env.deps.walletWriting what
   env.withWalletLock do
     if (← env.get).walletSerial != serial then failWith .walletReplaced
+    runWM x
+
+/-- `x` under the place lock (`placeLock`); not reentrant. -/
+def withPlaceLock {α} (env : Env) (x : IO α) : IO α :=
+  env.placeLock.atomically (m := IO) (liftM x : Std.AtomicT Unit IO α)
+
+/-- A write through a rider (`Rider`): refused once it is no longer one. -/
+def riderWrite {α} (env : Env) (serial : Nat) (what : String) (x : WM α) : IO α := do
+  env.deps.walletWriting what
+  env.withWalletLock do
+    unless (← env.get).riders.any (·.serial == serial) do failWith .walletReplaced
     runWM x
 
 /-- A new wallet's file is about to be written where the open wallet's is (`createWallet`, `importDecoded`):
@@ -429,6 +554,88 @@ def dirFile (dir name : String) : System.FilePath := System.FilePath.mk dir / na
 def removeQuietly (p : System.FilePath) : IO Unit := do
   try IO.FS.removeFile p catch _ => pure ()
 
+/-! ## A network's wallets
+
+A wallet's directory is a whole directory in the one layout. The first wallet's is the network's own
+directory, where every install has kept it; a wallet added beside it has a directory of its own under
+`wallets/`, named by a number (its slot). A slot holds a wallet when it holds `wallet.json`: nothing else
+lists the wallets, so no list can disagree with the files. Which one was open last is one small file. -/
+
+/-- The directory, under a network's, of the wallets added beside the first. -/
+def slotsDirName : String := "wallets"
+
+/-- A slot's name is a number: never a path, never a name a person chose. -/
+def validSlot (slot : String) : Bool := !slot.isEmpty && slot.length ≤ 6 && slot.all Char.isDigit
+
+/-- The network's directory of a wallet's directory: itself, or two up from a slot. -/
+def networkDirOf (dir : String) : String :=
+  let p := System.FilePath.mk dir
+  match p.parent with
+  | some parent =>
+    if parent.fileName == some slotsDirName && (p.fileName.map validSlot).getD false
+    then (parent.parent.map (·.toString)).getD dir else dir
+  | none => dir
+
+/-- The wallet's directory a slot names: the empty slot is the network's own. -/
+def slotDir (networkDir slot : String) : String :=
+  if slot.isEmpty then networkDir else (System.FilePath.mk networkDir / slotsDirName / slot).toString
+
+/-- The slot of a wallet's directory. -/
+def slotOf (dir : String) : String :=
+  if networkDirOf dir == dir then "" else (System.FilePath.mk dir).fileName.getD ""
+
+def holdsWallet (dir : String) : IO Bool := (walletPath dir).pathExists
+
+/-- The slots that hold a wallet: the network's own first, then the added ones in their order. -/
+def listSlots (networkDir : String) : IO (List String) := do
+  let mut slots : List String := if ← holdsWallet networkDir then [""] else []
+  let base := System.FilePath.mk networkDir / slotsDirName
+  if ← base.isDir then
+    let names := ((← base.readDir).map (·.fileName)).filter validSlot
+    for name in (names.qsort fun a b => a.toNat?.getD 0 < b.toNat?.getD 0) do
+      if ← holdsWallet (slotDir networkDir name) then slots := slots ++ [name]
+  return slots
+
+/-- A slot for a wallet to be added: the network's own while it holds none, else the lowest number whose
+directory holds none. What an addition that never finished left there is cleared first, as a new wallet's
+files replace the last one's in the network's own directory (`adopt`). -/
+def freeSlot (networkDir : String) : IO String := do
+  if !(← holdsWallet networkDir) then return ""
+  let mut n := 1
+  while ← holdsWallet (slotDir networkDir (toString n)) do n := n + 1
+  let dir := System.FilePath.mk (slotDir networkDir (toString n))
+  if ← dir.isDir then
+    for entry in ← dir.readDir do
+      unless ← entry.path.isDir do removeQuietly entry.path
+  return toString n
+
+/-- An added slot that holds no wallet is taken away with what an unfinished addition left in it. The
+network's own directory, and a slot that holds a wallet, are left alone. -/
+def discardEmptySlot (dir : String) : IO Unit := do
+  if networkDirOf dir == dir || (← holdsWallet dir) then return
+  let path := System.FilePath.mk dir
+  unless ← path.isDir do return
+  for entry in ← path.readDir do
+    unless ← entry.path.isDir do removeQuietly entry.path
+  try IO.FS.removeDir path catch _ => pure ()
+
+/-- Which slot was open last, in the network's directory. -/
+def activeSlotPath (networkDir : String) : System.FilePath := System.FilePath.mk networkDir / "active-wallet"
+
+/-- Written once a wallet has opened there, in one rename. -/
+def writeActiveSlot (networkDir slot : String) : IO Unit :=
+  Winnow.IO.writeAtomic (activeSlotPath networkDir) slot.toUTF8
+
+/-- The slot to open: the one open last if it still holds a wallet, else the first that does, else the
+network's own. A pointer that names nothing, or a slot whose wallet is gone, costs nothing. -/
+def resolveSlot (networkDir : String) : IO String := do
+  let slots ← listSlots networkDir
+  let pointed ← try pure (some (← IO.FS.readFile (activeSlotPath networkDir)).trimAscii.copy) catch _ => pure none
+  match pointed with
+  | some slot => if slots.contains slot then return slot
+  | none => pure ()
+  return slots.head?.getD ""
+
 /-- A saved manual peer, read by the rule Settings validated it with (`peerHostPort`). -/
 def parsePeerEndpoint (text : String) : Option PeerEndpoint :=
   (peerHostPort text).map fun (host, p) => { host, port := p.toUInt16 }
@@ -455,10 +662,42 @@ def Core.withSettings (c : Core) (s : Settings) : Core :=
 /-- `DefaultsKey.automaticUsedGateways` (global): whether Automatic routing last reached peers through Tor
 or I2P in the foreground, as a file beside the network directories. -/
 def gatewaysUsedPath (dir : String) : System.FilePath :=
-  (System.FilePath.mk dir).parent.getD (System.FilePath.mk dir) / "peer-gateways.automatic-used"
+  -- beside the network directories whichever wallet's directory asks: an added wallet's background check
+  -- must read the same answer the foreground wrote
+  let network := System.FilePath.mk (networkDirOf dir)
+  network.parent.getD network / "peer-gateways.automatic-used"
 
 /-- `DefaultsKey.lastCompleteCheck(network)`, as a file in the network's directory (Unix seconds). -/
 def lastCompleteCheckPath (dir : String) : System.FilePath := System.FilePath.mk dir / "sync.last-complete"
+
+/-- A wallet's own files beside `wallet.json`, which go with it (adopted over, deleted). -/
+def walletOwnFiles : List String :=
+  ["vaults.json", "multisig.json", "multisig-arriving.json", "device-sync.json", "receive-labels.json", "cloud-backup.json",
+   "profile.json"]
+
+/-- A wallet's name, and when it was given (milliseconds since 1970), in its directory. -/
+def profilePath (dir : String) : System.FilePath := System.FilePath.mk dir / "profile.json"
+
+def readProfileName (dir : String) : IO (Option (String × Nat)) := do
+  try
+    let text ← IO.FS.readFile (profilePath dir)
+    let read : SwiftJSON.D (String × Nat) := SwiftJSON.decodeText text fun v => do
+      let kvs ← SwiftJSON.asObject v
+      return (← SwiftJSON.key kvs "name" SwiftJSON.asString, (← SwiftJSON.key kvs "stamp" SwiftJSON.asInt).toNat)
+    match read with
+    | .ok (name, stamp) => return if name.utf8ByteSize ≤ 64 then some (name, stamp) else none
+    | .error _ => return none
+  catch _ => return none
+
+def writeProfileName (dir name : String) (stamp : Nat) : IO Unit :=
+  writeAtomic (profilePath dir) (SwiftJSON.write (Winnow.obj [("name", some (.str name)), ("stamp", some (SwiftJSON.ofInt stamp))])).toUTF8
+
+/-- The network's sync state, kept in its own directory for every wallet there: the scan's frontier and
+the relay's pending payments (`headers.bin` and `peers.json` are kept even with no wallet). -/
+def sharedStackFiles : List String := ["filters.json", "broadcast.json"]
+
+/-- The files a slot's own stack kept before the stack became the network's (0.9.20 to 0.9.23). -/
+def oldSlotStackFiles : List String := ["filters.json", "headers.bin", "peers.json", "sync.last-complete", "rollback.height"]
 
 def readLastCompleteCheck (dir : String) : IO (Option Nat) := do
   try return (← IO.FS.readFile (lastCompleteCheckPath dir)).trimAscii.copy.toNat? catch _ => return none

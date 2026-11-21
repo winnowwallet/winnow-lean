@@ -19,9 +19,16 @@ Release with `#if DEBUG`) and the app is launched with `WINNOW_E2E=1`. Then:
   clipboard can be set (the census URL and keys went with the census download, upstream e5ce950; the first
   tab and Advanced mode went with the one home);
 * device authentication is skipped unless `WINNOW_E2E_DEVICE_AUTH=1`;
+* the wallet secret's Keychain item is not put behind the person's presence, as the app's is, unless
+  `WINNOW_E2E_KEYCHAIN_PROTECTION=1` (which a run sets with `WINNOW_E2E_DEVICE_AUTH=1`: a read needs the
+  authentication);
 * (Lean only) `WINNOW_E2E_LEDGER=<entropy hex>` makes a simulated Ledger with that seed the app's Ledger,
   advertising nearby to the home's scan (and onboarding then shows its Bluetooth card); set but unreadable,
   the launch fails closed;
+* (Lean only) `WINNOW_E2E_CLOUD=<directory>` gives the run an iCloud of files in that directory, backups and
+  their keys side by side (`Real.directoryCloudStore`), in place of none: two runs with different seeds and one
+  directory are two devices of one person, which is how a journey sees an account follow from one to the other.
+  Without it test mode never uses iCloud;
 * events are appended to `story-events.jsonl` in the run's storage directory, refusing any field that
   looks like a secret.
 
@@ -41,6 +48,8 @@ structure Mode where
   clipboard : Option String
   forcedNetwork : Option Network
   requireDeviceAuthentication : Bool
+  /-- `WINNOW_E2E_KEYCHAIN_PROTECTION=1`: the wallet's secret behind the person's presence, as outside test mode. -/
+  keychainProtection : Bool := false
   controlFile : Option String
   peerCount : Option Nat
   syncIntervalSeconds : Option Float
@@ -51,6 +60,8 @@ structure Mode where
   /-- `WINNOW_E2E_LIVE_GATEWAYS=1`: let Automatic routing probe the real tailnet. Only the live gateway
   journey sets it; every other run keeps discovery off so it never depends on the developer's network. -/
   liveGateways : Bool := false
+  /-- `WINNOW_E2E_CLOUD` (Lean only): a directory standing in for the person's iCloud. -/
+  cloudDirectory : Option String := none
 
 inductive Resolution where
   | inactive
@@ -95,12 +106,14 @@ def resolve (env : String → Option String) : Resolution :=
         clipboard := env "WINNOW_E2E_CLIPBOARD"
         forcedNetwork := (env "WINNOW_E2E_NETWORK").bind networkOfRaw
         requireDeviceAuthentication := env "WINNOW_E2E_DEVICE_AUTH" == some "1"
+        keychainProtection := env "WINNOW_E2E_KEYCHAIN_PROTECTION" == some "1"
         controlFile := env "WINNOW_E2E_CONTROL_FILE"
         peerCount := (env "WINNOW_E2E_PEER_COUNT").bind swiftInt? |>.bind fun n => if n > 0 then some n.toNat else none
         syncIntervalSeconds := (env "WINNOW_E2E_SYNC_INTERVAL").bind parseDouble |>.bind fun d => if d > 0 then some d else none
         ledgerEntropy := (env "WINNOW_E2E_LEDGER").map fun h =>
           (Wire.dataOfHex? h).filter fun e => 16 ≤ e.size && e.size ≤ 32 && e.size % 4 == 0
-        liveGateways := env "WINNOW_E2E_LIVE_GATEWAYS" == some "1" }
+        liveGateways := env "WINNOW_E2E_LIVE_GATEWAYS" == some "1"
+        cloudDirectory := (env "WINNOW_E2E_CLOUD").filter (·.startsWith "/") }
 
 namespace Mode
 

@@ -38,7 +38,7 @@ def Env.httpGet (env : Env) (url : String) (maximumBytes : Nat) : IO ByteArray :
 
 def Env.new (deps : Deps) : IO Env := do
   let http ← RoutedHTTPClient.new deps.fetch
-  return { deps, core := ← Std.Mutex.new { http }, walletLock := ← Std.Mutex.new () }
+  return { deps, core := ← Std.Mutex.new { http }, walletLock := ← Std.Mutex.new (), placeLock := ← Std.Mutex.new () }
 
 def Env.backend (env : Env) : Backend :=
   { Backend.pending with
@@ -56,6 +56,9 @@ def Env.backend (env : Env) : Backend :=
     watchAddress := fun address seen => watchAddress env address seen
     stopWatchingAddress := stopWatchingAddress env
     deleteWallet := deleteWallet env
+    wallets := fun networkDir => wallets env networkDir
+    renameWallet := fun name => renameWallet env name
+    personPresent := personPresent env
     startNetworking := fun s => startNetworking env s
     stopNetworking := stopNetworking env
     syncNow := syncNow env

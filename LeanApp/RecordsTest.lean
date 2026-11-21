@@ -166,6 +166,193 @@ def peopleAndPastes (a b : Phone) : IO Unit := do
   let cardA ← obtain "ownCard A" (do return (← ownPersonCard a.wallet "Alice").serialized)
   discard <| obtain "B adds Alice" (addPerson b.store (some b.wallet) "Alice" (some cardA) none none none)
 
+/-- A card per person (issue #94): A makes a card for one person, B is that person and pays it. -/
+def personCards (a b : Phone) : IO Unit := do
+  let contains (haystack needle : String) : Bool := (haystack.splitOn needle).length > 1
+  let (cardText, r) ← obtain "a card for Dana" (personCard a.store a.wallet none " Dana " "Alice")
+  let some dana := r.people.find? (·.name == "Dana") | check "card: Dana is a contact" false; return
+  check "card: the person is saved by name, with no destination, and has a card"
+    (dana.payTo.isNone && dana.hasCard && !dana.isSavedRecipient)
+  let issued ← a.wallet.cards
+  check "card: the wallet issued one card" (issued.size == 1)
+  let some code := (← (a.wallet.card 0).run).toOption | check "card: issued" false; return
+  let codeText := code.encoded.toOption.getD ""
+  -- the wallet's own two keys, as its file records them and as a card of 0.9.12 carried them beside a tweak
+  let keysText := (← a.wallet.state).silentPaymentAddress.getD ""
+  let some own := (SilentPaymentAddress.parse keysText).toOption | check "card: the wallet records its keys" false; return
+  let tweakHex := (issued[0]?.map fun c => hex c.tweak).getD ""
+  check "card: a version 3 person card under my name, with Dana's code and nothing else to pay with"
+    (match PersonCard.decode cardText with
+     | .ok c => c.version == 3 && c.name == "Alice" && c.network == "regtest" && c.payTo == some codeText &&
+         c.tweak.isNone && codeText.startsWith "twinnowcard1p"
+     | .error _ => false) cardText
+  check "card: the card carries neither the account key, nor the wallet's two keys, nor the tweak"
+    (!contains cardText "tpub" && !contains cardText "tr(" && !contains cardText "tweak" && !contains cardText tweakHex &&
+     code.sharedSecret != own.scanKey && code.spendKey != own.spendKey && !contains cardText (keysText.drop 14).toString)
+  let (again, _) ← obtain "Dana's card again" (personCard a.store a.wallet none "Dana" "Alice")
+  check "card: asked again, it is the same card and no new one is issued" (again == cardText && (← a.wallet.cards).size == 1)
+  check "card: whether a person has one" ((← hasPersonCard a.store none "Dana") && (← hasPersonCard a.store none " Dana ") &&
+    (← hasPersonCard a.store (some dana.id) "") && !(← hasPersonCard a.store none "Nobody") &&
+    !(← hasPersonCard a.store none "") && !(← hasPersonCard a.store (some "no such id") "Dana"))
+  let (erinText, r) ← obtain "a card for Erin" (personCard a.store a.wallet none "Erin" "Alice")
+  check "card: another person gets another card" (erinText != cardText && (← a.wallet.cards).size == 2 &&
+    (r.people.filter (·.hasCard)).length == 2)
+  -- two people of one name: by name the first is meant, by ID the one that was chosen
+  let twin ← obtain "a second Dana" (do
+    let (ps, record) ← (← RM.io a.store.read).people.add a.keys writeAtomically "twin" "Dana" none
+    a.store.modify fun st => pure ({ st with people := ps }, record))
+  let (byName, _) ← obtain "Dana by name" (personCard a.store a.wallet none "Dana" "Alice")
+  let (byID, r) ← obtain "the second Dana by ID" (personCard a.store a.wallet (some twin.id) "Dana" "Alice")
+  check "card: by name the first Dana's card, by ID the second Dana's own"
+    (byName == cardText && byID != cardText && (← a.wallet.cards).size == 3 &&
+     (r.people.filter fun p => p.name == "Dana" && p.hasCard).length == 2)
+  refused "card: a person that is not saved has no card" (kind := "unknownPerson") (personCard a.store a.wallet (some "no such id") "Dana" "Alice")
+  discard <| obtain "the second Dana goes" (removePerson a.store (some a.wallet) twin.id)
+  refused "card: a name over two lines makes no card" (kind := "invalidState") (personCard a.store a.wallet none "Da\nna" "Alice")
+  check "card: and issues none" ((← a.wallet.cards).size == 3)
+  -- the person pastes it
+  let read ← obtain "B reads the card" (parsePaste network cardText)
+  check "card: read as Alice, a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
+  -- the code on its own is the whole of what a card pays with: the same person, without the name
+  let lone ← obtain "B reads the code alone" (parsePaste network codeText)
+  check "card: the code pasted alone is read as a card, without a name" (lone.name.isNone && lone.payTo == some true)
+  check "card: in capitals too" ((← (parsePaste network codeText.toUpper).run).toOption.map (·.payTo) == some (some true))
+  -- the wallet's two keys out of a 0.9.12 card are not: before they had a prefix of their own they read as an
+  -- ordinary silent payment address, and a payment made to it that way is one A's wallet never finds
+  refused "card: the two keys of a 0.9.12 card alone, without the tweak, are not read as anything to pay" (kind := "cardAddressAlone")
+    (parsePaste network keysText)
+  -- B already has an Alice (her shared card): names are not unique, so this one is found by its own
+  let rb ← obtain "B saves Alice" (addPerson b.store (some b.wallet) "Alice, her card for me" (some cardText) none none none)
+  let some alice := rb.people.find? (·.name == "Alice, her card for me") | check "card: Alice saved on B" false; return
+  check "card: B's first scripts for Alice are the card's" (
+    let expected := (List.range 20).filterMap fun i => (Keys.SilentPaymentPairing.codeScript code i.toUInt32).toOption.map hex
+    (rb.recipientByScript.filter (·.2 == alice.id)).map (·.1) == expected && expected.length == 20)
+  let (address0, index0) ← obtain "B's next payment" (nextPaymentAddress b.store alice.id)
+  let script0 := (Keys.SilentPaymentPairing.codeScript code 0).toOption.getD .empty
+  check "card: B pays payment 0 of the card, an address A's wallet watches"
+    (index0 == 0 && some address0 == AddressDecoder.address script0 network &&
+     ((← (a.wallet.watchScripts).run).toOption.getD #[]).contains script0) address0
+  -- for a payer that does not read cards, an exchange say: the same card's next unpaid address, as an address
+  let plain ← obtain "an address for Dana" (personAddress a.store a.wallet none " Dana ")
+  check "address: Dana's ordinary address is what her card's first payment goes to" (plain == address0 && plain.startsWith "bcrt1p")
+  check "address: by her ID too, and the same until it is paid"
+    ((← (personAddress a.store a.wallet (some dana.id) "").run).toOption == some plain)
+  check "address: Erin's is another" ((← (personAddress a.store a.wallet none "Erin").run).toOption.any (· != plain))
+  refused "address: nobody by that name" (kind := "unknownPerson") (personAddress a.store a.wallet none "Nobody")
+  refused "address: nobody by that ID" (kind := "unknownPerson") (personAddress a.store a.wallet (some "no such id") "Dana")
+  refused "address: a person without a card has none" (kind := "unknownCard") (personAddress a.store a.wallet none "Bob")
+  check "address: asking for one issues no card" ((← a.wallet.cards).size == 3)
+  discard <| advancePersonPaymentIndex b.store (some b.wallet) alice.id index0
+  let (address1, index1) ← obtain "B's payment after that" (nextPaymentAddress b.store alice.id)
+  check "card: the next payment is the next index, another address" (index1 == 1 && address1 != address0)
+  refused "card: the same card for a second person is refused" (kind := "duplicate")
+    (addPerson b.store (some b.wallet) "Alicia" (some cardText) none none none)
+  refused "card: the code alone for a second person is refused too" (kind := "duplicate")
+    (addPerson b.store (some b.wallet) "Alicia" (some codeText) none none none)
+  let withCode (payTo : String) : String := (PersonCard.make network "Alice" (some payTo)).serialized
+  let mainnetCode := ({ code with hrp := Keys.SilentPaymentPairing.hrp true } : CardCode).encoded.toOption.getD ""
+  let otherNetwork (text : String) : IO Bool := do
+    match ← (parsePaste network text).run with
+    | .error e => return e.description == "That code is for a different Bitcoin network. This wallet is on regtest."
+    | .ok _ => return false
+  check "card: a card whose code is for another network says so, and so does that code alone"
+    (mainnetCode.startsWith "winnowcard1p" && (← otherNetwork (withCode mainnetCode)) && (← otherNetwork mainnetCode))
+  let notValid (text : String) : IO Bool := do
+    match ← (parsePaste network text).run with
+    | .error e => return e.description == "That card's code is not valid. Ask for the card again."
+    | .ok _ => return false
+  check "card: a code that is damaged says so, in a card or alone"
+    ((← notValid (codeText ++ "q")) && (← notValid (withCode (codeText ++ "q"))))
+  check "card: a card with the wallet's two keys and no tweak is not a card"
+    (match ← (parsePaste network (withCode keysText)).run with
+     | .error e => e.description == "That isn't a Winnow card."
+     | .ok _ => false)
+  -- a card of 0.9.12: the wallet's two keys and a tweak. It is still read, as the code that pays what it paid
+  let withPayTo (payTo tweak : String) : String := (PersonCard.make network "Alice" (some payTo) (tweak := some tweak)).serialized
+  let oldCard := withPayTo keysText tweakHex
+  let oldCode := ((Keys.SilentPaymentPairing.codeOf { address := own, tweak := (issued[0]?.map (·.tweak)).getD .empty }).toOption.bind
+    (·.encoded.toOption)).getD ""
+  check "card: a 0.9.12 card is version 2, and is read"
+    (contains oldCard "\"version\":2" && (← (parsePaste network oldCard).run).toOption.map (·.payTo) == some (some true))
+  check "card: it is kept as a code with the wallet's own spend key, which pays what the card paid"
+    (oldCode.startsWith "twinnowcard1p" && oldCode != codeText &&
+     (PersonPayTo.ofCard keysText tweakHex network).toOption == some (.card oldCode) &&
+     (List.range 5).all fun i => (PersonPayTo.cardScript oldCode i.toUInt32 network).toOption ==
+       (Keys.SilentPaymentPairing.scriptPubKey { address := own, tweak := (issued[0]?.map (·.tweak)).getD .empty } i.toUInt32).toOption)
+  check "card: a code with a tweak beside it is refused" ((← (parsePaste network (withPayTo codeText tweakHex)).run).toOption.isNone)
+  let mainnetAddress := ({ own with hrp := Keys.SilentPaymentPairing.hrp true } : SilentPaymentAddress).encoded.toOption.getD ""
+  check "card: a 0.9.12 card whose keys are for another network says so" (← otherNetwork (withPayTo mainnetAddress tweakHex))
+  -- the same keys written as a silent payment address: not what a card carries, and refused as that
+  let plainAddress := ({ own with hrp := "tsp" } : SilentPaymentAddress).encoded.toOption.getD ""
+  let plain ← (parsePaste network (withPayTo plainAddress tweakHex)).run
+  check "card: a card that carries a plain silent payment address says so" (plainAddress.startsWith "tsp1" && (match plain with
+    | .error e => e.description == "That card carries a plain silent payment address, which a card for one person does not use. Ask for a new card."
+    | .ok _ => false))
+  -- a person saved by 0.9.12 holds the two keys and the tweak, and for a day before that the keys were written
+  -- tsp1…: the same person either way, read into the code that pays the same addresses
+  let saved (keys : String) : Option PersonPayTo :=
+    (PersonPayTo.ofJV (.obj #[("kind", .str "card"), ("tweak", .str tweakHex), ("value", .str keys)])).toOption
+  check "card: a person 0.9.12 saved is read into the code" (saved keysText == some (.card oldCode))
+  check "card: a person saved with the keys written as a silent payment address is read into the same code"
+    (saved plainAddress == some (.card oldCode))
+  check "card: a saved code reads back as it was, and is written without a tweak"
+    ((PersonPayTo.ofJV (PersonPayTo.card codeText).toJV).toOption == some (.card codeText) &&
+     !contains (SwiftJSON.write (PersonPayTo.card codeText).toJV) "tweak")
+  check "card: a saved card whose keys are not keys is left for validation to refuse"
+    (saved "tsp1qqnotanaddress" == some (.card "tsp1qqnotanaddress") &&
+     (PersonPayTo.ofCardCode "tsp1qqnotanaddress" network).toOption.isNone)
+  let alone ← (parsePaste network keysText).run
+  check "card: the card's address pasted on its own says to paste the whole card" (match alone with
+    | .error e => e.description == "That is the address from inside a Winnow card. On its own it cannot be paid: paste the whole card."
+    | .ok _ => false)
+  check "card: neither the code nor the wallet's two keys are taken for a silent payment code"
+    ([codeText, keysText].all fun t => (PersonPayTo.ofSilentPayment t network).toOption.isNone && !SilentPaymentAddress.looksLikeCode t)
+  let badTweak ← (parsePaste network (withPayTo keysText "00")).run
+  check "card: a card whose tweak is not one says so" (match badTweak with
+    | .error e => e.description == "That card's tweak is not valid. Ask for the card again."
+    | .ok _ => false)
+  refused "card: a zero tweak is refused" (kind := "invalidTweak")
+    (parsePaste network (withPayTo keysText (String.ofList (List.replicate 64 '0'))))
+  refused "card: a tweak with an ordinary address is refused" (parsePaste network (withPayTo address0 tweakHex))
+  check "card: a tweak with nothing to pay is not a card"
+    ((← (parsePaste network "{\"name\":\"Alice\",\"network\":\"regtest\",\"tweak\":\"00\",\"version\":2,\"winnow\":\"person-card\"}").run).toOption.isNone)
+  -- a payment to a card is named as its person's
+  let txid := String.ofList (List.replicate 64 'a')
+  labelCardPayment a.store 0 txid
+  check "card: a payment to Dana's card is labelled Dana's" ((lookup (← a.records).senderByTxid txid) == some dana.id)
+  labelCardPayment a.store 0 txid
+  check "card: labelled once" (((← a.records).senderByTxid.filter (·.1 == txid)).length == 1)
+  let some erin := (← a.records).people.find? (·.name == "Erin") | check "card: Erin" false; return
+  let other := String.ofList (List.replicate 64 'b')
+  discard <| obtain "label by hand" (labelSender a.store (some a.wallet) other erin.id)
+  labelCardPayment a.store 0 other
+  check "card: a label already given is kept" ((lookup (← a.records).senderByTxid other) == some erin.id)
+  labelCardPayment a.store 9 (String.ofList (List.replicate 64 'c'))
+  check "card: a card nobody is linked to labels nothing" ((← a.records).senderByTxid.length == 2)
+  -- the file
+  let reopened ← a.reopen
+  check "card: the links are in the people file" (((← reopened.records).people.filter (·.hasCard)).map (·.name) == ["Dana", "Erin"])
+  let st ← a.store.read
+  let people := st.people.records
+  check "card: two people linked to one card is an invalid file"
+    ((← (PeopleStore.validate (people.map fun (p : PersonRecord) => if p.name == "Erin" then { p with issuedCard := some 0 } else p)
+      st.people.senderByTxid network).run).toOption.isNone)
+  check "card: a person with no card writes no link"
+    (!contains (SwiftJSON.write ({ id := "p", name := "Plain" } : PersonRecord).toJV) "issuedCard")
+  -- an iCloud copy brings the links back to a phone that has the contacts without them
+  let backup ← obtain "backup" st.people.backup
+  let unlinked : PeopleStore := { st.people with records := people.map fun (p : PersonRecord) => { p with issuedCard := none } }
+  let merged : PeopleStore.Backup ← obtain "restore plan" (unlinked.planRestore backup)
+  check "card: a restore gives the contacts their cards back"
+    ((merged.people.filter (·.issuedCard.isSome)).map (fun (p : PersonRecord) => (p.name, p.issuedCard)) == #[("Dana", some 0), ("Erin", some 1)])
+  let taken : PeopleStore := { st.people with records := people.map fun (p : PersonRecord) =>
+    if p.name == "Erin" then { p with issuedCard := some 0 }
+    else if p.name == "Dana" then { p with id := "another", name := "Dan", issuedCard := none } else p }
+  let merged : PeopleStore.Backup ← obtain "restore plan, a card already linked here" (taken.planRestore backup)
+  check "card: a restore never links one card to two people"
+    ((merged.people.filter (·.issuedCard == some 0)).map (fun (p : PersonRecord) => p.name) == #["Erin"] &&
+     merged.people.any (fun (p : PersonRecord) => p.name == "Dana"))
+
 def receiveLabels (a b : Phone) : IO Unit := do
   let addr ← obtain "A receive address" (wm (a.wallet.address .receive 0))
   let foreign ← obtain "B receive address" (wm (b.wallet.address .receive 0))
@@ -642,8 +829,14 @@ def backgroundRuns : IO Unit := do
     (failed.stage == .storageDamaged "The wallet's folder could not be made." && contains (LeanNative.Html.toWire (view failed)).toJson.compress "Retry")
   let ready : Model := { stage := .ready, active := true, walletID := some "w" }
   let (leaving, _) := onHost (.scene false) ready
-  let (deleted, _) := onHost (.deleted 0) leaving
-  check "Model: a wallet deleted while the app was away is gone" (deleted.stage == .onboarding && deleted.walletID.isNone)
+  let (deleted, cs) := onHost (.deleted 0) leaving
+  check "Model: a wallet deleted while the app was away is gone, and what is kept now is asked for"
+    (deleted.stage == .loading && deleted.walletID.isNone && cs.any (· matches .openWallet _ _ false))
+  let (none', _) := onHost (.booted deleted.generation .missing) deleted
+  check "Model: with no wallet left, onboarding" (none'.stage == .onboarding && none'.walletID.isNone)
+  let (kept, _) := onHost (.walletPlace deleted.generation "1" [{ id := "x", slot := "1", active := true }]) deleted
+  let (other, _) := onHost (.booted deleted.generation (.opened "x")) kept
+  check "Model: with another wallet kept, that one opens" (other.stage == .ready && other.walletID == some "x" && other.slot == "1")
   -- #92's finding 15: an amount there cannot be is refused, not wrapped into another one
   check "amount: every satoshi there is, is an amount"
     ((← (Real.satsOf Real.maximumMoney).toBaseIO).toOption == some (Int64.ofNat Real.maximumMoney))
@@ -693,7 +886,7 @@ def Shell.fx (s : Shell) : LeanNative.Native.Effects Host where
 def answersTo : Cmd → Option Nat
   | .refresh .. => some 3
   | .saveSettings .. | .removeExport .. => some 0
-  | .receiveAddress .. | .setReceiveLabel .. | .ownCard .. | .parsePaste .. | .addPerson .. | .editPerson ..
+  | .records .. | .receiveAddress .. | .setReceiveLabel .. | .personCard .. | .parsePaste .. | .addPerson .. | .editPerson ..
   | .updateRecipient .. | .labelSender .. | .removeSenderLabel .. | .catalogStatus .. | .connectedPeers ..
   | .resetPeers .. | .reconnect .. | .loadPaymentDetails .. | .exportBundle .. | .revealPhrase ..
   | .deleteWallet .. | .paste .. | .importWallet .. => some 1
@@ -760,10 +953,10 @@ def busyFlags : List (String × (Model → Bool)) :=
   , ("person.saving", (·.person.saving)), ("person.inferring", (·.person.inferring))
   , ("multisigAdd.saving", (·.multisigAdd.saving)), ("multisigBuild.creating", (·.multisigBuild.creating))
   , ("ledgerPair.pairing", (·.ledgerPair.pairing)), ("signerKeys.saving", (·.signerKeys.saving))
-  , ("collect.busy", (·.collect.busy)) ]
+  , ("collect.busy", (·.collect.busy)), ("shareCard.making", (·.shareCard.making)) ]
 
 /-- A phone with every screen in the middle of something: each busy flag set, the export holding a file, a
-card shown, the collection step at epoch 4. -/
+card being made, the collection step at epoch 4. -/
 def busyModel : Model :=
   { readyModel "w" with
     onboarding := { busy := true, restoring := true }
@@ -777,7 +970,7 @@ def busyModel : Model :=
     exportState := { busy := true, file := some "/tmp/winnow-export-x/w.json" }
     reveal := { revealing := true }
     person := { saving := true, inferring := true }
-    shareCard := { card := some "card" }
+    shareCard := { making := true }
     multisigAdd := { saving := true }
     multisigBuild := { creating := true }
     ledgerPair := { pairing := true }
@@ -811,7 +1004,9 @@ def failTable : List (String × (Model → Bool) × List String) :=
   , ("feeBump.cancelled", (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
   , ("export", fun m => m.exportState.error == boom && m.exportState.file.isNone, ["exportState.busy"])
   , ("reveal", (·.reveal.error == boom), ["reveal.revealing"])
-  , ("card", fun m => m.shareCard.error == boom && m.shareCard.card.isNone, [])
+  , ("personCard", (·.shareCard.error == boom), ["shareCard.making"])
+  -- a declined Face ID before a card is made: nothing is said, and the button is free again
+  , ("personCard.cancelled", (·.shareCard.error.isNone), ["shareCard.making"])
   , ("person", (·.person.error == boom), ["person.saving", "person.inferring"])
   , ("recipients", (·.recipientsError == boom), [])
   , ("multisigAdd", (·.multisigAdd.error == boom), ["multisigAdd.saving"])
@@ -1028,7 +1223,8 @@ def settingsScreen (root : System.FilePath) : IO Unit := do
   let (asking, _) ← tap .askDelete m
   check "delete: asks first" (asking.confirm == some .deleteWallet && contains (rendered asking) "Delete this wallet?")
   let (deleted, _) ← tap .deleteWallet asking
-  check "delete: the backend deletes, onboarding" ((← called "deleteWallet") && deleted.stage == .onboarding && deleted.walletID.isNone)
+  check "delete: the backend deletes, and the wallet is no longer shown" ((← called "deleteWallet") && deleted.stage != .ready && deleted.walletID.isNone)
+    s!"{repr deleted.stage}"
   backendRef.set Backend.pending
 
 /-! ### Receive (#45) -/
@@ -1041,18 +1237,25 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   let first := m.receive.address
   check "receive: the first address" (first.startsWith "bcrt1p" && m.topSheet == some .receive) first
   check "receive: the mempool window opens on it" (left.any fun | .watchAddress _ a => a == first | _ => false)
-  check "receive: an unlabelled address asks who it is for first"
-    (m.receive.editingLabel && contains (rendered m) "Who is this address for?" && contains (rendered m) "Skip for now")
-  let (m, _) ← sh.tap (.receive .finishLabel) m
-  check "receive: Skip shows the address" (!m.receive.editingLabel && contains (rendered m) first && contains (rendered m) "Label this address")
+  check "receive: one page, the address at once and nothing asked first"
+    (!m.receive.editingLabel && contains (rendered m) first && contains (rendered m) "Label this address" &&
+     !contains (rendered m) "Who is this address for?" && contains (rendered m) "From one person")
+  check "receive: no button to a second sheet for a card" (!contains (rendered m) "Make a card")
+  let (asking, _) ← sh.tap (.receive .editLabel) m
+  check "label: asked for only when wanted, and Cancel goes back to the address"
+    (asking.receive.editingLabel && contains (rendered asking) "Who is this address for?" && contains (rendered asking) "Cancel" &&
+     !contains (rendered asking) "Skip for now" &&
+     (let back := (stepReceive .finishLabel asking).1; !back.receive.editingLabel && contains (rendered back) first))
   -- New address
   let (m, left) ← sh.tap (.receive .freshAddress) m
   let second := m.receive.address
   check "New address: differs from the first" (second.startsWith "bcrt1p" && second != first) second
   check "New address: the mempool window moves to it"
     (left.any (· matches .stopWatchingAddress) && left.any fun | .watchAddress _ a => a == second | _ => false)
-  check "New address: the label editor comes first" (m.receive.editingLabel && !m.receive.changing && m.labelEditor.address == second)
+  check "New address: shown at once too" (!m.receive.editingLabel && !m.receive.changing && m.labelEditor.address == second &&
+    contains (rendered m) second)
   -- label it
+  let (m, _) ← sh.tap (.receive .editLabel) m
   let (m, _) ← sh.tap (.receive (.setLabelDraft "  Alice, invoice 12 ")) m
   let (m, _) ← sh.tap (.receive .saveLabel) m
   check "label: saved for the new address only, trimmed"
@@ -1076,28 +1279,103 @@ def receiveScreen (sh : Shell) (backend : Backend) (walletID : String) : IO Unit
   check "remove: the label is gone" ((lookup m.records.receiveLabels second).isNone && !m.receive.editingLabel &&
     contains (rendered m) "Label this address")
   check "remove: and the backend agrees" ((lookup (← backend.records).receiveLabels second).isNone)
-  -- the share card: no name yet, then one
-  let (card, cs) := stepReceive .openCard m
-  check "card: the sheet opens, and asks for a name" (card.topSheet == some .shareCard && !cs.any (· matches .ownCard ..) &&
-    contains (renderedH (shareCardSheet card [])) "Add a name to make your card.")
+  -- one person, on the same page: no sheet of its own, and nothing but their name is asked for
+  let card := m
+  let page (model : Model) : String := renderedH (receiveSheet model [])
+  check "person: Receive offers it under the address, and waits for a name"
+    (card.topSheet == some .receive && contains (page card) "From one person" && contains (page card) "Their name" &&
+     contains (page card) "Make their address and card" && (stepReceive .makePersonCard card).2.isEmpty)
+  -- the card for everybody (the account key) is retired: none is asked for, made or shown
+  check "person: no card for everybody on the page" (!contains (page card) "A card for everyone" && !contains (page card) "tpub")
+  -- the wallet's own name is not needed: without one the card says nobody's, and the person names it themselves
+  let (unnamed, _) := stepReceive (.setCardFor "Dana") card
+  check "person: without a name of my own, theirs is enough"
+    (card.settings.ownDisplayName.isEmpty && !contains (page card) "Add your name" &&
+     (stepReceive .makePersonCard unnamed).2.any fun | .personCard _ none p own => p == "Dana" && own == "" | _ => false)
   let (card, left) ← sh.tap (.receive (.setOwnName "Alice")) card
-  check "card: the name is saved" (card.settings.ownDisplayName == "Alice" && left.isEmpty)
-  let shown := renderedH (shareCardSheet card [])
-  let some text := card.shareCard.card | check "card: made for the name" false; return
-  check "card: shown with its QR code" (contains shown "Your card" && contains shown "\"qr\"")
-  let read ← backend.parsePaste text
-  check "card: another phone reads Alice and a fresh address each payment" (read.name == some "Alice" && read.payTo == some true)
-  let (named, cs) := stepReceive .openCard { m with settings := { m.settings with ownDisplayName := "Alice" } }
-  check "card: opening it with a name set asks for the card" (cs.any fun | .ownCard _ n => n == "Alice" | _ => false)
-  let (named, _) ← sh.run named cs
-  check "card: the card arrives" (named.shareCard.card == some text)
-  let stale := onHost (.card named.generation "Bob" "other") named
-  check "card: one made for another name is dropped" (stale.1.shareCard.card == some text)
-  let (cleared, _) ← sh.tap (.receive (.setOwnName "  ")) card
-  check "card: an empty name takes the card away" (cleared.shareCard.card.isNone &&
-    contains (renderedH (shareCardSheet cleared [])) "Add a name to make your card.")
+  check "person: my name is saved" (card.settings.ownDisplayName == "Alice" && left.isEmpty)
+  let (forDana, _) ← sh.tap (.receive (.setCardFor " Dana ")) card
+  check "person: named, the button says whose it is" (contains (page forDana) "Make Dana’s address and card")
+  let (making, cs) := stepReceive .makePersonCard forDana
+  check "person card: asked of the backend, for Dana, under my name"
+    (making.shareCard.making && cs.any fun | .personCard _ none p own => p == "Dana" && own == "Alice" | _ => false)
+  check "person card: a second tap while it is being made asks nothing" ((stepReceive .makePersonCard making).2.isEmpty)
+  let asksBefore := ((← sh.asks.get).filter (·.1 == "auth")).size
+  let (made, _) ← sh.run making cs
+  let some (madeFor, personText) := made.shareCard.personCard | check "person card: made" false s!"{made.shareCard.error}"; return
+  check "person card: making it asked the device's owner" (((← sh.asks.get).filter (·.1 == "auth")).size == asksBefore + 1)
+  check "person card: shown for Dana on the same page, under the wallet's address, and the button has gone"
+    (madeFor == "Dana" && !made.shareCard.making && made.topSheet == some .receive &&
+     contains (page made) "A card for Dana" && contains (page made) "If Dana uses Winnow, give them this instead" &&
+     contains (page made) made.receive.address && contains (page made) "Your name on the card (optional)" &&
+     !contains (page made) "Dana’s address and card")
+  check "person card: Dana is a contact with a card" (made.records.people.any fun p => p.name == "Dana" && p.hasCard)
+  let some danaAddress := made.shareCard.personAddress | check "person address: on the sheet" false; return
+  check "person address: shown under the card, as an ordinary address, with what it is for"
+    (danaAddress.startsWith "bcrt1p" && danaAddress != made.receive.address && contains (page made) "An address for Dana" &&
+     contains (page made) "For any wallet or an exchange. It changes once it has been paid." && contains (page made) danaAddress)
+  check "person address: it comes before the card, which is for a payer on Winnow"
+    (((page made).splitOn "An address for Dana").head!.length < ((page made).splitOn "A card for Dana").head!.length)
+  check "person address: it is the address the card's own payer pays first"
+    ((← backend.personAddress none "Dana") == danaAddress &&
+     ((PersonPaste.parse personText network).toOption.bind (·.payTo)).bind (fun p => (p.addressAt 0 network).toOption) == some danaAddress)
+  check "person card: no account key in it" (!contains personText "tpub")
+  let readBack ← backend.parsePaste personText
+  check "person card: another phone reads Alice and a fresh address each payment" (readBack.name == some "Alice" && readBack.payTo == some true)
+  let (again, cs) := stepReceive .makePersonCard made
+  let (again, _) ← sh.run again cs
+  check "person card: shown again it is the same card, and the device's owner is not asked"
+    (again.shareCard.personCard == some ("Dana", personText) && ((← sh.asks.get).filter (·.1 == "auth")).size == asksBefore + 1)
+  let (other, _) ← sh.tap (.receive (.setCardFor "Erin")) made
+  check "person card: another name takes Dana's card and her address off the page"
+    (other.shareCard.personCard.isNone && other.shareCard.personAddress.isNone && !contains (page other) "A card for Dana" &&
+     contains (page other) "Make Erin’s address and card")
+  check "person card: her name typed again offers to show what was made"
+    (contains (page (stepReceive (.setCardFor "Dana") other).1) "Show Dana’s address and card")
+  let late := onHost (.personCard other.generation "Dana" personText (some danaAddress) other.records) other
+  check "person card: a card that arrives for another name is not shown, nor its address"
+    (late.1.shareCard.personCard.isNone && late.1.shareCard.personAddress.isNone)
+  let bare := onHost (.personCard made.generation "Dana" personText none made.records) made
+  check "person address: a card that arrives without one is shown without one"
+    (bare.1.shareCard.personCard.isSome && bare.1.shareCard.personAddress.isNone &&
+     !contains (page bare.1) "An address for Dana" && contains (page bare.1) "A card for Dana")
+  let (renamed, _) ← sh.tap (.receive (.setOwnName "Alicia")) made
+  check "person address: under a new name of mine, the card and the address leave the sheet together"
+    (renamed.shareCard.personCard.isNone && renamed.shareCard.personAddress.isNone)
+  -- declined at the device's prompt: nothing made, nothing said
+  sh.auth.set (Lean.Json.mkObj [("ok", Lean.Json.bool false), ("error", Lean.Json.str "User canceled.")])
+  let (declining, cs) := stepReceive .makePersonCard other
+  let (declined, _) ← sh.run declining cs
+  check "person card: declined at the prompt, no card and no error"
+    (declined.shareCard.personCard.isNone && !declined.shareCard.making && declined.shareCard.error.isNone &&
+     !(declined.records.people.any fun p => p.name == "Erin" && p.hasCard))
+  sh.auth.set (Lean.Json.mkObj [("ok", Lean.Json.bool true)])
+  -- a payment arrives in a wallet that has made a card: the people and labels are read again, since the sync
+  -- named it; in a wallet without one, nothing more is asked
+  let incoming : HistoryItem := { txid := String.ofList (List.replicate 64 'd'), height := 0, received := 5_000, spent := 0, fee := none }
+  let withPayment (model : Model) : List Cmd :=
+    (onHost (.snapshot model.generation { model.status with history := incoming :: model.status.history } model.phase) model).2
+  check "person card: a new payment in a wallet with a card reads the records again"
+    ((withPayment made).any (· matches .records ..) && !(withPayment card).any (· matches .records ..))
+  let seen := (onHost (.snapshot made.generation { made.status with history := incoming :: made.status.history } made.phase) made).1
+  check "person card: a payment already shown asks for nothing" (!(withPayment seen).any (· matches .records ..))
+  let passEnds (model : Model) : List Cmd :=
+    let syncing := { model with status := { model.status with syncing := true } }
+    (onHost (.snapshot syncing.generation { syncing.status with syncing := false } syncing.phase) syncing).2
+  check "person card: the end of a sync pass reads them again too, in a wallet with a card only"
+    ((passEnds seen).any (· matches .records ..) && !(passEnds card).any (· matches .records ..))
+  -- from the saved recipients, for someone already there
+  let (fromList, cs) := stepPeople (.card ((made.records.people.find? (·.name == "Dana")).map (·.id) |>.getD "")) made
+  check "person card: from a saved person, a sheet opens on what was made for them, and asks at once"
+    (fromList.topSheet == some .shareCard && fromList.shareCard.forName == "Dana" && fromList.shareCard.making &&
+     contains (renderedH (shareCardSheet fromList [])) "From Dana" &&
+     cs.any fun | .personCard _ pid p _ => p == "Dana" && pid.isSome | _ => false)
   let (closed, cs) := step .closeSheet m
   check "receive: Done closes the sheet and the mempool window" (closed.sheets.isEmpty && cs.any (· matches .stopWatchingAddress))
+  let (closedAfter, _) := step .closeSheet made
+  check "receive: closed, what was shown for Dana is gone, and opened again the page starts clean"
+    (closedAfter.shareCard.personCard.isNone && closedAfter.shareCard.forName.isEmpty &&
+     (step .openReceive { made with sheets := [] }).1.shareCard.personCard.isNone)
 
 /-! ### People (#35) -/
 
@@ -1344,12 +1622,12 @@ def cardsRefusedOnTheAddPersonSheet (sh : Shell) (walletID : String) : IO Unit :
   let (m, _) ← sh.tap (.send .openRecipients) m
   let (m, _) ← sh.tap (.people (.openAdd {} "")) m
   let (m, _) ← sh.tap (.people (.setName "Eve")) m
-  let newer := "{\"name\":\"Eve\",\"network\":\"regtest\",\"version\":2,\"winnow\":\"person-card\"}"
+  let newer := "{\"name\":\"Eve\",\"network\":\"regtest\",\"version\":4,\"winnow\":\"person-card\"}"
   let cards : List (String × String × String) := [
     ("another network's card", (PersonCard.make .mainnet "Eve" none).serialized,
       "This card is for mainnet; this wallet is on regtest."),
     ("a newer Winnow's card", newer,
-      "This card was made by a newer Winnow (card version 2). Update the app to read it."),
+      "This card was made by a newer Winnow (card version 4). Update the app to read it."),
     ("not a person card", "{\"name\":\"Eve\",\"winnow\":\"signer-card\"}", "That isn't a Winnow card.")]
   for (what, card, text) in cards do
     let (refused, _) ← sh.tap (.people (.setPasted card)) m
@@ -1584,13 +1862,28 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
   backendRef.set backend
   rootDir.set (root / "screens-alice").toString
 
+/-- A version 1 card, as other wallets hand one out (upstream's, and Winnow's own before issue #94): the
+account key as the pay-to key. The app no longer makes one; it still reads one and pays it. Built here from
+the descriptor in the phone's backup. -/
+def accountKeyCard (b : Backend) (name : String) : IO String := do
+  let bundle ← match Winnow.ImportBundle.decode (← b.exportBundle false) with
+    | .ok bundle => pure bundle
+    | .error _ => throw (IO.userError "accountKeyCard: the backup does not decode")
+  let some text := bundle.descriptor | throw (IO.userError "accountKeyCard: the backup has no descriptor")
+  let descriptor ← match Winnow.Descriptor.parse text with
+    | .ok d => pure d
+    | .error e => throw (IO.userError s!"accountKeyCard: {e.name}")
+  match ← (WinnowApp.RecordsReal.ownPersonCardOf descriptor .regtest name).run with
+  | .ok card => return card.serialized
+  | .error _ => throw (IO.userError "accountKeyCard: no card")
+
 /-- The screen flows, in one directory. -/
 def screens (root : System.FilePath) : IO Unit := do
   failuresReachTheirScreens
   settingsScreen root
   let (alice, aliceID) ← screenPhone root "screens-alice" 0xA1
   let (bob, _) ← screenPhone root "screens-bob" 0xB2
-  let cardB ← bob.ownCard "Bob"
+  let cardB ← accountKeyCard bob "Bob"
   let bobAddress ← bob.receiveAddress false
   let otherAddress ← bob.receiveAddress true
   let funder ← bob.receiveAddress true
@@ -1962,21 +2255,201 @@ def testModeSeed : IO Unit := do
   check "test mode: the launch reads one seed variable"
     (WinnowApp.e2eVariables.filter (fun v => v == "WINNOW_E2E_ENTROPY" || v == "WINNOW_E2E_MNEMONIC") == ["WINNOW_E2E_ENTROPY"])
 
+/-- A network's wallets on disk: the first in the network's own directory, the others in numbered slots,
+found by their `wallet.json` and by nothing else; which was open last is one small file that may be wrong. -/
+def walletSlots (root : System.FilePath) : IO Unit := do
+  let net := (root / "slots" / "signet").toString
+  IO.FS.createDirAll net
+  check "slots: the network's own directory is the empty slot"
+    (Real.slotDir net "" == net && Real.slotOf net == "" && Real.networkDirOf net == net)
+  let two := Real.slotDir net "2"
+  check "slots: an added wallet's directory is under wallets/"
+    (two == s!"{net}/wallets/2" && Real.slotOf two == "2" && Real.networkDirOf two == net) two
+  check "slots: a directory that only looks like one is its own network's"
+    (Real.networkDirOf s!"{net}/wallets/x" == s!"{net}/wallets/x" && Real.networkDirOf s!"{net}/other/2" == s!"{net}/other/2")
+  check "slots: none while no wallet is kept"
+    ((← Real.listSlots net) == [] && (← Real.freeSlot net) == "" && (← Real.resolveSlot net) == "")
+  IO.FS.writeFile (Real.walletPath net) "{}"
+  check "slots: the first wallet" ((← Real.listSlots net) == [""] && (← Real.freeSlot net) == "1")
+  -- an addition that never finished left files and no wallet
+  let one := Real.slotDir net "1"
+  IO.FS.createDirAll one
+  IO.FS.writeFile (Real.dirFile one "people.json") "left behind"
+  check "slots: a slot without a wallet is not one" ((← Real.listSlots net) == [""])
+  check "slots: …and is cleared before it is used again"
+    ((← Real.freeSlot net) == "1" && !(← (Real.dirFile one "people.json").pathExists))
+  IO.FS.writeFile (Real.walletPath one) "{}"
+  let three := Real.slotDir net "3"
+  IO.FS.createDirAll three
+  IO.FS.writeFile (Real.walletPath three) "{}"
+  check "slots: listed in order, the next free one between them"
+    ((← Real.listSlots net) == ["", "1", "3"] && (← Real.freeSlot net) == "2") s!"{← Real.listSlots net}"
+  check "slots: with no pointer, the first" ((← Real.resolveSlot net) == "")
+  Real.writeActiveSlot net "3"
+  check "slots: the one open last" ((← Real.resolveSlot net) == "3")
+  IO.FS.removeFile (Real.walletPath three)
+  check "slots: a pointer to a wallet that is gone falls back to the first" ((← Real.resolveSlot net) == "")
+  Real.writeActiveSlot net "../../elsewhere"
+  check "slots: a pointer that names no slot opens nothing else" ((← Real.resolveSlot net) == "")
+  Real.discardEmptySlot three
+  check "slots: an empty added slot is taken away" (!(← (System.FilePath.mk three).pathExists))
+  Real.discardEmptySlot one
+  Real.discardEmptySlot net
+  check "slots: one that holds a wallet, and the network's own, are left" ((← Real.listSlots net) == ["", "1"])
+  check "slots: the gateways answer is one file beside the networks, whichever wallet asks"
+    (Real.gatewaysUsedPath net == Real.gatewaysUsedPath two &&
+     Real.gatewaysUsedPath net == System.FilePath.mk s!"{root}/slots/peer-gateways.automatic-used")
+    s!"{Real.gatewaysUsedPath two}"
+
+/-- Several wallets for one network, as the screens and the commands have them: Settings lists them and opens
+another; adding one is onboarding in an empty place, with a way back; and a command acts in the place that
+was open when it was given. -/
+def walletSwitcher (root : System.FilePath) : IO Unit := do
+  let two : List WalletSummary := [{ id := "aaaa1111", slot := "", active := true }, { id := "bbbb2222", slot := "1" }]
+  let ready : Model := { stage := .ready, active := true, walletID := some "aaaa1111", wallets := two }
+  let page := rendered { ready with routes := [.settings] }
+  check "wallets: Settings lists the profiles kept, the open one marked, and offers one more and a rename"
+    (contains page "Wallet aaaa1111" && contains page "Wallet bbbb2222" && contains page "Add a profile" && contains page Ids.addWalletButton &&
+     contains page Ids.renameWalletButton)
+  check "wallets: the Danger zone names the profile it deletes" (contains page "Removes Wallet aaaa1111 (aaaa1111)")
+  -- the home: the open profile's name, which opens the list; a rename goes to the backend and closes its sheet
+  let home := (LeanNative.Html.toWire (view ready)).toJson.compress
+  check "wallets: the home names the open profile" (contains home Ids.walletNameButton && contains home "Wallet aaaa1111")
+  let (listed, _) := step (.home .openWallets) ready
+  check "wallets: …and its name opens the list of profiles" (listed.sheets == [.wallets])
+  let (naming, _) := step (.settings .openRename) listed
+  let (typed, _) := step (.settings (.setRenameDraft "Household")) naming
+  let (saving, cs) := step (.settings .saveRename) typed
+  check "wallets: a name is asked for and saved" (naming.sheets.getLast? == some .renameWallet && saving.renameBusy &&
+    cs.any fun c => c matches .renameWallet _ "Household")
+  let (refused, _) := onHost (.renamed saving.generation (some "A name is one short line of text.")) saving
+  check "wallets: a refused name says why, and the sheet stays" (refused.renameError.isSome && refused.sheets.getLast? == some .renameWallet)
+  let (named, _) := onHost (.renamed saving.generation none) saving
+  check "wallets: a saved name closes its sheet" (!named.sheets.contains .renameWallet && !named.renameBusy)
+  let (renamedList, _) := onHost (.walletPlace named.generation "" [{ id := "aaaa1111", slot := "", active := true, name := "Household" },
+    { id := "bbbb2222", slot := "1" }]) named
+  check "wallets: the new name is shown" (contains (LeanNative.Html.toWire (view renamedList)).toJson.compress "Household")
+  -- accounts by key: this profile's on the home, the others folded under one row, said where they sign
+  let ours : MultisigInfo := { id := "a1", name := "Ours", descriptor := "", balance := 5 }
+  let theirs : MultisigInfo := { id := "a2", name := "Theirs", descriptor := "", balance := 7, signsHere := false, signsIn := some "Phone" }
+  let withAccounts := { ready with multisig := { accounts := [ours, theirs] } }
+  let home := (LeanNative.Html.toWire (view withAccounts)).toJson.compress
+  check "accounts: the home lists this profile's account and folds the other under Watching"
+    (contains home "Ours" && !contains home "Theirs" && contains home Ids.homeWatchingRow && contains home "Watching 1 account" &&
+     contains home "in 1 multisig account")
+  let list := (LeanNative.Html.toWire (multisigSection withAccounts)).toJson.compress
+  check "accounts: the full list says where the other one signs" (contains list "Theirs" && contains list "Signs in Phone")
+  let (same, cs) := step (.settings (.selectWallet "")) ready
+  check "wallets: the open wallet chosen again changes nothing" (same.generation == ready.generation && cs.isEmpty)
+  let (_, cs) := step (.settings (.selectWallet "7")) ready
+  check "wallets: a place that keeps none is not opened" cs.isEmpty
+  let (switching, cs) := step (.settings (.selectWallet "1")) ready
+  check "wallets: another one chosen: its place is opened, in a new generation, and networking goes on (it is the network's)"
+    (switching.stage == .loading && switching.walletID.isNone && switching.generation > ready.generation &&
+     !cs.any (· matches .stopNetworking) && cs.any fun c => c matches .openSlot _ _ (some "1"))
+  let (stale, _) := onHost (.booted ready.generation (.opened "aaaa1111")) switching
+  check "wallets: an answer about the wallet left behind is dropped" (stale.stage == .loading && stale.walletID.isNone)
+  let (placed, _) := onHost (.walletPlace switching.generation "1" [{ id := "aaaa1111", slot := "" }, { id := "bbbb2222", slot := "1", active := true }]) switching
+  let (opened, _) := onHost (.booted switching.generation (.opened "bbbb2222")) placed
+  check "wallets: the other wallet is open" (opened.stage == .ready && opened.walletID == some "bbbb2222" && opened.slot == "1")
+  -- one more, added beside them
+  let (adding, cs) := step (.settings .addWallet) ready
+  check "wallets: adding one opens an empty place" (adding.stage == .loading && cs.any fun c => c matches .openSlot _ _ none)
+  let (placed, _) := onHost (.walletPlace adding.generation "2" two) adding
+  let (empty, cs) := onHost (.booted adding.generation .missing) placed
+  let screen := (LeanNative.Html.toWire (view empty)).toJson.compress
+  check "wallets: …where onboarding is \"Add a wallet\", with a way back and no change of network"
+    (empty.stage == .onboarding && contains screen "Add a profile" && contains screen Ids.cancelAddWalletButton &&
+     contains screen Ids.createWalletButton && !contains screen Ids.onboardingTestNetwork && cs.any (· matches .discoverCloud))
+  let first : Model := { stage := .onboarding }
+  check "wallets: a first wallet's onboarding is as it was"
+    (!contains (LeanNative.Html.toWire (view first)).toJson.compress Ids.cancelAddWalletButton &&
+     contains (LeanNative.Html.toWire (view first)).toJson.compress Ids.onboardingTestNetwork)
+  let (back, cs) := step (.settings .cancelAddWallet) empty
+  check "wallets: Cancel goes back to the wallet that was open"
+    (back.stage == .loading && cs.any fun c => c matches .openWallet _ _ false)
+  let (stay, cs) := step (.settings .cancelAddWallet) ready
+  check "wallets: Cancel means nothing with a wallet open" (stay.stage == .ready && cs.isEmpty)
+  let (created, _) := onHost (.created empty.generation "cccc3333") empty
+  check "wallets: a wallet made there is the one open" (created.stage == .ready && created.walletID == some "cccc3333")
+  -- a command acts in the place that was open when it was given
+  rootDir.set root.toString
+  openPlace.set (some (5, .signet, "1"))
+  let dirOf (g : Nat) (n : Network) : IO (Option String) := do
+    match ← (placeDir g n).toBaseIO with | .ok d => pure (some d) | .error _ => pure none
+  check "wallets: a command given after the place was opened acts there"
+    ((← dirOf 5 .signet) == some s!"{root}/signet/wallets/1" && (← dirOf 9 .signet) == some s!"{root}/signet/wallets/1")
+  check "wallets: one given before it, for the wallet open then, is refused" ((← dirOf 4 .signet).isNone)
+  check "wallets: and one for another network" ((← dirOf 6 .mainnet).isNone)
+  openPlace.set none
+
+/-- The version Settings shows is the bundle's, read from its `Info.plist` in either form a build writes one,
+and never a number made up here: a file cut short, a file that is something else, or a build setting left
+unexpanded gives none, and Settings then says Unknown. -/
+def bundleVersion : IO Unit := do
+  let xml (version build : String) : String :=
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n" ++
+    "\t<key>CFBundleIdentifier</key>\n\t<string>com.btcswift.app</string>\n" ++
+    s!"\t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n" ++
+    s!"\t<key>CFBundleVersion</key>\n\t<string>{build}</string>\n</dict>\n</plist>\n"
+  let read (s : String) : Option String := BundleInfo.versionText? s.toUTF8
+  check "version: an XML Info.plist" (read (xml "0.9.19" "26") == some "0.9.19 (26)") s!"{read (xml "0.9.19" "26")}"
+  check "version: a build setting left unexpanded is not a version"
+    (read (xml "$(MARKETING_VERSION)" "$(CURRENT_PROJECT_VERSION)") == none && read (xml "0.9.19" "") == none)
+  check "version: without a build number there is none" (read ((xml "0.9.19" "26").replace "CFBundleVersion" "Other") == none)
+  check "version: the string must be the key's own"
+    (read ((xml "0.9.19" "26").replace "<string>0.9.19</string>" "<true/>") == none)
+  check "version: not a property list" (read "not a plist" == none && BundleInfo.versionText? .empty == none)
+  -- plutil's binary form of such a file (`plutil -convert binary1`), its display name a UTF-16 string
+  let binary := Winnow.ofHex! <|
+    "62706c6973743030d50102030405060708090a5f101a434642756e646c6553686f727456657273696f6e537472696e675f1013" ++
+    "434642756e646c65446973706c61794e616d655f100f434642756e646c6556657273696f6e5f1012434642756e646c654964656e" ++
+    "7469666965725f10124c5352657175697265734950686f6e654f5356302e392e31396600570069006e006e00f600775232365f10" ++
+    "10636f6d2e62746373776966742e6170700908133046586d82899699ac0000000000000101000000000000000b00000000000000" ++
+    "0000000000000000ad"
+  check "version: a binary Info.plist" (BundleInfo.versionText? binary == some "0.9.19 (26)") s!"{BundleInfo.versionText? binary}"
+  check "version: a binary plist's UTF-16 string" (BundleInfo.binaryString? binary "CFBundleDisplayName" == some "Winnöw")
+  check "version: a key a binary plist lacks" (BundleInfo.binaryString? binary "CFBundleName" == none)
+  check "version: a binary plist cut short is none at every length"
+    ((List.range binary.size).all fun n => BundleInfo.versionText? (binary.extract 0 n) == none)
+  -- Settings → About: what launch read, and Unknown until then
+  let settings (m : Model) : String := rendered (update (.home .openSettings) m)
+  let unread := settings (readyModel "w")
+  check "version: Settings says Unknown before launch has read it" (contains unread "Unknown" && !contains unread "0.1.0")
+  let read := settings (update (.host (.versionRead "0.9.19 (26)")) (readyModel "w"))
+  check "version: Settings shows the bundle's version" (contains read "0.9.19 (26)" && !contains read "Unknown")
+
+/-- Records an earlier build locked behind Face ID: the home says so and offers the one tap that frees them,
+which asks for an authentication and nothing else; with nothing locked there is neither. -/
+def recordsLockedRow : IO Unit := do
+  let ready : Model := { stage := .ready, active := true, walletID := some "w" }
+  check "locked records: nothing is said while none is locked"
+    (!contains (rendered ready) Ids.unlockRecordsButton && (step .unlockRecords ready).2.isEmpty)
+  let locked := { ready with status := { ready.status with recordsLocked := true } }
+  check "locked records: the home says so, with one button" (contains (rendered locked) Ids.unlockRecordsButton &&
+    contains (rendered locked) "Unlock with Face ID")
+  check "locked records: the tap asks for the authentication" ((step .unlockRecords locked).2.any (· matches .unlockRecords _))
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
   syncErrorBookkeeping
   foundationURLRules
+  bundleVersion
   peerGatewayModel
   homeWarnings
   syncBookkeepingScreens
   backgroundRuns
   backgroundTaskCommands
   testModeSeed
+  walletSlots root
+  walletSwitcher root
+  recordsLockedRow
   try
     let a ← newPhone root "A"
     let b ← newPhone root "B"
     peopleAndPastes a b
+    personCards a b
     receiveLabels a b
     lookupSenderTest b
     let before ← a.records

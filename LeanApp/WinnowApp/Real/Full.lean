@@ -65,6 +65,7 @@ def hooks (h : RecordsHost) : Hooks where
   configure := h.configure
   personPayment := h.personPayment
   advancePersonIndex := fun id index => h.withStore () fun s => discard <| advancePersonPaymentIndex s none id index
+  cardPayment := fun card txid => h.withStore () fun s => labelCardPayment s card txid
 
 end RecordsHost
 
@@ -97,6 +98,7 @@ def Real.MultisigApp.install (a : Real.MultisigApp) (env : Real.Env) (base : Bac
     previewSend := fun inputs => if inputs.accountID.isSome then Real.previewAccountSend env a inputs else base.previewSend inputs
     signAndDraft := fun inputs p => Real.signAndDraft env a inputs p
     signDraft := Real.signDraft env a
+    handOverDraft := Real.handOverDraft env a
     signDraftWithLedger := Real.signDraftWithLedger env a
     adoptDraft := Real.adoptDraft env a
     broadcastDraft := Real.broadcastDraft env a

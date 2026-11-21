@@ -55,7 +55,7 @@ def Model.popSigner (m : Model) : Model × List Cmd :=
   | some .signers => ({ m with routes := m.routes.dropLast }, [])
   | _ => (m, [])
 
-/-- Settings → Signers (multisig-app-test's `testSignersAddOpenRenameRemove`). -/
+/-- Settings → Security → Hardware wallets and keys (multisig-app-test's `testSignersAddOpenRenameRemove`). -/
 def stepSigner (msg : SignerMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   let keys := m.signerKeys
@@ -104,8 +104,12 @@ def signersSummary (o : MultisigOverview) : String :=
 
 /-- `SignerRow`. -/
 def signerRow (s : SignerInfo) (action : Option Msg) (id : String := (Ids.signerRow (s.id))) : H :=
-  .col [.identified id (navLink s.name action),
-        caption (s.keysText ++ (if s.keys.length > 1 then " · one signer" else ""))]
+  .col ([.identified id (navLink s.name action),
+         caption (s.keysText ++ (if s.keys.length > 1 then " · one signer" else ""))] ++
+        -- it came with the person's other device: this one has not talked to it yet
+        (if s.elsewhere then
+          [.identified (Ids.signerElsewhere s.id) (caption "Paired on another device. The first time you use it here, the Ledger asks to pair with this one.")]
+         else []))
 
 /-- SignersView. -/
 def signersSections (m : Model) : List H :=
@@ -166,7 +170,7 @@ def signerKeysSections (m : Model) : List H :=
   let keys := signerKeysOf f.text
   [ .section "" "Whose keys these are, such as Bob, or Bob's phone and Ledger."
       [.identified Ids.signerKeysNameField (.input .plain "" "Name" f.name (fun s => .signer (.setKeysName s)) none)]
-  , .section "" "Another Winnow shows its key under Wallet → Multisig → Join an account → This phone's key, alone or together with its Ledger's. Any signer's key works: [fingerprint/path]xpub…/<0;1>/*."
+  , .section "" "Another Winnow shows its key under Settings → Security → Multisig accounts → Join an account → This phone's key, alone or together with its Ledger's. Any signer's key works: [fingerprint/path]xpub…/<0;1>/*."
       ([.identified Ids.signerKeysPasteButton (.button "Paste keys" .plain (some (.signer .pasteKeys)))] ++
        (keys.map fun k => .col [caption (keyFingerprint k network), literal k]) ++
        (match signerKeysError f.text network with
@@ -196,11 +200,11 @@ def signerPickerSheet (m : Model) (inner : List H) : H :=
     signerRow s (if s.keys.any used.contains then none else some (.multisig (.pickSigner s.id))) s!"signerPick-{s.id}"
   formSheet "Add a member" (some .closeSheet) [closeBar "Cancel"]
     [ .section "Ledgers" ""
-         ((if m.multisig.ledgers.isEmpty then [caption "None paired. Pair one under Settings → Signers."] else []) ++
+         ((if m.multisig.ledgers.isEmpty then [caption "None paired. Pair one under Settings → Security → Hardware wallets and keys."] else []) ++
           m.multisig.ledgers.map signerButton)
      , .section "Saved keys" ""
          ((if m.multisig.savedKeys.isEmpty then
-             [caption "None saved. Save keys someone sent under Settings → Signers, or paste them below."] else []) ++
+             [caption "None saved. Save keys someone sent under Settings → Security → Hardware wallets and keys, or paste them below."] else []) ++
           m.multisig.savedKeys.map signerButton)
      , .section "Accounts on this phone" "A whole account as one member: its keys sign for it as its own policy says, every key of a 2-of-2, any 2 of a 2-of-3. This phone's key moves into it. Its own recovery path stays with it, and a nested account cannot be one member yet."
          ((if m.multisig.accounts.isEmpty then [caption "None yet."] else []) ++

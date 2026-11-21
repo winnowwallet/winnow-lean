@@ -98,7 +98,7 @@ def feePriorityLabel (i : Nat) : String := (feePriorityLabels[i]?).getD "Normal"
 signers before it goes out. -/
 def sourceSection (m : Model) : List H :=
   -- the accounts this phone builds payments for (not a SegWit v0 one, whose payments are pasted in as PSBTs)
-  let accounts := m.multisig.accounts.filter (·.buildsPayments)
+  let accounts := m.multisig.accounts.filter fun a => a.buildsPayments && a.signsHere
   if accounts.isEmpty then [] else
   let selected := m.sendInputs.accountID
   let row (title : String) (balance : Int) (id : Option String) (identifier : String) : H :=
@@ -138,7 +138,7 @@ def sendForm (m : Model) : List H :=
        | none =>
          [ .row [.identified Ids.destinationField (.input .plain "" "Bitcoin address" i.destination (send .setDestination) none),
                  .identified Ids.pasteDestinationButton (.button "Paste" .plain (some (.send .pasteDestination)))]
-         , .button "Saved recipients" .plain (some (.send .openRecipients)) ])
+         , .identified Ids.savedRecipientsButton (.button "Saved recipients" .plain (some (.send .openRecipients))) ])
   sourceSection m ++ [toSection,
     .section "Amount" "You'll see the network fee before you send."
       [ .row [.identified Ids.amountField (.input .number "" "0" i.amount (send .setAmount) none), caption "sats"] ] ] ++
@@ -187,7 +187,7 @@ def sendReview (m : Model) (p : Preview) : List H :=
   , paymentAmounts p ] ++
   (match p.account with
    | some a =>
-     [.section "" "Sign and continue adds this phone's signature and keeps the payment under Transactions until the other signers have signed."
+     [.section "" "Sign and continue adds this phone's signature and keeps the payment under Activity until the other signers have signed."
        ([ .labeled "From" a.name ] ++
         (if a.recovery then [.identified Ids.reviewSpendPath (.labeled "Spend with" "Recovery path")]
          else [.identified Ids.reviewSignatures (.labeled "Signatures" s!"needs {a.threshold} of {a.signerCount}")]))]

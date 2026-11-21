@@ -61,6 +61,7 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
     let m := { m with routes := m.routes ++ [Route.network page] }
     if page == .peers then (m.loadGatewayDraft, m.settingsAppear) else (m, [])
   | .openMultisigAccounts => ({ m with routes := m.routes ++ [Route.multisigAccounts] }, [.multisigOverview g])
+  | .openWallets => (m.present .wallets, [])
   | .explainWarning kind => ({ m with confirm := some (.homeWarning kind) }, [])
   | .warningSettings kind =>
     -- Settings, then the page (as `openNetwork` opens it): Back leads through Settings to the home
@@ -212,7 +213,7 @@ def syncLine (m : Model) : List H :=
 /-- `AccountsBalanceLine`: how much of the headline sits in multisig accounts, which need co-signers to move;
 nothing when the phone has no account. -/
 def accountsBalanceLine (m : Model) : List H :=
-  let count := m.multisig.accounts.length
+  let count := (m.multisig.accounts.filter (·.signsHere)).length
   if count == 0 then [] else
   [.identified Ids.accountsBalanceText
     (caption s!"of which {satsText m.status.accountsBalance} in {count} multisig account{if count == 1 then "" else "s"}, needs co-signers")]
@@ -236,7 +237,8 @@ def balanceSection (m : Model) : H :=
     [.spacer, .identified Ids.networkTag (Html.badge (Html.tone .warning (caption s!"{m.settings.network.label} · test coins")))]
   let status := syncLine m ++ tag
   .section "" ""
-    ([.col ([caption "Balance", balanceText m] ++ accountsBalanceLine m ++ (if status.isEmpty then [] else [.row status]))] ++
+    ([.identified Ids.walletNameButton (Html.symbol "person.crop.circle" (.button m.walletLabel .plain (some (.home .openWallets))))] ++
+     [.col ([caption "Balance", balanceText m] ++ accountsBalanceLine m ++ (if status.isEmpty then [] else [.row status]))] ++
      (match networkWarningLabel m with
       | some label => [compactWarning Ids.homeNetworkWarning label .network]
       | none => []) ++
@@ -249,14 +251,24 @@ def activitySection (m : Model) : H :=
 
 /-- The home's Accounts, once this phone has a multisig account. -/
 def accountsSection (m : Model) : List H :=
-  if m.multisig.accounts.isEmpty then [] else
+  let mine := m.multisig.accounts.filter (·.signsHere)
+  let watching := m.multisig.accounts.length - mine.length
+  if mine.isEmpty && m.multisig.arriving.isEmpty && watching == 0 then [] else
+  -- this wallet's accounts; the others, another wallet's here or only watched, folded under one row
   [.identified Ids.homeAccountsSection (.section "Accounts" ""
-    (m.multisig.accounts.map fun a =>
-      .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
-            Html.tone .secondary (body (satsText a.balance))]))]
+    (mine.map accountRow ++ m.multisig.arriving.map arrivingRow ++
+     (if watching == 0 then [] else
+       [.identified Ids.homeWatchingRow (navLink s!"Watching {watching} account{if watching == 1 then "" else "s"}"
+          (some (.home .openMultisigAccounts)) (symbol := "eye"))])))]
+
+/-- The records an earlier build locked behind Face ID, and the one tap that frees them. -/
+def recordsLockedSection (m : Model) : List H :=
+  if !m.status.recordsLocked then [] else
+  [.section "" "An earlier version of Winnow locked the keys of some records (signers, accounts or people) behind Face ID, so they cannot be read or backed up. Unlock them once; nothing in them is lost."
+    [.identified Ids.unlockRecordsButton (Html.symbol "faceid" (.button "Unlock with Face ID" .primary (some .unlockRecords)))]]
 
 def homeSections (m : Model) : List H :=
-  [ balanceSection m ] ++ protectionCards m ++
+  recordsLockedSection m ++ [ balanceSection m ] ++ protectionCards m ++
   [ .section "" "" [.row [.identified Ids.receiveButton (Html.symbol "arrow.down.left" (.button "Receive" .plain (some .openReceive))),
                           .identified Ids.openSendButton (Html.symbol "arrow.up.right" (.button "Send" .primary (some .openSend)))]] ] ++
   accountsSection m ++

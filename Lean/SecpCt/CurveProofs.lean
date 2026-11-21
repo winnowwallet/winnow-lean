@@ -1,7 +1,7 @@
 import SecpCt.Proofs
 import SecpCt.ScalarProofs
 import SecpCt.Point
-import Secp.Curve.Spec
+import Secp.Proofs.Group
 
 /-! # What is proved about the curve
 
@@ -24,14 +24,7 @@ It is built in four steps.
    (`Sc.bit_testBit`).
 
 The step from three coordinates to the two a public key is made of is proved as well (`affine_point`,
-`public_point`): it divides by raising to the power P − 2.
-
-One thing is assumed, as a hypothesis in the statements and never as an axiom: that P is prime. Up to the
-ladder it is taken in the form winnow's specification takes it (`FieldP`: every element but zero has an
-inverse), together with the fact that the curve has no point of order two (`OddOrder`: no point has y = 0).
-From the division on it is taken as Fermat's little theorem for P (`Fermat`), which gives both of those: the
-inverse is the power P − 2, and a point with y = 0 would make −7 a cube modulo P, which it is not
-(`minus_seven_not_cube`, worked out by squaring).
+`public_point`): it divides by raising to the power P − 2, justified unconditionally by `Secp.Primes.P_prime`.
 
 Bytes are in `SecpCt/BytesProofs.lean`, the public key from bytes to bytes in `SecpCt/KeyProofs.lean`, and
 signing in `SecpCt/SignProofs.lean`.
@@ -39,7 +32,7 @@ signing in `SecpCt/SignProofs.lean`.
 Nothing that runs imports this file; `SecpCt/Gate.lean` does. -/
 
 namespace SecpCt
-open Secp.Spec (F FieldP OnCurve)
+open Secp.Spec (F OnCurve)
 open Secp
 
 theorem P_eq : P = Secp.P := by decide
@@ -157,13 +150,6 @@ theorem mulPublic_ladder (k : Sc) (p : Point) :
   simp only [Point.mulPublic]
   simp [-List.foldl_cons, body]
 
-/-! ## The formulas add points -/
-
-/-- The curve has no point of order two: no point has y = 0. True of secp256k1, whose number of points is
-odd, and taken as a hypothesis the way the specification takes that P is prime. -/
-class OddOrder : Prop where
-  y_ne_zero : ∀ x y : F, y * y = x * x * x + 7 → y ≠ 0
-
 /-! ## The formulas, as formulas -/
 
 def RX (X1 Y1 Z1 X2 Y2 Z2 : F) : F :=
@@ -186,14 +172,11 @@ theorem ne_zero_of_mul_eq_one {a w : F} (h : a * w = 1) : a ≠ 0 := by
   rw [this] at h
   exact absurd h (by decide)
 
-theorem mul_ne_zero [FieldP] {a b : F} (ha : a ≠ 0) (hb : b ≠ 0) : a * b ≠ 0 := by
-  intro e
-  rcases Spec.mul_eq_zero e with e | e
-  · exact ha e
-  · exact hb e
+theorem mul_ne_zero {a b : F} (ha : a ≠ 0) (hb : b ≠ 0) : a * b ≠ 0 :=
+  Spec.mul_ne_zero ha hb
 
 /-- Multiplying all three coordinates by something that is not zero leaves the point they stand for. -/
-theorem repF_scale [FieldP] (s X Y Z : F) (hs : s ≠ 0) (c : Spec.Point) (h : RepF X Y Z c) :
+theorem repF_scale (s X Y Z : F) (hs : s ≠ 0) (c : Spec.Point) (h : RepF X Y Z c) :
     RepF (s * X) (s * Y) (s * Z) c := by
   cases c with
   | inf =>
@@ -202,7 +185,9 @@ theorem repF_scale [FieldP] (s X Y Z : F) (hs : s ≠ 0) (c : Spec.Point) (h : R
   | pt x y =>
     obtain ⟨w, hw, hx, hy⟩ := h
     have hi := Spec.mul_inv hs
-    refine ⟨w * Spec.inv s, by grind, by grind, by grind⟩
+    generalize Spec.inv s = u at hi
+    clear hs
+    refine ⟨w * u, by grind, by grind, by grind⟩
 
 /-- The formulas are of degree two in each point's coordinates. -/
 theorem R_scaled (x1 y1 Z1 x2 y2 Z2 : F) :
@@ -235,7 +220,7 @@ theorem chord_Y (x1 y1 x2 y2 v : F) (h1 : y1 * y1 = x1 * x1 * x1 + 7) (h2 : y2 *
   simp only [RY, RZ]
   grind
 
-theorem affine_chord [FieldP] [OddOrder] (x1 y1 x2 y2 : F) (h1 : y1 * y1 = x1 * x1 * x1 + 7)
+theorem affine_chord (x1 y1 x2 y2 : F) (h1 : y1 * y1 = x1 * x1 * x1 + 7)
     (h2 : y2 * y2 = x2 * x2 * x2 + 7) (hx : x1 ≠ x2) :
     RepF (RX x1 y1 1 x2 y2 1) (RY x1 y1 1 x2 y2 1) (RZ x1 y1 1 x2 y2 1) (Spec.chord x1 y1 x2 y2) := by
   have hd : x2 - x1 ≠ 0 := fun h0 => hx (by grind)
@@ -243,7 +228,7 @@ theorem affine_chord [FieldP] [OddOrder] (x1 y1 x2 y2 : F) (h1 : y1 * y1 = x1 * 
   have h2' : (-y2) * (-y2) = x2 * x2 * x2 + 7 := by grind
   have difference := Spec.chord_onCurve h1 h2' hx
   simp only [Spec.chord, OnCurve] at difference
-  have yd := OddOrder.y_ne_zero _ _ difference
+  have yd := Spec.onCurve_y_ne_zero difference
   have hz := chord_Z x1 y1 x2 y2 _ h1 h2 hv
   have hX := chord_X x1 y1 x2 y2 _ h1 h2 hv
   have hY := chord_Y x1 y1 x2 y2 _ h1 h2 hv
@@ -252,10 +237,11 @@ theorem affine_chord [FieldP] [OddOrder] (x1 y1 x2 y2 : F) (h1 : y1 * y1 = x1 * 
   have hZ : RZ x1 y1 1 x2 y2 1 ≠ 0 := by
     intro e
     rw [e] at hz
-    exact yd (by rw [← hz]; grind)
+    exact yd (by rw [← hz]; clear yd difference hd hx hv; grind)
   have hw := Spec.mul_inv hZ
-  clear difference yd hz h1 h2 h2' hv hd hx
-  refine ⟨Spec.inv (RZ x1 y1 1 x2 y2 1), hw, ?_, ?_⟩
+  generalize Spec.inv (RZ x1 y1 1 x2 y2 1) = w at hw
+  clear hZ difference yd hz h1 h2 h2' hv hd hx
+  refine ⟨w, hw, ?_, ?_⟩
   · rw [hX]; grind
   · rw [hY]; grind
 
@@ -275,7 +261,7 @@ theorem tangent_Y (x y u : F) (h : y * y = x * x * x + 7) (hu : 2 * y * u = 1) :
   simp only [RY, RZ]
   grind
 
-theorem affine_tangent [FieldP] (x y : F) (h : y * y = x * x * x + 7) (hy : y ≠ 0) :
+theorem affine_tangent (x y : F) (h : y * y = x * x * x + 7) (hy : y ≠ 0) :
     RepF (RX x y 1 x y 1) (RY x y 1 x y 1) (RZ x y 1 x y 1) (Spec.tangent x y) := by
   have h2y : 2 * y ≠ 0 := mul_ne_zero Spec.two_ne_zero hy
   have hu := Spec.mul_inv h2y
@@ -287,8 +273,9 @@ theorem affine_tangent [FieldP] (x y : F) (h : y * y = x * x * x + 7) (hy : y �
     rw [tangent_Z x y h]
     exact mul_ne_zero (by decide) (mul_ne_zero (mul_ne_zero hy hy) hy)
   have hw := Spec.mul_inv hZ
-  clear h hu h2y hy
-  refine ⟨Spec.inv (RZ x y 1 x y 1), hw, ?_, ?_⟩
+  generalize Spec.inv (RZ x y 1 x y 1) = w at hw
+  clear hZ h hu h2y hy
+  refine ⟨w, hw, ?_, ?_⟩
   · rw [hX]; grind
   · rw [hY]; grind
 
@@ -300,35 +287,36 @@ theorem opposite_Y (x y u : F) (h : y * y = x * x * x + 7) (hu : 2 * y * u = 1) 
   simp only [RY]
   grind
 
-theorem affine_opposite [FieldP] [OddOrder] (x y : F) (h : y * y = x * x * x + 7) :
+theorem affine_opposite (x y : F) (h : y * y = x * x * x + 7) :
     RepF (RX x y 1 x (-y) 1) (RY x y 1 x (-y) 1) (RZ x y 1 x (-y) 1) .inf := by
-  have hy := OddOrder.y_ne_zero x y h
+  have hy := Spec.onCurve_y_ne_zero h
   have h2y : 2 * y ≠ 0 := mul_ne_zero Spec.two_ne_zero hy
   have hu := Spec.mul_inv h2y
   have double := Spec.tangent_onCurve h hy
   simp only [Spec.tangent, OnCurve] at double
-  have yt := OddOrder.y_ne_zero _ _ double
+  have yt := Spec.onCurve_y_ne_zero double
   have hY := opposite_Y x y _ h hu
   generalize Spec.inv (2 * y) = u at *
-  refine ⟨by simp only [RX]; grind, by simp only [RZ]; grind, ?_⟩
+  refine ⟨by clear hy h2y yt double hu; simp only [RX]; grind,
+          by clear hy h2y yt double hu; simp only [RZ]; grind, ?_⟩
   intro e
   rw [e] at hY
-  exact yt (by rw [← hY]; grind)
+  exact yt (by rw [← hY]; clear hy h2y yt double hu e; grind)
 
 /-! ## All of it -/
 
 /-- The complete formulas add points: if the coordinates stand for two points of the curve, what the
 formulas give stands for their sum as the specification defines it. One statement for every case, which is
 what "complete" means. -/
-theorem formulas_add [FieldP] [OddOrder] {X1 Y1 Z1 X2 Y2 Z2 : F} {a b : Spec.Point}
+theorem formulas_add {X1 Y1 Z1 X2 Y2 Z2 : F} {a b : Spec.Point}
     (ha : OnCurve a) (hb : OnCurve b) (ra : RepF X1 Y1 Z1 a) (rb : RepF X2 Y2 Z2 b) :
     RepF (RX X1 Y1 Z1 X2 Y2 Z2) (RY X1 Y1 Z1 X2 Y2 Z2) (RZ X1 Y1 Z1 X2 Y2 Z2) (Spec.add a b) := by
   match a, b with
   | .inf, .inf =>
     obtain ⟨rfl, rfl, hy1⟩ := ra
     obtain ⟨rfl, rfl, hy2⟩ := rb
-    refine ⟨by simp only [RX]; grind, by simp only [RZ]; grind, ?_⟩
-    have : RY 0 Y1 0 0 Y2 0 = (Y1 * Y2) * (Y1 * Y2) := by simp only [RY]; grind
+    refine ⟨by clear hy1 hy2; simp only [RX]; grind, by clear hy1 hy2; simp only [RZ]; grind, ?_⟩
+    have : RY 0 Y1 0 0 Y2 0 = (Y1 * Y2) * (Y1 * Y2) := by clear hy1 hy2; simp only [RY]; grind
     rw [this]
     exact mul_ne_zero (mul_ne_zero hy1 hy2) (mul_ne_zero hy1 hy2)
   | .inf, .pt x2 y2 =>
@@ -336,11 +324,11 @@ theorem formulas_add [FieldP] [OddOrder] {X1 Y1 Z1 X2 Y2 Z2 : F} {a b : Spec.Poi
     have hy2 : Y2 ≠ 0 := by
       obtain ⟨w, _, _, hy⟩ := rb
       intro e
-      exact OddOrder.y_ne_zero x2 y2 hb (by rw [hy, e]; grind)
+      exact Spec.onCurve_y_ne_zero hb (by rw [hy, e]; clear hy1; grind)
     have scaled := repF_scale (Y1 * Y1 * Y2) X2 Y2 Z2 (mul_ne_zero (mul_ne_zero hy1 hy1) hy2) _ rb
-    have eX : RX 0 Y1 0 X2 Y2 Z2 = Y1 * Y1 * Y2 * X2 := by simp only [RX]; grind
-    have eY : RY 0 Y1 0 X2 Y2 Z2 = Y1 * Y1 * Y2 * Y2 := by simp only [RY]; grind
-    have eZ : RZ 0 Y1 0 X2 Y2 Z2 = Y1 * Y1 * Y2 * Z2 := by simp only [RZ]; grind
+    have eX : RX 0 Y1 0 X2 Y2 Z2 = Y1 * Y1 * Y2 * X2 := by clear hy1 hy2 scaled rb hb; simp only [RX]; grind
+    have eY : RY 0 Y1 0 X2 Y2 Z2 = Y1 * Y1 * Y2 * Y2 := by clear hy1 hy2 scaled rb hb; simp only [RY]; grind
+    have eZ : RZ 0 Y1 0 X2 Y2 Z2 = Y1 * Y1 * Y2 * Z2 := by clear hy1 hy2 scaled rb hb; simp only [RZ]; grind
     rw [eX, eY, eZ]
     exact scaled
   | .pt x1 y1, .inf =>
@@ -348,11 +336,11 @@ theorem formulas_add [FieldP] [OddOrder] {X1 Y1 Z1 X2 Y2 Z2 : F} {a b : Spec.Poi
     have hy1 : Y1 ≠ 0 := by
       obtain ⟨w, _, _, hy⟩ := ra
       intro e
-      exact OddOrder.y_ne_zero x1 y1 ha (by rw [hy, e]; grind)
+      exact Spec.onCurve_y_ne_zero ha (by rw [hy, e]; clear hy2; grind)
     have scaled := repF_scale (Y2 * Y2 * Y1) X1 Y1 Z1 (mul_ne_zero (mul_ne_zero hy2 hy2) hy1) _ ra
-    have eX : RX X1 Y1 Z1 0 Y2 0 = Y2 * Y2 * Y1 * X1 := by simp only [RX]; grind
-    have eY : RY X1 Y1 Z1 0 Y2 0 = Y2 * Y2 * Y1 * Y1 := by simp only [RY]; grind
-    have eZ : RZ X1 Y1 Z1 0 Y2 0 = Y2 * Y2 * Y1 * Z1 := by simp only [RZ]; grind
+    have eX : RX X1 Y1 Z1 0 Y2 0 = Y2 * Y2 * Y1 * X1 := by clear hy1 hy2 scaled ra ha; simp only [RX]; grind
+    have eY : RY X1 Y1 Z1 0 Y2 0 = Y2 * Y2 * Y1 * Y1 := by clear hy1 hy2 scaled ra ha; simp only [RY]; grind
+    have eZ : RZ X1 Y1 Z1 0 Y2 0 = Y2 * Y2 * Y1 * Z1 := by clear hy1 hy2 scaled ra ha; simp only [RZ]; grind
     rw [eX, eY, eZ]
     exact scaled
   | .pt x1 y1, .pt x2 y2 =>
@@ -379,11 +367,9 @@ theorem formulas_add [FieldP] [OddOrder] {X1 Y1 Z1 X2 Y2 Z2 : F} {a b : Spec.Poi
         exact affine_tangent x1 y1 ha hy
       · simp only [hy, ↓reduceIte]
         have opposite : y2 = -y1 := by
-          have product : (y1 - y2) * (y1 + y2) = 0 := by grind
-          rcases Spec.mul_eq_zero product with e | e
-          · have same : y1 = y2 := by grind
-            exact absurd ⟨same, OddOrder.y_ne_zero x1 y1 ha⟩ hy
-          · grind
+          rcases Spec.eq_or_neg_of_eq_x ha hb with same | opp
+          · exact absurd ⟨same, Spec.onCurve_y_ne_zero ha⟩ hy
+          · exact opp
         rw [opposite]
         exact affine_opposite x1 y1 ha
     · simp only [hx, ↓reduceIte]
@@ -398,7 +384,7 @@ def Rep (p : Point) (a : Spec.Point) : Prop :=
 
 /-- `Point.add` adds: on points that stand for two points of the curve, it gives a point that stands for
 their sum. -/
-theorem rep_add [FieldP] [OddOrder] {p q : Point} {a b : Spec.Point} (ha : OnCurve a) (hb : OnCurve b)
+theorem rep_add {p q : Point} {a b : Spec.Point} (ha : OnCurve a) (hb : OnCurve b)
     (hp : Rep p a) (hq : Rep q b) : Rep (Point.add p q) (Spec.add a b) := by
   obtain ⟨px, py, pz, rp⟩ := hp
   obtain ⟨qx, qy, qz, rq⟩ := hq
@@ -410,7 +396,7 @@ theorem rep_add [FieldP] [OddOrder] {p q : Point} {a b : Spec.Point} (ha : OnCur
 
 /-- A point that stands for a point of the curve satisfies the curve's equation in its three coordinates:
 Y²Z = X³ + 7Z³. -/
-theorem repF_curve [FieldP] {X Y Z : F} {a : Spec.Point} (ha : OnCurve a) (r : RepF X Y Z a) :
+theorem repF_curve {X Y Z : F} {a : Spec.Point} (ha : OnCurve a) (r : RepF X Y Z a) :
     Y * Y * Z = X * X * X + 7 * Z * Z * Z := by
   match a, ha, r with
   | .inf, _, ⟨hx, hz, _⟩ =>
@@ -432,7 +418,7 @@ theorem double_is_add (X Y Z : F) (h : Y * Y * Z = X * X * X + 7 * Z * Z * Z) :
 
 /-- `Point.double` doubles: on a point that stands for a point of the curve, it gives a point that stands for
 that point added to itself. -/
-theorem rep_double [FieldP] [OddOrder] {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
+theorem rep_double {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
     Rep (Point.double p) (Spec.add a a) := by
   obtain ⟨_, _, _, rp⟩ := hp
   obtain ⟨vx, vy, vz⟩ := valid_point_double p
@@ -521,7 +507,7 @@ theorem Sc.bit_testBit (k : Sc) (j : Nat) (hj : j < 256) : (k.bit j = 1) ↔ k.t
 
 /-- Along the scalar's bits, the running point keeps standing for the specification's running point, for any
 point of the curve being multiplied. -/
-theorem ladder_rep [FieldP] [OddOrder] (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a)
+theorem ladder_rep (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a)
     (l : List Nat) (acc : Point) (r : Spec.Point) (hr : OnCurve r) (h : Rep acc r) :
     Rep (l.foldl (ladderStep k p) acc)
       (l.foldl (fun r i => if k.toNat.testBit (255 - i) then Spec.add (Spec.add r r) a else Spec.add r r) r) := by
@@ -544,20 +530,20 @@ theorem ladder_bits : (List.range 256).reverse = (List.range' 0 256).map (fun i 
 
 /-- **Multiplying a point.** For a point that stands for a point `a` of the curve, what `mul` returns stands
 for `k · a` as the specification defines it. -/
-theorem mul_rep [FieldP] [OddOrder] (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
+theorem mul_rep (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
     Rep (Point.mul k p) (Spec.smul k.toNat a) := by
   rw [mul_ladder, Spec.smul, ladder_bits, List.foldl_map]
   exact ladder_rep k ha hp _ _ _ trivial rep_infinity
 
 /-- The same for the multiplication that is for scalars that are not secret. -/
-theorem mulPublic_rep [FieldP] [OddOrder] (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
+theorem mulPublic_rep (k : Sc) {p : Point} {a : Spec.Point} (ha : OnCurve a) (hp : Rep p a) :
     Rep (Point.mulPublic k p) (Spec.smul k.toNat a) := by
   rw [mulPublic_ladder, Spec.smul, ladder_bits, List.foldl_map]
   exact ladder_rep k ha hp _ _ _ trivial rep_infinity
 
 /-- Multiplying the generator: the point `mulGenerator` returns stands for `k · G` as the specification
 defines it. -/
-theorem mulGenerator_rep [FieldP] [OddOrder] (k : Sc) :
+theorem mulGenerator_rep (k : Sc) :
     Rep (Point.mulGenerator k) (Spec.smul k.toNat Spec.G) :=
   mul_rep k Spec.G_onCurve rep_generator
 
@@ -570,115 +556,31 @@ theorem rep_ofAffine {x y : Fe} (hx : x.Valid) (hy : y.Valid) : Rep (Point.ofAff
     rw [one_toF]
     decide
   · show x.toF = x.toF * 1
-    grind
+    clear hx hy; grind
   · show y.toF = y.toF * 1
-    grind
+    clear hx hy; grind
 
 theorem toF_neg (a : Fe) (ha : a.Valid) : (Fe.neg a).toF = -a.toF := by
   rw [Fe.neg, toF_sub _ _ zero_valid ha, zero_toF]
-  grind
+  clear ha; grind
 
 theorem valid_neg (a : Fe) (ha : a.Valid) : (Fe.neg a).Valid := valid_sub _ _ zero_valid ha
 
 /-- `Point.neg` negates: it gives the point that stands for the specification's negation. -/
-theorem rep_neg [FieldP] {p : Point} {a : Spec.Point} (hp : Rep p a) : Rep (Point.neg p) (Spec.neg a) := by
+theorem rep_neg {p : Point} {a : Spec.Point} (hp : Rep p a) : Rep (Point.neg p) (Spec.neg a) := by
   obtain ⟨px, py, pz, rp⟩ := hp
   refine ⟨px, valid_neg _ py, pz, ?_⟩
   show RepF p.x.toF (Fe.neg p.y).toF p.z.toF (Spec.neg a)
   rw [toF_neg _ py]
+  clear px py pz
   match a, rp with
-  | .inf, ⟨hx, hz, hy⟩ => exact ⟨hx, hz, by grind⟩
+  | .inf, ⟨hx, hz, hy⟩ => exact ⟨hx, hz, fun e => hy (by grind)⟩
   | .pt x y, ⟨w, hw, hx, hy⟩ => exact ⟨w, hw, hx, by simp only [hy]; grind⟩
 
 /-! ## From three coordinates to two -/
 
-/-- Fermat's little theorem for P, which holds because P is prime. Taken as a hypothesis; it gives the
-specification's own assumption about P (`FieldP`), so a theorem that assumes this assumes nothing else
-about P. -/
-class Fermat : Prop where
-  little : ∀ a : Nat, a % Secp.P ≠ 0 → a ^ (Secp.P - 1) % Secp.P = 1
-
-theorem power_inverse [Fermat] (a : Nat) (h : a % Secp.P ≠ 0) : a * a ^ (Secp.P - 2) % Secp.P = 1 := by
-  have step : a * a ^ (Secp.P - 2) = a ^ (Secp.P - 1) := by
-    rw [show Secp.P - 1 = Secp.P - 2 + 1 by decide, Nat.pow_succ']
-  rw [step]
-  exact Fermat.little a h
-
-instance [Fermat] : FieldP where
-  inv_exists a ha := by
-    refine ⟨Fin.ofNat Secp.P (a.val ^ (Secp.P - 2)), ?_⟩
-    apply Fin.ext
-    have nonzero : a.val % Secp.P ≠ 0 := by
-      rw [Nat.mod_eq_of_lt a.isLt]
-      exact fun e => ha (Fin.ext e)
-    rw [Fin.val_mul]
-    show a.val * (a.val ^ (Secp.P - 2) % Secp.P) % Secp.P = 1
-    rw [Nat.mul_mod_mod]
-    exact power_inverse a.val nonzero
-
-/-! ### No point of order two, from primality -/
-
-/-- Raising to a power modulo `m` by squaring, one bit of the exponent at a time, most significant first. -/
-def modPowStep (b m : Nat) (acc : Nat) (bit : Bool) : Nat :=
-  if bit then acc * acc % m * b % m else acc * acc % m
-
-def exponentOfBits (e : Nat) (bit : Bool) : Nat := if bit then 2 * e + 1 else 2 * e
-
-theorem modPow_fold (b m : Nat) (bits : List Bool) (acc e : Nat) (h : acc = b ^ e % m) :
-    bits.foldl (modPowStep b m) acc = b ^ (bits.foldl exponentOfBits e) % m := by
-  induction bits generalizing acc e with
-  | nil => exact h
-  | cons bit bits ih =>
-    rw [List.foldl_cons, List.foldl_cons]
-    apply ih
-    have squared : acc * acc % m = b ^ (2 * e) % m := by
-      rw [h, ← Nat.mul_mod, ← Nat.pow_add, Nat.two_mul]
-    cases bit
-    · simpa [modPowStep, exponentOfBits] using squared
-    · simp only [modPowStep, exponentOfBits, ↓reduceIte]
-      rw [squared, Nat.mod_mul_mod, Nat.pow_succ]
-
-/-- −7 is not a cube modulo P: raised to the power (P − 1)/3 it does not give 1. Worked out by squaring. -/
-theorem minus_seven_not_cube : (Secp.P - 7) ^ ((Secp.P - 1) / 3) % Secp.P ≠ 1 := by
-  have exponent : ((List.range 256).reverse.map (fun i => ((Secp.P - 1) / 3).testBit i)).foldl exponentOfBits 0
-      = (Secp.P - 1) / 3 := by decide +kernel
-  have value : ((List.range 256).reverse.map (fun i => ((Secp.P - 1) / 3).testBit i)).foldl
-      (modPowStep (Secp.P - 7) Secp.P) 1 ≠ 1 := by decide +kernel
-  rw [modPow_fold (Secp.P - 7) Secp.P _ 1 0 (by decide), exponent] at value
-  exact value
-
-/-- No number cubed is −7 modulo P. If one were, Fermat's little theorem would make −7 to the power
-(P − 1)/3 equal to 1. -/
-theorem no_cube_root [Fermat] (a : Nat) : (a ^ 3 + 7) % Secp.P ≠ 0 := by
-  intro h
-  have cube : a ^ 3 % Secp.P = Secp.P - 7 := by
-    have lt := Nat.mod_lt (a ^ 3) (show 0 < Secp.P by decide)
-    rw [Nat.add_mod] at h
-    generalize a ^ 3 % Secp.P = r at *
-    simp only [Secp.P] at *
-    omega
-  have nonzero : a % Secp.P ≠ 0 := by
-    intro zero
-    rw [Nat.pow_mod, zero] at cube
-    exact absurd cube (by decide)
-  have fermat := Fermat.little a nonzero
-  rw [show Secp.P - 1 = 3 * ((Secp.P - 1) / 3) by decide, Nat.pow_mul, Nat.pow_mod, cube] at fermat
-  exact minus_seven_not_cube fermat
-
-/-- So the curve has no point of order two, given only that P is prime. -/
-instance [Fermat] : OddOrder where
-  y_ne_zero x y h := by
-    intro zero
-    rw [zero] at h
-    have val := congrArg Fin.val h
-    apply no_cube_root x.val
-    have seven : (7 : F).val = 7 := by decide
-    have nothing : ((0 : F) * 0).val = 0 := by decide
-    rw [nothing, Fin.val_add, Fin.val_mul, Fin.val_mul, seven, Nat.mod_mul_mod, Nat.mod_add_mod] at val
-    rw [show x.val ^ 3 = x.val * x.val * x.val by rw [Nat.pow_succ, Nat.pow_two]]
-    exact val.symm
 /-- `inv` gives the inverse: an element that is not zero, times its `inv`, is one. -/
-theorem inv_mul [Fermat] (a : Fe) (h : a.toF ≠ 0) : a.toF * (Fe.inv a).toF = 1 := by
+theorem inv_mul (a : Fe) (h : a.toF ≠ 0) : a.toF * (Fe.inv a).toF = 1 := by
   apply Fin.ext
   have nonzero : a.toNat % Secp.P ≠ 0 := by
     intro e
@@ -687,7 +589,7 @@ theorem inv_mul [Fermat] (a : Fe) (h : a.toF ≠ 0) : a.toF * (Fe.inv a).toF = 1
     rw [Fe.toF_val, P_eq]
     exact e
   rw [Fin.val_mul, Fe.toF_val, Fe.toF_val, inv_spec, P_eq, Nat.mod_mod, Nat.mod_mul_mod, Nat.mul_mod_mod]
-  exact power_inverse a.toNat nonzero
+  exact Secp.Primes.power_inverse_P a.toNat nonzero
 
 theorem valid_inv (a : Fe) : (Fe.inv a).Valid := by
   rw [Fe.Valid, inv_spec]
@@ -695,13 +597,14 @@ theorem valid_inv (a : Fe) : (Fe.inv a).Valid := by
 
 /-- From three coordinates to two: for a point that is not the point at infinity, `affine` gives its x and y
 and says so. -/
-theorem affine_point [Fermat] {p : Point} {x y : F} (h : Rep p (.pt x y)) :
+theorem affine_point {p : Point} {x y : F} (h : Rep p (.pt x y)) :
     p.affine.1.toF = x ∧ p.affine.2.1.toF = y ∧ p.affine.2.2 = 0 ∧ p.affine.1.Valid ∧ p.affine.2.1.Valid := by
   obtain ⟨_, _, vz, w, hw, hx, hy⟩ := h
   have hz : p.z.toF ≠ 0 := ne_zero_of_mul_eq_one hw
   have hi := inv_mul p.z hz
   have same : w = (Fe.inv p.z).toF := by
-    generalize (Fe.inv p.z).toF = i at *
+    generalize (Fe.inv p.z).toF = i at hi ⊢
+    clear hz vz
     grind
   refine ⟨?_, ?_, ?_, valid_mul _ _, valid_mul _ _⟩
   · simp only [Point.affine, toF_mul]
@@ -727,7 +630,7 @@ theorem affine_infinity {p : Point} (h : Rep p .inf) : p.affine.2.2 = 1 := by
 
 /-- The public point of a scalar: the two coordinates the code computes for `k` are those of `k · G` in the
 specification, whenever that is a point and not the point at infinity. -/
-theorem public_point [Fermat] (k : Sc) {x y : F} (h : Spec.smul k.toNat Spec.G = .pt x y) :
+theorem public_point (k : Sc) {x y : F} (h : Spec.smul k.toNat Spec.G = .pt x y) :
     (Point.mulGenerator k).affine.1.toF = x ∧ (Point.mulGenerator k).affine.2.1.toF = y
       ∧ (Point.mulGenerator k).affine.2.2 = 0 := by
   have rep := mulGenerator_rep k
@@ -738,7 +641,7 @@ theorem public_point [Fermat] (k : Sc) {x y : F} (h : Spec.smul k.toNat Spec.G =
 /-- From three coordinates back to the specification: what a point stands for can be read off what `affine`
 returns. Either it says the point at infinity, and that is what the point stands for; or it gives two
 coordinates below P, and the point stands for the point they name. -/
-theorem affine_spec [Fermat] {p : Point} {c : Spec.Point} (h : Rep p c) :
+theorem affine_spec {p : Point} {c : Spec.Point} (h : Rep p c) :
     (p.affine.2.2 = 1 ∧ c = .inf)
     ∨ (p.affine.2.2 = 0 ∧ c = .pt p.affine.1.toF p.affine.2.1.toF ∧ p.affine.1.Valid ∧ p.affine.2.1.Valid) := by
   cases c with
