@@ -1032,6 +1032,83 @@ def sharedScanChecks : IO Unit := do
     (r matches .ok () && a ≥ 3 && !restedA && restedB && next == (blocks + 1).toUInt32)
     s!"{match r with | .ok () => "synced" | .error e => e.description}; honest asked {a}; next {next}"
 
+/-- A range scan cut by its byte or time cap keeps the contiguous prefix of verified chunks it finished:
+with `stopAtCaps := true` it returns cleanly incomplete at the chunk end, a second run resumes from `h + 1`
+without re-fetching earlier heights, and with `stopAtCaps := false` it still throws while persisting the
+chunk end on disk. -/
+def cappedRangeKeepsChunks (dir : String) : IO Unit := do
+  let blocks := 2_500
+  let headers := minedHeaders blocks
+  let hashes := #[(HeaderChain.genesisHeader regtest).hash] ++ headers.map (·.hash)
+  let heightOf : Std.HashMap ByteArray Nat := (List.range hashes.size).foldl (fun m i => m.insert hashes[i]! i) {}
+  let filter := ByteArray.mk #[0]
+  let fhash := GCSFilter.filterHash filter
+  let fheaders : Array ByteArray := Id.run do
+    let mut out := Array.mkEmpty hashes.size
+    let mut prev := filled 32 0
+    for _ in [0:hashes.size] do
+      let next := sha256d (fhash ++ prev)
+      out := out.push next
+      prev := next
+    return out
+  let asked ← IO.mkRef (#[] : Array UInt32)
+  let node : IO PeerEndpoint := fakeNode regtest (startHeight := blocks.toInt32)
+    (answer := fun send m => do
+      match m with
+      | .getheaders _ => send (.headers #[])
+      | .getcfcheckpt r =>
+        let stop := heightOf[r.stopHash]?.getD 0
+        let checkpoints := (Array.range (stop / 1000)).map fun k => fheaders[(k + 1) * 1000]!
+        send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := checkpoints })
+      | .getcfheaders r =>
+        let stop := heightOf[r.stopHash]?.getD 0
+        let prev := if r.startHeight == 0 then filled 32 0 else fheaders[r.startHeight.toNat - 1]!
+        send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := prev,
+                           filterHashes := Array.replicate (stop + 1 - r.startHeight.toNat) fhash })
+      | .getcfilters r =>
+        asked.modify (·.push r.startHeight)
+        let stop := heightOf[r.stopHash]?.getD 0
+        for h in [r.startHeight.toNat:stop + 1] do
+          send (.cfilter { blockHash := hashes[h]!, filter })
+      | _ => pure ())
+  let first ← node
+  let second ← node
+  let pool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[first, second]) (seedResolver := some noSeeds)
+  pool.start
+  discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 2)
+  let store ← runNet "capped headers" (HeaderStore.open regtest none)
+  discard <| runNet "capped chain" (store.connect headers)
+  let filters ← runNet "capped filters" (FilterSyncIO.new pool store 0)
+  let spk := ByteArray.mk #[0x51, 0x20] ++ filled 32 0x11
+  let cap := RangeScanLimits.make (maxFilterBytes := 3 * 100 * filter.size + 50)
+  let path1 : System.FilePath := s!"{dir}/capped-range-stop.json"
+  let out1 ← runNet "capped range stopAtCaps" (filters.scanRange 0 2_499 #[spk] (limits := cap) (path := some path1)
+    (onMatch := fun _ => pure ()) (stopAtCaps := true))
+  let h := out1.scannedThrough.getD 0
+  check "capped range: stopAtCaps returns incomplete at a chunk end"
+    (!out1.isComplete && out1.scannedThrough.isSome && h ≥ 299 && h < 999 && (h + 1) % 100 == 0)
+    s!"complete {out1.isComplete}, scannedThrough {out1.scannedThrough}"
+  asked.set #[]
+  let out2 ← runNet "capped range resume" (filters.scanRange 0 2_499 #[spk] (path := some path1)
+    (onMatch := fun _ => pure ()) (stopAtCaps := true))
+  let starts ← asked.get
+  check "capped range: a second run resumes from h + 1, asks only past h, and finishes complete"
+    (out2.isComplete && out2.scannedThrough == some 2_499 && !starts.isEmpty && starts.all (· > h) && starts.contains (h + 1))
+    s!"complete {out2.isComplete}, scannedThrough {out2.scannedThrough}, starts {starts.qsort (· < ·)}"
+  let path2 : System.FilePath := s!"{dir}/capped-range-throw.json"
+  let r3 ← (filters.scanRange 0 2_499 #[spk] (limits := cap) (path := some path2) (onMatch := fun _ => pure ())).attempt
+  let saved3 ← if ← fileExists path2 then some <$> IO.FS.readFile path2 else pure none
+  let loaded3 := saved3.bind fun s => (RangeScanProgress.load (some s)).toOption.join
+  check "capped range: without stopAtCaps the cap still throws and persists the chunk end"
+    ((r3 matches .error (.range (.filterBytesExhausted ..))) && (loaded3.map (·.nextScanHeight)) == some (h + 1))
+    s!"{match r3 with | .ok _ => "ok" | .error e => e.description}; saved next {loaded3.map (·.nextScanHeight)}"
+  let out4 ← runNet "capped range zero time" (filters.scanRange 0 2_499 #[spk]
+    (limits := RangeScanLimits.make (maxDurationMs := 0)) (onMatch := fun _ => pure ()) (stopAtCaps := true))
+  check "capped range: stopAtCaps with no time left ends cleanly without reading a filter"
+    (!out4.isComplete && out4.scannedThrough.isNone && out4.filterBytesRead == 0)
+    s!"complete {out4.isComplete}, scannedThrough {out4.scannedThrough}, read {out4.filterBytesRead}"
+  pool.stop
+
 /-- Finding 9: a pin above the last checkpoint boundary that an answer agreed across source classes
 contradicts is rewound, and the scan starts again below it; one class's word rewinds nothing. -/
 def disputedPinChecks (dir : String) : IO Unit := do
@@ -1106,6 +1183,7 @@ def hardeningChecks (dir : String) : IO Unit := do
   headerTurnChecks
   restedScanPeerChecks
   sharedScanChecks
+  cappedRangeKeepsChunks dir
   disputedPinChecks dir
 
 /-- The broadcaster giving up on peers that take the inv and never ask for the transaction (#39), over an

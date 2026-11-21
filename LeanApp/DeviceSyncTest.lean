@@ -531,7 +531,16 @@ def accountsFollow (root : System.FilePath) : TM Unit := do
   let current := ((← b.app.multisig.host.arrivingAccounts).map (·.scannedThrough))[0]!
   b.catchUp current
   check "a device whose scan is behind the other's waits" ((← b.overview).arriving.length == 1 && (← b.overview).accounts.isEmpty)
-  b.settle
+  -- a capped pass keeps what it reached, and the next pass takes it up from the block after
+  let asked ← IO.mkRef (#[] : Array UInt32)
+  b.app.multisig.catchUp .signet (current + 5)
+    (fun fromH _ _ _ => do asked.modify (·.push fromH); pure (some (current + 2), false)) (fun _ => pure none)
+  check "a capped catch-up pass advances the arriving account and keeps it arriving"
+    ((← b.overview).arriving.length == 1 && (← b.overview).accounts.isEmpty &&
+     ((← b.app.multisig.host.arrivingAccounts).map (·.scannedThrough)) == #[current + 2])
+  b.app.multisig.catchUp .signet (current + 5)
+    (fun fromH toH _ _ => do asked.modify (·.push fromH); pure (some toH, true)) (fun _ => pure none)
+  check "the next pass resumes from where the capped one stopped" ((← asked.get) == #[current + 1, current + 3])
   let onB := (← b.overview).accounts
   check "caught up, it is one of this device's accounts" (onB.map (·.id) == [id] && (← b.overview).arriving.isEmpty)
   check "the same account: descriptor, policy and first address"

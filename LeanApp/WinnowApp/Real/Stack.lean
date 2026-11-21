@@ -456,7 +456,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
   try
     let scanner : RangeScanner := fun fromHeight toHeight scripts onMatch => do
       match ← (f.scanRange fromHeight toHeight scripts (limits := arrivingScanLimits)
-          (onMatch := fun m => (onMatch m : IO Unit))).attempt with
+          (onMatch := fun m => (onMatch m : IO Unit)) (stopAtCaps := true)).attempt with
       | .ok outcome => return (outcome.scannedThrough, outcome.isComplete)
       | .error (.range (.rangeBelowChain ..)) => throw (IO.userError waitingForNewerCopyText)
       | .error e => throw (IO.userError e.description)
@@ -665,7 +665,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
               for discarded in ← (env.hooks.multisigApply m net : IO _) do b.cancel discarded
             -- what a run does not finish is owed from where it got, not from where it began: a range longer than
             -- one run can take (a slow link, a long pass) is otherwise begun again at every pass, and never done
-            let (done, owedFrom) ← match ← (f.scanRange low (scanned - 1) again (limits := arrivingScanLimits) (onMatch := applyAccounts)).attempt with
+            let (done, owedFrom) ← match ← (f.scanRange low (scanned - 1) again (limits := arrivingScanLimits) (onMatch := applyAccounts) (stopAtCaps := true)).attempt with
               | .ok outcome => pure (outcome.isComplete, (outcome.scannedThrough.map (· + 1)).getD low)
               | .error e =>
                 env.journal "multisig.rescanWaiting" [("from", toString low), ("error", e.name)]

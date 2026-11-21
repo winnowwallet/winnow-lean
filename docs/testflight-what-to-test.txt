@@ -7,6 +7,7 @@ New: profiles. A profile is one key and what it holds: its coins, payments, cont
 4. A 2-of-2 of two profiles here: sign in one, tap "Switch to … and sign": the other opens on the payment; add its signature.
 5. Leave one device off a while, use the other, then open the first: it should be up to date at once, without scanning the gap.
 6. Through Tor and I2P gateways the wallet now fills all three peer seats, Tor among them (before, it stopped at two, often both I2P).
+7. Catch-up scans now fetch filter chunks across all seated peers at once and keep verified chunks when a pass's minute runs out, so catching up over Tor or I2P moves forward on every pass.
 
 Since 0.9.21: more of the wallet is proved, and fees are whole-number arithmetic. Send once: the fee quoted must be the fee paid.
 
