@@ -2,10 +2,13 @@ import LeanNative.Journey
 import LeanNative.Journey.Wire
 import WinnowApp.Main
 import Journeys.Screens
+import Journeys.Cards
+import Journeys.SegWit
+import Journeys.SyncProfiles
 
 /-! # The UI journeys
 
-Twelve journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Fourteen journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -708,207 +711,10 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
   finally
     discard <| h.cli #["setnetworkactive", "true"]⟩
 
-/-- A person's name typed on Receive, and their address and card made. On a phone closing the keyboard already
-makes them (the name's return does what the button does; seen on CI's simulator, 2026-11-15), and the button
-is then gone; the headless driver only sets the text, and the button is what makes them. -/
-def makeCardFor (name : String) : UI Unit := do
-  type personCardNameField name
-  unless ← exists? personCardText 2 do
-    let button ← state makePersonCardButton
-    if button.present && button.enabled then
-      -- gone between the look and the tap, the card is there: the wait below says
-      try tap makePersonCardButton catch _ => pure ()
-  waitFor personCardText 30
-
-/-- A card for one person (issue #94). On the card sheet the wallet makes a card for Dana alone; the device's
-owner is asked first, since making it reads the wallet's key. The node is Dana: it holds only the card's text,
-derives the card's first two addresses from it and pays each. The wallet finds both payments and Activity
-names each as received from Dana, though nobody labelled them. The card carries no account key, and shown
-again it is the same card. -/
-def cardForOnePerson : Journey := ⟨"cardForOnePerson", do
-  let r ← Run.new "card"
-  let h := r.host
-  r.launch "card"
-  createWallet
-
-  let card ← step "on Receive, under the wallet's address, Dana's name gives her address and her card" do
-    let own ← Receive.address
-    makeCardFor "Dana"
-    let card ← text personCardText
-    expect ((card.splitOn "\"payTo\":\"twinnowcard1p").length == 2 && (card.splitOn "tweak").length == 1)
-      s!"not a card with a test-network code and no tweak: {card}"
-    expect ((card.splitOn "pub").length == 1) s!"the card carries an extended key: {card}"
-    -- with it, an ordinary address for a payer that reads no card: the card's first payment, and not the
-    -- wallet's own address above
-    waitFor personAddressText 30
-    let hers ← text personAddressText
-    expectEq "Dana's address" hers (← h.cardAddress card 0)
-    expect (hers != own) "Dana's address is the wallet's own"
-    shot "50-card-for-dana"
-    Receive.close
-    -- asked for again, it is the same card
-    discard Receive.address
-    makeCardFor "Dana"
-    expectEq "the card shown again" (← text personCardText) card
-    Receive.close
-    pure card
-
-  let (first, second) ← step "Dana, who holds only the card, pays its first two addresses" do
-    let address0 ← h.cardAddress card 0
-    let address1 ← h.cardAddress card 1
-    expect (address0.startsWith "bcrt1p" && address1.startsWith "bcrt1p" && address0 != address1)
-      s!"the card's addresses: {address0}, {address1}"
-    let first ← h.fund address0 funding
-    waitForBalance funding
-    let second ← h.fund address1 payment
-    waitForBalance (funding + payment)
-    pure (first, second)
-
-  step "Activity names both payments as Dana's" do
-    for txid in [first, second] do
-      waitFor (historyPayment txid) 30
-      scrolled (historyPayment txid)
-      waitUntil 30 "the payment is named as Dana's" (every := 1) do
-        return (← text (historyPayment txid)) == "Received from Dana"
-    shot "51-card-payments-from-dana"⟩
-
-/-- Whether a backup in the stand-in iCloud was saved after `marker` was written. -/
-def savedSince (cloud marker : System.FilePath) : IO Bool := do
-  let since := (← marker.metadata).modified
-  for entry in ← cloud.readDir do
-    if entry.fileName.endsWith ".backup" && decide ((← entry.path.metadata).modified > since) then return true
-  return false
-
-/-- An account follows a person from one device to another. Two launches with two seeds are the two devices,
-and a directory both are given stands in for their iCloud (`WINNOW_E2E_CLOUD`; test mode has no iCloud
-otherwise). The first builds a 2-of-2 with a Core key, is paid, and saves its backup. The second, a different
-wallet, is told nothing: it lists the account by itself, with the balance its own scan confirms and the next
-address Core derives, and says it only watches, since its wallet holds none of the account's keys. -/
-def accountFollowsDevices : Journey := ⟨"accountFollowsDevices", do
-  let r ← Run.new "devices"
-  let h := r.host
-  let run ← randomHex 4
-  let core ← h.coreSigner s!"ui-core-devices-{run}"
-  let cloud := s!"{h.fixture}/icloud-{run}"
-  IO.FS.createDirAll cloud
-  r.launch "devicesfirst" [("WINNOW_E2E_CLOUD", cloud)]
-  createWallet
-
-  let descriptor ← step "the first device builds a 2-of-2 of this phone and a Core key" do
-    openMultisigAccounts
-    Builder.start
-    Builder.name "Phone and Core"
-    Builder.addPastedMember r core.keyExpression
-    waitFor (.beginning "Members · 2") 10
-    Builder.create
-  let account := accountID descriptor
-  h.importAccount core descriptor
-
-  step "the node funds it, and the first device's backup is saved with it" do
-    Builder.openAccount
-    let first ← h.deriveAddress descriptor 0
-    expectEq "the account's first address (Core's)" (← Account.receiveAddress) first
-    discard <| h.fund first funding
-    waitForBalance funding multisigBalance
-    let marker := s!"{cloud}/seen"
-    IO.FS.writeFile marker ""
-    waitUntil 60 "the first device's backup was not saved after the payment" (every := 0.5) do savedSince cloud marker
-    shot "40-devices-first"
-
-  step "a second device, another wallet, the same iCloud: the account is there by itself, under Watching" do
-    r.launch "devicessecond" [("WINNOW_E2E_CLOUD", cloud)]
-    createWallet
-    waitFor homeWatchingRow 120
-    scrolled homeWatchingRow
-    tap homeWatchingRow
-    waitFor (multisigAccount account) 30
-    waitFor (multisigWatchOnly account) 10
-    expectEq "the account's name" (← text (multisigAccount account)) "Phone and Core"
-    shot "41-devices-second-home"
-
-  step "its page says it only watches, with the balance and Core's next address" do
-    openAccountRow account
-    waitFor multisigWatchOnlyNote 20
-    waitForBalance funding multisigBalance
-    expectEq "the next address, the one after the paid one (Core's)" (← Account.receiveAddress) (← h.deriveAddress descriptor 1)
-    shot "42-devices-watch-only"⟩
-
-/-- Two wallets on one device. Settings → Wallets adds a second beside the first, through the onboarding
-there already is. The second builds a 2-of-2 of itself and the first; the node pays it; a payment from it is
-signed by the wallet that is open and then, with a button and a device check of its own, by the other wallet
-kept on the device; and the node takes a witness with both signatures. No other device takes part. -/
-def twoWalletsOneDevice : Journey := ⟨"twoWalletsOneDevice", do
-  let r ← Run.new "wallets"
-  let h := r.host
-  r.launch "wallets"
-  createWallet
-
-  let firstKey ← step "the first wallet's key, as it is sent to whoever builds an account" do
-    openMultisigAccounts
-    tap multisigAddButton
-    waitFor multisigKeyText 10
-    let key ← text multisigKeyText
-    backToWalletList
-    pure key
-
-  step "Settings → Profiles → Add a profile: a second one, made beside the first" do
-    openSettings
-    scrolled addWalletButton
-    shot "60-wallets-one"
-    tap addWalletButton
-    waitFor cancelAddWalletButton 60
-    shot "61-wallets-add"
-    tap createWalletButton
-    waitFor receiveButton 60
-    waitFor balanceText 30
-    openSettings
-    scrolled addWalletButton
-    waitUntil 20 "Settings does not list two profiles" do return (← exists? (.text "^Wallet [0-9a-f]{8}$"))
-    shot "62-wallets-two"
-    backToWalletList
-
-  let descriptor ← step "the second wallet builds a 2-of-2 of itself and the first" do
-    openMultisigAccounts
-    Builder.start
-    Builder.name "Both wallets"
-    Builder.addPastedMember r firstKey
-    waitFor (.beginning "Members · 2") 10
-    Builder.create
-  let account := accountID descriptor
-
-  step "the node pays the account" do
-    Builder.openAccount
-    discard <| h.fund (← Account.receiveAddress) funding
-    waitForBalance funding multisigBalance
-
-  let destination ← h.bankAddress
-  step "a payment from it: the open wallet signs, and one signature is not enough" do
-    Send.fromAccount r account destination payment "needs 2 of 2"
-    Collect.countIs multisigSignatureCount "1 of 2"
-    shot "63-wallets-one-signature"
-
-  step "the other profile kept here holds the second key: the payment goes to it, it opens, and it signs" do
-    scrolled (.beginning "Switch to ")
-    tap (.beginning "Switch to ")
-    waitFor multisigSignButton 60
-    Collect.countIs multisigSignatureCount "1 of 2"
-    shot "64-wallets-switched"
-    tap multisigSignButton
-    Collect.countIs multisigSignatureCount "2 of 2" 60
-    shot "65-wallets-two-signatures"
-
-  step "the phone broadcasts, and the node takes it" do
-    -- from the payment's own page (the Send sheet that began it was the other profile's)
-    scrolled multisigBroadcastButton
-    let before ← h.mempool
-    tap multisigBroadcastButton
-    let txid ← h.newMempoolTransaction before 30
-    h.expectPays txid destination payment⟩
-
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
-   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson, accountFollowsDevices,
-   twoWalletsOneDevice]
+   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson,
+   cardRestoreFromBackup, segwitMultisigJoinSign, accountFollowsDevices, twoWalletsOneDevice]
 
 end WinnowJourneys
 

@@ -1,7 +1,12 @@
 import LeanNative.Journey
+import TestKit.Fixtures
 import TestKit.Regtest
+import Winnow.Crypto.Base58
+import Winnow.Crypto.Sha2
 import Winnow.Keys.BIP32
 import Winnow.Keys.BIP39
+import Winnow.Keys.Secp256k1
+import Winnow.Wallet.People
 
 /-! # The journeys' host side: the fixture's regtest node, Bitcoin Core as a co-signer, backend-test's receiver
 
@@ -277,5 +282,78 @@ def Host.sweepOneCoin (h : Host) (wallet destination : String) (rate : Nat) : IO
 /-- The Core signers are done: their wallets unloaded. -/
 def Host.unload (h : Host) (signers : List CoreSigner) : IO Unit := do
   for s in signers do discard <| h.cli #["unloadwallet", s.wallet]
+
+/-! ## Person cards and SegWit v0 multisig accounts -/
+
+/-- Extracts the raw `twinnowcard1p…` code from a person card JSON string. -/
+def cardCodeOf (cardJson : String) : IO String := do
+  match Winnow.PersonCard.decode cardJson with
+  | .ok c =>
+    match c.payTo with
+    | some code => return code
+    | none => failure s!"person card has no payTo code: {cardJson}"
+  | .error e => failure s!"could not decode person card ({e.name}): {cardJson}"
+
+/-- A SegWit v0 2-of-3 multisig account (`wsh(sortedmulti(2, FIXED, phoneKey, otherKey))`) backed by two
+Bitcoin Core wallets: `watchWallet` (watch-only, builds funded PSBTs) and `serviceWallet` (holds the fixed
+key's WIF and adds Core's ECDSA signature). -/
+structure SegWitAccount where
+  watchWallet : String
+  serviceWallet : String
+  descriptor : String
+
+private def Host.importSegwitWallet (h : Host) (name descriptor : String) (privateKeys : Bool) : IO Unit := do
+  discard <| h.cli #["-named", "createwallet", s!"wallet_name={name}", "blank=true", s!"disable_private_keys={!privateKeys}"]
+  let withCs ← h.withChecksum descriptor
+  let request := Json.arr #[Json.mkObj [("desc", Json.str withCs), ("active", Json.bool true),
+    ("timestamp", Json.str "now"), ("range", Json.arr #[(0 : Nat), (19 : Nat)])]]
+  let result ← h.walletJson #["importdescriptors", request.compress] name
+  let imported := match result with
+    | .arr rows => rows.all fun row => (row.getObjValAs? Bool "success").toOption == some true
+    | _ => false
+  unless imported do failure s!"Core did not import the descriptor into {name}: {result.compress}"
+
+/-- Creates `watchWallet` and `serviceWallet` on the fixture node for `wsh(sortedmulti(2, FIXED, phoneKey,
+otherKey))` with descriptor range `[0, 19]`, mirroring `BackendTest.segwitFlow`. -/
+def Host.segwitAccount (h : Host) (tag phoneKey : String) : IO SegWitAccount := do
+  let otherKey ← TestKit.keyExpression (← TestKit.master 0xB2)
+  -- a regtest key, written here on purpose: it has never held anything and must never be used for anything else
+  let fixedSecret := Winnow.sha256 s!"winnow journey fixed key {tag}".toUTF8
+  let some fixedPublic := (Winnow.Keys.publicKeyOf fixedSecret).toOption
+    | failure "could not derive the fixed public key"
+  let wif := Winnow.Base58Check.encode ((ByteArray.mk #[0xEF] ++ fixedSecret).push 0x01)
+  let descriptorWith (fixed : String) := s!"wsh(sortedmulti(2,{fixed},{phoneKey.trimAscii.copy},{otherKey}))"
+  let rawDescriptor := descriptorWith (Winnow.hex fixedPublic)
+  let watchWallet := s!"wsh-watch-{tag}"
+  let serviceWallet := s!"wsh-service-{tag}"
+  h.importSegwitWallet watchWallet rawDescriptor (privateKeys := false)
+  h.importSegwitWallet serviceWallet (descriptorWith wif) (privateKeys := true)
+  return { watchWallet, serviceWallet, descriptor := ← h.withChecksum rawDescriptor }
+
+/-- The SegWit v0 descriptor's receive address at `index`, derived by the node. -/
+def Host.deriveSegwitAddress (h : Host) (descriptor : String) (index : Nat) : IO String := do
+  let single := (body descriptor).replace "<0;1>" "0"
+  let withCs ← h.withChecksum single
+  let addresses ← h.json #["deriveaddresses", withCs, s!"[{index},{index}]"]
+  let some a := (strings addresses).head? | failure s!"the node derived no address from {descriptor}"
+  return a
+
+/-- `watchWallet` builds a funded PSBT paying `destination` `amountSats` (fee_rate 2, changePosition 1), and
+`serviceWallet` signs it with the fixed key; returns `(signedPSBT, feeSats)`. -/
+def Host.segwitBuildAndSign (h : Host) (acct : SegWitAccount) (destination : String) (amountSats : Nat) : IO (String × Nat) := do
+  let outs := Json.arr #[Json.mkObj [(destination, Json.str (TestKit.Regtest.btc amountSats))]]
+  let options := Json.mkObj [("fee_rate", (2 : Nat)), ("changePosition", (1 : Nat))]
+  let built ← h.walletJson #["walletcreatefundedpsbt", "[]", outs.compress, "0", options.compress] acct.watchWallet
+  let fee := satsOf (built.getObjValD "fee")
+  if fee == 0 then failure s!"walletcreatefundedpsbt returned no fee: {built.compress}"
+  let unsignedPsbt : String ← field built "psbt"
+  let processed ← h.walletJson #["walletprocesspsbt", unsignedPsbt, "true", "DEFAULT", "true", "false"] acct.serviceWallet
+  let signedPsbt : String ← field processed "psbt"
+  return (signedPsbt, fee)
+
+/-- Unloads both Core wallets created for a SegWit v0 multisig account. -/
+def Host.unloadSegwit (h : Host) (acct : SegWitAccount) : IO Unit := do
+  discard <| h.cli #["unloadwallet", acct.watchWallet]
+  discard <| h.cli #["unloadwallet", acct.serviceWallet]
 
 end WinnowJourneys

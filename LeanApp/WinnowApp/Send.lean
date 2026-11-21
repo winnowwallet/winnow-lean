@@ -138,7 +138,7 @@ def sendForm (m : Model) : List H :=
        | none =>
          [ .row [.identified Ids.destinationField (.input .plain "" "Bitcoin address" i.destination (send .setDestination) none),
                  .identified Ids.pasteDestinationButton (.button "Paste" .plain (some (.send .pasteDestination)))]
-         , .button "Saved recipients" .plain (some (.send .openRecipients)) ])
+         , .identified Ids.savedRecipientsButton (.button "Saved recipients" .plain (some (.send .openRecipients))) ])
   sourceSection m ++ [toSection,
     .section "Amount" "You'll see the network fee before you send."
       [ .row [.identified Ids.amountField (.input .number "" "0" i.amount (send .setAmount) none), caption "sats"] ] ] ++

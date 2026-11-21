@@ -263,4 +263,17 @@ def paymentBlock : String := "paymentBlock"
 def paymentFee : String := "paymentFee"
 def paymentReplacedBy : String := "paymentReplacedBy"
 
+/-! ## Saved recipients, Add person, and iCloud restore rows -/
+
+def savedRecipientsButton : String := "savedRecipientsButton"
+def addPersonToolbarButton : String := "addPersonToolbarButton"
+def personNameField : String := "personNameField"
+def personPastedField : String := "personPastedField"
+def personPasteButton : String := "personPasteButton"
+def personSaveButton : String := "personSaveButton"
+def personPayToCaption : String := "personPayToCaption"
+def savedRecipientButton (id : String) : String := s!"savedRecipient-{id}"
+def savedRecipientCardButton (id : String) : String := s!"savedRecipientCard-{id}"
+def cloudRestoreBackupButton (id : String) : String := s!"cloudRestoreBackup-{id}"
+
 end WinnowApp.Ids

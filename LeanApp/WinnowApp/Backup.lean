@@ -122,7 +122,8 @@ def cloudRestoreSheet (m : Model) (inner : List H) : H :=
       else
        [.section "Choose a saved backup" "Use the same Apple Account and enable Passwords & Keychain. Backups may take time to appear on a new device. Restoring never replaces a wallet already on this phone."
          ((c.available.map fun b =>
-             Html.symbol "icloud.and.arrow.down" (.button (restoreLabel b) .plain (if o.restoring then none else some (.cloud (.restore b.id))))) ++
+             .identified (Ids.cloudRestoreBackupButton b.id)
+               (Html.symbol "icloud.and.arrow.down" (.button (restoreLabel b) .plain (if o.restoring then none else some (.cloud (.restore b.id)))))) ++
           (if c.available.isEmpty && !c.busy then [body "No backup found for this network yet."] else []) ++
           [ .button "Check again" .plain (if o.restoring || c.busy then none else some (.cloud .checkAgain)) ])]) ++
      (if o.restoring || c.busy then [.progress (if o.restoring then "Restoring wallet…" else "Checking iCloud…")] else []) ++

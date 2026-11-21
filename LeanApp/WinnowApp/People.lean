@@ -1,4 +1,5 @@
 import WinnowApp.Home
+import WinnowApp.Ids
 
 /-! RecipientsView.swift: SavedRecipientsView, and AddPersonView in all its modes — a new recipient, a
 payment's address, a rename, a destination for someone without one, and the
@@ -125,11 +126,12 @@ def addPersonSheet (m : Model) (inner : List H) : H :=
   let choosing := f.choosingFunding m
   formSheet (f.title m) (if f.saving then none else some .closeSheet) [closeBar "Cancel"]
     ([ .section "" ""
-         ([.input .plain "" "Name" f.name (fun s => .people (.setName s)) none] ++
+         ([.identified Ids.personNameField (.input .plain "" "Name" f.name (fun s => .people (.setName s)) none)] ++
           (if (person.bind (·.payTo)).isNone then
-            [ .input .multiline "" "Paste an address or card" f.pasted
-                (fun s => .people (.setPasted s)) none
-            , .button "Paste from clipboard" .plain (some (.people .paste)) ]
+            [ .identified Ids.personPastedField
+                (.input .multiline "" "Paste an address or card" f.pasted
+                  (fun s => .people (.setPasted s)) none)
+            , .identified Ids.personPasteButton (.button "Paste from clipboard" .plain (some (.people .paste))) ]
            else [])) ] ++
      (if f.labelingSender && !m.records.people.isEmpty then
        [.section "Or choose someone saved" ""
@@ -151,11 +153,14 @@ def addPersonSheet (m : Model) (inner : List H) : H :=
       | some p, none =>
         [.section "" ""
           (match p.payTo with
-            | some fresh => [caption (if fresh then "Fresh address each payment" else "Uses this same address each time")]
+            | some fresh =>
+              [.identified Ids.personPayToCaption
+                 (caption (if fresh then "Fresh address each payment" else "Uses this same address each time"))]
             | none => [])]
       | _, _ => []) ++
      errorRows f.error ++
-     [.section "" "" [.button (if f.saving then "Saving…" else "Save") .primary (if f.canSave m then some (.people .save) else none)]])
+     [.section "" "" [.identified Ids.personSaveButton
+        (.button (if f.saving then "Saving…" else "Save") .primary (if f.canSave m then some (.people .save) else none))]])
     inner
 
 def savedRecipientsSheet (m : Model) (inner : List H) : H :=
@@ -163,17 +168,20 @@ def savedRecipientsSheet (m : Model) (inner : List H) : H :=
   let locked := m.records.peopleStorageNotice.isSome
   formSheet "Saved recipients" (some .closeSheet)
     [ closeBar "Done"
-    , .toolbar [Html.symbol "plus" (.button "Add" .plain (if locked then none else some (.people (.openAdd {} ""))))] ]
+    , .toolbar [.identified Ids.addPersonToolbarButton
+        (Html.symbol "plus" (.button "Add" .plain (if locked then none else some (.people (.openAdd {} "")))))] ]
     (errorRows (m.records.peopleStorageNotice <|> m.recipientsError) ++
      (if shown.isEmpty then [caption "Save a recipient from a payment in Wallet, or add an address or card here."] else []) ++
      (shown.flatMap fun p =>
-        [ .row [ .button (if p.payTo.isNone then s!"{p.name} — add destination" else p.name) .plain (some (.people (.choose p.id)))
+        [ .row [ .identified (Ids.savedRecipientButton p.id)
+                   (.button (if p.payTo.isNone then s!"{p.name} — add destination" else p.name) .plain (some (.people (.choose p.id))))
                , .spacer
                , .button "Rename" .plain (some (.people (.rename p.id)))
                , .button "Remove" .destructive (some (.people (.remove p.id))) ]
         -- on a line of its own: a fourth button in the row above pushed Remove off the screen (seen in the
         -- simulator, 2026-11-14)
-        , .button (if p.hasCard then s!"Show {p.name}’s address and card" else s!"Make {p.name}’s address and card") .plain
-            (some (.people (.card p.id))) ])) inner
+        , .identified (Ids.savedRecipientCardButton p.id)
+            (.button (if p.hasCard then s!"Show {p.name}’s address and card" else s!"Make {p.name}’s address and card") .plain
+              (some (.people (.card p.id)))) ])) inner
 
 end WinnowApp
