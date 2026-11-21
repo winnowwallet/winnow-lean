@@ -29,8 +29,11 @@ def ofHex? (s : String) : Option ByteArray := Id.run do
     | _ => break
   return some out
 
+def hexChar (n : Nat) : Char :=
+  let d := #['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f']
+  if h : n < 16 then d[n]'(by simpa [d] using h) else '0'
+
 def toHex (b : ByteArray) : String :=
-  let d := "0123456789abcdef".toList
-  String.ofList (b.toList.flatMap fun x => [d[x.toNat / 16]!, d[x.toNat % 16]!])
+  String.ofList (b.toList.flatMap fun x => [hexChar (x.toNat / 16), hexChar (x.toNat % 16)])
 
 end Secp

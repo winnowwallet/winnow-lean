@@ -1,6 +1,6 @@
 # Winnow in Lean: the port of Sources/WalletCore and Sources/WinnowApp (see ../PORT.md).
 name = "winnow"
-defaultTargets = ["Secp", "SecpCt", "WinnowCore", "Winnow", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
+defaultTargets = ["Secp", "SecpCt", "WinnowCore", "Winnow", "WinnowProofs", "io-test", "multisig-test", "ledger-test", "crypto-test", "census-check"]
 
 # What the curve code is proved against, and the plain pieces around it: the curve as specified, signing as
 # BIP 340 and ECDSA give it, bytes, SHA-256, DER (Secp/Proofs/Gate.lean).
@@ -21,6 +21,11 @@ name = "WinnowCore"
 
 [[lean_lib]]
 name = "Winnow"
+
+# Build-time verification library (WinnowProofs.lean -> Winnow/Proofs/Gate.lean). Never imported by
+# WinnowCore, Winnow, or WinnowApp; scripts/check-proofs enforces zero proof leakage.
+[[lean_lib]]
+name = "WinnowProofs"
 
 # What the test executables share (TestKit/): the tally and how it prints, the test keys, a regtest bitcoind, a
 # fake peer.
@@ -53,6 +58,20 @@ root = "LedgerTest"
 [[lean_exe]]
 name = "silent-payment-test"
 root = "SilentPaymentTest"
+
+# A card per person (Winnow/Keys/SilentPaymentPairing.lean, issue #94): a silent payment address, a person's
+# tweak and the payments they derive, against vectors an independent implementation wrote
+# (scripts/card-keys-vectors). Run from Lean/; CI runs it.
+[[lean_exe]]
+name = "card-keys-test"
+root = "CardKeysTest"
+
+# A card per person against a regtest Bitcoin Core, the payer: found through its basic filters, replaced,
+# reorganised, spent by the issuer alone, and recovered from the phrase by a scan back. Run from Lean/ with
+# bitcoind on hand (scripts/ci-regtest cards uses the pinned release); CI runs it.
+[[lean_exe]]
+name = "card-regtest"
+root = "CardRegtest"
 
 # AES and AES-GCM (Winnow/Crypto/AES*.lean): FIPS 197, every Wycheproof AES-GCM test and CryptoKit's own
 # output; BIP340 signing against BIP340's test vectors (Vectors/). Run from Lean/; CI runs it.

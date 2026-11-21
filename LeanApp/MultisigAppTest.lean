@@ -17,7 +17,7 @@ import TestKit.Fixtures
   recovery path), a co-signer's spend signed on two phones with BIP326 sequences, the recovery path's age
   check, through `Backend.realWithMultisig` (`Real/Multisig.lean`) on wallets opened from
   disk with no network;
-* Settings → Signers as a person uses it: a signer saved from pasted keys, opened, renamed and removed (one an
+* Settings → Security → Hardware wallets and keys as a person uses it: a signer saved from pasted keys, opened, renamed and removed (one an
   account still uses among them), through the app's own `perform` on that backend;
 * an account's own screens the same way: removal refused until every spend is in a block, joining from a pasted
   descriptor, a new address, the collection page and Discard, and removing members and keys in the builder.
@@ -752,6 +752,106 @@ def testRecoveryPathRefusesCoinsThatAreTooYoung : IO Unit := do
   match ← (Real.createMultisigSpend phone.env phone.multisig id destination 20_000 2.0 false).toBaseIO with
   | .ok p => check "the signers' path spends it at once" p.screen.isSome
   | .error e => check "the signers' path spends it at once" false (toString e)
+
+/-- The Keychain names a wallet's secret by the master key's fingerprint, which says nothing of the network:
+one phrase used on two networks is one item. Deleting one of the two wallets must leave the other its key. -/
+def testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes : IO Unit := do
+  let root := (← tempFile "x").parent.get!
+  let signet := root / "signet"
+  let regtest := root / "regtest"
+  IO.FS.createDirAll signet
+  IO.FS.createDirAll regtest
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let ks := Winnow.inMemoryKeyStore secrets
+  let entropy := some (zeros 16 0xD4)
+  let first ← match ← (Wallet.create .signet ks (some (signet / "wallet.json")) (entropy := entropy)).run with
+    | .ok w => pure w
+    | .error e => throw (IO.userError s!"Wallet.create: {e.name}")
+  -- the same phrase restored on regtest: a bundle of it, made by a wallet that keeps its key elsewhere
+  let elsewhere := Winnow.inMemoryKeyStore (← IO.mkRef ({} : Keys.InMemorySecrets))
+  let bundle ← match ← (do
+      let w ← Wallet.create .regtest elsewhere none (entropy := entropy)
+      w.exportBundle true).run with
+    | .ok b => pure b
+    | .error e => throw (IO.userError s!"the regtest bundle: {e.name}")
+  match ← (Wallet.importing bundle ks (some (regtest / "wallet.json"))).run with
+  | .ok w => check "one phrase on two networks is one wallet id" (w.id == first.id)
+  | .error e => throw (IO.userError s!"Wallet.importing: {e.name}")
+  check "…and one Keychain item" ((← secrets.get).size == 1)
+  let (backend, env, _) ← Backend.realWithMultisig { keyStore := ks, fetch := fun _ => throw (.other "offline") }
+  check "the regtest wallet opens" ((← backend.openWallet .regtest regtest.toString) matches .opened _)
+  failsWith "a wallet is never created over one" (backend.createWallet .regtest regtest.toString)
+    Real.AppError.walletAlreadyHere.text
+  check "…and the one there is as it was" ((← backend.openWallet .regtest regtest.toString) matches .opened _)
+  Real.deleteWallet env
+  check "deleting one of the two leaves the key the other needs" ((← secrets.get).size == 1)
+  check "the signet wallet opens" ((← backend.openWallet .signet signet.toString) matches .opened _)
+  check "…and still reads its phrase" ((← backend.revealMnemonic).length == 12)
+  failsWith "a delete names the wallet it means" (Real.deleteWallet env (expected := some "00000000"))
+    Real.AppError.walletReplaced.text
+  Real.deleteWallet env (expected := some first.id)
+  check "deleting the last one deletes the key" ((← secrets.get).isEmpty)
+
+/-- Two wallets kept for one network. The first stays in the network's own directory and is not touched by
+the second, which has a directory, accounts and files of its own; each opens with its own key; a wallet
+already kept is not kept twice; and deleting the added one takes its directory and nothing of the first. -/
+def testTwoWalletsAreKeptSideBySideOnOneNetwork : IO Unit := do
+  let net := (← tempFile "x").parent.get! / "signet"
+  IO.FS.createDirAll net
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let ks := Winnow.inMemoryKeyStore secrets
+  let make (dir : System.FilePath) (byte : UInt8) : IO Wallet := do
+    IO.FS.createDirAll dir
+    match ← (Wallet.create .signet ks (some (dir / "wallet.json")) (entropy := some (zeros 16 byte))).run with
+    | .ok w => pure w
+    | .error e => throw (IO.userError s!"Wallet.create: {e.name}")
+  let a ← make net 0xA1
+  let (backend, env, _) ← Backend.realWithMultisig { keyStore := ks, fetch := fun _ => throw (.other "offline") }
+  check "the first wallet opens where it always was" ((← backend.openWallet .signet net.toString) matches .opened _)
+  check "one wallet, open, and no pointer written for it"
+    ((← backend.wallets net.toString) == [{ id := a.id, slot := "", active := true }] && !(← (Real.activeSlotPath net.toString).pathExists))
+  let before ← IO.FS.readBinFile (net / "wallet.json")
+  -- a second wallet, in the slot the backend names
+  let slot ← Real.freeSlot net.toString
+  let second := System.FilePath.mk (Real.slotDir net.toString slot)
+  let b ← make second 0xB2
+  check "the second wallet has a slot of its own" (slot == "1" && b.id != a.id)
+  check "…and opens there" ((← backend.openWallet .signet second.toString) matches .opened _)
+  check "both are listed, the second open"
+    ((← backend.wallets net.toString) == [{ id := a.id, slot := "", active := false }, { id := b.id, slot := "1", active := true }])
+    s!"{repr (← backend.wallets net.toString)}"
+  check "the one open last is the one a launch opens" ((← Real.resolveSlot net.toString) == "1")
+  check "its phrase is its own" ((← backend.revealMnemonic) != [] && (← secrets.get).size == 2)
+  -- what the second wallet does is in its own directory
+  let ms ← masters
+  let other ← keyExpression ms[2]!
+  let own ← Real.multisigKeyExpression env
+  let (account, _, _) ← backend.createMultisigAccount "Second's" 2 [([own], none), ([other], none)] none
+  check "an account built in the second wallet is the second's" ((← backend.multisigOverview).accounts.map (·.id) == [account])
+  check "the first wallet's file is as it was" ((← IO.FS.readBinFile (net / "wallet.json")) == before)
+  check "back in the first" ((← backend.openWallet .signet net.toString) matches .opened _)
+  check "the first has none of the second's accounts" ((← backend.multisigOverview).accounts.isEmpty)
+  check "…and is the one a launch opens now" ((← Real.resolveSlot net.toString) == "")
+  -- the first wallet's own backup, taken as a wallet to add
+  let bundle ← match ← (do let w ← Wallet.open (net / "wallet.json") ks; w.exportBundle true).run with
+    | .ok bundle => pure bundle
+    | .error e => throw (IO.userError s!"exportBundle: {e.name}")
+  let third := Real.slotDir net.toString (← Real.freeSlot net.toString)
+  failsWith "a wallet already kept is not kept twice" (Real.importDecoded env .signet third bundle)
+    Real.AppError.walletAlreadyHeld.text
+  check "…and nothing was written for it" (!(← Real.holdsWallet third) && (← backend.wallets net.toString).length == 2)
+  -- the second wallet is deleted
+  check "the second again" ((← backend.openWallet .signet second.toString) matches .opened _)
+  check "its account is still there" ((← backend.multisigOverview).accounts.map (·.id) == [account])
+  Real.deleteWallet env (expected := some b.id)
+  check "deleted: its directory is gone" (!(← second.pathExists))
+    s!"{(← (try second.readDir catch _ => pure #[])).map (·.fileName)}"
+  check "…and its key, and not the first's" (!(← secrets.get).contains b.id && (← secrets.get).contains a.id)
+  check "one wallet is kept, and it is the one a launch opens"
+    ((← backend.wallets net.toString) == [{ id := a.id, slot := "", active := false }] && (← Real.resolveSlot net.toString) == "")
+  check "the first opens, with its file as it was"
+    (((← backend.openWallet .signet net.toString) matches .opened _) && (← IO.FS.readBinFile (net / "wallet.json")) == before)
+  check "…and reads its phrase" ((← backend.revealMnemonic).length == 12)
 
 def flowTests : List (String × IO Unit) :=
   [ ("testBuilderMakesAccountWithAnotherWinnowAndRecovery", testBuilderMakesAccountWithAnotherWinnowAndRecovery)
@@ -1806,7 +1906,7 @@ def testAnswersFinishAcrossTheBackground : IO Unit := do
   let (other, _) := onHost (.multisigCreated g "id1" "tr(…)" none) { other with multisigBuild := building.multisigBuild }
   check "another network's wallet drops it" other.multisigBuild.created.isNone
 
-/-! ## Settings → Signers, as a person uses it (#46)
+/-! ## Settings → Security → Hardware wallets and keys, as a person uses it (#46)
 
 The Model gets what a tap sends (`step`), the commands run through the app's own `perform` against a phone's
 real backend, and every answer comes back through `onHost` (the signer answers through `onSignerHost`); the
@@ -2098,6 +2198,48 @@ def testJoiningAnAccountFromAPastedDescriptor : IO Unit := do
   check "joined twice: refused on the form" (m.routes.getLast? == some .multisigAdd && !m.multisigAdd.saving && m.multisigAdd.error.isSome &&
     contains (rendered m) (m.multisigAdd.error.getD "?"))
   check "joined twice: one account, its name kept" ((← phone.accounts).map (·.name) == ["Household"])
+
+/-- A co-signer's key given by itself is their own extended key's child at receive index 8, so at that one
+index two of the account's keys are the same key and the account has no address
+(`SegwitMultisigAccount.usable`). Joining cannot see it. The account goes on working around the place: every
+other script is watched, a payment past it is credited, the address shown steps over it and New address goes
+on from the one shown. Before, an account like this could not list its scripts once the watched indices
+reached the place, and the scan stopped for every account with it. -/
+def testASegwitAccountWithNoAddressAtOneIndexGoesOnWorking : IO Unit := do
+  let phone ← phoneWith 0xA1
+  let theirs ← master 0xC3
+  let spoiled : UInt32 := 8
+  let child ← needE "their child" (·.name) ((← accountKey theirs).derivedPath #[0, spoiled])
+  let descriptor := s!"wsh(sortedmulti(2,{hex child.publicKey},{← phone.keyExpression},{← keyExpression theirs}))"
+  let account ← need "the account" (SegwitMultisigAccount.parse descriptor signet)
+  let script (index : UInt32) (choice : Nat := 0) : IO ByteArray :=
+    need s!"script {index}/{choice}" (account.scriptPubKey index choice)
+  check "the account has no address there" ((account.usable 0 spoiled) matches .ok none)
+  -- the store: the scripts around the place, and a payment past it
+  let (store, _) ← S.open (← memoryKeys) none
+  let added ← need "add" (store.step fun st => st.add store.keys writeAtomically "Exchange" (.segwit account) 100)
+  let watched ← need "the scripts to watch" store.watch
+  check "39 scripts for the first 20 indices: every place but that one"
+    (watched.size == 39 && watched.contains (← script 7) && watched.contains (← script 9) &&
+      watched.contains (← script spoiled 1) && !watched.contains ByteArray.empty)
+  discard <| need "apply 101" (store.apply (block 101 #[payment (← script 9) 9_000 (foreign 0x51)]))
+  let current ← store.fetch added.id
+  check "a payment past the place is credited and moves the counter on" (current.balance == 9_000 && current.nextReceiveIndex == 10)
+  check "and the window with it: 59 scripts for 30 indices" ((← need "watch again" store.watch).size == 59)
+  -- the phone: the address shown, and New address
+  let id ← phone.join "Exchange" descriptor
+  let shown : IO (Option MultisigInfo) := do return (← phone.accounts).find? (·.id == id)
+  check "the first address is index 0's" (((← shown).bind (·.receiveAddress)) == (account.address 0).toOption)
+  for _ in [0:8] do Real.newMultisigReceiveAddress phone.multisig id
+  check "eight addresses on, the counter stands at the place" ((← phone.record id).nextReceiveIndex == spoiled)
+  check "the address shown is the next index's"
+    (((← shown).map (·.nextReceiveIndex)) == some 9 && ((← shown).bind (·.receiveAddress)) == (account.address 9).toOption &&
+      (account.address 9).toOption.isSome)
+  Real.newMultisigReceiveAddress phone.multisig id
+  check "New address goes on from the one shown"
+    ((← phone.record id).nextReceiveIndex == 10 && ((← shown).bind (·.receiveAddress)) == (account.address 10).toOption)
+  check "the phone's scan has every script but that place's: 59 for 30 indices"
+    ((← phone.multisig.watchScripts signet).size == 59)
 
 /-- New address: the account's next address, the one every co-signer derives, kept across a restart. -/
 def testNewAddressMovesTheAccountOn : IO Unit := do
@@ -2394,10 +2536,131 @@ def testRefusedAddressesAndPSBTsFromAnAccount : IO Unit := do
     "The PSBTs disagree about a field and cannot be combined safely."
   check "the account's spend in hand still reviews" ((← Real.reviewMultisigPSBT phone.env phone.multisig id mine.psbt).screen.isSome)
 
+/-- Two wallets kept on one device, each holding one key of a 2-of-2, and a third that holds none. From the
+open wallet the account is not watch-only; the open wallet signs with its own button and the other with its
+own, one read of the Keychain for the one wallet named; a wallet that is not kept, or whose key is not the
+account's, is refused before anything is read. An account only the other wallet's key is in is not watch-only
+either: its payment is filed unsigned and signed with that wallet's key. -/
+def testAnotherWalletOnTheDeviceSignsWithItsOwnKey : IO Unit := do
+  let net := (← tempFile "x").parent.get! / "signet"
+  IO.FS.createDirAll net
+  let secrets ← IO.mkRef ({} : Keys.InMemorySecrets)
+  let inner := Winnow.inMemoryKeyStore secrets
+  -- every read of a wallet's secret is noted (the sealed stores' own keys are not wallets' secrets)
+  let loads ← IO.mkRef (#[] : Array String)
+  let ks : Keys.KeyStore IO := { inner with load := fun id => do
+    unless id.startsWith "store-key." do (loads.modify (·.push id) : IO Unit)
+    inner.load id }
+  let make (dir : System.FilePath) (byte : UInt8) : IO Wallet := do
+    IO.FS.createDirAll dir
+    match ← (Wallet.create .signet ks (some (dir / "wallet.json")) (entropy := some (zeros 16 byte))).run with
+    | .ok w => pure w
+    | .error e => throw (IO.userError s!"Wallet.create: {e.name}")
+  let second := System.FilePath.mk (Real.slotDir net.toString "1")
+  let third := System.FilePath.mk (Real.slotDir net.toString "2")
+  let a ← make net 0xA1
+  let b ← make second 0xC3
+  let c ← make third 0xD4
+  let (backend, env, multisig) ← Backend.realWithMultisig { keyStore := ks, fetch := fun _ => throw (.other "offline") }
+  stackedPhones.modify (·.push { backend, env, multisig })
+  let opened (dir : System.FilePath) : IO Unit := do
+    unless (← backend.openWallet .signet dir.toString) matches .opened _ do throw (IO.userError s!"did not open {dir}")
+    Real.buildStackIfNeeded env
+  let infoOf (id : String) : IO MultisigInfo := do
+    let some i := (← backend.multisigOverview).accounts.find? (·.id == id) | throw (IO.userError s!"no account {id}")
+    return i
+  let fund (d : String) (id : String) (seed : UInt8) : IO Unit := do
+    let account ← need "account" (MultisigAccount.parse d signet)
+    let height := (← Real.record multisig id).createdAtHeight + 1
+    let funding := spend #[⟨zeros 32 seed, 0⟩] #[{ value := 60_000, scriptPubKey := ← spk account 0 }]
+    discard <| multisig.applyMatch (block height #[funding]) signet
+  -- the second wallet: its key, and an account only it and someone else are in
+  opened second
+  let keyB ← Real.multisigKeyExpression env
+  let (theirs, theirsDescriptor, _) ← backend.createMultisigAccount "Second's" 2 [([keyB], none), ([← keyExpression (← masters)[1]!], none)] none
+  let theirsRecord ← Real.record multisig theirs
+  -- the first wallet, open: an account of the two wallets kept here
+  opened net
+  let keyA ← Real.multisigKeyExpression env
+  let (both, bothDescriptor, _) ← backend.createMultisigAccount "Both" 2 [([keyA], none), ([keyB], none)] none
+  check "an account of two wallets kept here is not watch-only" (!(← infoOf both).watchOnly)
+  fund bothDescriptor both 0x46
+  let inputs := accountInputs both (← accountDestination) 25_000
+  let preview ← backend.previewSend inputs
+  discard <| backend.signAndDraft inputs preview
+  let screen (id : String) : IO MultisigScreen := do
+    let some s := (← infoOf id).draft.bind (·.screen) | throw (IO.userError "no signing screen")
+    return s
+  let held (sc : MultisigScreen) := sc.heldKeys.map fun k => (k.walletID, k.unsigned)
+  let slotB := Real.slotOf second.toString
+  let slotC := Real.slotOf third.toString
+  check "the open wallet has signed, and the other wallet kept here is still to sign"
+    ((← screen both).signatures == [(false, 1, 2)] && held (← screen both) == [(b.id, true)])
+    (reprStr (← screen both).heldKeys)
+  -- the screen and its messages: a way to the other wallet, which signs with its own key once it is open
+  let m : Model := { stage := .ready, walletID := some a.id, multisig := ← backend.multisigOverview, routes := [.multisigPSBT both] }
+  let page := rendered m
+  check "the page offers to switch to the other wallet to sign, by its name, beside this phone's signature"
+    (contains page (Ids.multisigSwitchToSign b.id) && contains page s!"Switch to Wallet {b.id} and sign" && contains page Ids.multisigSignButton)
+  let (tapped, cs) := step (.multisig (.switchToSign both slotB)) m
+  check "its tap hands the payment over to that wallet" (cs.any fun cmd => cmd matches .handOverDraft _ _ _ _)
+  let (_, cs) := step (.multisig (.switchToSign both slotC)) m
+  check "a wallet the page does not offer is not handed anything" cs.isEmpty
+  let (switching, cs) := onHost (.handedOver tapped.generation tapped.collect.epoch both slotB) { tapped with active := true }
+  check "handed over, the other wallet is opened, and its page for the account waits"
+    (switching.pendingAccount == some both && cs.any fun cmd => cmd matches .openSlot _ _ (some _))
+  loads.set #[]
+  failsWith "a wallet not kept here is refused" (backend.handOverDraft both "99") Real.notHeldText
+  failsWith "a wallet kept here whose key is not the account's is refused" (backend.handOverDraft both slotC) Real.notASignerText
+  backend.handOverDraft both slotB
+  check "…and handing over reads nothing of the Keychain" ((← loads.get).isEmpty) s!"{← loads.get}"
+  -- the other wallet open: the account is there, with the payment, and it adds its own signature
+  opened second
+  check "in the other wallet, the account is there with the payment and its first signature"
+    ((← screen both).signatures == [(false, 1, 2)] && (← screen both).progress.phoneUnsigned)
+  backend.signDraft both
+  check "it signs with one read, of its own secret" ((← loads.get) == #[b.id]) s!"{← loads.get}"
+  let done ← screen both
+  check "both signatures: the payment is complete" (done.signatures == [(false, 2, 2)] && done.progress.complete)
+    (reprStr done.signatures)
+  -- an account only the second wallet's key is in, seen from the first (as it arrives from another device)
+  opened net
+  multisig.withStore fun s => do return (← s.admit multisig.host.keys multisig.host.writeData theirsRecord, ())
+  check "an account another wallet kept here holds a key of is not watch-only" (!(← infoOf theirs).watchOnly)
+  check "…it is not this wallet's: it says where it signs" (!(← infoOf theirs).signsHere && (← infoOf theirs).signsIn == some s!"Wallet {b.id}")
+  fund theirsDescriptor theirs 0x47
+  -- the same block reaches the second wallet's copy (one pass scans for both)
+  opened second
+  fund theirsDescriptor theirs 0x47
+  opened net
+  let inputs := accountInputs theirs (← accountDestination) 20_000
+  let preview ← backend.previewSend inputs
+  loads.set #[]
+  discard <| backend.signAndDraft inputs preview
+  check "its payment is filed unsigned by the open wallet, which holds no key of it, with nothing read"
+    ((← screen theirs).signatures == [(false, 0, 2)] && !(← screen theirs).progress.phoneHolds && (← loads.get).isEmpty)
+    (reprStr (← screen theirs).signatures)
+  let m : Model := { stage := .ready, walletID := some a.id, multisig := ← backend.multisigOverview, routes := [.multisigPSBT theirs] }
+  check "its page offers to switch to the other wallet and not this phone's signature"
+    (contains (rendered m) (Ids.multisigSwitchToSign b.id) && !contains (rendered m) Ids.multisigSignButton && !contains (rendered m) Ids.multisigWatchOnlyNote)
+  backend.handOverDraft theirs slotB
+  opened second
+  backend.signDraft theirs
+  check "…and that wallet signs it" ((← screen theirs).signatures == [(false, 1, 2)] && (← loads.get) == #[b.id])
+  -- with the second wallet gone from the device, the account is only watched
+  Real.deleteWallet env (expected := some b.id)
+  opened net
+  check "once that wallet is deleted from the device, the account is watch-only" ((← infoOf theirs).watchOnly)
+  check "…and the first wallet's own account is as it was" (!(← infoOf both).watchOnly)
+
 def accountTests : List (String × IO Unit) :=
-  [ ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
+  [ ("testAnotherWalletOnTheDeviceSignsWithItsOwnKey", withStacksStopped testAnotherWalletOnTheDeviceSignsWithItsOwnKey)
+  , ("testAnAccountGoesOnlyWhenEverySpendIsInABlock", testAnAccountGoesOnlyWhenEverySpendIsInABlock)
   , ("testJoiningAnAccountFromAPastedDescriptor", testJoiningAnAccountFromAPastedDescriptor)
+  , ("testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes", testOnePhraseOnTwoNetworksKeepsItsKeyUntilTheLastWalletGoes)
+  , ("testTwoWalletsAreKeptSideBySideOnOneNetwork", testTwoWalletsAreKeptSideBySideOnOneNetwork)
   , ("testASegwitAccountIsJoinedAndAPastedPaymentSignedHere", testASegwitAccountIsJoinedAndAPastedPaymentSignedHere)
+  , ("testASegwitAccountWithNoAddressAtOneIndexGoesOnWorking", testASegwitAccountWithNoAddressAtOneIndexGoesOnWorking)
   , ("testNewAddressMovesTheAccountOn", testNewAddressMovesTheAccountOn)
   , ("testACollectionPageShowsItsDraftAndDiscardsIt", testACollectionPageShowsItsDraftAndDiscardsIt)
   , ("testTheBuilderRemovesMembersAndKeys", testTheBuilderRemovesMembersAndKeys)

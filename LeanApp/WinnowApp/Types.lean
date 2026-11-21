@@ -14,6 +14,19 @@ inductive Network where
   | regtest
   deriving Repr, BEq, Inhabited, ToJson, FromJson
 
+/-- A wallet kept on this device for a network: its id, the slot its directory is (empty for the network's
+own), and whether it is the one open. -/
+structure WalletSummary where
+  id : String
+  slot : String
+  active : Bool := false
+  /-- The name the person gave it; empty for none. -/
+  name : String := ""
+  deriving Repr, BEq, Inhabited
+
+/-- How a wallet is called: its name, or "Wallet" and its id. -/
+def WalletSummary.label (w : WalletSummary) : String := if w.name.isEmpty then s!"Wallet {w.id}" else w.name
+
 /-- How the app is drawn: as the system is, or always light or always dark (the shell's `appearance`). -/
 inductive Appearance where
   | system
@@ -185,6 +198,9 @@ def DisplayedPayment.accountName (p : DisplayedPayment) : Option String :=
 structure Status where
   /-- The wallet's own coins. -/
   balance : Int := 0
+  /-- Some of the records' files are sealed with a key the Keychain gives only to the person
+  (`RecordsReal.refusedStoreKeys`): they read as damaged until the person authenticates once. -/
+  recordsLocked : Bool := false
   /-- The multisig accounts' live coins, which need co-signers to move. -/
   accountsBalance : Int := 0
   utxoCount : Nat := 0
@@ -216,6 +232,8 @@ structure Status where
 structure CloudBackupInfo where
   id : String
   savedAtText : String
+  /-- The wallet the backup is of, when this device could read it (its key had arrived). -/
+  walletID : Option String := none
   deriving Repr, Inhabited, BEq
 
 /-- What the screens say for a build without the iCloud entitlement (the shell's `missingEntitlement`). -/
@@ -234,6 +252,9 @@ structure CloudStatus where
   busy : Bool := false
   available : List CloudBackupInfo := []
   restoreNotice : Option String := none
+  /-- How keeping accounts and Ledgers in step with the person's other devices stands: when their backups were
+  last read ("Checked 2 min ago"), or why they could not be. None before the first look, and in test mode. -/
+  devicesNote : Option String := none
   deriving Repr, Inhabited, BEq
 
 /-- AppModel's `SyncPhase`. -/
@@ -287,6 +308,8 @@ structure Person where
   nextPaymentIndex : Nat := 0
   savedRecipient : Option Bool := none
   provenance : Option Provenance := none
+  /-- Whether this wallet has issued the person a card of their own. -/
+  hasCard : Bool := false
   deriving Repr, Inhabited, BEq
 
 def Person.isSavedRecipient (p : Person) : Bool := p.payTo.isSome && p.savedRecipient != some false
@@ -373,6 +396,16 @@ def MultisigProgress.nextStep (p : MultisigProgress) : String :=
   else if p.signedHere then "Share the PSBT below with the other signers, then combine their signed copies here."
   else "Check the payment, then add this phone's signature. Signers can sign in any order."
 
+/-- Another wallet kept on this device that holds one of the account's keys: which wallet, and whether it has
+yet to sign the payment on the screen. -/
+structure HeldKey where
+  walletID : String
+  unsigned : Bool
+  /-- Its place on this device, to switch to, and what it is called. -/
+  slot : String := ""
+  name : String := ""
+  deriving Repr, Inhabited, BEq
+
 /-- `MultisigSigningScreen`: the review, the verified signatures per usable path, and the progress. -/
 structure MultisigScreen where
   outputs : List MultisigOutputLine
@@ -383,6 +416,8 @@ structure MultisigScreen where
   /-- Per usable path: the row's title and its UI-test identifier (`signaturesTitle`, `signatureCountIdentifier`). -/
   signatureTitles : List (String × String) := []
   progress : MultisigProgress
+  /-- The other wallets kept on this device that hold a key of this account (`progress` is the open wallet's). -/
+  heldKeys : List HeldKey := []
   deriving Repr, Inhabited, BEq
 
 def MultisigScreen.recoveryUsable (s : MultisigScreen) : Bool := s.signatures.any (·.1)
@@ -439,16 +474,33 @@ structure MultisigInfo where
   draft : Option MultisigDraftInfo := none
   /-- Spends this phone broadcast that no block has taken (display-hex txids). -/
   inFlight : List String := []
+  /-- The open wallet's key is one of the account's: it is among this wallet's accounts, and its money in
+  this wallet's balance. -/
+  signsHere : Bool := true
+  /-- Otherwise, the name of another wallet on this device whose key is one of the account's. -/
+  signsIn : Option String := none
   nextReceiveIndex : Nat := 0
   receiveAddress : Option String := none
   coins : List MultisigCoin := []
   /-- What a PSBT's review depends on (`TrustedState`: coins and frontiers): a change re-reviews it. -/
   trusted : String := ""
+  /-- No key of the account is this device's (it came from another of the person's devices, whose wallet is a
+  different one): the account shows here, and this device cannot sign for it. -/
+  watchOnly : Bool := false
+  deriving Repr, Inhabited, BEq
+
+/-- An account another of the person's devices has, on its way here: shown by name until this device has
+scanned the blocks between that device's and its own. -/
+structure ArrivingInfo where
+  id : String
+  name : String
+  /-- Why it waits, when it is not only a matter of scanning. -/
+  note : Option String := none
   deriving Repr, Inhabited, BEq
 
 def MultisigInfo.hasRecovery (a : MultisigInfo) : Bool := a.recovery.isSome
 
-/-- A `SignerRecord` as Settings → Signers and the builder's picker show it. -/
+/-- A `SignerRecord` as Settings → Security → Hardware wallets and keys and the builder's picker show it. -/
 structure SignerInfo where
   id : String
   isLedger : Bool
@@ -457,6 +509,8 @@ structure SignerInfo where
   keys : List String
   /-- `SignerLabel.keysText`: "5992698d" for a Ledger, "6824f543 · 1a2b3c4d" for saved keys. -/
   keysText : String
+  /-- A Ledger paired on another of the person's devices that has not yet answered on this one. -/
+  elsewhere : Bool := false
   deriving Repr, Inhabited, BEq
 
 /-- `multisigAccounts`, `multisigStorageNotice`, this wallet's key expression (`multisigKeyExpression`),
@@ -469,6 +523,8 @@ structure MultisigOverview where
   ownFingerprint : Option String := none
   signers : List SignerInfo := []
   signerNotice : Option String := none
+  /-- Accounts on their way from another of the person's devices. -/
+  arriving : List ArrivingInfo := []
   deriving Repr, Inhabited, BEq
 
 def MultisigOverview.ledgers (o : MultisigOverview) : List SignerInfo := o.signers.filter (·.isLedger)

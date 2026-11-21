@@ -9,6 +9,12 @@ drives a Ledger: `LedgerTests` and the device simulator show that the phone's
 client is consistent with Ledger's published vectors, not that a device
 agrees. This record is the evidence that one did.
 
+Note of 2026-11-17: this run was made with the Swift app, and `d8b95e3`,
+`ledger-on-main` and #255 are winnowwallet/winnow's. The Lean app's Ledger
+client (`Lean/Winnow/Ledger/`) and its Bluetooth transport are a port of that
+code; `LedgerTests` is carried there as `ledger-test`. No physical Ledger run
+of the Lean client is recorded in this directory.
+
 - **Revision:** `d8b95e3` (#255), build 0.8.14 (106) in the internal
   TestFlight group.
 - **Device:** a Ledger Nano X over Bluetooth, firmware and Bitcoin app
@@ -52,8 +58,10 @@ first change address (`/1/0`), which the app then showed as its coin.
 - Both signatures verified on the phone before it kept them (SEC-036); the
   finalized witness is what the chain checked.
 - Not shown here: a 2-of-3, a recovery leaf, declining on the device, and
-  signet. Those remain the manual checks in
-  [docs/testflight-what-to-test.txt](../../testflight-what-to-test.txt).
+  signet. Those were the manual checks in
+  [docs/testflight-what-to-test.txt](../../testflight-what-to-test.txt) at
+  that build. That file has since been rewritten for the Lean app and, as of
+  2026-11-17, lists pairing a Ledger into a 2-of-2 and none of these four.
 
 The addresses and transactions above are public. No recovery words, keys or
 backup files were involved in making this record.

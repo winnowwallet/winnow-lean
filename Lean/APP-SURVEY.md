@@ -1,5 +1,10 @@
 # Winnow app layer: survey for the LeanNative port (2026-10-26)
 
+> Note of 2026-11-17: history. This surveys the Swift app the port started from (upstream 0.7.3); its
+> `Sources/WinnowApp` is not in this repository and remains upstream in winnowwallet/winnow. Vaults, shared
+> savings, MuSig2 and the Simple/Advanced modes it lists were removed from the Lean app later, and the UI tests
+> are Lean journeys now. [PORT.md](../PORT.md) is the current record.
+
 Source: `Sources/WinnowApp` (AppModel.swift = AM). Condensed from a read-only survey; file:line refs
 point at the original.
 

@@ -160,18 +160,36 @@ structure Resolved where
   output : Descriptor.DerivedOutput
   deriving Inhabited
 
-/-- (choice, index) resolved from the descriptor: choice 0 receives, 1 is change. Refused where two of the
-keys come out the same there: one signature would then count for both. -/
-def resolved (a : SegwitMultisigAccount) (choice : Nat) (index : UInt32) : MAM Resolved := do
+/-- (choice, index) resolved from the descriptor where it is an address of the account: choice 0 receives, 1
+is change. `none` where two of the keys come out the same key there: one signature would count for both, so
+the script would ask for fewer signers than the account says, and that place is no address of the account.
+`resolved` refuses it, `watchScripts` leaves it out, `usableIndex` steps over it, and the review counts no
+output as the account's there.
+
+Admission cannot rule such a place out: a key given by itself may be the child of another signer's extended
+key at any one index, and `make` cannot look at every index. So a co-signer can make one place per fixed key
+unusable, and no more than that without finding a collision in BIP32's hash. -/
+def usable (a : SegwitMultisigAccount) (choice : Nat) (index : UInt32) : MAM (Option Resolved) := do
   unless choice < 2 do throw (.named "indexOutOfRange")
   let keys ← a.keys.mapM fun key => lift (·.name) (Descriptor.publicKey key index choice)
-  unless allDifferent keys do invalid "two of the account's keys are the same key at one address"
+  unless allDifferent keys do return none
   let script := witnessScript a.threshold keys
   let address ← lift (·.name) (SegwitAddress.encode (AddressDecoder.hrp a.network) 0 (sha256 script))
-  return { keys, witnessScript := script, output := { scriptPubKey := scriptPubKeyOf script, address } }
+  return some { keys, witnessScript := script, output := { scriptPubKey := scriptPubKeyOf script, address } }
+
+/-- (choice, index) resolved, for a coin or an address that is to be there. Refused where two of the keys
+come out the same (`usable`): nothing is signed for, shown or checked at such a place. -/
+def resolved (a : SegwitMultisigAccount) (choice : Nat) (index : UInt32) : MAM Resolved := do
+  let some found ← a.usable choice index | invalid "two of the account's keys are the same key at one address"
+  return found
 
 def derivedOutput (a : SegwitMultisigAccount) (index : UInt32) (choice : Nat) : MAM Descriptor.DerivedOutput :=
   return (← a.resolved choice index).output
+
+/-- The output at (index, choice), or `none` where the account has no address (`usable`). -/
+def derivedOutput? (a : SegwitMultisigAccount) (index : UInt32) (choice : Nat) :
+    MAM (Option Descriptor.DerivedOutput) :=
+  return (← a.usable choice index).map (·.output)
 
 /-- scriptPubKey at (multipath choice, index): choice 0 receive, 1 change. -/
 def scriptPubKey (a : SegwitMultisigAccount) (index : UInt32) (choice : Nat := 0) : MAM ByteArray :=
@@ -180,13 +198,25 @@ def scriptPubKey (a : SegwitMultisigAccount) (index : UInt32) (choice : Nat := 0
 def address (a : SegwitMultisigAccount) (index : UInt32) (choice : Nat := 0) : MAM String :=
   return (← a.derivedOutput index choice).address
 
-/-- Both choices for indices `0 ..< count`. -/
+/-- Both choices for indices `0 ..< count`, without the places where the account has no address (`usable`):
+one such place does not stop the others being watched. -/
 def watchScripts (a : SegwitMultisigAccount) (count : UInt32) : MAM (Array ByteArray) := do
   let mut scripts := #[]
   for index in [0:count.toNat] do
     for choice in [0:2] do
-      scripts := scripts.push (← a.derivedOutput index.toUInt32 choice).scriptPubKey
+      if let some output ← a.derivedOutput? index.toUInt32 choice then scripts := scripts.push output.scriptPubKey
   return scripts
+
+/-- The first index at or after `index` where the account has an address on `choice` (`usable`): the address
+to hand out when the counter stands at `index`. It looks at `maxKeys` places: at most `maxKeys - 1` keys are
+given by themselves and each can spoil one place, so an account with none among them has been made with a
+collision in BIP32's hash, and is refused. -/
+def usableIndex (a : SegwitMultisigAccount) (choice : Nat) (index : UInt32) : MAM UInt32 := do
+  for step in [0:maxKeys] do
+    let candidate := index.toNat + step
+    unless candidate < 0x8000_0000 do throw (.named "indexOutOfRange")
+    if (← a.usable choice candidate.toUInt32).isSome then return candidate.toUInt32
+  invalid "the account has no address at any of the next indices"
 
 /-! ## Review -/
 
@@ -258,7 +288,9 @@ def reviewSpend (a : SegwitMultisigAccount) (psbt : PSBT) (knownUTXOs : Array Wa
   discard (lift (·.name) psbt.unsignedTransaction)
   let inputTotal ← a.reviewedInputTotal psbt knownUTXOs chainTip
   let candidates ← MultisigAccount.outputCandidates ownedOutputCoordinates
-  let ownedScripts ← candidates.mapM fun c => a.scriptPubKey c.index c.choice.toNat
+  -- a coordinate where the account has no address owns nothing: an output paying there is shown as leaving
+  let ownedScripts ← candidates.filterMapM fun c =>
+    return (← a.derivedOutput? c.index c.choice.toNat).map (·.scriptPubKey)
   let (outputs, outputTotal) ← MultisigAccount.reviewedOutputsAmong psbt inputTotal ownedScripts
   let fee := inputTotal - outputTotal
   MultisigAccount.checkFeeCeiling fee inputTotal

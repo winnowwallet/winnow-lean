@@ -47,6 +47,8 @@ def sheetView (m : Model) (s : Sheet) (inner : List H) : H :=
   | .signerPicker => signerPickerSheet m inner
   | .ledgerNearby => ledgerNearbySheet m inner
   | .bluetoothIntro => bluetoothIntroSheet inner
+  | .wallets => walletsSheet m inner
+  | .renameWallet => renameWalletSheet m inner
 
 def cancel : H := .button "Cancel" .cancel (some .dismissConfirm)
 
@@ -119,9 +121,15 @@ def onboardingView (m : Model) : H :=
   let o := m.onboarding
   let c := m.cloud
   let act (msg : Msg) : Option Msg := if o.busy then none else some msg
-  .screen "Winnow" none
+  -- with wallets already kept for this network, this is one more being added beside them
+  let adding := m.walletID.isNone && !m.wallets.isEmpty
+  .screen (if adding then "Add a profile" else "Winnow") none
     ([ .list
-        ([ .section "" "" [Html.tone .secondary (body "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available.")]
+        ((if adding then
+            [ .section "" "The wallets you already keep stay as they are; this one is added beside them."
+                [ .identified Ids.cancelAddWalletButton (.button "Cancel" .plain (act (.settings .cancelAddWallet))) ] ]
+          else []) ++
+         [ .section "" "" [Html.tone .secondary (body "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available.")]
          , .section "" "No iCloud? Your wallet still works. You can save a backup file instead. Recovery words and backup controls are in Settings → Backup."
              (match m.walletID with
               | some _ =>
@@ -131,15 +139,22 @@ def onboardingView (m : Model) : H :=
                   [ .identified Ids.restoreCloudBackupButton (Html.symbol "icloud.and.arrow.down" (.button "Restore your iCloud wallet" .primary (act (.cloud .openRestore))))
                   , caption s!"{c.available.length} saved backup(s) found." ]) ++
                 [ .identified Ids.createWalletButton (Html.symbol "plus.circle" (.button "Create new wallet" .primary (act .createWallet)))
-                , .identified Ids.importWalletButton (Html.symbol "square.and.arrow.down" (.button "Restore from a file" .plain (act .openImport))) ]) ] ++
+                , .identified Ids.importWalletButton (Html.symbol "square.and.arrow.down" (.button "Restore from a file" .plain (act .openImport))) ] ++
+                -- none found, or not yet: the search can be made again, and says it is being made
+                (if !c.available.isEmpty then [] else
+                  [ .identified Ids.checkCloudAgainButton (Html.symbol "arrow.clockwise.icloud"
+                      (.button (if c.busy then "Looking in iCloud…" else "Look for iCloud backups again") .plain
+                        (if c.busy then none else act (.cloud .checkAgain)))) ])) ] ++
          (if c.busy then [.section "" "" [.progress "Checking iCloud…"]] else []) ++
          (match c.message with | some t => [.section "" "" [caption t]] | none => []) ++
-         -- mainnet unless asked: the picker is folded behind "Use a test network" (open on a test network)
+         -- mainnet unless asked: the picker is folded behind "Use a test network" (open on a test network). A
+         -- wallet added beside others is this network's: the network is chosen in Settings
+         (if adding then [] else
          [.section "" (if m.settings.network == .mainnet && !m.isExpanded "onboarding.network" then "" else "Each network has its own wallet. Signet uses test coins with no value.")
            [.identified Ids.onboardingTestNetwork
              (.disclosure "Use a test network" (m.settings.network != .mainnet || m.isExpanded "onboarding.network") (Msg.setExpanded "onboarding.network")
                [.identified Ids.onboardingNetworkPicker
-                 (if o.busy then .labeled "Network" m.settings.network.label else networkPicker m)])]] ++
+                 (if o.busy then .labeled "Network" m.settings.network.label else networkPicker m)])]]) ++
          (if o.busy then [.section "" "" [.progress "Creating your wallet…"]] else []) ++
          (match o.error with | some e => [.section "" "" (errorRows (some e))] | none => [])) ] ++ overlays m)
 

@@ -307,7 +307,7 @@ def prunedFilterHeaders (headers : Std.HashMap String String) (frontier : UInt32
         | some h => some (match acc with | some m => min m h | none => h)
         | none => acc) (none : Option UInt32)
       headers.filter fun k _ => match parseUInt32? k with
-        | some h => some h == firstAnchor || h ≥ keepFrom || (h > 0 && h % checkpointInterval == 0)
+        | some h => h < frontier && (some h == firstAnchor || h ≥ keepFrom || (h > 0 && h % checkpointInterval == 0))
         | none => false
 
 /-! ## Scheduling -/

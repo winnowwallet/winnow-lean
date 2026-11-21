@@ -2,10 +2,13 @@ import LeanNative.Journey
 import LeanNative.Journey.Wire
 import WinnowApp.Main
 import Journeys.Screens
+import Journeys.Cards
+import Journeys.SegWit
+import Journeys.SyncProfiles
 
 /-! # The UI journeys
 
-Nine journeys of the app in the simulator (or headless, against the app itself) against the regtest node
+Fourteen journeys of the app in the simulator (or headless, against the app itself) against the regtest node
 `backend-test --fixture` left running (scripts/ui-fixture). Each is a list of named steps of what a person
 does on each screen (`Journeys/Screens.lean`) and what the node must then show (`Journeys/Host.lean`): a
 step that cannot be done fails with its name, the driver's reason and what was on screen. Each journey
@@ -333,8 +336,9 @@ def ledgerCardTwoOfTwo : Journey := ⟨"ledgerCardTwoOfTwo", do
     expect (!(← exists? ledgerNearbyCard)) "the nearby card came back with a Ledger paired"⟩
 
 /-- The census list the build ships (the app's manifest bundles build/census/peers.json): Settings → Network →
-Peers and routing on mainnet shows its date and count, not the sentence for a build without one; then the plain
-texts (PORT.md, deliberate departures): Settings' Backup section, the backup file sheet, the iCloud sheet,
+Peers and routing on mainnet shows its date and count, not the sentence for a build without one; About shows
+the version on the build's own bundle (in a simulator; headless there is no bundle, and it says Unknown); then
+the plain texts (PORT.md, deliberate departures): Settings' Backup section, the backup file sheet, the iCloud sheet,
 Settings → Security → Multisig accounts and Join. -/
 def shippedCensus : Journey := ⟨"shippedCensus", do
   let r ← Run.new "census"
@@ -353,6 +357,13 @@ def shippedCensus : Journey := ⟨"shippedCensus", do
     expect (count.getD 0 > 100) s!"census line: {line}"
     shot "30-settings-census"
     tap .back
+
+  step "About shows the version on this build's bundle" do
+    scrolled appVersion
+    let shown ← text appVersion
+    -- headless, the app is the journeys' own executable, with no Info.plist beside it: nothing to read
+    if (← IO.getEnv "LEANNATIVE_DRIVER") == some "wire" then expectEq "the version, with no bundle" shown "Unknown"
+    else expect (shown != "Unknown" && (digits shown).isSome && shown.endsWith ")") s!"the version in a bundle: {shown}"
 
   step "the Backup section, the backup file sheet and the iCloud sheet" do
     waitFor exportBundleButton 10
@@ -430,7 +441,12 @@ each one's fee and what replaced the original. -/
 def feeBumpReplaceConfirm : Journey := ⟨"feeBumpReplaceConfirm", do
   let r ← Run.new "feebump"
   let h := r.host
-  r.launch "feebump"
+  -- headless, this run's wallet secret is behind the person's presence, as the app's is outside test mode, and
+  -- its device check is on: creating, sending and bumping each read the secret under the authentication they ask
+  -- for, and the fake shell refuses a read without one as a device does. Not in a simulator: there the device
+  -- check is a system sheet that no driver answers, and the Keychain does not enforce an access control anyway
+  let headless := (← IO.getEnv "LEANNATIVE_DRIVER") == some "wire"
+  r.launch "feebump" (if headless then [("WINNOW_E2E_DEVICE_AUTH", "1"), ("WINNOW_E2E_KEYCHAIN_PROTECTION", "1")] else [])
   createWallet
 
   step "the node funds the wallet" do
@@ -661,7 +677,10 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
       let start ← IO.monoMsNow
       activate
       waitFor homeNetworkWarning 30
-      expect ((← text homeNetworkWarning) == "Offline") "the home's warning is not Offline"
+      -- the warning may say "Sync problem" first, while a sync is still failing against the peer that went
+      -- quiet; it is Offline once the pool has given that peer up
+      waitUntil 12 "the home's warning is not Offline" (every := 0.5) do
+        return (← text homeNetworkWarning) == "Offline"
       expectGone retryPeersButton
       shot "60-home-offline"
       pure start
@@ -694,7 +713,8 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
 
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
-   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers]
+   silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson,
+   cardRestoreFromBackup, segwitMultisigJoinSign, accountFollowsDevices, twoWalletsOneDevice]
 
 end WinnowJourneys
 

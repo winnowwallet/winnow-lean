@@ -4,9 +4,13 @@ Status recorded 2026-08-17. This is a handoff checkpoint, not authorization to s
 
 The entire checklist below is historical, including its mainnet-default change,
 runner setup, checkpoint height, and v1 gate. It is not the current release plan.
-The [current CI runbook](ci-release.md) uses GitHub-hosted Apple silicon with
-one signet journey; [checkpoint maintenance](../../Tools/Generate/README.md)
-documents the current boundary. References below describe their dated revisions.
+References below describe their dated revisions.
+
+Note of 2026-11-17: this handoff is about the Swift app. The scripts, tests and
+workflows it names (`scripts/refresh-checkpoint`, `HeaderChainTests`, the Node
+E2E workflow, the checkpoint runbook `Tools/Generate/README.md`) are not in this
+repository. The [current CI runbook](ci-release.md) and
+[docs/testing.md](../../docs/testing.md) describe the Lean app's checks.
 
 ## Merged and verified
 

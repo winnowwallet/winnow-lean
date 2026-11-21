@@ -165,6 +165,18 @@ paste field empties (every signature is already in the account's draft). -/
 def CollectForm.cleared (f : CollectForm) : CollectForm :=
   { f with epoch := f.epoch + 1, busy := false, pasted := "" }
 
+/-- Leave the open wallet for another place of this network: a new generation, nothing of the screen carried
+over. Networking goes on: the peers, the chain and the scan are the network's, and every wallet kept there is
+scanned for. `open'` is the command that opens the place, given the new generation. -/
+def Model.switchWallet (m : Model) (open' : Nat → Cmd) : Model × List Cmd :=
+  let m0 := m.nextWallet
+  let m' := { m0 with stage := Stage.loading, status := ({} : Status), records := ({} : Records),
+                      multisig := ({} : MultisigOverview), collect := m0.collect.cleared,
+                      phase := SyncPhase.idle, walletID := none, routes := [], sheets := [], confirm := none,
+                      send := ({} : SendState), nearbyLedger := none, ledgerSetup := none,
+                      onboarding := ({} : Onboarding) }
+  (m', [.stopWatchingAddress, open' m'.generation])
+
 /-- Leave the innermost multisig screen (its state goes with it). -/
 def Model.popMultisig (m : Model) : Model :=
   let m' := match m.routes.getLast? with
@@ -340,6 +352,12 @@ def stepMultisigCollect (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
     if spend.busy || !ok then (m, []) else
     let (m', e) := m.runCollect
     (m', [.signDraft g e id])
+  | .switchToSign id slot =>
+    let ok := ((m.multisigInfo? id).bind (·.draft)).bind (·.screen) |>.any fun s =>
+      !s.progress.complete && s.heldKeys.any fun k => k.slot == slot && k.unsigned
+    if spend.busy || !ok then (m, []) else
+    let (m', e) := m.runCollect
+    (m', [.handOverDraft g e id slot])
   | .signWithLedger id =>
     let ok := ((m.multisigInfo? id).bind (·.draft)).bind (·.screen) |>.any fun s => s.progress.ledgerUnsigned && !s.progress.complete
     if spend.busy || !ok then (m, []) else
@@ -389,7 +407,7 @@ def stepMultisig (msg : MultisigMsg) (m : Model) : Model × List Cmd :=
   | .newAddress | .askRemove | .remove | .askSetAside | .setAside | .sendFrom .. | .pasteForAccount .. | .verifyAddress | .rebroadcast ..
   | .askAbandon .. | .abandon =>
     stepMultisigAccount msg m
-  | .setPasted .. | .pastePSBT | .addPasted .. | .sign .. | .signWithLedger .. | .broadcast .. | .askDiscard ..
+  | .setPasted .. | .pastePSBT | .addPasted .. | .sign .. | .switchToSign .. | .signWithLedger .. | .broadcast .. | .askDiscard ..
   | .discard =>
     stepMultisigCollect msg m
   | .openLedgerPair | .setLedgerName .. | .pairLedger =>
@@ -443,6 +461,11 @@ def Model.onMultisigHost (m : Model) (h : Host) : Model × List Cmd :=
     ({ m with send := { m.send with sending := false, collecting := some id, error := none }, spendingInFlight := false,
               collect := { epoch := spend.epoch + 1, loadingDraft := true } },
      [.multisigOverview g, .refresh g])
+  | .handedOver g e id slot =>
+    if !accepts g e id then (m, []) else
+    -- the other wallet opens on the same account's page, where it adds its own signature
+    let (m', cmds) := { m with collect := { spend with busy := false } }.switchWallet fun g' => .openSlot g' m.settings.network (some slot)
+    ({ m' with pendingAccount := some id }, cmds)
   | .collected g e id fromPaste =>
     if !accepts g e id then (m, [.multisigOverview m.generation]) else
     let m' := { m with collect := { spend with busy := false, pasted := if fromPaste then "" else spend.pasted } }
@@ -480,6 +503,25 @@ literal this long the renderer's row leaves the button no room). -/
 def literalRow (m : Model) (key text : String) (id := "") : H :=
   .col [withId id (literal text), .button (if m.copied == some key then "Copied" else "Copy") .plain (some (.copy key text))]
 
+/-- What an account says of itself where this device holds none of its keys. -/
+def watchOnlyText : String := "Watch-only on this device"
+
+/-- An account's row (the home's Accounts, Settings → Security → Multisig accounts): its name and balance, and
+that it is only watched here when this device holds none of its keys. -/
+def accountRow (a : MultisigInfo) : H :=
+  let row : H :=
+    .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
+          Html.tone .secondary (body (satsText a.balance))]
+  match a.signsIn with
+  | some name => .col [row, .identified (Ids.multisigSignsIn a.id) (caption s!"Signs in {name}")]
+  | none => if a.watchOnly then .col [row, .identified (Ids.multisigWatchOnly a.id) (caption watchOnlyText)] else row
+
+/-- An account on its way from another of the person's devices: its name, and that it is being caught up. -/
+def arrivingRow (a : ArrivingInfo) : H :=
+  .identified (Ids.multisigArriving a.id)
+    (.col [Html.symbol "icloud.and.arrow.down" (body a.name),
+           caption (a.note.getD "From your other device. Catching up with the blocks since it was saved there.")])
+
 /-- Settings → Security → Multisig accounts. -/
 def multisigSection (m : Model) : H :=
   .section "Multisig" "Accounts that need more than one signature to spend. Pair a Ledger or save other people's keys in Settings → Security → Hardware wallets and keys."
@@ -489,9 +531,7 @@ def multisigSection (m : Model) : H :=
         , caption "While this file is in place Winnow does not sync, so that no payment to these accounts is passed over."
         , .identified Ids.multisigSetAsideButton (.button "Set the damaged file aside" .plain (some (.multisig .askSetAside))) ]
       | none => []) ++
-     (m.multisig.accounts.map fun a =>
-        .row [.identified (Ids.multisigAccount (a.id)) (navLink a.name (some (.multisig (.openAccount a.id))) (symbol := "person.3")), .spacer,
-              Html.tone .secondary (body (satsText a.balance))]) ++
+     (m.multisig.accounts.map accountRow) ++ m.multisig.arriving.map arrivingRow ++
      [ .col [.identified Ids.multisigBuildButton (navLink "Create an account" (some (.multisig .openBuild)) (symbol := "plus.circle")),
              caption "You choose who signs, then share the account with them."]
      , .col [.identified Ids.multisigAddButton (navLink "Join an account" (some (.multisig .openAdd)) (symbol := "person.badge.plus")),
@@ -640,6 +680,10 @@ def multisigAccountSections (m : Model) (id : String) : List H :=
   | some a =>
     match a.policy with
     | some policy =>
+      (if a.watchOnly then
+        [.section "" "" [.identified Ids.multisigWatchOnlyNote (Html.symbol "eye"
+          (body "Watch-only on this device. Its wallet key is not one of this account's keys, so it shows the account and cannot sign for it. A device that holds one of the keys signs."))]]
+       else []) ++
       [ .section "" ""
           ([.identified Ids.multisigBalance (.labeled "Balance" (satsText a.balance)),
             .identified Ids.multisigPolicy (.labeled "Policy" policy)] ++
@@ -703,6 +747,7 @@ through the account's draft, so leaving the screen loses nothing. -/
 def collectSections (m : Model) (id : String) : List H :=
   let f := m.collect
   let set (g : String → MultisigMsg) : String → Msg := fun s => .multisig (g s)
+  let watchOnly := ((m.multisigInfo? id).map (·.watchOnly)).getD false
   match (m.multisigInfo? id).bind (·.draft) with
   | none =>
     if f.loadingDraft then [.section "" "" [.progress "Opening the payment…"]] else
@@ -729,8 +774,18 @@ def collectSections (m : Model) (id : String) : List H :=
         let onLedger := f.busy && f.ledgerSigning
         [.section (if s.recoveryUsable then "Signing · signers or recovery path" else "Signing")
           (if onLedger then "Check the payment on the Ledger's screen and approve it there. Winnow waits for the Ledger." else p.nextStep)
-          ([ .identified Ids.multisigSignButton (.button "Add this phone's signature" .plain
-              (if f.busy || !p.phoneUnsigned || p.complete then none else some (.multisig (.sign id)))) ] ++
+          ((if watchOnly then
+             [ .identified Ids.multisigWatchOnlyNote (caption "This device holds none of this account's keys, so it cannot sign. Signatures made on your other devices arrive here.") ]
+            else
+             -- the open wallet's key, where it holds one; then each other wallet kept on this device that
+             -- holds one: the payment goes to it, and it adds its own signature once it is open
+             (if p.phoneHolds || s.heldKeys.isEmpty then
+               [ .identified Ids.multisigSignButton (.button "Add this phone's signature" .plain
+                   (if f.busy || !p.phoneUnsigned || p.complete then none else some (.multisig (.sign id)))) ]
+              else []) ++
+             (s.heldKeys.map fun k =>
+               .identified (Ids.multisigSwitchToSign k.walletID) (.button s!"Switch to {k.name} and sign" .plain
+                 (if f.busy || !k.unsigned || p.complete then none else some (.multisig (.switchToSign id k.slot)))))) ++
            (if p.ledgerHolds then
              [.identified Ids.ledgerSignButton
                (.button (if onLedger then "Approve on the Ledger…" else "Sign with Ledger") .plain (if f.busy || !p.ledgerUnsigned || p.complete then none else some (.multisig (.signWithLedger id))))]

@@ -60,7 +60,7 @@ theorem Sc.isKey_spec (b : ByteArray) (h : b.size = 32) :
 /-- The public key's two coordinates as `publicRaw` returns them are those of `d · G`, written as winnow
 writes numbers, for `d` the number the secret's bytes spell (taken modulo N, which changes nothing for a
 key). -/
-theorem publicRaw_spec [Fermat] (secret : ByteArray) (h : secret.size = 32) {x y : F}
+theorem publicRaw_spec (secret : ByteArray) (h : secret.size = 32) {x y : F}
     (point : Spec.smul (Secp.fromBE secret % N) Spec.G = .pt x y) :
     publicRaw secret = (Secp.toBE32 x.val, Secp.toBE32 y.val, Sc.isKey secret) := by
   have rep := mulGenerator_rep (Sc.ofBytes secret)

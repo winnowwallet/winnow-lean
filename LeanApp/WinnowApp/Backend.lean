@@ -30,6 +30,10 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   watchAddress : (address : String) → (seen : String → Int → IO Unit) → IO Unit
   stopWatchingAddress : IO Unit
   deleteWallet : IO Unit
+  /-- The wallets kept for the network whose directory this is, the first one first. No secret is read. -/
+  wallets : (networkDir : String) → IO (List WalletSummary) := fun _ => pure []
+  /-- Names the open wallet; the name travels with its backup to the person's other devices. -/
+  renameWallet : String → IO Unit := fun _ => pure ()
   startNetworking : Settings → IO Unit
   stopNetworking : IO Unit
   syncNow : IO Unit
@@ -62,8 +66,17 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   exportBundle : (includeMnemonic : Bool) → IO String
   /-- After authentication: the recovery words. -/
   revealMnemonic : IO (List String)
-  /-- `ownPersonCard(name:).serialized()`. -/
-  ownCard : (name : String) → IO String
+  /-- A card for one person only (issue #94): the saved person `personID`, or else the first person named
+  `personName` (saved as a contact if there is none), a card code issued for them alone, on a card under
+  `ownName`. The first call issues the card and reads the wallet's private key; later calls read it back.
+  The card and the records it changed. -/
+  personCard : (personID : Option String) → (personName ownName : String) → IO (String × Records)
+  /-- An ordinary address for that person, who has a card: what a wallet that does not read cards, or an
+  exchange, pays them at. It is the next unpaid address of their card, so the payment is found and named as
+  theirs, and it changes once it has been paid. Reads no key. -/
+  personAddress : (personID : Option String) → (personName : String) → IO String
+  /-- Whether that person has a card already, so reading it needs no key and no device authentication. -/
+  hasPersonCard : (personID : Option String) → (personName : String) → IO Bool
   /-- `PersonPaste.parse`. -/
   parsePaste : (text : String) → IO PastePreview
   /-- `addPerson` (+ `labelReceivedSender` when labelling a payment). -/
@@ -112,6 +125,8 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   signAndDraft : SendInputs → Preview → IO String
   /-- After device authentication: this phone's signature on the draft. -/
   signDraft : (id : String) → IO Unit
+  /-- The payment being collected, to the same account in another wallet kept on this device (its slot). -/
+  handOverDraft : (id slot : String) → IO Unit := fun _ _ => throw (IO.userError "Another wallet is not available here.")
   /-- The Ledger's signature on the draft. -/
   signDraftWithLedger : (id : String) → IO Unit
   /-- `adoptMultisigDraft(_:record:)`: a pasted PSBT combined into the draft, or adopted as it. -/
@@ -157,6 +172,10 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   scanLedgers : IO (List NearbyLedger)
   /-- Ask for Bluetooth (`ble.state`: iOS asks the person the first time). -/
   askBluetooth : IO Unit
+  /-- The person has just authenticated, and the Keychain's reads of the wallet's secret are allowed for the
+  action that follows: what has waited for that is done first (a restored wallet's search for cards that has
+  no search key keeps one). Never why the action fails. -/
+  personPresent : IO Unit := pure ()
 
 def notPorted (what : String) : IO α := throw (IO.userError s!"{what}: this part of Winnow is still being ported to Lean.")
 
@@ -194,7 +213,9 @@ def Backend.pending : Backend where
   resetPeers := notPorted "Resetting peers"
   exportBundle := fun _ => notPorted "Backing up the wallet"
   revealMnemonic := notPorted "Showing the recovery phrase"
-  ownCard := fun _ => notPorted "Your card"
+  personCard := fun _ _ _ => notPorted "A card for one person"
+  personAddress := fun _ _ => notPorted "An address for one person"
+  hasPersonCard := fun _ _ => pure false
   parsePaste := fun _ => notPorted "Reading addresses and cards"
   addPerson := fun _ _ _ _ _ => notPorted "Saving people"
   attachDestination := fun _ _ _ _ => notPorted "Saving people"

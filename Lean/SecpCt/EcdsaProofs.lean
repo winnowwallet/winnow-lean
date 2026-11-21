@@ -26,7 +26,7 @@ means is `Ecdsa.verify_sound` (`SecpCt/KeySpecs.lean`).
 Nothing that runs imports this file; `SecpCt/Gate.lean` does. -/
 
 namespace SecpCt
-open Secp.Spec (F FieldP)
+open Secp.Spec (F)
 open Secp
 
 /-! ## The scalars ECDSA adds: one, powers, the inverse, the upper half -/
@@ -136,7 +136,7 @@ theorem lower_half (s : Nat) (below : s < N) : (N - s) % N = if s = 0 then 0 els
 /-- **The signature is the reference's.** Whenever the reference gives an ECDSA signature for the number
 thirty-two bytes of secret spell, `signRaw` gives the same `r` and `s`, as bytes, and says they are a
 signature. -/
-theorem Ecdsa.signRaw_eq [Fermat] (secret digest aux : ByteArray) (size : secret.size = 32) {r s : Nat}
+theorem Ecdsa.signRaw_eq (secret digest aux : ByteArray) (size : secret.size = 32) {r s : Nat}
     (h : Secp.Ecdsa.signWith Spec.mulG digest (Secp.fromBE secret) aux = some (r, s)) :
     SecpCt.Ecdsa.signRaw secret digest aux = (Secp.toBE32 r ++ Secp.toBE32 s, 1) := by
   unfold Secp.Ecdsa.signWith at h
@@ -230,7 +230,7 @@ theorem Ecdsa.signRaw_eq [Fermat] (secret digest aux : ByteArray) (size : secret
 
 /-- **`Ecdsa.sign` returns the reference's signature.** Whenever the reference gives an ECDSA signature for
 the number thirty-two bytes of secret spell, `Ecdsa.sign` returns it: `r` then `s`, sixty-four bytes. -/
-theorem Ecdsa.sign_eq [Fermat] (secret digest aux : ByteArray) (size : secret.size = 32) {signature : ByteArray}
+theorem Ecdsa.sign_eq (secret digest aux : ByteArray) (size : secret.size = 32) {signature : ByteArray}
     (h : (Secp.Ecdsa.signWith Spec.mulG digest (Secp.fromBE secret) aux).map Secp.Ecdsa.encode = some signature) :
     SecpCt.Ecdsa.sign secret digest aux = some signature := by
   cases hr : Secp.Ecdsa.signWith Spec.mulG digest (Secp.fromBE secret) aux with

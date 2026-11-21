@@ -459,7 +459,7 @@ structure CloudPhone where
 open Real in
 def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO) (auth : Bool) (cloud : Option MemoryCloud := none)
     (cloudKeys : Option CloudBackupKeys := none) (whileAuthenticating : IO Unit := pure ())
-    (deviceCheck : Option (String → IO Unit) := none) : TM CloudPhone := do
+    (deviceCheck : Option (String → IO Unit) := none) (store : Option CloudBackupStore := none) : TM CloudPhone := do
   let vars := [("WINNOW_E2E", "1"), ("WINNOW_E2E_RUN", "cloud"), ("WINNOW_E2E_ENTROPY", "04040404040404040404040404040404"),
                ("WINNOW_E2E_PEER", "127.0.0.1:1"), ("WINNOW_E2E_CHALLENGE", "51")]
   let .active mode := WinnowApp.E2E.resolve (fun k => vars.lookup k) | throw "test mode did not resolve"
@@ -468,7 +468,7 @@ def cloudPhone (root : System.FilePath) (name : String) (keys : Keys.KeyStore IO
   let attempts ← IO.mkRef 0
   let deps : Deps := { keyStore := keys, networkParams := mode.networkParams, peerCount := 1, importPeerWaitMs := 1_000,
                        fetch := fun _ => throw (.other "offline") }
-  let (backend, env, app) ← Backend.realWithCloud deps (store := cloud.store) (keys := cloudKeys)
+  let (backend, env, app) ← Backend.realWithCloud deps (store := store.getD cloud.store) (keys := cloudKeys)
     (authenticate := fun reason => do
       attempts.modify (· + 1)
       whileAuthenticating
@@ -590,6 +590,87 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
   check "restore: a second restore is refused" (← fails (b.backend.restoreCloudBackup .signet b.dir backup.id))
   b.backend.stopNetworking
 
+/-- A second wallet added from iCloud beside the one a phone already keeps. The restore list says which
+wallet each backup is of and leaves out the phone's own; the restored wallet goes in a slot of its own with a
+backup record of its own; the first wallet's file, its backup's record and its settings are not touched; a
+wallet already kept is refused; and "automatic backup off" is each wallet's own. -/
+def secondWalletFromICloud (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let sharedKeys ← Real.memoryCloudKeys
+  -- another device, another wallet, backed up
+  let a ← cloudPhone root "secondA" (← newKeys) true (some cloud) (some sharedKeys)
+  let other ← need "the other wallet" (Wallet.create .signet a.keys (some (System.FilePath.mk a.dir / "wallet.json")) (some (ByteArray.mk (Array.replicate 16 0xA7))))
+  discard <| a.backend.openWallet .signet a.dir
+  a.activate
+  unless ← waitUntil 5000 (every := 10) (do return (← a.app.controller.get).lastSaved.isSome) do throw "the other device's backup was not saved"
+  a.backend.cloudScene false
+  a.backend.stopNetworking
+  -- this phone and its own wallet, backed up too. While its iCloud is listing, the app's tick may run (it runs
+  -- every second): on 0.9.20 to 0.9.22 the tick pointed the backup at the empty place and so ended the search,
+  -- and "Add a wallet" offered no restore at all
+  let during ← IO.mkRef (pure () : IO Unit)
+  let listing : Real.CloudBackupStore := { cloud.store with list := fun n => do (← during.get); cloud.store.list n }
+  let b ← cloudPhone root "secondB" (← newKeys) true (some cloud) (some sharedKeys) (store := some listing)
+  during.set do
+    during.set (pure ())
+    b.backend.cloudTick
+  discard <| b.backend.openWallet .signet b.dir
+  b.activate
+  let own ← b.backend.createWallet .signet b.dir
+  unless ← waitUntil 5000 (every := 10) (do return (← b.app.controller.get).lastSaved.isSome) do throw "this phone's backup was not saved"
+  check "two wallets, two backups" (own != other.id && (← cloud.count) == 2)
+  let ownBackup := ((← b.app.controller.get).configuration.map (·.backup.id)).getD ""
+  let walletFile := System.FilePath.mk b.dir / "wallet.json"
+  let configFile := System.FilePath.mk b.dir / "cloud-backup.json"
+  let (walletBefore, configBefore) := (← IO.FS.readBinFile walletFile, ← IO.FS.readBinFile configFile)
+  let recordBefore := ((← cloud.records.get).find? (·.id == ownBackup)).map (·.savedAt)
+  -- a place for a wallet to be added: nothing is there yet
+  let slot ← Real.freeSlot b.dir
+  let added := Real.slotDir b.dir slot
+  IO.FS.createDirAll added
+  check "the place for a second wallet is empty" (slot == "1" && ((← b.backend.openWallet .signet added) matches .missing))
+  during.set do
+    during.set (pure ())
+    b.backend.cloudTick
+  b.backend.discoverCloudBackups
+  let found := (← b.backend.cloudStatus).available
+  check "the list offers the other wallet's backup, named, and not this phone's own"
+    (found.map (·.walletID) == [some other.id]) (reprStr found)
+  let some backup := found.head? | throw "no backup offered"
+  let (restoredID, _, _) ← b.backend.restoreCloudBackup .signet added backup.id
+  check "the other wallet is restored beside the first" (restoredID == other.id && (← Real.holdsWallet added))
+  check "both are kept, the restored one open"
+    ((← b.backend.wallets b.dir) == [{ id := own, slot := "", active := false }, { id := other.id, slot := "1", active := true }])
+    (reprStr (← b.backend.wallets b.dir))
+  check "the first wallet's file and its backup's record are as they were"
+    ((← IO.FS.readBinFile walletFile) == walletBefore && (← IO.FS.readBinFile configFile) == configBefore &&
+     ((← cloud.records.get).find? (·.id == ownBackup)).map (·.savedAt) == recordBefore)
+  let st ← b.app.controller.get
+  check "the restored wallet keeps a backup record of its own on this phone"
+    (st.enabled && (st.configuration.map (·.backup.id)) != some backup.id && (st.configuration.map (·.backup.id)) != some ownBackup)
+  -- the same wallet again, into another place
+  let again := Real.slotDir b.dir (← Real.freeSlot b.dir)
+  IO.FS.createDirAll again
+  discard <| b.backend.openWallet .signet again
+  b.backend.discoverCloudBackups
+  check "a wallet already kept is no longer offered" ((← b.backend.cloudStatus).available.isEmpty)
+    (reprStr (← b.backend.cloudStatus).available)
+  check "…and is refused if asked for, with nothing written"
+    ((← fails (b.backend.restoreCloudBackup .signet again backup.id)) && !(← Real.holdsWallet again))
+  -- "automatic backup off" is a wallet's own
+  -- (the app's tick points the backup at the wallet now open, as it does every second while the app is open)
+  discard <| b.backend.openWallet .signet added
+  b.backend.setAutomaticCloudBackup false
+  check "off for the restored wallet" (!(← b.backend.cloudStatus).automaticEnabled)
+  discard <| b.backend.openWallet .signet b.dir
+  b.backend.cloudTick
+  check "the first wallet's is still on, and its backup is still its own"
+    ((← b.backend.cloudStatus).automaticEnabled && ((← b.app.controller.get).configuration.map (·.backup.id)) == some ownBackup)
+  discard <| b.backend.openWallet .signet added
+  b.backend.cloudTick
+  check "…and the restored wallet's still off, after a switch away and back" (!(← b.backend.cloudStatus).automaticEnabled)
+  b.backend.stopNetworking
+
 /-! ## The screens: onboarding without a checklist, the home's backup line, Settings → Backup -/
 
 def rendered (h : H) : String := (LeanNative.Html.toWire h).toJson.compress
@@ -602,6 +683,7 @@ def onboardingScreens : TM Unit := do
     contains plain "Restore from a file")
   check "onboarding: iCloud said up front" (contains plain "automatically backs up your wallet with iCloud when available")
   check "onboarding: no iCloud restore without a backup" (!contains plain "restoreCloudBackupButton")
+  check "onboarding: …and a way to look again" (contains plain Ids.checkCloudAgainButton && contains plain "Look for iCloud backups again")
   check "onboarding: on mainnet the network is folded behind Use a test network" (contains plain "onboardingTestNetwork" &&
     contains plain "Use a test network")
   let found := rendered (view { m with cloud := { available := [{ id := "A", savedAtText := "10/27/2026, 7:28 PM" }] } })
@@ -674,6 +756,88 @@ def shellAnswers : TM Unit := do
     ((← accountText (Lean.Json.mkObj [("status", Lean.Json.str "noAccount"), ("user", Lean.Json.null)])) == Real.CloudBackupError.unavailable.description)
   check "available: the user" ((← accountText (Lean.Json.mkObj [("status", Lean.Json.str "available"), ("user", Lean.Json.str "_u")])) == "ok")
 
+/-- A Keychain as the shell's `keychain.*` capabilities give it: items by key, each with whether it is behind
+the person's presence, which a read that names no kept authentication is refused as a device refuses it. -/
+def fakeKeychain : IO (Real.Ask × IO.Ref (Std.HashMap String (String × Bool))) := do
+  let items ← IO.mkRef ({} : Std.HashMap String (String × Bool))
+  let ask : Real.Ask := fun name args => do
+    let obj := Lean.Json.mkObj
+    let key := (args.getObjValAs? String "key").toOption.getD ""
+    let answer ← match name with
+      | "keychain.add" =>
+        -- the item as the device keeps it: the bytes given as hex (or text), read back as text
+        let value := match (args.getObjValAs? String "hex").toOption with
+          | some h => ((ofHex? h).bind String.fromUTF8?).getD ""
+          | none => (args.getObjValAs? String "value").toOption.getD ""
+        let guarded := (args.getObjValAs? String "access").toOption == some "userPresence"
+        if (← items.get).contains key then pure (obj [("ok", false), ("status", (-25299 : Int)), ("exists", true)])
+        else
+          items.modify (·.insert key (value, guarded))
+          pure (obj [("ok", true), ("status", (0 : Int)), ("exists", false), ("access", if guarded then "userPresence" else "unlocked")])
+      | "keychain.get" =>
+        let named := (args.getObjValAs? String "context").toOption.isSome
+        match (← items.get)[key]? with
+        | none => pure (obj [("value", Lean.Json.null), ("status", (-25300 : Int))])
+        | some (v, guarded) =>
+          if guarded && !named then pure (obj [("value", Lean.Json.null), ("status", (-25308 : Int))])
+          else pure (obj [("value", Lean.Json.str v), ("status", (0 : Int))])
+      | "keychain.delete" =>
+        items.modify (·.erase key)
+        pure (obj [("ok", true), ("status", (0 : Int))])
+      | _ => pure Lean.Json.null
+    pure (Task.pure answer)
+  return (ask, items)
+
+/-- 0.9.17 to 0.9.21 put every item the app added behind the person's presence, the sealed stores' keys
+included: a store first sealed then read as damaged at the next launch, with nobody there to give the key.
+Now only the wallet's secret goes behind it, and a key an earlier build put there is moved out the next time
+the person authenticates, keeping its bytes, so the files it sealed read again. A move cut short is finished
+from where the key waited. -/
+def storeKeysOutOfPresence (root : System.FilePath) : TM Unit := do
+  let (ask, items) ← fakeKeychain
+  let ks := Real.shellKeyStore ask Real.walletService true
+  let vault := StoreKeyVault.ofKeyStore ks
+  let net : BitcoinNetwork := .signet
+  let account := ({ store := SignerStore.storeName, keys := vault } : StoreSeal).account net
+  let main := accountPrefix ++ account
+  Real.keychainContext.set none
+  refusedStoreKeys.set #[]
+  -- what an earlier build left: the signers' key behind the person's presence, and the file it sealed
+  let key ← IO.getRandomBytes 32
+  let text := String.fromUTF8! (WalletSecret.masterKey (hex key)).serialized
+  items.modify (·.insert main (text, true))
+  let dir := root / "lockedKeys"
+  IO.FS.createDirAll dir
+  let path := dir / SignerStore.fileName
+  IO.FS.writeBinFile path (SealedStoreFile.sealed (SignerStore.encode #[]) SignerStore.storeName net key)
+  let (opened, _) ← SignerStore.configure vault (some path) net
+  check "an earlier build's key: the store reads as damaged with nobody there" opened.isDamaged
+  check "…and the key is noted as refused, not lost" ((← refusedStoreKeys.get) == #[account])
+  check "…and the file is untouched" ((← IO.FS.readBinFile path).size > 0)
+  -- the wallet's secret and a new store's key, as this build adds them
+  discard (ks.store (.mnemonic "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about") "w1").run
+  let other := accountPrefix ++ ({ store := "people", keys := vault } : StoreSeal).account net
+  discard <| (vault.establishKey (({ store := "people", keys := vault } : StoreSeal).account net)).run
+  check "the wallet's secret goes behind the person's presence" (((← items.get)["w1"]?).map (·.2) == some true)
+  check "a new store's key does not" (((← items.get)[other]?).map (·.2) == some false)
+  -- nobody has authenticated: nothing moves
+  check "with nobody there, nothing is moved" ((← repairRefusedStoreKeys ks).isEmpty && ((← items.get)[main]?).map (·.2) == some true)
+  -- the person authenticates (any action that asks): the key comes out from behind it, with its bytes
+  Real.keychainContext.set (some "ctx")
+  let moved ← repairRefusedStoreKeys ks
+  Real.keychainContext.set none
+  check "authenticated: the refused key is moved out from behind the person's presence" (moved == [account])
+  check "…as the same key, and no copy is left waiting"
+    (((← items.get)[main]?) == some (text, false) && !(← items.get).contains (main ++ movingSuffix))
+  check "…and none is still refused" ((← refusedStoreKeys.get).isEmpty)
+  let (again, _) ← SignerStore.configure vault (some path) net
+  check "the store it sealed reads again, with nobody there" (!again.isDamaged)
+  -- a move cut short after the item went and before it came back: the key waits under its copy
+  items.modify fun m => (m.erase main).insert (main ++ movingSuffix) (text, false)
+  check "a move cut short: the key is taken from where it waited" (((← (vault.key account).run).toOption.join) == some key)
+  check "…put back as it should be, and the copy gone"
+    (((← items.get)[main]?) == some (text, false) && !(← items.get).contains (main ++ movingSuffix))
+
 /-- The shell adapters over LeanNative's typed clients, against a scripted shell: what they ask and how
 they read the answers into this app's errors and texts. -/
 def shellAdapters : TM Unit := do
@@ -703,6 +867,65 @@ def shellAdapters : TM Unit := do
   check "load: a locked device is errSecInteractionNotAllowed" ((← (store.load "w1").run) matches .error (.keychain (-25308)))
   answer fun _ _ => obj [("hex", Lean.Json.null), ("status", (-25300 : Int))]
   check "loadBytes: missing is none" ((← (store.loadBytes "w1").run) matches .ok none)
+  -- as it was: nothing of an access control or a kept authentication is sent by a store that was not asked for it
+  let sent (name : String) : IO (Array Lean.Json) := do return (← asked.get).filterMap fun (n, a) => if n == name then some a else none
+  let has (a : Lean.Json) (key : String) : Bool := (a.getObjVal? key).toOption.isSome
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false)]
+  discard (store.store secret "w1").run
+  check "store: without userPresence, no access is sent" ((← sent "keychain.add").all (!has · "access"))
+  check "upgradeProtection: without userPresence, nothing is asked"
+    ((← (store.upgradeProtection "w1").run) matches .ok false && (← sent "keychain.protect").isEmpty)
+  -- the wallet's secret behind the person's presence (SEC-060): the secret's item alone, and its reads under
+  -- the authentication the app keeps
+  let guarded := Real.shellKeyStore ask Real.walletService true
+  Real.keychainContext.set none
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false), ("access", "userPresence")]
+  let stored ← (guarded.store secret "w1").run
+  check "userPresence: the secret is added behind the person's presence, by one keychain.add"
+    (stored matches .ok () && ((← asked.get).map (·.1)) == #["keychain.add"] &&
+     ((← sent "keychain.add").map fun a => (a.getObjValAs? String "access").toOption) == #[some "userPresence"])
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false)]
+  discard (guarded.storeBytes (ByteArray.mk #[1, 2, 3]) "store-key.people.main").run
+  check "userPresence: an item kept as bytes is not: a sync pass reads it with nobody there"
+    ((← sent "keychain.add").size == 1 && (← sent "keychain.add").all (!has · "access"))
+  -- a sealed store's key goes through `store`, as text, and is read at every launch with nobody there
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("exists", false)]
+  discard (guarded.store (.masterKey (String.ofList (List.replicate 64 'a'))) "store-key.signers.main").run
+  check "userPresence: a store's key, kept as text, is not behind the person's presence"
+    ((← sent "keychain.add").size == 1 && (← sent "keychain.add").all (!has · "access"))
+  answer fun _ _ => obj [("value", Lean.Json.null), ("status", (-25308 : Int))]
+  check "userPresence: a read with no authentication names none, and the Keychain's refusal is its status"
+    ((← (guarded.load "w1").run) matches .error (.keychain (-25308)) && (← sent "keychain.get").all (!has · "context"))
+  answer fun name _ =>
+    if name == "keychain.get" then obj [("value", Lean.Json.str (String.fromUTF8! secret.serialized)), ("status", (0 : Int))]
+    else obj [("ok", true)]
+  let twoReads : IO Bool := do
+    let first ← (guarded.load "w1").run
+    let second ← (guarded.load "w1").run
+    return first matches .ok _ && second matches .ok _
+  let read ← (Real.withKeychainContext ask (some "kept-1") twoReads : IO Bool)
+  check "userPresence: under a kept authentication every read names it, and it is ended once, after"
+    (read && ((← sent "keychain.get").map fun a => (a.getObjValAs? String "context").toOption) == #[some "kept-1", some "kept-1"] &&
+     ((← sent "auth.end").map fun a => (a.getObjValAs? String "context").toOption) == #[some "kept-1"] &&
+     ((← asked.get).map (·.1)) == #["keychain.get", "keychain.get", "auth.end"] && (← Real.keychainContext.get).isNone)
+  answer fun _ _ => obj [("ok", true)]
+  let threw ← (Real.withKeychainContext ask (some "kept-2") (throw (IO.userError "the action failed") : IO Unit)).toBaseIO
+  check "userPresence: an action that fails still ends its authentication"
+    (threw matches .error _ && ((← sent "auth.end").map fun a => (a.getObjValAs? String "context").toOption) == #[some "kept-2"] &&
+     (← Real.keychainContext.get).isNone)
+  answer fun _ _ => obj [("value", Lean.Json.null), ("status", (-25308 : Int))]
+  discard (guarded.load "w1").run
+  check "userPresence: after it, a read names no authentication again" ((← sent "keychain.get").all (!has · "context"))
+  -- an item an earlier build stored: one keychain.protect, in place; a wallet that only watches has none
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("changed", true), ("access", "userPresence")]
+  check "upgradeProtection: one keychain.protect and nothing else, and it says it changed the item"
+    ((← (guarded.upgradeProtection "w1").run) matches .ok true && ((← asked.get).map (·.1)) == #["keychain.protect"])
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int)), ("changed", false), ("access", "userPresence")]
+  check "upgradeProtection: an item already protected is left" ((← (guarded.upgradeProtection "w1").run) matches .ok false)
+  answer fun _ _ => obj [("ok", false), ("status", (-25300 : Int)), ("changed", false)]
+  check "upgradeProtection: no item (a wallet that only watches) is not a failure" ((← (guarded.upgradeProtection "w1").run) matches .ok false)
+  answer fun _ _ => obj [("ok", false), ("status", (-25293 : Int)), ("changed", false)]
+  check "upgradeProtection: a refusal is its status" ((← (guarded.upgradeProtection "w1").run) matches .error (.keychain (-25293)))
   -- fetch: a response is a response; the shell's errors as the routed client's
   let fetch (reply : Lean.Json) : IO (Except Winnow.IO.NetError Winnow.IO.HttpHop) := do
     answer fun _ _ => reply
@@ -877,6 +1100,20 @@ def declinedDeviceCheck (root : System.FilePath) : TM Unit := do
   WinnowApp.e2eRef.set (mode [("WINNOW_E2E_DEVICE_AUTH", "1")])
   check "test mode with WINNOW_E2E_DEVICE_AUTH=1: asked, and declined it stops"
     ((← failsWith (WinnowApp.authenticateNow fx "Restore") "Canceled by user.") && (← prompts) == #["Restore"])
+  -- approved, the authentication the shell kept is what the Keychain's reads that follow name
+  let keeps : IO (Array Lean.Json) := do
+    return (← asked.get).filterMap fun (n, a) => if n == "auth" then (a.getObjVal? "keep").toOption else none
+  check "the check asks the shell to keep a yes, for a minute at most" ((← keeps) == #[Lean.toJson (60 : Nat)])
+  Real.keychainContext.set none
+  answer.set (Lean.Json.mkObj [("ok", true), ("context", "kept-9")])
+  check "approved: the kept authentication is the one the reads name"
+    (!(← fails (WinnowApp.authenticateNow fx "Restore")) && (← Real.keychainContext.get) == some "kept-9")
+  answer.set (Lean.Json.mkObj [("ok", true)])
+  check "approved by a shell that kept none: the reads name none"
+    (!(← fails (WinnowApp.authenticateNow fx "Restore")) && (← Real.keychainContext.get).isNone)
+  check "test mode: the secret is behind the person's presence only when the run asks"
+    ((mode []).map (·.keychainProtection) == some false &&
+     (mode [("WINNOW_E2E_KEYCHAIN_PROTECTION", "1")]).map (·.keychainProtection) == some true)
   WinnowApp.e2eRef.set none
 
 def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
@@ -897,8 +1134,10 @@ def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
   runTest "shellAnswers" shellAnswers
   runTest "shellAdapters" shellAdapters
   let root ← IO.FS.createTempDir
+  runTest "storeKeysOutOfPresence" (storeKeysOutOfPresence root)
   runTest "automaticCloud" (automaticCloudTests root)
   runTest "scopedPreparation" (scopedPreparationTests root)
   runTest "restoreFromICloud" (restoreFromICloud root)
+  runTest "secondWalletFromICloud" (secondWalletFromICloud root)
   runTest "declinedDeviceCheck" (declinedDeviceCheck root)
   try IO.FS.removeDirAll root catch _ => pure ()

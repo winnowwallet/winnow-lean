@@ -281,6 +281,79 @@ def addresses : TM Unit := do
   refused "a third choice" (w.account.resolved 2 0) "indexOutOfRange"
   refused "a hardened index" (w.account.resolved 0 0x8000_0000) "invalidPath"
 
+/-! ## A key given by itself that is another signer's child -/
+
+/-- A co-signer gives, as the key by itself, the child of their own extended key at receive index 25: there,
+and nowhere else, two of the account's keys are the same key, and one signature would count for both.
+Admission cannot see it, since it would have to look at every index. The place is no address of the account,
+and everything beside it goes on: the scripts around it are watched, the address handed out steps over it,
+and a spend is reviewed with that index among the account's coordinates. Before `usable`, the scripts to
+watch could not be listed once the watched indices reached 26, and no spend could be reviewed with index 25
+among the 20 coordinates past the counter. -/
+def sameKeyAtOneIndex : TM Unit := do
+  let w ← world
+  let spoiled : UInt32 := 25
+  let theirs ← needE "their child" (·.name) ((← accountKey w.other).derivedPath #[0, spoiled])
+  let descriptor := descriptorOf 2 #[hex theirs.publicKey, ← keyExpression w.ours, ← keyExpression w.other]
+  let account ← need "the account is admitted" (SegwitMultisigAccount.parse descriptor .regtest)
+  refused "no address where two keys are the same key" (account.resolved 0 spoiled) "invalidDescriptor"
+    (says "same key at one address")
+  refused "nor a script" (account.scriptPubKey spoiled 0) "invalidDescriptor" (says "same key at one address")
+  check "the place is no address of the account" ((account.usable 0 spoiled) matches .ok none)
+  check "the change address at that index is one, and so are the receive addresses beside it"
+    ((account.usable 1 spoiled) matches .ok (some _) && (account.usable 0 (spoiled - 1)) matches .ok (some _) &&
+      (account.usable 0 (spoiled + 1)) matches .ok (some _))
+  refused "a third choice is still refused" (account.usable 2 0 |>.map fun _ => ()) "indexOutOfRange"
+  -- watching
+  let before ← need "watch scripts up to it" (account.watchScripts spoiled)
+  let watched ← need "watch scripts past it" (account.watchScripts (spoiled + 6))
+  let at24 ← need "receive 24" (account.scriptPubKey 24 0)
+  let change25 ← need "change 25" (account.scriptPubKey spoiled 1)
+  let at26 ← need "receive 26" (account.scriptPubKey 26 0)
+  let keysThere ← needE "the keys there" (·.name) (account.keys.mapM fun key => Descriptor.publicKey key spoiled 0)
+  let scriptThere := SegwitMultisigAccount.scriptPubKeyOf (SegwitMultisigAccount.witnessScript 2 keysThere)
+  check "two of the three keys there are one key" (keysThere.size == 3 && keysThere[0]! == keysThere[2]! && keysThere[0]! != keysThere[1]!)
+  check "fifty scripts for the 25 indices before it" (before.size == 50)
+  check "every other place is watched: 61 scripts for 31 indices, all different, that place's not among them"
+    (watched.size == 61 && SegwitMultisigAccount.allDifferent watched && watched.contains at24 &&
+      watched.contains change25 && watched.contains at26 && !watched.contains scriptThere)
+  check "the scripts before it are the same scripts in the same order" (watched.extract 0 50 == before)
+  -- the address handed out
+  check "the address handed out at that index is the next one's, and any other index is its own"
+    ((account.usableIndex 0 spoiled).toOption == some (spoiled + 1) && (account.usableIndex 0 24).toOption == some 24 &&
+      (account.usableIndex 0 26).toOption == some 26 && (account.usableIndex 1 spoiled).toOption == some spoiled)
+  refused "no index past the unhardened ones" (account.usableIndex 0 0x8000_0000) "indexOutOfRange"
+  -- either kind, as a record's account is read
+  let any ← need "read as either kind" (AnyMultisigAccount.parse account.serialized .regtest)
+  let both ← need "both choices at that index" (any.derivedOutputs spoiled)
+  check "a record's scripts at that index: none to receive, one for change"
+    (both.size == 2 && both[0]!.isNone && (both[1]!.map (·.scriptPubKey)) == some change25 &&
+      (any.usableIndex 0 spoiled).toOption == some (spoiled + 1))
+  -- review, with the coordinates a wallet whose counter is at 6 gives: the 20 past it on each chain
+  let script0 ← need "receive 0" (account.scriptPubKey 0 0)
+  let paid : Array Transaction.Output := #[{ value := 100_000, scriptPubKey := script0 }]
+  let funding : Transaction := { version := 2, locktime := 0, outputs := paid, inputs :=
+    #[{ previousOutput := ⟨ByteArray.mk (Array.replicate 32 0x22), 0⟩, scriptSig := .empty, sequence := 0xFFFF_FFFD }] }
+  let coin : WalletUTXO :=
+    { txid := funding.txid, vout := 0, amount := 100_000, scriptPubKey := script0, chain := .receive, index := 0, height := 100 }
+  let there : World := { w with account, descriptor, funding, coins := #[coin] }
+  let change ← need "change 6" (account.scriptPubKey 6 1)
+  let psbt := spend there #[coin] #[{ value := 60_000, scriptPubKey := scriptThere }, { value := 39_000, scriptPubKey := change }]
+  let window : Array OutputCoordinate := (Array.range 20).flatMap fun offset =>
+    #[{ choice := 0, index := 6 + offset.toUInt32 }, { choice := 1, index := 6 + offset.toUInt32 }]
+  let reviewed ← need "a spend is reviewed with that index among the coordinates" (account.reviewSpend psbt #[coin] window 200)
+  check "an output to the script of that place is shown as leaving the account, the change as returning"
+    (reviewed.outputs.size == 2 && !reviewed.outputs[0]!.isAccountOwned && reviewed.outputs[0]!.amount == 60_000 &&
+      reviewed.outputs[1]!.isAccountOwned && reviewed.outputs[1]!.amount == 39_000 && reviewed.fee == 1_000)
+  -- a coin said to be at that place is no coin of the account: nothing is signed for it
+  let coinThere : WalletUTXO := { coin with scriptPubKey := scriptThere, index := spoiled }
+  let fundingThere : Transaction := { funding with outputs := #[{ value := 100_000, scriptPubKey := scriptThere }] }
+  let spendThere := spend { there with funding := fundingThere } #[{ coinThere with txid := fundingThere.txid }]
+    #[{ value := 99_000, scriptPubKey := destination }]
+  refused "a spend of a coin at that place is refused"
+    (account.reviewSpend spendThere #[{ coinThere with txid := fundingThere.txid }] window 200 |>.map fun _ => ())
+    "invalidDescriptor" (says "same key at one address")
+
 /-! ## Review -/
 
 def review : TM Unit := do
@@ -461,5 +534,6 @@ def main : IO UInt32 := runMain "segwit-test" do
   runTest "publishedVectors" publishedVectors
   runTest "descriptors" descriptors
   runTest "addresses" addresses
+  runTest "sameKeyAtOneIndex" sameKeyAtOneIndex
   runTest "review" review
   runTest "signing" signing

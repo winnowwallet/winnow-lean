@@ -20,7 +20,7 @@ hypothesis, never an axiom.
 Nothing that runs imports this file; `SecpCt/Gate.lean` does. -/
 
 namespace SecpCt
-open Secp.Spec (F FieldP OnCurve)
+open Secp.Spec (F OnCurve)
 open Secp
 
 /-! ## Elements read and compared -/
@@ -168,21 +168,18 @@ on the curve and has that x. -/
 theorem parseCompressed_spec {b : ByteArray} {p : Affine} (h : parseCompressed b = some p) :
     b.size = 33 ∧ p.x.toNat = Secp.fromBE (b.extract 1 33) ∧ p.Good := by
   unfold parseCompressed at h
-  rcases Bool.eq_false_or_eq_true (b.size == 33 && (b[0]! == 2 || b[0]! == 3)) with shape | shape
-  · simp only [shape, ↓reduceIte] at h
-    have size : b.size = 33 := by
-      simp only [Bool.and_eq_true, beq_iff_eq] at shape
-      exact shape.1
-    obtain ⟨q, parsed, made⟩ := Option.map_eq_some_iff.mp h
-    obtain ⟨_, number, good, _⟩ := parseXOnly_spec parsed
-    subst made
-    rcases Bool.eq_false_or_eq_true (b[0]! == 3) with odd | odd
-    · simp only [odd, ↓reduceIte]
-      exact ⟨size, number, Affine.neg_good good⟩
-    · simp only [odd, Bool.false_eq_true, ↓reduceIte]
-      exact ⟨size, number, good⟩
-  · simp only [shape, Bool.false_eq_true, ↓reduceIte] at h
-    cases h
+  split at h
+  · rename_i size
+    dsimp only at h
+    split at h
+    · obtain ⟨q, parsed, made⟩ := Option.map_eq_some_iff.mp h
+      obtain ⟨_, number, good, _⟩ := parseXOnly_spec parsed
+      subst made
+      split
+      · exact ⟨size, number, Affine.neg_good good⟩
+      · exact ⟨size, number, good⟩
+    · cases h
+  · cases h
 
 /-- Whether the curve's equation holds, as `onCurve` checks it, is whether it holds. -/
 theorem onCurve_spec {x y : Fe} (h : onCurve x y = true) : y.toF * y.toF = x.toF * x.toF * x.toF + 7 := by
@@ -194,26 +191,23 @@ point of the curve. -/
 theorem parseUncompressed_spec {b : ByteArray} {p : Affine} (h : parseUncompressed b = some p) :
     b.size = 65 ∧ p.x.toNat = Secp.fromBE (b.extract 1 33) ∧ p.y.toNat = Secp.fromBE (b.extract 33 65) ∧ p.Good := by
   unfold parseUncompressed at h
-  rcases Bool.eq_false_or_eq_true (b.size == 65 && (b[0]! == 4 || b[0]! == 6 || b[0]! == 7)) with shape | shape
-  · simp only [shape, ↓reduceIte] at h
-    have size : b.size = 65 := by
-      simp only [Bool.and_eq_true, beq_iff_eq] at shape
-      exact shape.1
-    obtain ⟨x, readX, rest⟩ := Option.bind_eq_some_iff.mp h
-    obtain ⟨y, readY, made⟩ := Option.bind_eq_some_iff.mp rest
-    obtain ⟨_, numberX, validX⟩ := Fe.ofBytes?_spec readX
-    obtain ⟨_, numberY, validY⟩ := Fe.ofBytes?_spec readY
-    rcases Bool.eq_false_or_eq_true (onCurve x y && (b[0]! == 4 || ((y.isOdd == 1) == (b[0]! == 7)))) with fits | fits
-    · simp only [fits, ↓reduceIte, Option.some.injEq] at made
-      subst made
-      have curve : onCurve x y = true := by
+  split at h
+  · rename_i size
+    dsimp only at h
+    split at h
+    · obtain ⟨x, readX, rest⟩ := Option.bind_eq_some_iff.mp h
+      obtain ⟨y, readY, made⟩ := Option.bind_eq_some_iff.mp rest
+      obtain ⟨_, numberX, validX⟩ := Fe.ofBytes?_spec readX
+      obtain ⟨_, numberY, validY⟩ := Fe.ofBytes?_spec readY
+      split at made
+      · rename_i fits
+        injection made with made
+        subst made
         simp only [Bool.and_eq_true] at fits
-        exact fits.1
-      exact ⟨size, numberX, numberY, validX, validY, onCurve_spec curve⟩
-    · simp only [fits, Bool.false_eq_true, ↓reduceIte] at made
-      cases made
-  · simp only [shape, Bool.false_eq_true, ↓reduceIte] at h
-    cases h
+        exact ⟨size, numberX, numberY, validX, validY, onCurve_spec fits.1⟩
+      · cases made
+    · cases h
+  · cases h
 
 /-! ## Numbers that are not secret -/
 
@@ -254,21 +248,15 @@ theorem scalar?_spec {b : ByteArray} {t : Sc} (h : scalar? b = some t) :
 
 /-! ## Back from three coordinates to two -/
 
-theorem neg_onCurve {p : Spec.Point} (h : OnCurve p) : OnCurve (Spec.neg p) := by
-  cases p with
-  | inf => trivial
-  | pt x y =>
-    show (-y) * (-y) = x * x * x + 7
-    have h : y * y = x * x * x + 7 := h
-    rw [← h]
-    grind
+theorem neg_onCurve {p : Spec.Point} (h : OnCurve p) : OnCurve (Spec.neg p) :=
+  Spec.neg_onCurve h
 
 /-- A point of this library stands, in three coordinates, for the point it names. -/
 theorem Affine.rep {p : Affine} (good : p.Good) : Rep p.point p.spec := rep_ofAffine good.1 good.2.1
 
 /-- **Reading a result off.** When `toAffine?` gives two coordinates for a point that stands for a point of
 the curve, they name that point. -/
-theorem toAffine?_spec [Fermat] {p : Point} {c : Spec.Point} (curve : OnCurve c) (rep : Rep p c) {q : Affine}
+theorem toAffine?_spec {p : Point} {c : Spec.Point} (curve : OnCurve c) (rep : Rep p c) {q : Affine}
     (made : p.toAffine? = some q) : c = q.spec ∧ q.Good := by
   unfold Point.toAffine? at made
   have spec := affine_spec rep
@@ -286,7 +274,7 @@ theorem toAffine?_spec [Fermat] {p : Point} {c : Spec.Point} (curve : OnCurve c)
       exact curve
 
 /-- And when it gives none, the point stands for the point at infinity. -/
-theorem toAffine?_none [Fermat] {p : Point} {c : Spec.Point} (rep : Rep p c) (made : p.toAffine? = none) :
+theorem toAffine?_none {p : Point} {c : Spec.Point} (rep : Rep p c) (made : p.toAffine? = none) :
     c = .inf := by
   unfold Point.toAffine? at made
   have spec := affine_spec rep
@@ -301,28 +289,28 @@ theorem toAffine?_none [Fermat] {p : Point} {c : Spec.Point} (rep : Rep p c) (ma
 /-! ## Sums and products -/
 
 /-- **`t·G`.** -/
-theorem generatorMul_spec [Fermat] {t : Sc} {q : Affine} (h : generatorMul t = some q) :
+theorem generatorMul_spec {t : Sc} {q : Affine} (h : generatorMul t = some q) :
     Spec.smul t.toNat Spec.G = q.spec ∧ q.Good :=
   toAffine?_spec (Spec.smul_onCurve _ Spec.G_onCurve) (mulPublic_rep t Spec.G_onCurve rep_generator) h
 
 /-- **A secret's public point** is `d·G`. -/
-theorem publicPoint_spec [Fermat] {d : Sc} {q : Affine} (h : publicPoint d = some q) :
+theorem publicPoint_spec {d : Sc} {q : Affine} (h : publicPoint d = some q) :
     Spec.smul d.toNat Spec.G = q.spec ∧ q.Good :=
   toAffine?_spec (Spec.smul_onCurve _ Spec.G_onCurve) (mulGenerator_rep d) h
 
 /-- **`t·G + P`**: the tweak of BIP 32's public derivation and of BIP 341's output key. -/
-theorem pointAdd_spec [Fermat] {p q : Affine} {t : Sc} (good : p.Good) (h : pointAdd p t = some q) :
+theorem pointAdd_spec {p q : Affine} {t : Sc} (good : p.Good) (h : pointAdd p t = some q) :
     Spec.add (Spec.smul t.toNat Spec.G) p.spec = q.spec ∧ q.Good :=
   toAffine?_spec (Spec.add_onCurve (Spec.smul_onCurve _ Spec.G_onCurve) good.2.2)
     (rep_add (Spec.smul_onCurve _ Spec.G_onCurve) good.2.2 (mulPublic_rep t Spec.G_onCurve rep_generator)
       (Affine.rep good)) h
 
 /-- **`k·P`**, for any point of the curve this library has read. -/
-theorem pointMul_spec [Fermat] {p q : Affine} {k : Sc} (good : p.Good) (h : pointMul k p = some q) :
+theorem pointMul_spec {p q : Affine} {k : Sc} (good : p.Good) (h : pointMul k p = some q) :
     Spec.smul k.toNat p.spec = q.spec ∧ q.Good :=
   toAffine?_spec (Spec.smul_onCurve _ good.2.2) (mul_rep k good.2.2 (Affine.rep good)) h
 
-theorem sum_rep [Fermat] (points : List Affine) (good : ∀ p ∈ points, p.Good) (acc : Point) (c : Spec.Point)
+theorem sum_rep (points : List Affine) (good : ∀ p ∈ points, p.Good) (acc : Point) (c : Spec.Point)
     (curve : OnCurve c) (rep : Rep acc c) :
     OnCurve (points.foldl (fun sum p => Spec.add sum p.spec) c) ∧
     Rep (points.foldl (fun sum p => Point.add sum p.point) acc)
@@ -335,7 +323,7 @@ theorem sum_rep [Fermat] (points : List Affine) (good : ∀ p ∈ points, p.Good
       (rep_add curve here.2.2 rep (Affine.rep here))
 
 /-- **A sum of points**, added in the order given, starting from the point at infinity. -/
-theorem combine_spec [Fermat] {points : List Affine} {q : Affine} (good : ∀ p ∈ points, p.Good)
+theorem combine_spec {points : List Affine} {q : Affine} (good : ∀ p ∈ points, p.Good)
     (h : combine points = some q) :
     points.foldl (fun sum p => Spec.add sum p.spec) .inf = q.spec ∧ q.Good :=
   have ⟨curve, rep⟩ := sum_rep points good Point.infinity .inf trivial rep_infinity
@@ -343,7 +331,7 @@ theorem combine_spec [Fermat] {points : List Affine} {q : Affine} (good : ∀ p 
 
 /-- **The key with the even y.** For a secret `d` below N whose public point is `(x, y)`, `evenKey d` is `d`
 if `y` is even and `N − d` if it is odd. -/
-theorem evenKey_spec [Fermat] (d : Sc) (below : d.toNat < N) {x y : F}
+theorem evenKey_spec (d : Sc) (below : d.toNat < N) {x y : F}
     (point : Spec.smul d.toNat Spec.G = .pt x y) :
     (evenKey d).toNat = if y.val % 2 = 1 then (N - d.toNat) % N else d.toNat := by
   unfold evenKey
@@ -377,7 +365,7 @@ theorem extract_size (b : ByteArray) (from' to : Nat) (h : to ≤ b.size) : (b.e
 bytes spell the x of a point of the curve, taken with its even y; `r` is below P and `s` below N; and
 `s·G − e·P` is a point, not the point at infinity, with an even y, whose x is `r`: for `e` the BIP 340
 challenge. -/
-theorem verify_sound [Fermat] {signature message key : ByteArray} (h : verify signature message key = true) :
+theorem verify_sound {signature message key : ByteArray} (h : verify signature message key = true) :
     signature.size = 64 ∧ key.size = 32 ∧
     Secp.fromBE (signature.extract 0 32) < P ∧ Secp.fromBE (signature.extract 32 64) < N ∧
     ∃ px py : F, px.val = Secp.fromBE key ∧ py * py = px * px * px + 7 ∧ py.val % 2 = 0 ∧
@@ -445,7 +433,7 @@ signature is 64 bytes spelling `r` and `s` with `0 < r < N` and `0 < s ≤ N/2`,
 curve that `parseCompressed` read, and there is a `w` with `s·w = 1` modulo N for which `(z·w)·G + (r·w)·Q`
 is a point, not the point at infinity, whose x modulo N is `r`: for `z` the digest as a number modulo N and
 `Q` the key. Nothing here rests on N being prime. -/
-theorem Ecdsa.verify_sound [Fermat] {signature digest key : ByteArray}
+theorem Ecdsa.verify_sound {signature digest key : ByteArray}
     (h : Ecdsa.verify signature digest key = true) :
     signature.size = 64 ∧ digest.size = 32 ∧
     0 < Secp.fromBE (signature.extract 0 32) ∧ Secp.fromBE (signature.extract 0 32) < N ∧

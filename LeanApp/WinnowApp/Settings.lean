@@ -98,6 +98,21 @@ def stepSettings (msg : SettingsMsg) (m : Model) : Model × List Cmd :=
   | .resetPeers => ({ m with confirm := none, settingsDraft := { d with resettingPeers := true } }, [.resetPeers g])
   | .askDelete => ({ m with confirm := some .deleteWallet }, [])
   | .deleteWallet => ({ m with confirm := none }, [.deleteWallet g])
+  | .selectWallet slot =>
+    if slot == m.slot || !m.wallets.any (·.slot == slot) then (m, [])
+    else m.switchWallet fun g => .openSlot g m.settings.network (some slot)
+  | .addWallet => m.switchWallet fun g => .openSlot g m.settings.network none
+  | .cancelAddWallet =>
+    if m.walletID.isSome || m.wallets.isEmpty then (m, [])
+    else m.switchWallet fun g => .openWallet g m.settings.network false
+  | .openRename =>
+    if m.walletID.isNone then (m, []) else
+    let name := (m.wallets.find? (·.slot == m.slot)).map (·.name) |>.getD ""
+    ({ m with renameDraft := name, renameBusy := false, renameError := none }.present .renameWallet, [])
+  | .setRenameDraft s => ({ m with renameDraft := s, renameError := none }, [])
+  | .saveRename =>
+    if m.renameBusy || m.renameDraft.trimAscii.isEmpty then (m, []) else
+    ({ m with renameBusy := true, renameError := none }, [.renameWallet g m.renameDraft.trimAscii.copy])
   | .dismissTor => save { m.settings with torRemovedNotice := false }
   | .setGatewayMode i => ({ m with settingsDraft := { d with gatewayMode := i } }, [])
   | .setGatewayNetwork n on =>
@@ -225,16 +240,50 @@ def securitySection (m : Model) : H :=
     , settingsRow Ids.multisigAccountsButton "Multisig accounts" "person.3" (if count == 0 then "" else s!"{count}")
         (.home .openMultisigAccounts) ]
 
+/-- The profiles kept on this device for the network, the open one marked, the others opened by a tap; a
+name for the open one, and a way to add one more. -/
+def walletRows (m : Model) : List H :=
+  (m.wallets.map fun w =>
+      if w.slot == m.slot then
+        .identified (Ids.walletRow w.id) (.row [Html.symbol "checkmark.circle" (body w.label), .spacer, Html.tone .secondary (body "Open")])
+      else
+        .identified (Ids.walletRow w.id) (Html.symbol "circle" (.button w.label .plain (some (.settings (.selectWallet w.slot)))))) ++
+  [ .identified Ids.renameWalletButton (Html.symbol "pencil" (.button "Rename this profile" .plain (some (.settings .openRename))))
+  , .identified Ids.addWalletButton (Html.symbol "plus.circle" (.button "Add a profile" .plain (some (.settings .addWallet)))) ]
+
+def walletsText : String :=
+  "A profile is one key and what it holds: its own balance, payments, contacts and backup, and the multisig accounts its key is in. Every profile on this device is kept up to date, the ones not open too."
+
+/-- Settings → Profiles. Shown once a profile is open. -/
+def walletsSection (m : Model) : List H :=
+  if m.walletID.isNone then [] else [.section "Profiles" walletsText (walletRows m)]
+
+/-- The home's list of profiles (its name of the open one, tapped). -/
+def walletsSheet (m : Model) (inner : List H) : H :=
+  formSheet "Profiles" (some .closeSheet) [closeBar "Done"] [.section "" walletsText (walletRows m)] inner
+
+/-- "Rename this profile": its name, here and on the person's other devices. -/
+def renameWalletSheet (m : Model) (inner : List H) : H :=
+  let canSave := !m.renameBusy && !m.renameDraft.trimAscii.isEmpty
+  formSheet "Rename this profile" (if m.renameBusy then none else some .closeSheet) []
+    [ .section "" "The name shows here and on your other devices with this profile."
+        ([ .identified Ids.renameWalletField
+             (.input .plain "" "Phone, Savings…" m.renameDraft (fun s => .settings (.setRenameDraft s)) (some (.settings .saveRename))) ] ++
+         (match m.renameError with | some e => [body e] | none => []))
+    , .section "" ""
+        [ .identified Ids.saveWalletNameButton (.button "Save" .primary (if canSave then some (.settings .saveRename) else none))
+        , .button "Cancel" .plain (if m.renameBusy then none else some .closeSheet) ] ] inner
+
 def settingsSections (m : Model) : List H :=
   let s := m.settings
   [.section "" "System follows your phone's light and dark setting." [.identified Ids.appearancePicker
     (.picker "Appearance" (Appearance.all.map (·.label)) (Appearance.all.idxOf s.appearance) (fun i => .settings (.setAppearance i)))]] ++
-  [networkSection m, securitySection m, backupSection m] ++
+  [networkSection m] ++ walletsSection m ++ [securitySection m, backupSection m] ++
   [.section "About" ""
-    ([.labeled "Version" appVersionText, .labeled "Wallet ID" (m.walletID.getD "—")] ++
+    ([.identified Ids.appVersion (.labeled "Version" (m.appVersion.getD "Unknown")), .labeled "Wallet ID" (m.walletID.getD "—")] ++
      [navLink "Design papers" (some (.settings .openPapers)) (symbol := "doc.text")])] ++
   (if m.walletID.isSome then
-    [.section "Danger zone" s!"Removes this {s.network.name} wallet so you can create or import another. The key is deleted from this device; restore it from your iCloud backup or a backup file that includes the recovery phrase, or the money is gone. People you added stay on this phone, and block headers are kept, so the next wallet does not re-sync the chain."
+    [.section "Danger zone" s!"Removes {m.walletLabel} ({m.walletID.getD ""}), this device's {s.network.name} profile that is open, so you can create or import another. The key is deleted from this device; restore it from your iCloud backup or a backup file that includes the recovery phrase, or the money is gone. People you added stay on this phone, and block headers are kept, so the next wallet does not re-sync the chain."
       [.button "Delete wallet from this device" .destructive (some (.settings .askDelete))]] else [])
 
 /-- `DesignPapersView` and `DesignPaperView`. The pages are the HTML files the site serves, bundled

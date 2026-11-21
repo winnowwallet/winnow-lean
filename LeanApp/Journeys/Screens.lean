@@ -137,10 +137,9 @@ def openAccountRow (account : String) : UI Unit := do
 
 namespace Receive
 
-/-- Opens Receive and reads the address it shows (its label skipped). -/
+/-- Opens Receive and reads the address it shows. -/
 def address : UI String := do
   tap receiveButton
-  if ← exists? skipReceiveAddressLabelButton 20 then tap skipReceiveAddressLabelButton
   waitFor receiveAddress 30
   let address ← text receiveAddress
   expect (address.startsWith "bcrt1") s!"not a regtest address: {address}"
@@ -416,8 +415,84 @@ def pair (name : String) : UI Unit := do
 def verifyAddress : UI String := do
   tap ledgerVerifyButton
   waitFor ledgerVerifyResult 60
-  text ledgerVerifyResult
+  let verified ← text ledgerVerifyResult
+  return verified
 
 end Ledger
+
+/-! ## Person cards, Saved recipients, Profiles, and stand-in iCloud -/
+
+/-- A person's name typed on Receive, and their address and card made. On a phone closing the keyboard already
+makes them (the name's return does what the button does; seen on CI's simulator, 2026-11-15), and the button
+is then gone; the headless driver only sets the text, and the button is what makes them. -/
+def makeCardFor (name : String) : UI Unit := do
+  type personCardNameField name
+  unless ← exists? personCardText 2 do
+    let button ← state makePersonCardButton
+    if button.present && button.enabled then
+      -- gone between the look and the tap, the card is there: the wait below says
+      try tap makePersonCardButton catch _ => pure ()
+  waitFor personCardText 30
+
+/-- Whether a backup in the stand-in iCloud was saved after `marker` was written. -/
+def savedSince (cloud marker : System.FilePath) : IO Bool := do
+  let since := (← marker.metadata).modified
+  for entry in ← cloud.readDir do
+    if entry.fileName.endsWith ".backup" && decide ((← entry.path.metadata).modified > since) then return true
+  return false
+
+namespace People
+
+/-- Adds a saved recipient from a person card or `winnowcard1p…` code. Starts on either the Send sheet or
+Saved recipients: opens Saved recipients if needed, taps Add, pastes `cardText`, optionally types `name`,
+waits for `"Fresh address each payment"`, and saves (returning to Saved recipients). -/
+def addFromCard (r : Run) (cardText : String) (name : Option String := none) : UI Unit := do
+  unless ← exists? addPersonToolbarButton do
+    scrolled savedRecipientsButton
+    tap savedRecipientsButton
+    waitFor addPersonToolbarButton 10
+  tap addPersonToolbarButton
+  waitFor personPasteButton 10
+  r.paste cardText personPasteButton
+  if let some n := name then
+    scrolled personNameField
+    type personNameField n
+  waitUntil 20 "the card did not read as fresh addresses" do
+    if !(← exists? personPayToCaption) then
+      discard <| scrollTo personPayToCaption
+    if ← exists? personPayToCaption then
+      return (← text personPayToCaption 1) == "Fresh address each payment"
+    return false
+  scrolled personSaveButton
+  waitUntil 10 "Save did not enable" do return (← state personSaveButton).enabled
+  tap personSaveButton
+  expectGone personSaveButton 20
+  waitFor addPersonToolbarButton 20
+
+end People
+
+namespace Profiles
+
+/-- Opens the Home's Profiles sheet by tapping the open profile's name. -/
+def openSheet : UI Unit := do
+  waitFor walletNameButton 10
+  scrolled walletNameButton
+  tap walletNameButton
+  waitFor renameWalletButton 10
+
+/-- Renames the open profile (from Settings or the Profiles sheet). On a simulator, typing into
+`renameWalletField` submits on return and closes the sheet; headless, `saveWalletNameButton` saves it. -/
+def rename (newName : String) : UI Unit := do
+  scrolled renameWalletButton
+  tap renameWalletButton
+  waitFor renameWalletField 10
+  type renameWalletField newName
+  if ← exists? saveWalletNameButton 1 then
+    let button ← state saveWalletNameButton
+    if button.present && button.enabled then
+      try tap saveWalletNameButton catch _ => pure ()
+  expectGone renameWalletField 20
+
+end Profiles
 
 end WinnowJourneys

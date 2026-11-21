@@ -3,8 +3,7 @@
 # (scripts/ui-fixture: a fresh regtest node, the census list the app bundles) as their hooks.
 #
 #   scripts/journeys [names]          on a throwaway simulator with XCTest's real touches (LeanNative's ui-tests)
-#   scripts/journeys --wire [names]   headless against the app itself (LeanNative's wire-journeys): no simulator,
-#                                     about a minute for all six
+#   scripts/journeys --wire [names]   headless against the app itself (LeanNative's wire-journeys): no simulator
 #
 # Names come from Journeys.lean's `all`; none runs every journey. Evidence goes to $UI_OUT (default
 # LeanApp/ios/build/ui-journey, or LeanApp/build/wire-journeys headless): the screenshots, journeys.json and

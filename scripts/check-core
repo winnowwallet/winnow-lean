@@ -24,11 +24,12 @@ SecpCt.Field SecpCt.Keys SecpCt.Point SecpCt.Scalar SecpCt.Schnorr SecpCt.Word
 Winnow.Bytes Winnow.Text.UTF8
 Winnow.Crypto Winnow.Crypto.AES Winnow.Crypto.AESGCM Winnow.Crypto.Base58 Winnow.Crypto.Bech32
 Winnow.Crypto.Ripemd160 Winnow.Crypto.Sha2 Winnow.Crypto.SipHash
-Winnow.Keys.BIP32 Winnow.Keys.Secp256k1 Winnow.Keys.SilentPayments Winnow.Keys.Taproot
+Winnow.Keys.BIP32 Winnow.Keys.Secp256k1 Winnow.Keys.SilentPaymentPairing Winnow.Keys.SilentPayments Winnow.Keys.Taproot
 Winnow.Tx Winnow.Tx.AddressDecoder Winnow.Tx.Base64 Winnow.Tx.FundingSources Winnow.Tx.Multisig Winnow.Tx.PSBT
 Winnow.Tx.Script Winnow.Tx.SighashBIP143 Winnow.Tx.SighashBIP341 Winnow.Tx.Taproot Winnow.Tx.Transaction Winnow.Tx.TransactionBuilder
 Winnow.Tx.Wire
-Winnow.Wallet.Descriptor Winnow.Wallet.SegwitSpendReview Winnow.Wallet.SpendReview Winnow.Wallet.SwiftDouble Winnow.Wallet.SwiftJSON
+Winnow.Wallet.Descriptor Winnow.Wallet.SegwitSpendReview Winnow.Wallet.SendAuthorization Winnow.Wallet.SpendReview
+Winnow.Wallet.SwiftDouble Winnow.Wallet.SwiftJSON
 Winnow.Wallet.Types
 Winnow.Net.Header Winnow.Net.HeaderChain Winnow.Net.Params Winnow.Net.UInt256 Winnow.Net.Wire
 Std.Data.HashMap Std.Data.HashSet

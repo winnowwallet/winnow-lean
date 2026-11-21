@@ -12,15 +12,22 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   transaction review without seed phrases, Unicode tables, coin selection, wallet naming or I/O) to the list of
   modules it allows, so the core does not grow back; CI runs it. `--measure MOD...` prints a closure's module
   count and non-blank lines.
-- [ci-regtest](ci-regtest) runs io-test, backend-test, multisig-differential and segwit-regtest against a
-  disposable regtest bitcoind (CI's `lean` job).
+- [check-proofs](check-proofs) enforces zero proof leakage into runtime libraries (`WinnowCore`, `Winnow`,
+  `WinnowApp`), zero theorems/axioms/`sorry` in runtime and spec modules, zero `sorry`/`native_decide`/`bv_decide`
+  in proof modules, and zero panicking `!`-indexing in bounds-cleaned modules; CI runs it.
+- [check-shell-names](check-shell-names) prepares the iOS project without Xcode (LeanNative's `build-ios` with
+  `PREPARE_ONLY=1`) to run the check CI's Xcode jobs make before they compile: a string in the app's compiled C
+  that equals the name of a shell capability the manifest does not list. A JSON key `"device"` stopped all
+  three Xcode jobs once; this says so in the `lean` job in about fifteen seconds. CI runs it.
+- [ci-regtest](ci-regtest) runs io-test, backend-test, multisig-differential, card-regtest and
+  segwit-regtest against a disposable regtest bitcoind (CI's `lean` job).
 - [install-bitcoin](install-bitcoin) downloads the pinned Bitcoin Core release (31.1) from bitcoincore.org, checks
   its SHA-256 and prints its bin directory; `ci-regtest` and `ui-fixture` run against it, never a bitcoind
   found on the PATH.
 - [ui-fixture](ui-fixture) starts the UI journeys' regtest node and config, and afterwards collects the app's
   journals and stops the node: the hooks of LeanNative's `ui-tests` and `wire-journeys`.
 - [journeys](journeys) runs the journeys locally as CI does: in the simulator, or `--wire` headless against the
-  app itself (no simulator, no XCTest: about a minute for all six).
+  app itself (no simulator, no XCTest). Without names it runs all ten.
 - [ios-simulator](ios-simulator) prints one available iPhone (default) or iPad on the newest iOS runtime.
 - [signet-fixture](signet-fixture) provisions a disposable custom-signet bitcoind (`up`, `down`, `status`,
   `snapshot DIR`, `destroy`). For a regtest node with a funded wallet, use `LeanApp`'s `backend-test --fixture <dir>`.
@@ -29,8 +36,8 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   verifies the Ed25519 signature under the key pinned in [census-public-key.txt](census-public-key.txt)
   ([ed25519_verify.py](ed25519_verify.py)), drops clearnet peers the census's health record scores under 70,
   checks the result with Lean's `census-check` and records its provenance in `build/census/peers-source.txt`.
-  CI runs it once per run (the `build` job's `prepare`); `build-ios` runs it for Release builds and when the
-  list is missing; `IMPORT_CENSUS=1` forces it, `IMPORT_CENSUS=0` keeps an existing list.
+  CI runs it in each job that builds (`prepare` in `ci.yml`: `lean`, `app` and `release`); `build-ios` runs it
+  for CI (`CI=true`) and Release builds and when the list is missing; `IMPORT_CENSUS=1` forces it, `IMPORT_CENSUS=0` keeps an existing list.
 - [foundation-vectors](foundation-vectors) regenerates `LeanApp/FoundationVectors.lean`: what Foundation's `URL`
   and the Swift app's rules answer for custom explorer URLs and manual peers, which records-test checks the
   Lean rules against (macOS, `xcrun swift`).
@@ -43,6 +50,14 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   segwit and a bare key), each input with the script it spent, from a public Esplora server. Each transaction, and
   each one an input spends from, must hash to its txid, so the server is trusted for nothing. crypto-test holds
   `FundingSources.revelation` to them.
+- [bip32-vectors](bip32-vectors) writes `Lean/Vectors/bip32-test-vectors.json`: the test vectors of BIP32
+  itself, read from the BIP's text (vectors 1 to 4 give a seed and each chain's extended keys, vector 5 extended
+  keys that must be refused). crypto-test holds `HDKey` to them.
+- [card-keys-vectors](card-keys-vectors) writes `Lean/Vectors/card-keys-vectors.json`: a wallet's silent payment
+  keys, the tweak, label and code it makes for each person and the payments derived from them (issue #94),
+  computed with the
+  Python standard library alone (BIP32, secp256k1, tagged hashes, bech32m) and none of the wallet's code.
+  `card-keys-test` holds `Winnow.Keys.SilentPaymentPairing` to them.
 - [ecdsa-vectors](ecdsa-vectors) writes `Lean/Vectors/openssl-ecdsa-secp256k1.json`: 64 ECDSA signatures over
   secp256k1 that OpenSSL made and verified, with their keys, which segwit-test holds the verifier
   (`Lean/SecpCt/Ecdsa.lean`) and the DER reader (`Lean/Secp/Der.lean`) to. OpenSSL signs with its own randomness,
@@ -52,9 +67,6 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
   The wallet has one implementation of secp256k1 (`Lean/SecpCt`), so this is what its compiled code is compared
   with; secpct-test holds it to every record. The output is the same on every run, and `--check` (CI runs it)
   fails if the kept file is not it.
-- [gen-scalar-mul-proofs](gen-scalar-mul-proofs) writes `Lean/SecpCt/ScalarMulProofs.lean`, the proofs about the
-  constant-time scalar multiplication, which are too long to write by hand; Lean checks what it writes like any
-  other proof. `--check` (CI) fails unless the file in the repository is what the script writes.
 - [swift-utf8-vectors](swift-utf8-vectors) writes `Lean/Vectors/swift-utf8-decoding.json`, Swift's own
   `String(decoding:as: UTF8.self)` over well-formed and ill-formed UTF-8, which `crypto-test` holds
   `Winnow.Text.decodeUTF8Lossy` to. It needs Xcode's Swift and feeds the program to `xcrun swift` on stdin, so

@@ -8,6 +8,13 @@ only live evidence for #181's routing. No wallet addresses or transactions were
 sent. The simulator journey below shares the Mac's network; the physical-iPhone
 run is recorded in #181.
 
+Note of 2026-11-17: this run was made with the Swift app. `WalletCore`, the
+revisions, `scripts/check-live-gateways`, `scripts/check-live-gateways-ui`,
+the two test names and #181 are winnowwallet/winnow's; this repository
+has none of those scripts or tests. The census download it records ended on
+2026-10-13, when builds began to ship the list. No live-gateway run of the
+Lean app is recorded here.
+
 - **Revision:** WalletCore identical to main `8661469` (#181).
 - **Census input:** `census/peers.json` dated 2026-09-28 from
   `census.winnowwallet.com`, SHA-256 `cec282a3ad5e9af72436d5fc004175434186ed7a0f8ce21ec679439cd7b764d7`,

@@ -4,10 +4,7 @@ import SecpCt.Word
 
 A secret key is a scalar, and so is the secret number each signature is made with. Like a field element, a
 scalar is four words, least significant first, always the representative below N, and every operation does
-the same thing whatever the scalar is.
-
-Multiplication goes through arrays of words. Their sizes and the positions read are fixed by the code, never
-by a value. -/
+the same register sequence whatever the scalar is (no heap arrays, no secret-dependent branches). -/
 
 namespace SecpCt
 
@@ -26,8 +23,9 @@ def n1 : UInt64 := 0xBAAEDCE6AF48A03B
 def n2 : UInt64 := 0xFFFFFFFFFFFFFFFE
 def n3 : UInt64 := 0xFFFFFFFFFFFFFFFF
 
-/-- `2²⁵⁶ − N`, least significant word first: 129 bits. -/
-def complement : Array UInt64 := #[0x402DA1732FC9BEBF, 0x4551231950B75FC4, 1]
+/-- `2²⁵⁶ − N = c0 + 2⁶⁴·c1 + 2¹²⁸`, least significant word first (129 bits). -/
+def c0 : UInt64 := 0x402DA1732FC9BEBF
+def c1 : UInt64 := 0x4551231950B75FC4
 
 def zero : Sc := ⟨0, 0, 0, 0⟩
 
@@ -71,42 +69,44 @@ def choose (m : UInt64) (a b : Sc) : Sc :=
 /-- `−a` if `bit` is 1, `a` if it is 0. -/
 def negIf (bit : UInt64) (a : Sc) : Sc := choose (mask bit) (neg a) a
 
-/-- The product of two numbers given as words, least significant first: as many words as both together. -/
-def mulWords (a b : Array UInt64) : Array UInt64 := Id.run do
-  let mut out := Array.replicate (a.size + b.size) (0 : UInt64)
-  for i in [0:a.size] do
-    let mut carry : UInt64 := 0
-    for j in [0:b.size] do
-      let (h, l) := mulAdd a[i]! b[j]! out[i + j]! carry
-      out := out.set! (i + j) l
-      carry := h
-    out := out.set! (i + b.size) carry
-  return out
+/-- Eight-word product `(t0..t7)` of two four-word scalars, in registers. -/
+@[inline] def mulWide4 (a b : Sc) : UInt64 × UInt64 × UInt64 × UInt64 × UInt64 × UInt64 × UInt64 × UInt64 :=
+  let (t0, r1, r2, r3, r4) := mulRow a.a0 b.a0 b.a1 b.a2 b.a3 0 0 0 0
+  let (t1, r2, r3, r4, r5) := mulRow a.a1 b.a0 b.a1 b.a2 b.a3 r1 r2 r3 r4
+  let (t2, r3, r4, r5, r6) := mulRow a.a2 b.a0 b.a1 b.a2 b.a3 r2 r3 r4 r5
+  let (t3, t4, t5, t6, t7) := mulRow a.a3 b.a0 b.a1 b.a2 b.a3 r3 r4 r5 r6
+  (t0, t1, t2, t3, t4, t5, t6, t7)
 
-/-- The sum of two numbers given as words, to `size` words; anything above that is dropped, and the callers
-choose `size` so that nothing is. -/
-def addWords (a b : Array UInt64) (size : Nat) : Array UInt64 := Id.run do
-  let mut out := Array.replicate size (0 : UInt64)
-  let mut carry : UInt64 := 0
-  for i in [0:size] do
-    let (s, k) := adc (a.getD i 0) (b.getD i 0) carry
-    out := out.set! i s
-    carry := k
-  return out
+/-- First fold: 512 bits → 7 words (< 2³⁸⁶) via `2²⁵⁶ ≡ c0 + 2⁶⁴·c1 + 2¹²⁸ (mod N)`. -/
+@[inline] def fold1 (t0 t1 t2 t3 t4 t5 t6 t7 : UInt64) :
+    UInt64 × UInt64 × UInt64 × UInt64 × UInt64 × UInt64 × UInt64 :=
+  let (f0, u1, u2, u3, u4) := mulRow c0 t4 t5 t6 t7 t0 t1 t2 t3
+  let (f1, v2, v3, v4, v5) := mulRow c1 t4 t5 t6 t7 u1 u2 u3 u4
+  let (f2, k) := adc v2 t4 0
+  let (f3, k) := adc v3 t5 k
+  let (f4, k) := adc v4 t6 k
+  let (f5, f6) := adc v5 t7 k
+  (f0, f1, f2, f3, f4, f5, f6)
 
-/-- `low + 2²⁵⁶·high` is the same modulo N as `low + complement·high`, which is shorter. `t` is `low` in its
-first four words and `high` in the rest; the result has `size` words. -/
-def fold (t : Array UInt64) (size : Nat) : Array UInt64 :=
-  addWords (t.extract 0 4) (mulWords (t.extract 4 t.size) complement) size
+/-- Second fold: 7 words (< 2³⁸⁶) → 5 words (< 2²⁶⁰). -/
+@[inline] def fold2 (f0 f1 f2 f3 f4 f5 f6 : UInt64) : UInt64 × UInt64 × UInt64 × UInt64 × UInt64 :=
+  let (g0, u1, u2, u3, u4) := mulRow c0 f4 f5 f6 0 f0 f1 f2 f3
+  let (g1, v2, v3, v4, _)  := mulRow c1 f4 f5 f6 0 u1 u2 u3 u4
+  let (g2, k) := adc v2 f4 0
+  let (g3, k) := adc v3 f5 k
+  let (g4, _) := adc v4 f6 k
+  (g0, g1, g2, g3, g4)
 
-/-- A number of eight words, modulo N. Three folds bring 512 bits to 386, to 260, to 257 at most, which is
-below 2N. -/
-def reduceWide (t : Array UInt64) : Sc :=
-  let q := fold (fold (fold t 7) 5) 5
-  reduceOnce q[0]! q[1]! q[2]! q[3]! q[4]!
+/-- Reduce an 8-word product modulo N in three register folds and one conditional subtraction. -/
+@[inline] def reduceWide (t0 t1 t2 t3 t4 t5 t6 t7 : UInt64) : Sc :=
+  let (f0, f1, f2, f3, f4, f5, f6) := fold1 t0 t1 t2 t3 t4 t5 t6 t7
+  let (g0, g1, g2, g3, g4) := fold2 f0 f1 f2 f3 f4 f5 f6
+  let (q0, q1, q2, q3, q4) := mulRow g4 c0 c1 1 0 g0 g1 g2 g3
+  reduceOnce q0 q1 q2 q3 q4
 
 def mul (a b : Sc) : Sc :=
-  reduceWide (mulWords #[a.a0, a.a1, a.a2, a.a3] #[b.a0, b.a1, b.a2, b.a3])
+  let (t0, t1, t2, t3, t4, t5, t6, t7) := mulWide4 a b
+  reduceWide t0 t1 t2 t3 t4 t5 t6 t7
 
 /-- The scalar 32 bytes stand for, most significant first, reduced modulo N. -/
 def ofBytes (b : ByteArray) : Sc := reduceOnce (wordAt b 24) (wordAt b 16) (wordAt b 8) (wordAt b 0) 0
