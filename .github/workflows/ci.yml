@@ -2,11 +2,11 @@ name: CI
 # The Lean app's checks, by LeanNative's ios-app workflow (LeanNative/leannative, formerly posix4e/elmlean):
 # three jobs on GitHub's own macOS runners (free for a public repository) that start at once, `lean` (the Lean
 # built, every proof checked, then every test below at the same time, the regtest node's among them), `app`
-# (the Debug simulator build and the UI journeys, split across two runners; `media` joins their recordings) and
+# (the Debug simulator build and the UI journeys, split across three runners; `media` joins their recordings) and
 # `release` (the Release builds and the test-mode check).
 # It runs on pull
 # requests that are ready for review and change more than the docs, on every push to main, and by hand. Every
-# run is the same full run: every test, all twelve journeys, the Release builds and the website's media.
+# run is the same full run: every test, all fourteen journeys, the Release builds and the website's media.
 # release.yml looks for one on the tag's tree that is not a pull request's instead of testing again: main's
 # commit has one once its push run passes; after a push run that failed, or a force-push (which starts no push
 # run), run this by hand before tagging.
@@ -93,12 +93,12 @@ jobs:
       ui-device-type: iPhone 17 Pro
       ui-before: scripts/ui-fixture start
       ui-after: scripts/ui-fixture stop
-      # the journeys are Lean on the Mac (LeanApp/Journeys.lean), all twelve with XCTest's real touches
-      # (LeanNative's LNDriver, one snapshot per step) on one simulator: a hosted runner has the cores for one
+      # the journeys are Lean on the Mac (LeanApp/Journeys.lean and LeanApp/Journeys/), all fourteen with XCTest's
+      # real touches (LeanNative's LNDriver, one snapshot per step) on one simulator: a hosted runner has the cores for one
       ui-journey: journeys
-      # two runners at once, six journeys each (five took about 3.5 minutes each; one runner: 6.6); the media
-      # job joins their recordings into the website's one video, the journeys in Journeys.lean's order
-      ui-journey-shards: '["createReceiveSendConfirm multisigTwoOfThreeWithRecovery feeBumpReplaceConfirm retryAfterNoPeers cardForOnePerson twoWalletsOneDevice", "ledgerPairVerifySpend ledgerCardTwoOfTwo shippedCensus silentPaymentSend spentElsewhere accountFollowsDevices"]'
+      # three runners at once, four or five journeys each; the media job joins their recordings into the website's
+      # one video, the journeys in Journeys.lean's order
+      ui-journey-shards: '["createReceiveSendConfirm multisigTwoOfThreeWithRecovery feeBumpReplaceConfirm retryAfterNoPeers", "ledgerPairVerifySpend ledgerCardTwoOfTwo shippedCensus silentPaymentSend spentElsewhere", "cardForOnePerson cardRestoreFromBackup segwitMultisigJoinSign accountFollowsDevices twoWalletsOneDevice"]'
       # the website (winnowwallet/website, scripts/fetch-journey-media) takes this from main's newest successful run:
       # LeanNative's journey-media, in the layout and names the website reads
       journey-media: build/journey-media
