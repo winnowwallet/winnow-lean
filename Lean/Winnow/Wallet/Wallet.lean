@@ -1237,11 +1237,15 @@ def exportBundle (w : Wallet) (includeMnemonic : Bool := false) : WM ImportBundl
 
 /-! ### Rollback -/
 
-/-- The coin rows a fork takes away (reserved rows stay, re-heighted to 0). -/
-def rewindCoins (forkHeight : UInt32) (coins : Array WalletUTXO) : Array WalletUTXO :=
+/-- The coin rows a fork takes away (reserved rows stay, re-heighted to 0, and so do the outputs of the wallet's own
+spends `HistoryLedger.rewind` re-pended: multisig-test's `aReorgKeepsASendsChange`). -/
+def rewindCoins (forkHeight : UInt32) (coins : Array WalletUTXO) (repended : Array ByteArray := #[]) :
+    Array WalletUTXO :=
   let kept := coins.filter fun c =>
     let reserved := c.spent.isSome && (c.spent.bind (·.height)).isNone
-    !(c.height > forkHeight && !reserved)
+    -- made by a spend of the wallet's that the fork put back in the mempools (`HistoryLedger.rewind`): the coin
+    -- is pending again, as before a block took the spend, and not gone with the block
+    !(c.height > forkHeight && !reserved && !repended.contains c.txid)
   kept.map fun c => if c.height > forkHeight then { c with height := 0 } else c
 
 /-- A disconnected spender is still live in mempools (`HistoryLedger.rewind` re-pended its entry): its input
@@ -1261,7 +1265,7 @@ def rollBack (w : Wallet) (forkHeight : UInt32) : WM Unit := do
   let s ← w.state
   let (history, repended) := HistoryLedger.rewind s.history forkHeight
   let mut candidate := { s with
-    allUtxos := rewindCoins forkHeight (keepReservations repended forkHeight s.allUtxos)
+    allUtxos := rewindCoins forkHeight (keepReservations repended forkHeight s.allUtxos) repended
     history
     nextScanHeight := min s.nextScanHeight (if forkHeight == 0xFFFF_FFFF then forkHeight else forkHeight + 1) }
   -- A frontier that moved back names a block this rewind just doubted.

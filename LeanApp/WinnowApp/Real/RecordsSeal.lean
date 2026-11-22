@@ -1,6 +1,7 @@
 import Std.Data.HashMap
 import Winnow.Wallet
 import WinnowApp.Types
+import WinnowApp.Faults
 
 /-! # Sealed store files and their keys (port of `Sources/WinnowApp/StoreAuthentication.swift`)
 
@@ -427,6 +428,7 @@ end StoreSeal
 /-- `Data.write(to:options: .atomic)`: a temporary file beside the target, then a rename over it. -/
 def writeAtomically (data : ByteArray) (path : System.FilePath) : IO Unit := do
   let name := path.fileName.getD "store.json"
+  Faults.check s!"store.write.{name}"
   let tmp := path.withFileName s!".{name}.{hex (← IO.getRandomBytes 6)}.tmp"
   try
     IO.FS.writeBinFile tmp data

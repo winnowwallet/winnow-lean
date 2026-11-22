@@ -41,6 +41,15 @@ structure Host extends Node where
   /-- LeanApp's backend-test: the silent payment test receiver -/
   backendTest : String
   fixture : String
+  /-- the fixture's SOCKS5 gateway (scripts/socks-gateway), standing in for a person's Tor and I2P gateways: every
+  .onion and .i2p name reaches the node; and its log of each CONNECT (`<name>:<port> ok|refused`) -/
+  socksGateway : Nat := 0
+  socksLog : String := ""
+  /-- the fixture's proxy in front of the node (scripts/peer-proxy), the file that says what it does (`{"mode":
+  "pass" | "drop" | "stall"}`), and its log -/
+  peerProxy : Nat := 0
+  peerProxyControl : String := ""
+  peerProxyLog : String := ""
 
 namespace Host
 
@@ -53,7 +62,12 @@ def load : IO Host := do
   let rpc : Nat ← field f "rpc"
   let p2p : Nat ← field f "p2p"
   return { bitcoinCli := ← field c "bitcoinCli", backendTest := ← field c "backendTest", fixture,
-           datadir := ← field f "datadir", rpc := rpc.toUInt16, p2p := p2p.toUInt16 }
+           datadir := ← field f "datadir", rpc := rpc.toUInt16, p2p := p2p.toUInt16,
+           socksGateway := (c.getObjValAs? Nat "socksGateway").toOption.getD 0,
+           socksLog := (c.getObjValAs? String "socksLog").toOption.getD "",
+           peerProxy := (c.getObjValAs? Nat "peerProxy").toOption.getD 0,
+           peerProxyControl := (c.getObjValAs? String "peerProxyControl").toOption.getD "",
+           peerProxyLog := (c.getObjValAs? String "peerProxyLog").toOption.getD "" }
 
 /-- A host program's standard output, trimmed; a nonzero exit fails the journey with its standard error.
 backend-test reaches the node through the same pinned Core (WINNOW_BITCOIN_CLI). -/

@@ -4,9 +4,12 @@
 #
 #   scripts/ui-fixture start <out>             a fresh regtest node of the pinned Bitcoin Core
 #                                              (scripts/install-bitcoin) with a funded wallet `w` (backend-test
-#                                              --fixture, random ports) and <out>/ui.json, the journeys' config
+#                                              --fixture, random ports), a SOCKS5 gateway in front of it for
+#                                              .onion and .i2p names (scripts/socks-gateway), a proxy in front
+#                                              of it a journey can tell to drop or stall (scripts/peer-proxy),
+#                                              and <out>/ui.json, the journeys' config
 #   scripts/ui-fixture stop <out> [simulator]  the app's test-mode journals copied out of the simulator (or,
-#                                              headless, out of <out>/wire), and the node stopped
+#                                              headless, out of <out>/wire), and the node, the gateway and the proxy stopped
 #
 # The journeys (LeanApp/Journeys.lean, on the Mac) find ui.json through WINNOW_UI_CONFIG, which `start` leaves in
 # <out>/test-env (ui-tests passes test-env to them). The node's data directory is <out>/private/fixture, which CI keeps out of the evidence.
@@ -34,11 +37,31 @@ case "$action" in
     "$APP/.lake/build/bin/backend-test" --fixture "$OUT/private/fixture" > "$OUT/fixture.log" 2>&1 \
       || { cat "$OUT/fixture.log"; exit 1; }
     tail -1 "$OUT/fixture.log"
+    # a SOCKS5 gateway standing in for a Tor and an I2P gateway (scripts/socks-gateway): every .onion and .i2p
+    # name reaches the node, anything else is refused; each CONNECT goes to <out>/socks.log
+    P2P=$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["p2p"])' "$OUT/private/fixture/fixture.json")
+    rm -f "$OUT/private/socks.port"
+    nohup /usr/bin/python3 -I "$ROOT/scripts/socks-gateway" --node "127.0.0.1:$P2P" --port-file "$OUT/private/socks.port" \
+      --log "$OUT/socks.log" > "$OUT/private/socks.out" 2>&1 &
+    echo $! > "$OUT/private/socks.pid"
+    for ((i = 0; i < 200; i++)); do [ -s "$OUT/private/socks.port" ] && break; sleep 0.05; done
+    [ -s "$OUT/private/socks.port" ] || { echo "ui-fixture: the SOCKS gateway did not start"; cat "$OUT/private/socks.out"; exit 1; }
+    # a TCP proxy in front of the node (scripts/peer-proxy) that a journey makes its peer and tells to pass, drop or
+    # stall through <out>/private/peer-proxy.json; its connections go to <out>/peer-proxy.log
+    rm -f "$OUT/private/peer-proxy.port"
+    nohup /usr/bin/python3 -I "$ROOT/scripts/peer-proxy" --node "127.0.0.1:$P2P" --port-file "$OUT/private/peer-proxy.port" \
+      --control "$OUT/private/peer-proxy.json" --log "$OUT/peer-proxy.log" > "$OUT/private/peer-proxy.out" 2>&1 &
+    echo $! > "$OUT/private/peer-proxy.pid"
+    for ((i = 0; i < 200; i++)); do [ -s "$OUT/private/peer-proxy.port" ] && break; sleep 0.05; done
+    [ -s "$OUT/private/peer-proxy.port" ] || { echo "ui-fixture: the peer proxy did not start"; cat "$OUT/private/peer-proxy.out"; exit 1; }
     /usr/bin/python3 - "$OUT" "$WINNOW_BITCOIN_CLI" "$APP/.lake/build/bin/backend-test" <<'PY'
 import json, os, sys
 out, cli, backend_test = sys.argv[1:4]
 config = {"fixture": out + "/private/fixture", "bitcoinCli": cli, "backendTest": backend_test,
-          "screenshots": out + "/screenshots"}
+          "screenshots": out + "/screenshots",
+          "socksGateway": int(open(out + "/private/socks.port").read()), "socksLog": out + "/socks.log",
+          "peerProxy": int(open(out + "/private/peer-proxy.port").read()),
+          "peerProxyControl": out + "/private/peer-proxy.json", "peerProxyLog": out + "/peer-proxy.log"}
 device = os.path.join(out, "device.json")
 if os.path.exists(device):
     config["device"] = json.load(open(device))
@@ -63,6 +86,9 @@ PY
         done
       fi
     fi
+    for pidfile in "$OUT/private/socks.pid" "$OUT/private/peer-proxy.pid"; do
+      [ -f "$pidfile" ] && { kill "$(cat "$pidfile")" 2>/dev/null || true; }
+    done
     FIXTURE="$OUT/private/fixture/fixture.json"
     if [ -f "$FIXTURE" ]; then
       NODE_PID=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$FIXTURE")

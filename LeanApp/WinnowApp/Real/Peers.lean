@@ -97,6 +97,7 @@ comes back up, on the peers it had, and the failure is thrown for Settings to sh
 error and left the stack down until the app next came to the foreground). backend-test's `resetPeersFlow` resets
 on a running stack and on a stopped one, and `resetPeersFailureFlow` with a directory where `peers.json` goes. -/
 def resetPeers (env : Env) : IO Unit := do
+  Faults.check "peers.reset"
   let c ← env.get
   let avoid ← match c.stack with
     | some s => (·.map (·.endpoint)) <$> s.pool.connectedPeers

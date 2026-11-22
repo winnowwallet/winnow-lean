@@ -280,6 +280,7 @@ def bootApp (fx : Effects Host) : IO Unit := discard <| IO.asTask do
       try IO.FS.removeDirAll root catch _ => pure ()
       discard <| IO.wait (← fx.ask "keychain.clear" (Json.mkObj [("service", Json.str m.keychainService)]))
   e2eRef.set mode
+  Faults.arm (mode.bind (·.controlFile))
   chooseBackend fx mode
   IO.FS.createDirAll root
   let _ ← fx.ask "exclude-from-backup" (Json.mkObj [("path", Json.str root.toString)])

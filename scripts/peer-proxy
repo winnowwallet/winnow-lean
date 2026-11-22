@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""A TCP proxy in front of the regtest node for the journeys (scripts/ui-fixture starts one): a journey makes it the
+app's peer (`WINNOW_E2E_PEER=127.0.0.1:<port>`) and says what it does by writing `{"mode": …}` to `--control`:
+
+    pass    forward both ways (also what an absent or unreadable control file means)
+    drop    close every connection, and each new one at once: a peer that went away
+    stall   keep every connection open and forward nothing: a peer that stopped answering
+
+The mode is read for each new connection and every 0.2 s for the open ones. Each connection and each change of
+mode it sees is a line of `--log`.
+
+    scripts/peer-proxy --node 127.0.0.1:18444 --port-file <file> --control <file> --log <file>"""
+import argparse
+import asyncio
+import json
+import os
+
+
+def mode_of(control):
+    try:
+        with open(control) as f:
+            return json.load(f).get("mode", "pass")
+    except (OSError, ValueError):
+        return "pass"
+
+
+def note(log, line):
+    with open(log, "a") as f:
+        f.write(line + "\n")
+
+
+async def forward(reader, writer, control, closing):
+    try:
+        while not closing.is_set():
+            mode = mode_of(control)
+            if mode == "drop":
+                closing.set()
+                break
+            if mode == "stall":
+                await asyncio.sleep(0.2)
+                continue
+            try:
+                data = await asyncio.wait_for(reader.read(65536), 0.2)
+            except asyncio.TimeoutError:
+                continue
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, OSError):
+        pass
+    finally:
+        closing.set()
+
+
+async def serve(node, control, log, reader, writer):
+    peer = writer.get_extra_info("peername")
+    mode = mode_of(control)
+    note(log, f"connect {peer[1]} {mode}")
+    if mode == "drop":
+        writer.close()
+        return
+    try:
+        up_reader, up_writer = await asyncio.open_connection(*node)
+    except OSError:
+        note(log, f"node unreachable {peer[1]}")
+        writer.close()
+        return
+    closing = asyncio.Event()
+    await asyncio.gather(forward(reader, up_writer, control, closing), forward(up_reader, writer, control, closing))
+    note(log, f"close {peer[1]} {mode_of(control)}")
+    for w in (writer, up_writer):
+        try:
+            w.close()
+        except Exception:
+            pass
+
+
+async def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--node", required=True)
+    p.add_argument("--port-file", required=True)
+    p.add_argument("--control", required=True)
+    p.add_argument("--log", required=True)
+    a = p.parse_args()
+    host, _, port = a.node.rpartition(":")
+    node = (host, int(port))
+    server = await asyncio.start_server(lambda r, w: serve(node, a.control, a.log, r, w), "127.0.0.1", 0)
+    listening = server.sockets[0].getsockname()[1]
+    tmp = a.port_file + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(f"{listening}\n")
+    os.replace(tmp, a.port_file)
+    async with server:
+        await server.serve_forever()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

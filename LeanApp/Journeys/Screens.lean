@@ -60,9 +60,30 @@ def Run.new (name : String) : IO Run := do
   let host ← Host.load
   return { host, control := s!"{host.fixture}/control-{name}-{← randomHex 4}.json" }
 
+/-- The control file with `key` set to `value`, the rest kept (the clipboard and the faults side by side):
+written beside it, then renamed over it, so the app never reads half a file. -/
+def Run.setControl (r : Run) (key : String) (value : Json) : IO Unit := do
+  let current ← try pure ((Json.parse (← IO.FS.readFile r.control)).toOption.getD (Json.mkObj []))
+    catch _ => pure (Json.mkObj [])
+  let tmp := r.control ++ ".tmp"
+  IO.FS.writeFile tmp (current.setObjVal! key value).compress
+  IO.FS.rename tmp r.control
+
 /-- What the app's Paste buttons read next. -/
-def Run.clipboard (r : Run) (text : String) : IO Unit :=
-  IO.FS.writeFile r.control (Json.mkObj [("clipboard", Json.str text)]).compress
+def Run.clipboard (r : Run) (text : String) : IO Unit := r.setControl "clipboard" (Json.str text)
+
+/-- The next `times` of Winnow's own operations at `point` fail (test mode's `WinnowApp.Faults`: `store.write.<file>`,
+`broadcast`, `feeRate`, `receive.fresh`, `export`, `peers.reset`, `payment.details`), saying
+"A failure the journey asked for (<point>)." The shell's capabilities fail by `failNext` instead. -/
+def Run.fail (r : Run) (point : String) (times : Nat := 1) : IO Unit := do
+  let current ← try pure ((Json.parse (← IO.FS.readFile r.control)).toOption.getD (Json.mkObj []))
+    catch _ => pure (Json.mkObj [])
+  let faults := (current.getObjValAs? (Array Json) "faults").toOption.getD #[]
+  let fault := Json.mkObj [("id", Json.str (← randomHex 6)), ("point", Json.str point), ("times", toJson times)]
+  r.setControl "faults" (toJson (faults.push fault))
+
+/-- The message of a failure a journey asked for (`Run.fail`), wherever the app shows it. -/
+def journeyFault : Find := .text "A failure the journey asked for"
 
 /-- The app in test mode on the fixture's node, as its only peer, with a fresh seed; `extra` adds to the
 environment or replaces in it. -/
@@ -137,10 +158,11 @@ def openAccountRow (account : String) : UI Unit := do
 
 namespace Receive
 
-/-- Opens Receive and reads the address it shows. -/
+/-- Opens Receive and reads the address it shows. The first address of a run on a simulator just booted can take
+longer than 30 s (the first journey of a CI shard timed out at 30 twice: #133, #134). -/
 def address : UI String := do
   tap receiveButton
-  waitFor receiveAddress 30
+  waitFor receiveAddress 90
   let address ← text receiveAddress
   expect (address.startsWith "bcrt1") s!"not a regtest address: {address}"
   return address

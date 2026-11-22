@@ -510,6 +510,7 @@ def importBundle (env : Env) (n : WinnowApp.Network) (dir : String) (json : Stri
 
 /-- `exportWalletBundle(includeMnemonic:)`. -/
 def exportBundle (env : Env) (includeMnemonic : Bool) : IO String := do
+  Faults.check "export"
   let c ← env.get
   let some w := c.wallet | failWith .noWallet
   if let some f := c.stack.bind (·.filters) then
@@ -586,7 +587,9 @@ def deleteWallet (env : Env) (expected : Option String := none) : IO Unit := do
 def receiveAddress (env : Env) (fresh : Bool) : IO String := do
   let c ← env.get
   let some w := c.wallet | failWith .noWallet
-  if fresh then discard <| env.walletWrite c.walletSerial "receive.fresh" w.freshReceiveAddress
+  if fresh then
+    Faults.check "receive.fresh"
+    discard <| env.walletWrite c.walletSerial "receive.fresh" w.freshReceiveAddress
   let address ← runWM (w.address .receive (← w.nextReceiveIndex))
   -- `currentReceiveAddress()` journals what it shows; `freshReceiveAddress()` does not
   unless fresh do env.journal "address.receive" [("address", address)]

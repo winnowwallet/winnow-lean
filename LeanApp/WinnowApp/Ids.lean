@@ -229,6 +229,8 @@ def sendFromWallet : String := "sendFromWallet"
 def sendFrom (accountID : String) : String := s!"sendFrom-{accountID}"
 /-- A peer's network tag in Settings. -/
 def peerType (raw : String) : String := s!"peerType_{raw}"
+/-- Settings → Peers and routing: the manual peer to add (host:port). -/
+def manualPeerField : String := "manualPeerField"
 /-- A stepper's halves, as XCTest names them. -/
 def decrement (stepper : String) : String := stepper ++ "-Decrement"
 

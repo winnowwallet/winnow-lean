@@ -180,7 +180,7 @@ def peersSections (m : Model) : List H :=
       (match d.catalog with | some line => [.identified Ids.censusCatalogText (body line)] | none => [])
   , .section "Manual peers" "Manual peers are tried first when their network is enabled. Clearnet seeds resolve over HTTPS (Cloudflare 1.1.1.1), with system DNS as the fallback. Overlay names are resolved by their SOCKS gateway. The default port is 8333 (mainnet) / 38333 (signet). Peers must advertise compact filters and pass Winnow's checks."
       ((s.manualPeers.zipIdx.map fun (p, i) => .row [literal p, .spacer, .button "Remove" .destructive (some (.settings (.removeManualPeer i)))]) ++
-       [.row [.input .plain "" "host:port" d.manualPeer (set .setManualPeer) (some (.settings .addManualPeer)),
+       [.row [.identified Ids.manualPeerField (.input .plain "" "host:port" d.manualPeer (set .setManualPeer) (some (.settings .addManualPeer))),
               .button "Add" .plain (if d.manualPeer.trimAscii.isEmpty then none else some (.settings .addManualPeer))]] ++
        errorRows d.error ++
        [.button "Reconnect peers" .plain (some (.settings .reconnect))])

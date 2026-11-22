@@ -591,6 +591,7 @@ def feeRateOf (tx : Transaction) (coins : Array WalletUTXO) : Option Float := do
 /-- `broadcastMultisigSpend(_:record:)`: finalize once enough signatures verify, broadcast, then move the
 spent coins in flight and the change to pending, under the spending gate. The txid (display hex). -/
 def broadcastMultisigSpend (env : Env) (a : MultisigApp) (id text : String) : IO String := exclusively env do
+  Faults.check "broadcast"
   let r ← record a id
   let network ← currentNetwork env
   let account ← accountOf r network

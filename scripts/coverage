@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+"""How much of each Lean function the tests run.
+
+Lean has no coverage tool of its own. It compiles each module to C (.lake/build/ir), and every C function's name
+is the Lean declaration it came from, mangled: a closure, a specialization or a `where` helper names the function
+it belongs to. So this builds instrumented copies of the test programs (each module's C recompiled with clang's
+source-based coverage, then linked as Lake links them), runs the suites CI runs, and gives each Lean declaration
+the C regions of every C function that came from it, with how many of them ran.
+
+    scripts/coverage [suite ...]     the suites below, or only those named (the others' counts are kept); build
+                                     them first (README, "Tests")
+    scripts/coverage --report        the report again from the counts there are
+
+It writes build/coverage/lean-coverage.json (and $CI_RESULTS/lean-coverage.json in CI): per declaration, its
+file, the line of its name, its C regions and how many ran, and whether Lean inlined it everywhere; and how each
+suite ended. The regtest suites need bitcoind (scripts/install-bitcoin), and the journeys the UI fixture
+(scripts/ui-fixture), as in CI. Instrumented, the programs run about three times slower.
+
+What the regions are: the C that Lean emits, which is more than the Lean. The boxed copies the compiler writes for
+closures, and both arms of each test of whether a value is shared (Lean's C reuses what no one else holds), are
+left out. What is left still has more than the Lean: every step that can fail has a path for the failure, and an
+inlined library loop checks bounds it cannot miss. A test seldom takes those, so a function's share run here is
+somewhat lower than its Lean would show (the curve code, tested against every vector, is at a median of 100%).
+Lean inlines small definitions into their callers before it writes C: their code counts as the callers', and a
+declaration whose own C nothing calls is marked `inlined`, not unrun. The renderer and the platform shell are
+Objective-C, not Lean, and are not here.
+"""
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / 'build' / 'coverage'
+PACKAGES = {'Lean': ROOT / 'Lean', 'LeanApp': ROOT / 'LeanApp'}
+# CI's lines (.github/workflows/ci.yml `tests`, scripts/ci-regtest), with the fuzzer's seed fixed
+SUITES = {
+    'multisig-test': ('Lean', []), 'ledger-test': ('Lean', []), 'silent-payment-test': ('Lean', []),
+    'card-keys-test': ('Lean', []), 'crypto-test': ('Lean', []), 'segwit-test': ('Lean', []),
+    'secpct-test': ('Lean', ['2000']), 'fuzz': ('Lean', ['--iterations', '10000', '--seed', '0x77696e6e6f77']),
+    'records-test': ('LeanApp', []), 'multisig-app-test': ('LeanApp', []), 'ledger-transport-test': ('LeanApp', []),
+    'cloud-backup-test': ('LeanApp', []), 'device-sync-test': ('LeanApp', []),
+    'io-test': ('Lean', []), 'backend-test': ('LeanApp', []),
+    'multisig-differential': ('Lean', ['--cases', '9']), 'card-regtest': ('Lean', []), 'segwit-regtest': ('Lean', []),
+    'journeys': ('LeanApp', []),
+}
+REGTEST = {'io-test', 'backend-test', 'multisig-differential', 'card-regtest', 'segwit-regtest'}
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, check=True, text=True, **kw)
+
+
+def xcrun(tool):
+    return run(['xcrun', '--find', tool], capture_output=True).stdout.strip()
+
+
+def lean_prefix():
+    return run(['lean', '--print-prefix'], cwd=PACKAGES['Lean'], capture_output=True).stdout.strip()
+
+
+def own_modules():
+    """Each Lean source file in the two packages and its generated C, for the modules that are still sources."""
+    out = []
+    for pkg, d in PACKAGES.items():
+        ir = d / '.lake' / 'build' / 'ir'
+        for c in sorted(ir.rglob('*.c')):
+            src = d / c.relative_to(ir).with_suffix('.lean')
+            if src.exists():
+                out.append((pkg, c, src))
+    return out
+
+
+def compile_all(prefix, modules):
+    """Each module's C with coverage, into build/coverage/obj, mirroring the ir tree; a fresh copy is reused."""
+    clang = xcrun('clang')
+
+    def one(m):
+        pkg, c, _ = m
+        dest = OUT / 'obj' / pkg / c.relative_to(PACKAGES[pkg] / '.lake' / 'build' / 'ir').with_suffix('.o')
+        if dest.exists() and dest.stat().st_mtime >= c.stat().st_mtime:
+            return c, dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        run([clang, '-c', '-o', str(dest), str(c), '-I', f'{prefix}/include', '-O3', '-DNDEBUG', '-DLEAN_EXPORTING',
+             '-ffp-contract=off', '-fvisibility=hidden', '-w', '-fprofile-instr-generate', '-fcoverage-mapping'])
+        return c, dest
+    with ThreadPoolExecutor(os.cpu_count()) as pool:
+        return dict(pool.map(one, modules))
+
+
+def link(suite, pkg, objects):
+    """The suite's program as Lake links it (its .rsp), with the instrumented objects, by the system linker."""
+    rsp = PACKAGES[pkg] / '.lake' / 'build' / 'bin' / f'{suite}.rsp'
+    args = [a.strip('"') for a in shlex.split(rsp.read_text())]
+    built, flags, skip = [], [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a == '--sysroot':
+            skip = True
+        elif a.endswith('.c.o.export'):
+            built.append(str(objects.get(Path(a[:-len('.o.export')]), a)))
+        elif a not in ('-fuse-ld=lld', '-Wl,-dead_strip'):
+            flags.append(a)
+    exe = OUT / 'bin' / suite
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    run([xcrun('clang'), '-fprofile-instr-generate', '-o', str(exe), *built, *flags])
+    return exe
+
+
+def run_suite(suite, exe, env):
+    pkg, args = SUITES[suite]
+    log = OUT / 'logs' / f'{suite}.log'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    # continuous mode (%c): the counters are the file's, written as they change, so a process that is killed
+    # (the journeys end the app they run with SIGKILL, at every relaunch) still leaves its counts
+    env = dict(env, LLVM_PROFILE_FILE=str(OUT / 'profiles' / f'{suite}-%c%p.profraw'))
+    with open(log, 'w') as f:
+        if suite == 'journeys':
+            # LeanNative's wire-journeys, with this program in place of Lake's: the fixture, its environment, the run
+            evidence = OUT / 'wire-journeys'
+            shutil.rmtree(evidence, ignore_errors=True)
+            evidence.mkdir(parents=True)
+            fixture = ROOT / 'scripts' / 'ui-fixture'
+            # headless, the app reads the census list it bundles beside the executable, as ui-fixture leaves it
+            # beside Lake's
+            shutil.copy(ROOT / 'build' / 'census' / 'peers.json', exe.parent / 'peers.json')
+            env.update(APP_DIR=str(PACKAGES[pkg]), APP_ROOT='WinnowApp', SCHEME='WinnowLean')
+            try:
+                code = subprocess.run([str(fixture), 'start', str(evidence)], stdout=f, stderr=subprocess.STDOUT,
+                                      env=env).returncode
+                test_env = evidence / 'test-env'
+                if code == 0 and test_env.exists():
+                    for line in test_env.read_text().splitlines():
+                        if '=' in line:
+                            k, v = line.split('=', 1)
+                            env[k] = v
+                if code == 0:
+                    code = subprocess.run([str(exe), str(evidence)], cwd=PACKAGES[pkg], stdout=f,
+                                          stderr=subprocess.STDOUT, env=dict(env, LEANNATIVE_DRIVER='wire')).returncode
+            finally:
+                subprocess.run([str(fixture), 'stop', str(evidence), ''], stdout=f, stderr=subprocess.STDOUT, env=env)
+        else:
+            code = subprocess.run([str(exe), *args], cwd=PACKAGES[pkg], stdout=f, stderr=subprocess.STDOUT,
+                                  env=env).returncode
+    print(f'{"✓" if code == 0 else "✗"} {suite} (exit {code})', flush=True)
+    return suite, code
+
+
+def declarations():
+    """Every declaration Lake indexed (.ilean): name → (source file relative to the repository, line of its name),
+    and name → the other declarations whose source uses it."""
+    out, users = {}, {}
+    for pkg, d in PACKAGES.items():
+        lib = d / '.lake' / 'build' / 'lib' / 'lean'
+        for ilean in lib.rglob('*.ilean'):
+            src = d / ilean.relative_to(lib).with_suffix('.lean')
+            if not src.exists():
+                continue
+            refs = json.loads(ilean.read_text()).get('references', {})
+            for key, val in refs.items():
+                ident = json.loads(key).get('c')
+                if not ident:
+                    continue
+                name = plain(ident['n'])
+                if val.get('definition'):
+                    out[name] = (str(src.relative_to(ROOT)), val['definition'][0] + 1)
+                users.setdefault(name, set()).update(
+                    plain(u[4]) for u in val.get('usages', []) if len(u) > 4 and plain(u[4]) != name)
+    return out, users
+
+
+def plain(name):
+    return name.replace('«', '').replace('»', '')
+
+
+def symbol(name):
+    """The C symbol of a coverage record: llvm-cov names a static function `file.c:name`, and the function that
+    computes a closed term once is the term's `_init_` one."""
+    name = name.split(':', 1)[-1]
+    return name[len('_init_'):] if name.startswith('_init_') else name
+
+
+def resolve(parts, decls):
+    """The declaration of the source a name is, or is one of the compiler's pieces of: its closures, its boxed and
+    reduced-arity copies, the constants lifted out of it."""
+    parts = [p[1:] if p.startswith('#') else p for p in parts]
+    while parts:
+        name = '.'.join(parts)
+        if name in decls:
+            return name
+        parts = parts[:-1]
+    return None
+
+
+def owner(parts, decls):
+    """The declaration a C function came from. A specialization (`f._at_.g.spec_n`, nested for a specialization
+    made inside another) is f's code made for g: it is f's when f is one of the source's declarations, and
+    otherwise (a library loop, fold or map) g's, whose closure it runs."""
+    segments, current = [], []
+    for p in parts:
+        if p == '_at_':
+            segments.append(current)
+            current = []
+        else:
+            current.append(p)
+    segments.append(current)
+    if len(segments) > 1:
+        last = segments[-1]
+        segments[-1] = last[:next((i for i, p in enumerate(last) if p.startswith('spec_')), len(last))]
+    for segment in segments:
+        name = resolve(segment, decls)
+        if name:
+            return name
+    return None
+
+
+DEFINITION = re.compile(r'^(?:LEAN_EXPORT|static)\b[^;]*?(\w+)\([^;]*\{\s*$')
+IDENT = re.compile(r'\b(?:_init_)?lp?_\w+')
+
+
+SHARED_TEST = re.compile(r'^if \(v_isShared(?:Check)?_\d+_ == 0\)\s*$')
+
+
+def memory_paths(c_file):
+    """The lines that open the two arms of each test of whether a value is shared (`v_isShared…`): Lean's C reuses
+    a value no one else holds and copies one that is shared, a choice of memory and not a path of the Lean."""
+    lines = Path(c_file).read_text(errors='ignore').splitlines()
+    marks = set()
+
+    def arm_end(start):
+        depth = 0
+        for k in range(start, len(lines)):
+            depth += lines[k].count('{') - lines[k].count('}')
+            if depth == 0:
+                return k
+        return len(lines) - 1
+    for i, line in enumerate(lines):
+        if SHARED_TEST.match(line) and i + 1 < len(lines) and lines[i + 1].startswith('{'):
+            marks.add(i + 2)  # 1-based line of the `{`
+            j = arm_end(i + 1)
+            if j + 2 < len(lines) and lines[j + 1].strip() == 'else' and lines[j + 2].startswith('{'):
+                marks.add(j + 3)
+    return marks
+
+
+def c_references(modules):
+    """(each C function's symbol, the symbols its body names) over the generated C. A function runs from its
+    definition line to the next; declarations of prototypes and globals are skipped."""
+    for _, c, _ in modules:
+        current, names = None, set()
+        for line in c.read_text(errors='ignore').splitlines():
+            m = DEFINITION.match(line)
+            if m:
+                if current:
+                    yield current, names
+                current, names = m.group(1), set()
+            elif current and not (line[:1].isalpha() and line.rstrip().endswith(';')):
+                names.update(IDENT.findall(line))
+        if current:
+            yield current, names
+
+
+def main():
+    args = sys.argv[1:]
+    report_only = args == ['--report']
+    suites = [] if report_only else (args or list(SUITES))
+    unknown = [s for s in suites if s not in SUITES]
+    if unknown:
+        sys.exit(f'coverage: no suite {", ".join(unknown)} ({", ".join(SUITES)})')
+    # all of them start afresh; a few named are run again, the others' counts kept
+    if args:
+        for s in suites:
+            for f in (OUT / 'profiles').glob(f'{s}-*.profraw'):
+                f.unlink()
+    else:
+        for d in ('profiles', 'logs', 'bin'):
+            shutil.rmtree(OUT / d, ignore_errors=True)
+    prefix = lean_prefix()
+    modules = own_modules()
+    objects = compile_all(prefix, modules)
+    print(f'{len(objects)} modules compiled with coverage', flush=True)
+    env = dict(os.environ)
+    if REGTEST & set(suites):
+        bitcoin = run([str(ROOT / 'scripts' / 'install-bitcoin')], capture_output=True).stdout.strip()
+        env.update(WINNOW_BITCOIND=f'{bitcoin}/bitcoind', WINNOW_BITCOIN_CLI=f'{bitcoin}/bitcoin-cli')
+    if 'journeys' in suites and not (ROOT / 'build' / 'census' / 'peers.json').exists():
+        run([str(ROOT / 'scripts' / 'import-census')])  # the census list the app bundles, as CI's prepare step
+    exes = {s: link(s, SUITES[s][0], objects) for s in suites}
+    # the regtest suites each start their own node; CI runs its lines at the same time, and so does this
+    with ThreadPoolExecutor(int(os.environ.get('COVERAGE_JOBS', '4'))) as pool:
+        codes = dict(pool.map(lambda s: run_suite(s, exes[s], env), suites))
+    # what each suite's last run did, for the suites whose counts are kept from before
+    status_file = OUT / 'status.json'
+    status = json.loads(status_file.read_text()) if args and status_file.exists() else {}
+    status.update({s: ('passed' if c == 0 else f'exit {c}') for s, c in codes.items()})
+    status_file.write_text(json.dumps(status, indent=1))
+    profiles = sorted((OUT / 'profiles').glob('*.profraw'))
+    merged = OUT / 'lean.profdata'
+    # a file that cannot be read is named, not merged
+    unreadable = [p.name for p in profiles
+                  if subprocess.run([xcrun('llvm-profdata'), 'show', str(p)], capture_output=True).returncode != 0]
+    run([xcrun('llvm-profdata'), 'merge', '-sparse', '-o', str(merged),
+         *[str(p) for p in profiles if p.name not in unreadable]])
+    # every module's object, not only the programs: a function no test links is there, never run
+    objs = [str(o) for o in objects.values()]
+    with tempfile.TemporaryFile('w+') as f:
+        run([xcrun('llvm-cov'), 'export', '-format=text', '-skip-expansions', '-instr-profile', str(merged),
+             objs[0], *[x for o in objs[1:] for x in ('-object', o)]], stdout=f)
+        f.seek(0)
+        export = json.load(f)
+    functions = [fn for d in export['data'] for fn in d['functions']]
+    references = list(c_references(modules))
+    symbols = sorted({symbol(fn['name']) for fn in functions} |
+                     {symbol(x) for f, names in references for x in (f, *names)})
+    demangled = run(['lean', '--run', str(ROOT / 'scripts' / 'coverage-demangle.lean')], cwd=PACKAGES['Lean'],
+                    input='\n'.join(symbols) + '\n', capture_output=True).stdout
+    parts = {}
+    for line in demangled.splitlines():
+        sym, _, rest = line.partition('\t')
+        parts[sym] = rest.split('\x1f') if rest else None
+    decls, users = declarations()
+    per, unattributed, marks = {}, 0, {}
+    for fn in functions:
+        sym = symbol(fn['name'])
+        p = parts.get(sym)
+        if p is None:
+            continue  # the runtime's inline functions (lean.h), module initializers, main
+        if sym.endswith('___boxed'):
+            continue  # the boxed copy the compiler writes for a closure to call: no Lean of its own
+        # code regions of the function's own C file, not its expansions, less the arms of a shared-value test
+        source = fn['filenames'][0]
+        if source not in marks:
+            marks[source] = memory_paths(source)
+        regions = [r for r in fn['regions'] if r[7] == 0 and r[5] == 0 and r[0] not in marks[source]]
+        name = owner(p, decls)
+        if name is None:
+            unattributed += len(regions)  # what deriving made, and the library code of proofs
+            continue
+        e = per.setdefault(name, {'regions': 0, 'covered': 0, 'c_functions': 0})
+        e['regions'] += len(regions)
+        e['covered'] += sum(1 for r in regions if r[4] > 0)
+        e['c_functions'] += 1
+    # Lean inlines small definitions into their callers before it writes C: a declaration the source uses but
+    # whose C no other declaration's C names runs only inside its callers, and its own C never does
+    def owner_of(sym):
+        p = parts.get(symbol(sym))
+        return owner(p, decls) if p else None
+    named = set()
+    for f, names in references:
+        mine = owner_of(f)
+        if mine is None:
+            continue  # module initializers compute constants; they call nothing
+        named.update(o for o in map(owner_of, names) if o and o != mine)
+    # ...and one that no source uses either is not inlined anywhere: it is code nothing runs. An instance is used
+    # where instances are resolved, which the index does not record as a use
+    for n, e in per.items():
+        instance = n.rsplit('.', 1)[-1].startswith('inst')
+        e['inlined'] = e['covered'] == 0 and n not in named and (bool(users.get(n)) or instance)
+    rows = [{'decl': n, 'file': decls[n][0], 'line': decls[n][1], **v} for n, v in sorted(per.items())]
+    result = {
+        'about': 'C regions of each Lean declaration and how many the suites ran (scripts/coverage)',
+        'commit': run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True).stdout.strip(),
+        'suites': dict(sorted(status.items())),
+        'unreadable_profiles': unreadable,
+        'unattributed_regions': unattributed,
+        'declarations': rows,
+    }
+    OUT.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(result, indent=1)
+    (OUT / 'lean-coverage.json').write_text(text)
+    if os.environ.get('CI_RESULTS'):
+        Path(os.environ['CI_RESULTS'], 'lean-coverage.json').write_text(text)
+    total = sum(r['regions'] for r in rows)
+    ran = sum(r['covered'] for r in rows)
+    print(f'{len(rows)} declarations, {ran} of {total} regions run ({100 * ran / max(total, 1):.1f}%), '
+          f'{unattributed} regions of Lean names with no declaration → {OUT / "lean-coverage.json"}')
+    sys.exit(0 if all(v == 'passed' for v in status.values()) and not unreadable else 1)
+
+
+if __name__ == '__main__':
+    main()

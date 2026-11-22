@@ -805,6 +805,26 @@ def sendRecordsItsOutputs : TM Unit := do
   check "history: no longer bumpable" (← w.feeBumpableTxids).isEmpty
   check "history: outputs kept" (confirmed.outputs == some outputs)
 
+/-- A send confirmed, then its block lost to a longer chain: the send is back in the mempools (`HistoryLedger.rewind`
+re-pends it), so its change is a pending coin again, as before a block took it, and is not dropped with the block
+(the journey `reorgBackToPending` found the balance at 0 until the send confirmed again). -/
+def aReorgKeepsASendsChange : TM Unit := do
+  let w ← fundedWallet (← newKeyStore)
+  let prepared ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit prepared)
+  let signed := prepared.built.transaction
+  let pending ← w.balance
+  discard (need "confirm" (w.apply (fakeMatch 150 #[signed])))
+  check "reorg send: confirmed, the change counted" ((← w.balance) == pending) s!"{← w.balance} {pending}"
+  need "roll back" (w.rollBack 149)
+  check "reorg send: pending again" (((← w.history).find? (·.txid == signed.txid)).map (·.height) == some 0)
+  check "reorg send: its change still counted" ((← w.balance) == pending) s!"{← w.balance} {pending}"
+  check "reorg send: the change a pending coin" ((← w.allUtxos).any fun u => u.txid == signed.txid && u.height == 0 && u.spent.isNone)
+  discard (need "confirm again" (w.apply (fakeMatch 151 #[signed])))
+  check "reorg send: confirmed again, the change once" ((← w.balance) == pending &&
+    ((← w.allUtxos).filter (·.txid == signed.txid)).size == 1 &&
+    ((← w.allUtxos).filter (·.txid == signed.txid)).all (·.height == 151))
+
 def sendToOwnAddressIsNotExternal : TM Unit := do
   let w ← fundedWallet (← newKeyStore)
   let ours ← need "spk" (w.scriptPubKey .receive 1)
@@ -2491,6 +2511,7 @@ def main : IO UInt32 := runMain "multisig-test" do
   runTest "historyRecord" historyRecord
   runTest "historyClassifyOutputs" historyClassifyOutputs
   runTest "historyRewind" historyRewind
+  runTest "aReorgKeepsASendsChange" aReorgKeepsASendsChange
   runTest "recordWithoutSpendsEncodesAsBefore" recordWithoutSpendsEncodesAsBefore
   runTest "spendRecordsRoundTrip" spendRecordsRoundTrip
   runTest "bundleSigners" bundleSigners

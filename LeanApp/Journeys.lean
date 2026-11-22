@@ -5,6 +5,10 @@ import Journeys.Screens
 import Journeys.Cards
 import Journeys.SegWit
 import Journeys.SyncProfiles
+import Journeys.Tags
+import Journeys.Failures
+import Journeys.Routing
+import Journeys.Chain
 
 /-! # The UI journeys
 
@@ -714,10 +718,10 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
    silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson,
-   cardRestoreFromBackup, segwitMultisigJoinSign, accountFollowsDevices, twoWalletsOneDevice]
+   cardRestoreFromBackup, segwitMultisigJoinSign, accountFollowsDevices, twoWalletsOneDevice, capabilityFailures, backendFailures, paymentFailures, torOnly, peerFailures, reorgBackToPending]
 
 end WinnowJourneys
 
 /-- The journeys, and the app itself for the headless driver (`LEANNATIVE_DRIVER=wire`: `scripts/journeys --wire`). -/
 def main (args : List String) : IO UInt32 :=
-  LeanNative.Journey.main WinnowJourneys.all args (wire := some (LeanNative.Journey.Wire.app WinnowApp.app))
+  LeanNative.Journey.main WinnowJourneys.all args (wire := some (LeanNative.Journey.Wire.app WinnowApp.taggedApp))
