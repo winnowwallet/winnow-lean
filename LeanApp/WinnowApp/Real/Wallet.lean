@@ -481,7 +481,9 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
     let some filters := stack.filters | waiting "sync stack unavailable"
     stack.pool.start
     if !(← waitForPeer env stack.pool env.deps.importPeerWaitMs c.generation) then return ← waiting "public peers unavailable"
-    let additional ← env.hooks.multisigWatchScripts (Network.tx n)
+    let additional ← match ← env.hooks.multisigWatchScripts (Network.tx n) with
+      | .ok xs => pure xs
+      | .error e => throw (IO.userError e.message)
     let report ← runWM (w.verifyImport bundle (scanSource filters) additional fun m => do
       discard <| WM.io (env.hooks.multisigApply m (Network.tx n)))
     -- `await refresh()`, then the journal reads the refreshed status

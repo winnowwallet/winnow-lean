@@ -306,14 +306,14 @@ Each account and signer is held to the store's own rules, one that fails left ou
 the context by themselves. None when the backup is another network's. -/
 def openReplica (a : SyncApp) (id account : String) (network : WinnowApp.Network) :
     IO (Except Unread (Option Replica × Nat)) := do
-  let key ← match ← (a.controller.keys.load id).toBaseIO with
+  let key ← match ← (a.controller.keys.load id).run with
     | .ok k => pure k
-    | .error e =>
-      return .error (if toString e == CloudBackupError.keyUnavailable.description then .keyMissing else .notOpened)
-  let backup ← match ← (a.controller.store.load id account).toBaseIO with
+    | .error (.issue .keychainUnavailable) => return .error .keyMissing
+    | .error _ => return .error .notOpened
+  let backup ← match ← (a.controller.store.load id account).run with
     | .ok b => pure b
-    | .error e =>
-      return .error (if toString e == CloudBackupError.invalidBackup.description then .notOpened else .notFetched)
+    | .error (.issue .unreadableBackup) => return .error .notOpened
+    | .error _ => return .error .notFetched
   unless backup.network == network.name do return .ok (none, 0)
   let shared ← match ← (backup.shared key).run with
     | .ok s => pure s
@@ -347,11 +347,11 @@ structure Reading where
 /-- The other backups of this network, newest first, each opened once per save date. One whose key has not
 arrived, or that iCloud did not hand over, is passed over this time and tried again; one that does not open
 is not fetched again in this run of the app unless it is saved again. -/
-def replicas (a : SyncApp) (network : WinnowApp.Network) (settled : Array (String × Float)) : IO Reading := do
+def replicas (a : SyncApp) (network : WinnowApp.Network) (settled : Array (String × Float)) : CloudM Reading := do
   let state ← a.controller.get
   let account ← a.controller.store.account
   if let some pinned := state.configuration.bind (·.account) then
-    unless pinned == account do CloudBackupError.accountChanged.throw
+    unless pinned == account do CloudM.throwIssue .accountChanged
   let own := state.configuration.map (·.backup.id)
   let listed := ((← a.controller.store.list network.name).filter (some ·.id != own)).extract 0 maximumSiblings
   let mut reading : Reading := { listed := listed.size }
@@ -559,7 +559,7 @@ def headStart (a : SyncApp) : IO Unit := do
   let found ← a.lastFound.get
   let c ← a.env.get
   let (some s, some w) := (c.stack, c.wallet) | return
-  let some account ← (try some <$> a.controller.store.account catch _ => pure none) | return
+  let some account ← (do return (← a.controller.store.account.run).toOption) | return
   let places : Array (Wallet × Option Rider) := #[(w, none)] ++ c.riders.map fun r => (r.wallet, some r)
   for (pw, rider) in places do
     let st ← pw.state
@@ -574,11 +574,11 @@ def headStart (a : SyncApp) : IO Unit := do
     let loaded ← (do
         let key ← a.controller.keys.load best.id
         let backup ← a.controller.store.load best.id account
-        runWM (backup.state key)).toBaseIO
+        CloudM.liftWM (backup.state key)).run
     let skip (why : String) : IO Unit := a.journalOnce "sync.headStartSkipped" [("walletID", pw.id), ("why", why)]
     let bundle ← match loaded with
       | .ok (bundle, _) => pure bundle
-      | .error e => skip s!"the backup did not open: {e}"; continue
+      | .error e => skip s!"the backup did not open: {e.description}"; continue
     let other ← match ← (Wallet.importing bundle CloudWalletBackup.validationKeys none).run with
       | .ok other => pure other
       | .error e => skip s!"the backup's wallet did not read: {e.name}"; continue
@@ -658,18 +658,18 @@ def uploadRiders (a : SyncApp) : IO Unit := do
     if disabled.contains r.held.id then continue
     let path := System.FilePath.mk r.held.dir / "cloud-backup.json"
     unless ← path.pathExists do continue
-    let attempt : IO Unit := do
+    let attempt : CloudM Unit := do
       let saved ← CloudConfiguration.decode (← IO.FS.readBinFile path)
       unless saved.walletID == r.held.id do return
       let key ← a.controller.keys.load saved.backup.id
-      let (old, appState) ← runWM (saved.backup.state key)
-      let exported ← runWM (r.wallet.exportBundle false)
+      let (old, appState) ← CloudM.liftWM (saved.backup.state key)
+      let exported ← CloudM.liftWM (r.wallet.exportBundle false)
       let vaults ← r.multisig.backup
       let bundle := { exported with vaults := if vaults.isEmpty then none else some vaults, signers := old.signers }
       let contents : CloudBackupContents := { bundle, appState }
       let digest := contents.digest
       if digest == saved.digest && saved.pendingUpload != some true then return
-      let backup ← runWM (saved.backup.updating bundle key appState)
+      let backup ← CloudM.liftWM (saved.backup.updating bundle key appState)
       let account ← match saved.account with
         | some x => pure x
         | none => a.controller.store.account
@@ -678,12 +678,12 @@ def uploadRiders (a : SyncApp) : IO Unit := do
       unless (← a.env.get).riders.any (·.serial == r.serial) do return
       CloudBackupController.persist { saved with backup, digest, account := some account, pendingUpload := some false } path
       a.env.journal "cloud.riderBackedUp" [("walletID", r.held.id), ("height", toString bundle.lastKnownHeight)]
-    match ← attempt.toBaseIO with
+    match ← attempt.run with
     | .ok () => pure ()
-    | .error e => a.journalOnce "cloud.riderBackupFailed" [("walletID", r.held.id), ("error", toString e)]
+    | .error e => a.journalOnce "cloud.riderBackupFailed" [("walletID", r.held.id), ("error", e.description)]
 
 /-- One look at the other devices' backups: read what changed, decide, do it, and remember. -/
-def round (a : SyncApp) : IO Unit := do
+def round (a : SyncApp) : CloudM Unit := do
   let began ← a.epoch.get
   let some (wallet, network, dir) ← a.place | return
   -- the backup is pointed at the open wallet a moment after it opens (the app's tick): until then nothing says
@@ -708,7 +708,7 @@ def round (a : SyncApp) : IO Unit := do
   unless (← a.epoch.get) == began && (← a.place) == some (wallet, network, dir) do return
   a.renewWaiting found
   let latest := found.foldl (fun t r => max t ((r.sync.map (·.latest)).getD 0)) 0
-  let changed ← a.withView false (latest := latest) (since := some began) fun view initial fresh => do
+  let changed : Bool ← CloudM.io <| a.withView false (latest := latest) (since := some began) fun view initial fresh => do
     let (before, accounts, signers) ← a.stamped view initial fresh
     let known := (before.accounts.filter fun e => !accounts.any (·.record.id == e.stamps.id)).map (·.stamps)
     let mut view := before
@@ -742,7 +742,7 @@ def round (a : SyncApp) : IO Unit := do
   -- is there for the others
   a.lastFound.set found
   try a.adoptNames found catch _ => pure ()
-  try a.headStart catch e => a.journalOnce "sync.headStartFailed" [("error", toString e)]
+  try a.headStart catch e => a.journalOnce "sync.headStartFailed" [("error", e.description)]
   a.uploadRiders
 
 /-- A round when one is due: on coming to the foreground (`force`), and then at most every `intervalMs`
@@ -760,11 +760,11 @@ def tick (a : SyncApp) (force : Bool := false) : IO Unit := do
   a.lastRound.set (some now)
   discard <| IO.asTask (prio := .dedicated) do
     try
-      a.round
-    catch e =>
-      unless isCancellation e do
-        a.status.modify fun s => { s with message := some (toString e) }
-        a.journalOnce "devices.lookFailed" [("reason", toString e)]
+      match ← a.round.run with
+      | .ok () | .error .cancelled => pure ()
+      | .error e =>
+        a.status.modify fun s => { s with message := some e.description }
+        a.journalOnce "devices.lookFailed" [("reason", e.description)]
     finally
       a.running.set false
 

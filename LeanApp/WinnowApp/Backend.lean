@@ -158,7 +158,7 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   /-- `restoreCloudBackup(_:)` (it authenticates itself): the wallet's id, the verification
   (`matchesBundle`, none while no peer answered) and the restored display name and the backup's Advanced switch (kept for the format; the app applies only
   the name). -/
-  restoreCloudBackup : Network → (dir id : String) → IO (String × Option Bool × Option (String × Bool))
+  restoreCloudBackup : Network → (dir id : String) → IO RestoreOutcome
   /-- What `refresh()` asks of the iCloud side (an update, a preparation when due). -/
   cloudTick : IO Unit
   /-- The scene became active (true) or went to the background (false). -/

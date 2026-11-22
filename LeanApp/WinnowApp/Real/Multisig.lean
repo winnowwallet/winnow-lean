@@ -56,7 +56,7 @@ def psbtErrorText : PSBTError → String
   | .malformed r => s!"The PSBT is malformed ({r})."
   | .inconsistentCounts => "The PSBT's input or output count does not match its transaction."
   | .conflict _ => "The PSBTs disagree about a field and cannot be combined safely."
-  | .wire e => s!"The operation couldn’t be completed. (WalletCore.WireError.{e.name})"
+  | .wire _ => "The PSBT contains invalid transaction data."
 
 /-- A `MultisigAccount` failure as the screens show it (another module's error is known by its case name
 only, so it reads as `namedText` does). -/
@@ -137,13 +137,21 @@ def mergeSigners (a : MultisigApp) (restored : Array SignerRecord) : IO Unit := 
     return (← s.restore a.signers.keys a.signers.writeData merged, ())).run
   match r with
   | .ok () => pure ()
-  | .error e => if e.name == "damaged" then pure () else throw (IO.userError e.description)
+  | .error e => if e.isDamaged then pure () else throw (IO.userError e.description)
 
-def watchScripts (a : MultisigApp) (network : Tx.BitcoinNetwork) : IO (Array ByteArray) := do
+def watchScripts (a : MultisigApp) (network : Tx.BitcoinNetwork) : IO (Except WatchScriptsError (Array ByteArray)) := do
   a.host.readAgainIfUnavailable
-  a.withStore fun s => do
-    let (scripts, s') ← s.watchScripts network
-    return (s', scripts)
+  match ← (a.host.modify fun s => do
+      let (scripts, s') ← s.watchScripts network
+      return (s', scripts)).run with
+  | .ok scripts => return .ok scripts
+  | .error (.multisig .unavailable) => return .error (.locked multisigUnavailableText)
+  | .error e => return .error (.failed e.description)
+
+def watchScriptsIO (a : MultisigApp) (network : Tx.BitcoinNetwork) : IO (Array ByteArray) := do
+  match ← a.watchScripts network with
+  | .ok scripts => pure scripts
+  | .error e => throw (IO.userError e.message)
 
 def applyMatch (a : MultisigApp) (m : Net.BlockMatch) (network : Tx.BitcoinNetwork) : IO (Array ByteArray) :=
   a.withStore fun s => s.apply a.host.keys a.host.writeData m network
@@ -245,7 +253,7 @@ def catchUp (a : MultisigApp) (_network : Tx.BitcoinNetwork) (frontier : UInt32)
 
 /-- `ownedMultisigScripts`: the scripts the accounts watch, on the store's network. -/
 def ownedScripts (a : MultisigApp) : IO (Array ByteArray) := do
-  a.watchScripts (← a.host.read).network
+  a.watchScriptsIO (← a.host.read).network
 
 /-- `ProfileMultisig.headStart`: each account takes the coins, history and address counters another device
 had for it, which its backup names the block of; its name, draft and Ledger stay this device's. Nothing changes
@@ -275,7 +283,9 @@ def at' (a : MultisigApp) (n : WinnowApp.Network) (dir : String) : IO ProfileMul
     if (← a.host.read).path == some file then throw (IO.userError "this wallet is the open one now")
     x
   return {
-    watchScripts := fun network => guard (other.watchScripts network)
+    watchScripts := fun network => do
+      if (← a.host.read).path == some file then return .error (.failed "this wallet is the open one now")
+      other.watchScripts network
     -- a person's payment index is the open wallet's records'; another wallet's people are told when it is opened
     apply := fun m network => guard (other.applyMatchPaying (fun _ _ => pure ()) m network)
     rollBack := fun fork => guard (other.rollBack fork)

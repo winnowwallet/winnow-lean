@@ -150,10 +150,13 @@ def HttpError.name : HttpError → String
   | .status _ => "HTTPFailure" | .transport _ => "URLError" | .cancelled => "cancelled"
 
 def HttpError.description : HttpError → String
+  | .unavailable => "The network service is unavailable."
+  | .response => "The server returned an unreadable response."
+  | .tooLarge => "The server response was too large."
+  | .redirect => "The server redirected to an unsupported location."
   | .status c => s!"The server returned HTTP {c}."
   | .transport r => s!"The network request failed ({r})."
   | .cancelled => "The request was cancelled."
-  | e => s!"Network request failed: {e.name}."
 
 /-- One error type for everything the I/O layer throws, a case per Swift error type. -/
 inductive NetError where
@@ -184,13 +187,10 @@ def name : NetError → String
   | .broadcastStorage e => e.name | .wire e => e.name | .http e => e.name
   | .cancelled => "cancelled" | .other _ => "other"
 
-/-- `localizedDescription`. -/
+/-- User-facing description of a network or storage error. -/
 def description : NetError → String
   | .peer e => e.description
-  | .framing e =>
-    -- `FramingError` is not a `LocalizedError`: Foundation's default text, with the case index as the code.
-    let code := match e with | .badMagic => 0 | .badCommand => 1 | .payloadTooLarge _ => 2 | .checksumMismatch _ => 3
-    s!"The operation couldn’t be completed. (WalletCore.FramingError error {code}.)"
+  | .framing _ => "A peer sent a message that could not be understood."
   | .headers e => HeaderChainError.description e
   | .pool e => e.description
   | .filters e => FilterSyncError.description e
@@ -199,9 +199,7 @@ def description : NetError → String
   | .broadcast .invalidFeeRate => "The transaction fee rate must be a positive, finite number within Bitcoin's monetary range."
   | .broadcast .stopped => "This transaction relay session has stopped. Reconnect before changing relay state."
   | .broadcastStorage e => e.description
-  | .wire e =>
-    let code := match e with | .truncated .. => 0 | .trailingBytes _ => 1 | .invalidVarInt => 2 | .malformed _ => 3
-    s!"The operation couldn’t be completed. (WalletCore.WireError error {code}.)"
+  | .wire _ => "A peer sent invalid Bitcoin protocol data."
   | .http e => e.description
   | .cancelled => "The operation was cancelled."
   | .other m => m

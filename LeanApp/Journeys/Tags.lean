@@ -9,31 +9,26 @@ place types come first, so that a message holding one is tagged by it: `host.boo
 namespace WinnowApp
 
 deriving instance LeanNative.Tag for BootResult, Done, Sheet, Route, NetworkPage, Confirm, PasteTarget,
-  LedgerSetupStep, HomeWarning, ClipPolicy
+  LedgerSetupStep, HomeWarning, ClipPolicy, WalletFail, PaymentFail, SettingsFail, PeopleFail, MultisigFail, FailTarget
 
 deriving instance LeanNative.Tag for Host, SendMsg, ReceiveMsg, HomeMsg, SettingsMsg, BackupMsg, PeopleMsg,
   SignerMsg, MultisigMsg, LedgerCardMsg, CloudMsg, Msg, Cmd
 
-/-- The contexts `Model.fail` routes a failure by, each to a screen (a collection's epoch left out): which
-failures a run showed, by where they were shown. -/
-def failedContexts : Array String :=
-  #["onboarding", "create", "create.cancelled", "import", "import.cancelled", "cloudRestore",
-    "cloudRestore.cancelled", "receive", "label", "send", "rate", "settings", "peers", "delete", "open", "catalog",
-    "payment", "feeBump", "export", "export.cancelled", "reveal", "reveal.cancelled", "personCard",
-    "personCard.cancelled", "person", "recipients", "multisigAdd", "multisigBuild", "multisigAccount",
-    "accountSpend", "ledgerPair", "signerKeys", "signer", "multisigOverview", "collect", "collect.cancelled"]
+/-- Targets where a cancelled device prompt or in-flight operation is handled distinctly from a failure. -/
+def cancellableTargets : Array FailTarget :=
+  #[.wallet .create, .wallet .importWallet, .wallet .cloudRestore, .wallet .unlock,
+    .settings .exportBundle, .settings .reveal, .people .personCard, .multisig (.collect 0)]
 
-/-- A message's tag, `Host.failed` by its context: `host.failed.feeBump`, `host.failed.collect`. -/
+/-- A message's tag, `Host.failed` by its typed target (plus `.cancelled` when cancelled). -/
 def msgTag : Msg → String
-  | .host (.failed _ context _) =>
-    "host.failed." ++ ".".intercalate ((context.splitOn ".").filter fun p => p.isEmpty || !p.all Char.isDigit)
+  | .host (.failed _ target true _) => "host.failed." ++ LeanNative.Tag.tag target ++ ".cancelled"
   | m => LeanNative.Tag.tag m
 
 /-- The app, naming what it handles in the record of a run. -/
 def taggedApp : LeanNative.Native.App Model Msg Cmd Host :=
   { app with tagging :=
       { msg := some msgTag, cmd := some LeanNative.Tag.tag,
-        allMsgs := (LeanNative.Tag.all (α := Msg)).filter (· != "host.failed") ++ failedContexts.map ("host.failed." ++ ·),
+        allMsgs := LeanNative.Tag.all (α := Msg) ++ cancellableTargets.map fun t => "host.failed." ++ LeanNative.Tag.tag t ++ ".cancelled",
         allCmds := LeanNative.Tag.all (α := Cmd) } }
 
 end WinnowApp

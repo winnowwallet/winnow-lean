@@ -239,12 +239,12 @@ def create (d : Device) : TM String := do
 
 /-- This device's backup saved now, with what it holds. -/
 def publish (d : Device) : IO Unit :=
-  d.app.controller.update do
+  Real.CloudM.toIO <| d.app.controller.update do
     let bundle ← d.app.exportedBundle
     return { bundle, appState := some (← d.app.cloudAppState bundle).encoded }
 
 /-- One look at the other devices' backups. -/
-def look (d : Device) : IO Unit := d.app.follow.round
+def look (d : Device) : IO Unit := Real.CloudM.toIO d.app.follow.round
 
 def overview (d : Device) : IO MultisigOverview := d.backend.multisigOverview
 
@@ -657,7 +657,7 @@ def legacyCopy (cloud : Real.MemoryCloud) (cloudKeys : Real.CloudBackupKeys) (so
   let words := " ".intercalate (← source.backend.revealMnemonic)
   let state ← source.app.cloudAppState bundle
   let id ← UUIDText.random
-  let key ← cloudKeys.create id
+  let key ← (Real.CloudM.toIO (cloudKeys.create id) : IO ByteArray)
   let backup ← need "legacy backup"
     (CloudWalletBackup.create { bundle with mnemonic := some words } key (appState := some ({ state with sync := none } : CloudAppState).encoded) (id := some id))
   cloud.records.modify (·.push backup)
@@ -712,7 +712,7 @@ def craftedCopy (cloud : Real.MemoryCloud) (cloudKeys : Real.CloudBackupKeys) (s
     TM (String × ByteArray) := do
   let exported ← source.app.exportedBundle
   let id ← UUIDText.random
-  let key ← cloudKeys.create id
+  let key ← (Real.CloudM.toIO (cloudKeys.create id) : IO ByteArray)
   let savedAt ← referenceDateNow
   let json := obj [("bundle", some (bundle ({ exported with mnemonic := none } : ImportBundle).toJV)),
                              ("appState", context.map SwiftJSON.ofData)]
@@ -843,12 +843,13 @@ def twoWalletsOneDevice (root : System.FilePath) : TM Unit := do
   let some r := (← d.env.get).riders.find? (·.held.id == first) | throw "the first wallet is not scanned for"
   discard <| (r.wallet.recordScanHeight 500 (some (ByteArray.mk (Array.replicate 32 7)))).run
   d.look
-  let heights ← (← d.app.controller.store.list "signet").filterMapM fun summary => do
-    let b ← d.app.controller.store.load summary.id (← d.app.controller.store.account)
-    let key ← cloudKeys.load b.id
-    match ← (b.shared key).run with
-    | .ok sh => pure (if sh.walletID == some first then some (sh.lastKnownHeight, sh.lastKnownBlockHash.isSome) else none)
-    | .error _ => pure none
+  let heights : Array (UInt32 × Bool) ← (Real.CloudM.toIO do
+    (← d.app.controller.store.list "signet").filterMapM fun summary => do
+      let b ← d.app.controller.store.load summary.id (← d.app.controller.store.account)
+      let key ← cloudKeys.load b.id
+      match ← Real.CloudM.io (b.shared key).run with
+      | .ok sh => pure (if sh.walletID == some first then some (sh.lastKnownHeight, sh.lastKnownBlockHash.isSome) else none)
+      | .error _ => pure none : IO _)
   check "the wallet that is not open keeps its backup current, with the block it stands on" (heights.toList == [(499, true)])
     s!"{heights}"
   check "…in the same backup" ((← cloud.count) == 2)
@@ -863,7 +864,7 @@ def whenNothingFollows (root : System.FilePath) : TM Unit := do
   let late : Real.CloudBackupKeys :=
     { create := fun id => do created.modify (·.push id); allKeys.create id
       load := fun id => do
-        if (← created.get).contains id || (← arrived.get) then allKeys.load id else Real.CloudBackupError.keyUnavailable.throw }
+        if (← created.get).contains id || (← arrived.get) then allKeys.load id else Real.CloudM.throwIssue .keychainUnavailable }
   let a ← device root "nothingA" cloud allKeys
   let b ← device root "nothingB" cloud late
   discard <| a.create
@@ -1017,12 +1018,15 @@ def directoryCloud (root : System.FilePath) : TM Unit := do
   discard <| a.backend.addSignerKeys "Hana" (← testKey 0xC3)
   a.publish
   check "two backups and their keys, as files" ((← dir.readDir).size == 4)
-  check "listed newest first, each with its network" (((← store.list "signet").size == 2) && (← store.list "mainnet").isEmpty)
+  let signetList : Array Real.CloudBackupSummary ← (Real.CloudM.toIO (store.list "signet") : IO _)
+  let mainnetList : Array Real.CloudBackupSummary ← (Real.CloudM.toIO (store.list "mainnet") : IO _)
+  check "listed newest first, each with its network" (signetList.size == 2 && mainnetList.isEmpty)
   b.look
   check "the directory carries an account and a signer from one device to the other"
     ((← b.overview).arriving.map (·.id) == [id] && (← b.signerNames) == ["Hana"])
     s!"{(← b.app.follow.status.get).message}"
-  check "a key that is not there has not arrived" (← fails (keys.load "00000000-0000-0000-0000-000000000000"))
+  check "a key that is not there has not arrived"
+    ((← (keys.load "00000000-0000-0000-0000-000000000000").run) matches .error (.issue .keychainUnavailable))
   a.stop
   b.stop
 

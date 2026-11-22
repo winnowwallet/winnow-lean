@@ -289,138 +289,157 @@ def failsWith {α} (x : IO α) (text : String) : IO Bool := do
 
 def fails {α} (x : IO α) : IO Bool := do return (← x.toBaseIO) matches .error _
 
+def cloudOk {α} (x : Real.CloudM α) : TM α := ExceptT.mk do
+  match ← x.run with
+  | .ok a => pure (.ok a)
+  | .error e => pure (.error e.description)
+
+def cloudFails {α} (x : Real.CloudM α) : IO Bool := do return (← x.run) matches .error _
+
+def cloudFailsWith {α} (x : Real.CloudM α) (expected : Real.CloudError) : IO Bool := do
+  match ← x.run with
+  | .ok _ => return false
+  | .error e => return e == expected
+
+private def exceptEq [BEq ε] [BEq α] : Except ε α → Except ε α → Bool
+  | .ok a, .ok b => a == b
+  | .error a, .error b => a == b
+  | _, _ => false
+
 open Real in
 def controllerTests : TM Unit := do
   -- testNoUploadUntilPreparedAndStopKeepsCloudCopy
   let f ← ctlFixture
   let asked ← IO.mkRef false
-  f.controller.update (do asked.set true; return { bundle := f.bundle })
+  cloudOk <| f.controller.update (do asked.set true; return { bundle := f.bundle })
   check "no upload until prepared" (!(← asked.get) && (← f.cloud.count) == 0)
-  f.controller.enable f.bundle (walletID := "test-wallet")
+  cloudOk <| f.controller.enable f.bundle (walletID := "test-wallet")
   check "enabled once prepared" (← f.controller.get).enabled
-  f.controller.stop
+  cloudOk <| f.controller.stop
   check "stop keeps the iCloud copy" (!(← f.controller.get).enabled && (← f.cloud.count) == 1)
+  check "stop sets statusTitle to Off with no error issue" ((← f.controller.get).statusTitle == "Off" && (← f.controller.get).issue.isNone)
   -- testFailedUploadKeepsLastSuccessfulBackup
   let f ← ctlFixture
-  f.controller.enable f.bundle (walletID := "test-wallet")
+  cloudOk <| f.controller.enable f.bundle (walletID := "test-wallet")
   let saved := (← f.controller.get).lastSaved
   f.cloud.failing.set true
   let updated := { f.bundle with mnemonic := none, nextReceiveIndex := some 7 }
-  check "a failed upload is not treated as saved" (← fails (f.controller.update (pure { bundle := updated })))
+  check "a failed upload is not treated as saved" (← cloudFailsWith (f.controller.update (pure { bundle := updated })) (.issue .offline))
   check "the last successful save stays" ((← f.controller.get).lastSaved == saved)
   f.cloud.failing.set false
   f.controller.discover "signet"
   match (← f.controller.get).available[0]? with
-  | some b => check "the last successful backup restores" ((← f.controller.restore b.id) == f.bundle)
+  | some b => check "the last successful backup restores" ((← cloudOk (f.controller.restore b.id)) == f.bundle)
   | none => check "the backup is listed" false
   -- testReconfigureSameWalletDoesNotCancelBackup
   let f ← ctlFixture
   f.controller.configure (some f.dir) (some "test-wallet")
-  f.controller.enable f.bundle (walletID := "test-wallet")
+  cloudOk <| f.controller.enable f.bundle (walletID := "test-wallet")
   f.controller.configure (some f.dir) (some "test-wallet")
   check "reconfiguring the same wallet keeps the backup" (← f.controller.get).enabled
   f.controller.configure (some f.dir) (some "another-wallet")
   check "another wallet has none" (!(← f.controller.get).enabled)
   -- testCancelledExportCannotUploadToAnotherWallet
   let f ← ctlFixture
-  f.controller.enable f.bundle (walletID := "test-wallet")
+  cloudOk <| f.controller.enable f.bundle (walletID := "test-wallet")
   let switched := f.controller.update do
     f.controller.configure (some f.dir) (some "another-wallet")
     return { bundle := { f.bundle with nextReceiveIndex := some 8 } }
-  check "a wallet change cancels the export" (← failsWith switched cancelledText)
+  check "a wallet change cancels the export" (← cloudFailsWith switched .cancelled)
   check "nothing uploaded for the other wallet" ((← f.cloud.saves.get) == 1 && !(← f.controller.get).enabled)
   -- testChangedAccountCannotOverwriteExistingBackup
   let f ← ctlFixture
-  f.controller.enable f.bundle (walletID := "test-wallet")
+  cloudOk <| f.controller.enable f.bundle (walletID := "test-wallet")
   f.cloud.accountName.set "second-account"
   check "a changed account cannot overwrite the backup"
-    (← failsWith (f.controller.update (pure { bundle := { f.bundle with nextReceiveIndex := some 6 } })) CloudBackupError.accountChanged.description)
+    (← cloudFailsWith (f.controller.update (pure { bundle := { f.bundle with nextReceiveIndex := some 6 } })) (.issue .accountChanged))
   check "one save only" ((← f.cloud.saves.get) == 1)
   -- testLateUploadCannotEnableBackupAfterWalletChange
   let f ← ctlFixture
   let gate ← IO.Promise.new
   f.cloud.hold.set (some gate)
-  let enable ← IO.asTask (f.controller.enable f.bundle (walletID := "test-wallet"))
+  let enable ← IO.asTask ((f.controller.enable f.bundle (walletID := "test-wallet")).run)
   discard <| waitUntil 2000 (every := 10) f.cloud.holding.get
   f.controller.configure (some f.dir) (some "another-wallet")
   gate.resolve ()
-  check "a late acknowledgement is cancelled" (match ← IO.wait enable with | .error e => toString e == cancelledText | .ok _ => false)
+  check "a late acknowledgement is cancelled" (match ← IO.wait enable with | .ok (.error .cancelled) => true | _ => false)
   check "it enables nothing" (!(← f.controller.get).enabled && (← f.controller.get).lastSaved.isNone)
   let reopened ← CloudBackupController.new f.cloud.store (← memoryCloudKeys)
   reopened.configure (some f.dir) (some "another-wallet")
   check "the encrypted retry does not configure a different wallet" (!(← reopened.get).enabled)
   -- testOnlyChangingAppContextStillUpdatesBackup
   let f ← ctlFixture
-  f.controller.enable f.bundle (some "before".toUTF8) "test-wallet"
-  f.controller.update (pure { bundle := { f.bundle with mnemonic := none }, appState := some "after".toUTF8 })
+  cloudOk <| f.controller.enable f.bundle (some "before".toUTF8) "test-wallet"
+  cloudOk <| f.controller.update (pure { bundle := { f.bundle with mnemonic := none }, appState := some "after".toUTF8 })
   check "the context alone changing uploads again" ((← f.cloud.saves.get) == 2)
   f.controller.discover "signet"
   match (← f.controller.get).available[0]? with
   | some b =>
-    let r ← f.controller.restoreContents b.id
+    let r ← cloudOk (f.controller.restoreContents b.id)
     check "the new context restores" (r.contents.appState == some "after".toUTF8)
     check "with the words carried forward" (r.contents.bundle == f.bundle)
   | none => check "the backup is listed" false
   -- testRestoredDeviceResumesBackupsAcrossOfflineRelaunchWithoutOverwritingOriginal
   let f ← ctlFixture
-  f.controller.enable f.bundle (walletID := "test-wallet")
+  cloudOk <| f.controller.enable f.bundle (walletID := "test-wallet")
   f.controller.discover "signet"
   let some source := (← f.controller.get).available[0]? | throw "no backup listed"
-  let restored ← f.controller.restoreContents source.id
+  let restored ← cloudOk (f.controller.restoreContents source.id)
   let keys ← memoryCloudKeys
   let replacement := f.dir / "replacement"
   IO.FS.createDirAll replacement
   let device ← CloudBackupController.new f.cloud.store keys
   device.configure (some replacement) (some "test-wallet")
-  device.resume restored.contents "test-wallet" restored.account
+  cloudOk <| device.resume restored.contents "test-wallet" restored.account
   check "resume: enabled, not yet acknowledged" ((← device.get).enabled && (← device.get).lastSaved.isNone)
   f.cloud.failing.set true
-  check "resume: an offline save fails" (← fails (device.update (pure { bundle := f.bundle })))
+  check "resume: an offline save fails" (← cloudFails (device.update (pure { bundle := f.bundle })))
   check "resume: still enabled, still not saved" ((← device.get).enabled && (← device.get).lastSaved.isNone)
   let relaunched ← CloudBackupController.new f.cloud.store keys
   relaunched.configure (some replacement) (some "test-wallet")
   check "resume: the retry survives a relaunch" ((← relaunched.get).enabled && (← relaunched.get).lastSaved.isNone)
   f.cloud.failing.set false
-  relaunched.update (pure { bundle := f.bundle })
+  cloudOk <| relaunched.update (pure { bundle := f.bundle })
   check "resume: saved once online" (← relaunched.get).lastSaved.isSome
   check "resume: the replacement phone has its own record" ((← f.cloud.count) == 2)
-  check "resume: the original backup is untouched" ((← f.controller.restore source.id) == f.bundle)
+  check "resume: the original backup is untouched" ((← cloudOk (f.controller.restore source.id)) == f.bundle)
   -- testAutomaticDefaultAndOptOutSurviveRestartAndWalletChanges
   let f ← ctlFixture
   check "automatic by default, not backed up" ((← f.controller.get).automaticEnabled && (← f.controller.get).statusTitle == "Not backed up")
-  f.controller.prepare { bundle := f.bundle } "test-wallet"
+  cloudOk <| f.controller.prepare { bundle := f.bundle } "test-wallet"
   check "prepared: backing up" ((← f.controller.get).statusTitle == "Backing up")
-  f.controller.stop
+  cloudOk <| f.controller.stop
   let reopened ← CloudBackupController.new f.cloud.store (← memoryCloudKeys)
   reopened.configure (some f.dir) (some "test-wallet")
   check "the opt-out survives a restart" (!(← reopened.get).automaticEnabled)
-  reopened.prepare { bundle := f.bundle } "test-wallet"
+  cloudOk <| reopened.prepare { bundle := f.bundle } "test-wallet"
   check "an opted-out wallet prepares nothing" (!(← reopened.get).enabled)
   reopened.configure (some f.dir) (some "new-wallet")
   check "a new wallet is automatic" (← reopened.get).automaticEnabled
   reopened.configure (some f.dir) (some "test-wallet")
   check "the opted-out wallet stays off" (!(← reopened.get).automaticEnabled)
-  reopened.setAutomatic true
+  cloudOk <| reopened.setAutomatic true
   check "turned on again, it needs preparation" (← reopened.get).needsPreparation
   -- testOfflineInitialPreparationDoesNotRequireAnAccountOrClaimSuccess
   let f ← ctlFixture
   f.cloud.failing.set true
-  f.controller.prepare { bundle := f.bundle } "test-wallet"
+  cloudOk <| f.controller.prepare { bundle := f.bundle } "test-wallet"
   check "offline preparation: enabled, not saved" ((← f.controller.get).enabled && (← f.controller.get).lastSaved.isNone)
-  check "offline: the upload fails" (← fails (f.controller.update (pure { bundle := f.bundle })))
+  check "offline: the upload fails" (← cloudFails (f.controller.update (pure { bundle := f.bundle })))
   check "offline: still not saved" (← f.controller.get).lastSaved.isNone
   f.cloud.failing.set false
-  f.controller.update (pure { bundle := f.bundle })
+  cloudOk <| f.controller.update (pure { bundle := f.bundle })
   check "online: backed up" ((← f.controller.get).statusTitle == "Backed up")
   -- testScheduledFailuresBackOffWithoutDroppingAutomaticPreference
   let f ← ctlFixture
-  f.controller.prepare { bundle := f.bundle } "test-wallet"
+  cloudOk <| f.controller.prepare { bundle := f.bundle } "test-wallet"
   f.cloud.failing.set true
   f.controller.schedule (pure { bundle := f.bundle })
-  discard <| waitUntil 8000 (every := 10) do return (← f.controller.get).message.isSome
+  discard <| waitUntil 8000 (every := 10) do return (← f.controller.get).issue.isSome
   let st ← f.controller.get
-  check "a scheduled failure says so" st.message.isSome
-  check "the automatic preference stays" (st.automaticEnabled && st.statusTitle == "Not backed up")
+  check "a scheduled offline failure records offline issue" (st.issue == some .offline)
+  check "transient offline keeps automatic preference and calm Waiting for connection title"
+    (st.automaticEnabled && st.statusTitle == "Waiting for connection")
   check "the retry waits at least 50 s" (st.retryAfter - (← unixNowFloat) > 50)
   let retried ← IO.mkRef false
   f.controller.schedule (do retried.set true; return { bundle := f.bundle })
@@ -432,14 +451,14 @@ def controllerTests : TM Unit := do
   let shared ← memoryCloudKeys
   let original ← CloudBackupController.new f.cloud.store shared
   original.configure (some f.dir) (some "test-wallet")
-  original.enable f.bundle (walletID := "test-wallet")
+  cloudOk <| original.enable f.bundle (walletID := "test-wallet")
   let waiting ← CloudBackupController.new f.cloud.store (← memoryCloudKeys)
   waiting.discover "signet"
   let some b := (← waiting.get).available[0]? | throw "no backup listed"
-  check "a new installation waits for the key" (← failsWith (waiting.restore b.id) CloudBackupError.keyUnavailable.description)
+  check "a new installation waits for the key" (← cloudFailsWith (waiting.restore b.id) (.issue .keychainUnavailable))
   let later ← CloudBackupController.new f.cloud.store shared
   later.discover "signet"
-  check "once the key arrives it restores" ((← later.restore b.id) == f.bundle)
+  check "once the key arrives it restores" ((← cloudOk (later.restore b.id)) == f.bundle)
   check "restoring replaced nothing" ((← f.cloud.saves.get) == 1)
 
 /-! ## AutomaticCloudBackupTests and the onboarding without a checklist (`WalletStartupTests`) -/
@@ -497,9 +516,10 @@ def automaticCloudTests (root : System.FilePath) : TM Unit := do
   let p ← cloudPhone root "declined" (← newKeys) false
   p.bootExisting
   p.activate
-  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).message.isSome
+  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).issue.isSome
   check "declined: one authentication prompt" ((← p.authAttempts.get) == 1)
-  check "declined: not backed up" ((← p.backend.cloudStatus).statusTitle == "Not backed up")
+  check "declined: not backed up, typed authenticationRequired issue"
+    ((← p.backend.cloudStatus).statusTitle == "Not backed up" && (← p.backend.cloudStatus).issue == some .authenticationRequired)
   p.backend.cloudTick
   p.activate
   IO.sleep 100
@@ -511,11 +531,11 @@ def automaticCloudTests (root : System.FilePath) : TM Unit := do
   p.cloud.accountUnavailable.set true
   p.bootExisting
   p.activate
-  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).message.isSome
+  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).issue.isSome
   let st ← p.backend.cloudStatus
   check "unavailable iCloud: no authentication prompt" ((← p.authAttempts.get) == 0)
-  check "unavailable iCloud: says so, not backed up, still automatic"
-    (st.message == some Real.CloudBackupError.unavailable.description && st.statusTitle == "Not backed up" && st.automaticEnabled)
+  check "unavailable iCloud: signedOut issue, not backed up, still automatic"
+    (st.issue == some .signedOut && st.statusTitle == "Not backed up" && st.automaticEnabled)
   let manual ← match ImportBundle.decode (← p.backend.exportBundle false) with
     | .ok b => pure b | .error _ => throw "the manual export does not decode"
   check "unavailable iCloud: the manual export still works, without the words" (manual.network == "signet" && manual.mnemonic.isNone)
@@ -565,7 +585,7 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
     | .ok c => pure c.serialized | .error _ => throw "card"
   discard <| a.backend.addPerson "Bob" (some card) none none none
   a.backend.updateSettings { a.settings with ownDisplayName := "Alice" }
-  a.app.controller.update do
+  cloudOk <| a.app.controller.update do
     let bundle ← a.app.exportedBundle
     return { bundle, appState := some (← a.app.cloudAppState bundle).encoded }
   check "restore: phone A's backup is saved" ((← a.backend.cloudStatus).statusTitle == "Backed up") (reprStr (← a.backend.cloudStatus))
@@ -577,7 +597,8 @@ def restoreFromICloud (root : System.FilePath) : TM Unit := do
   let found := (← b.backend.cloudStatus).available
   check "restore: the new phone finds the backup" (found.length == 1)
   let some backup := found.head? | throw "no backup found"
-  let (restoredID, verified, context) ← b.backend.restoreCloudBackup .signet b.dir backup.id
+  let .restored restoredID verified context ← b.backend.restoreCloudBackup .signet b.dir backup.id
+    | throw "restore unexpectedly cancelled"
   check "restore: the same wallet" (restoredID == id)
   check "restore: one authentication" ((← b.authAttempts.get) == 1)
   check "restore: no peer yet, verification waits" verified.isNone
@@ -637,7 +658,8 @@ def secondWalletFromICloud (root : System.FilePath) : TM Unit := do
   check "the list offers the other wallet's backup, named, and not this phone's own"
     (found.map (·.walletID) == [some other.id]) (reprStr found)
   let some backup := found.head? | throw "no backup offered"
-  let (restoredID, _, _) ← b.backend.restoreCloudBackup .signet added backup.id
+  let .restored restoredID _ _ ← b.backend.restoreCloudBackup .signet added backup.id
+    | throw "second wallet restore unexpectedly cancelled"
   check "the other wallet is restored beside the first" (restoredID == other.id && (← Real.holdsWallet added))
   check "both are kept, the restored one open"
     ((← b.backend.wallets b.dir) == [{ id := own, slot := "", active := false }, { id := other.id, slot := "1", active := true }])
@@ -681,6 +703,12 @@ def onboardingScreens : TM Unit := do
   check "onboarding: no phrase checklist" (!contains plain "writtenDownToggle" && !contains plain "I have written the words down")
   check "onboarding: create and restore from a file" (contains plain "createWalletButton" && contains plain "importWalletButton" &&
     contains plain "Restore from a file")
+  check "onboarding: softened backup footer without manual-backup nag"
+    (contains plain "Recovery words and backup controls are in Settings → Backup." && !contains plain "No iCloud?")
+  check "onboarding: transient offline issue stays quiet"
+    (!contains (rendered (view { m with cloud := { issue := some .offline } })) CloudIssue.offline.message)
+  check "onboarding: actionable issue still shows"
+    (contains (rendered (view { m with cloud := { issue := some .signedOut } })) CloudIssue.signedOut.message)
   check "onboarding: iCloud said up front" (contains plain "automatically backs up your wallet with iCloud when available")
   check "onboarding: no iCloud restore without a backup" (!contains plain "restoreCloudBackupButton")
   check "onboarding: …and a way to look again" (contains plain Ids.checkCloudAgainButton && contains plain "Look for iCloud backups again")
@@ -692,6 +720,8 @@ def onboardingScreens : TM Unit := do
   check "onboarding: the restore sheet looks again" (m2.hasSheet .cloudRestore && cs.any (· matches .discoverCloud))
   let sheet := rendered (view m2)
   check "restore sheet: lists the backup by date" (contains sheet "Choose a saved backup" && contains sheet "10/27/2026, 7:28 PM")
+  let offlineSheet := rendered (view { m2 with cloud := { m2.cloud with issue := some .offline } })
+  check "restore sheet: shows offline message when explicitly restoring" (contains offlineSheet CloudIssue.offline.message)
   let (m3, cs) := step (.cloud (.restore "A")) m2
   check "restore sheet: restoring" (m3.onboarding.restoring && cs.any (· matches .restoreCloud ..))
   let (m4, cs) := onHost (.cloudRestored m3.generation "W" none (some ("Alice", true))) m3
@@ -706,17 +736,56 @@ def onboardingScreens : TM Unit := do
   check "restore sheet: Continue lands on the wallet, then the Bluetooth card" (m5.stage == .ready && m5.sheets == [.bluetoothIntro])
   let signet := rendered (view { m with settings := { network := .signet } })
   check "onboarding: a signet wallet keeps the network picker" (contains signet "onboardingNetworkPicker")
-  -- the home's backup line
+  -- the home's backup section across every state
   let home (c : CloudStatus) := rendered (.list (homeSections { stage := .ready, cloud := c, walletID := some "w" }) : H)
   let notYet := home {}
-  check "home: not backed up offers the backup file" (contains notYet "Not backed up" && contains notYet "backupButton" &&
-    contains notYet "Your wallet still works. Until iCloud backup works, keep a backup file yourself." &&
-    contains notYet "Save a backup file")
-  let noEntitlement := home { message := some cloudMissingEntitlementText }
-  check "home: a build without iCloud says so once" (contains noEntitlement "iCloud backup isn't available in this build of Winnow." &&
-    (noEntitlement.splitOn "Not backed up").length == 2 && !contains noEntitlement "Sign in to iCloud")
+  check "home: not backed up links to iCloud backup settings, never manual backup file"
+    (contains notYet "Not backed up" && contains notYet Ids.homeCloudBackupButton &&
+     !contains notYet "Save a backup file" && !contains notYet "Until iCloud backup works")
+  let signedOut := home { statusTitle := "Not backed up", issue := some .signedOut }
+  check "home: signedOut shows plain copy and iCloud backup link, never manual backup or iCloud Drive"
+    (contains signedOut CloudIssue.signedOut.message && contains signedOut Ids.homeCloudBackupButton &&
+     !contains signedOut "Save a backup file" && !contains signedOut "iCloud Drive")
+  let storageFull := home { statusTitle := "Not backed up", issue := some .storageFull }
+  check "home: storageFull shows plain copy and iCloud backup link"
+    (contains storageFull CloudIssue.storageFull.message && contains storageFull Ids.homeCloudBackupButton &&
+     !contains storageFull "Save a backup file")
+  let waitingOffline := home { statusTitle := "Waiting for connection", issue := some .offline }
+  check "home: offline retry stays calm with no error text and no link"
+    (contains waitingOffline "Waiting for connection" && !contains waitingOffline CloudIssue.offline.message &&
+     !contains waitingOffline Ids.homeCloudBackupButton && !contains waitingOffline "Save a backup file")
+  let backedUpOffline := home { statusTitle := "Backed up", lastSavedText := some "10/27/2026, 7:28 PM", enabled := true, issue := some .offline }
+  check "home: backed up while offline stays Backed up with no error noise"
+    (contains backedUpOffline "Backed up" && contains backedUpOffline "Last saved 10/27/2026, 7:28 PM" &&
+     !contains backedUpOffline CloudIssue.offline.message && !contains backedUpOffline Ids.homeCloudBackupButton)
+  let turnedOff := home { automaticEnabled := false, statusTitle := "Off" }
+  check "home: off shows Off + iCloud backup link with zero scare text"
+    (contains turnedOff "\"Off\"" && contains turnedOff Ids.homeCloudBackupButton &&
+     !contains turnedOff "Save a backup file" && !contains turnedOff "Until iCloud")
+  let noEntitlement := home { statusTitle := "Not available", issue := some .unavailableInBuild }
+  check "home: build without entitlement says Not available + plain explanation, no button"
+    (contains noEntitlement "Not available" && contains noEntitlement CloudIssue.unavailableInBuild.message &&
+     !contains noEntitlement Ids.homeCloudBackupButton && !contains noEntitlement "Sign in to" && !contains noEntitlement "Save a backup file")
   let done := home { statusTitle := "Backed up", lastSavedText := some "10/27/2026, 7:28 PM", enabled := true }
-  check "home: backed up, with its date, and no manual nag" (contains done "Last saved 10/27/2026, 7:28 PM" && !contains done "backupButton")
+  check "home: backed up, with its date, and no link"
+    (contains done "Last saved 10/27/2026, 7:28 PM" && !contains done Ids.homeCloudBackupButton && !contains done "Save a backup file")
+  -- Every CloudIssue message stays free of legacy/misleading copy
+  let allIssues : List CloudIssue :=
+    [.signedOut, .keychainUnavailable, .offline, .storageFull, .accountChanged,
+     .unreadableBackup, .unsupportedWallet, .unavailableInBuild, .settingsUnreadable,
+     .authenticationRequired, .backupFailed]
+  for issue in allIssues do
+    let msg := issue.message
+    check s!"CloudIssue.{reprStr issue}: plain copy without iCloud Drive, backup file, or WalletCore"
+      (!msg.isEmpty && !contains msg "iCloud Drive" && !contains msg "backup file" &&
+       !contains msg "WalletCore" && !contains msg "Backup needs attention")
+  -- Plain error messages for silent payment codes and WalletFailure.named (no legacy Swift NSError strings)
+  check "silentPaymentErrorText: wrongHRP is plain"
+    (Real.silentPaymentErrorText (.wrongHRP "sp" "tsp") == "That silent payment code belongs to a different Bitcoin network.")
+  check "silentPaymentErrorText: invalidEncoding is plain"
+    (!contains (Real.silentPaymentErrorText .invalidEncoding) "WalletCore")
+  check "namedText: fallback never leaks WalletCore"
+    (!contains (Real.namedText "someInternalCase") "WalletCore")
   -- Settings → Backup: always the iCloud backup, the file and the recovery words
   let advanced : Model := { walletID := some "w" }
   let advBackup := rendered (backupSection advanced)
@@ -726,8 +795,9 @@ def onboardingScreens : TM Unit := do
     contains advBackup "Save a backup file" && !contains advBackup "Back up wallet")
   let row (c : CloudStatus) := rendered (backupSection { advanced with cloud := c })
   check "Settings row: backed up, how long ago" (contains (row { statusTitle := "Backed up", lastSavedAgo := some "5 min" }) "Backed up 5 min ago")
-  check "Settings row: not available in this build" (contains (row { message := some cloudMissingEntitlementText }) "Not available")
-  check "Settings row: off" (contains (row { automaticEnabled := false }) "\"Off\"")
+  check "Settings row: not available in this build" (contains (row { statusTitle := "Not available", issue := some .unavailableInBuild }) "Not available")
+  check "Settings row: off" (contains (row { automaticEnabled := false, statusTitle := "Off" }) "\"Off\"")
+  check "Settings row: waiting for connection" (contains (row { statusTitle := "Waiting for connection", issue := some .offline }) "Waiting for connection")
   let (sheetModel, _) := step (.backup .openExport) advanced
   let exportText := rendered (exportSheet sheetModel [])
   check "Backup file sheet: its title and what it does" (contains exportText "Backup file" && !contains exportText "Back up wallet" &&
@@ -737,24 +807,37 @@ def onboardingScreens : TM Unit := do
   check "Backup file sheet: the phrase still asks first" (asking.confirm == some .exportWithPhrase)
   let (m6, _) := step (.cloud .openBackup) advanced
   let controls := rendered (cloudBackupSheet m6 [])
-  check "iCloud backup: the automatic switch" (contains controls "automaticCloudBackupToggle" && contains controls "Automatic iCloud backup")
+  check "iCloud backup: the automatic switch, no manual backup nag"
+    (contains controls "automaticCloudBackupToggle" && contains controls "Automatic iCloud backup" &&
+     !contains controls "Keep a backup file too.")
+  let offlineControls := rendered (cloudBackupSheet { m6 with cloud := { statusTitle := "Waiting for connection", issue := some .offline } } [])
+  check "iCloud backup sheet: shows offline note when opened" (contains offlineControls CloudIssue.offline.message)
   check "iCloud backup: the switch asks the backend" ((step (.cloud (.setAutomatic false)) m6).2.any (· matches .setAutomaticCloud false))
 
-/-- The shell's CloudKit answers as the screens' texts: a build without the entitlement is not a sign-in
-problem (PORT.md, deliberate departures, user 2026-10-28). -/
+/-- The shell's CloudKit answers classified into typed `CloudError` / `CloudIssue`, never leaking raw
+CloudKit details to the UI. -/
 def shellAnswers : TM Unit := do
   let answering (answer : Lean.Json) : Real.Ask := fun _ _ => pure (Task.pure answer)
-  let accountText (answer : Lean.Json) : IO String := do
-    match ← ((Real.shellCloudStore (answering answer)).account).toBaseIO with
-    | .ok _ => return "ok"
-    | .error e => return toString e
-  check "missingEntitlement: its own text"
-    ((← accountText (Lean.Json.mkObj [("error", Lean.Json.str "missingEntitlement")])) == "iCloud backup isn't available in this build of Winnow.")
-  check "notAuthenticated: sign in"
-    ((← accountText (Lean.Json.mkObj [("error", Lean.Json.str "notAuthenticated")])) == Real.CloudBackupError.unavailable.description)
-  check "no account: sign in"
-    ((← accountText (Lean.Json.mkObj [("status", Lean.Json.str "noAccount"), ("user", Lean.Json.null)])) == Real.CloudBackupError.unavailable.description)
-  check "available: the user" ((← accountText (Lean.Json.mkObj [("status", Lean.Json.str "available"), ("user", Lean.Json.str "_u")])) == "ok")
+  let accountErr (answer : Lean.Json) : IO (Except Real.CloudError String) :=
+    (Real.shellCloudStore (answering answer)).account.run
+  check "missingEntitlement -> unavailableInBuild"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("error", Lean.Json.str "missingEntitlement"), ("detail", Lean.Json.str "raw internal detail")])) (.error (.issue .unavailableInBuild)))
+  check "notAuthenticated -> signedOut"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("error", Lean.Json.str "notAuthenticated")])) (.error (.issue .signedOut)))
+  check "permissionFailure -> signedOut"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("error", Lean.Json.str "permissionFailure")])) (.error (.issue .signedOut)))
+  check "noAccount -> signedOut"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("status", Lean.Json.str "noAccount"), ("user", Lean.Json.null)])) (.error (.issue .signedOut)))
+  check "temporarilyUnavailable -> offline"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("status", Lean.Json.str "temporarilyUnavailable"), ("user", Lean.Json.null)])) (.error (.issue .offline)))
+  check "networkUnavailable -> offline (never leaks raw detail)"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("error", Lean.Json.str "networkUnavailable"), ("detail", Lean.Json.str "CKErrorDomain 3")])) (.error (.issue .offline)))
+  check "quotaExceeded -> storageFull (never leaks raw detail)"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("error", Lean.Json.str "quotaExceeded"), ("detail", Lean.Json.str "CKErrorDomain 25")])) (.error (.issue .storageFull)))
+  check "operationCancelled -> cancelled"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("error", Lean.Json.str "operationCancelled")])) (.error .cancelled))
+  check "available: the user"
+    (exceptEq (← accountErr (Lean.Json.mkObj [("status", Lean.Json.str "available"), ("user", Lean.Json.str "_u")])) (.ok "_u"))
 
 /-- A Keychain as the shell's `keychain.*` capabilities give it: items by key, each with whether it is behind
 the person's presence, which a read that names no kept authentication is refused as a device refuses it. -/
@@ -946,7 +1029,7 @@ def shellAdapters : TM Unit := do
     | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
     | _ => obj [("records", Lean.Json.arr #[record a "signet" 978_307_300, record b "signet" 978_307_400,
                                             record "not-a-uuid" "signet" 1, record a "mainnet" 2]), ("more", false)]
-  let listed ← (cloud.list "signet").toBaseIO
+  let listed ← (cloud.list "signet").run
   check "list: this network's backups, newest first" (match listed with
     | .ok l => l.map (·.id) == #[b, a] && l.map (·.savedAt) == #[200, 100] | _ => false)
   check "list: the query names the record type, network and container" ((← asked.get).any fun (n, args) =>
@@ -955,23 +1038,19 @@ def shellAdapters : TM Unit := do
   answer fun name _ => match name with
     | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
     | _ => obj [("error", "tooLarge")]
-  check "load: an asset over the limit is an invalid backup" (match ← (cloud.load a "_u").toBaseIO with
-    | .error e => toString e == Real.CloudBackupError.invalidBackup.description | .ok _ => false)
+  check "load: an asset over the limit is unreadableBackup" (← cloudFailsWith (cloud.load a "_u") (.issue .unreadableBackup))
   answer fun name _ => match name with
     | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
     | _ => obj [("error", "quotaExceeded"), ("code", (25 : Int)), ("detail", "iCloud storage is full")]
-  check "load: another CloudKit error is its detail" (match ← (cloud.load a "_u").toBaseIO with
-    | .error e => toString e == "iCloud storage is full" | .ok _ => false)
+  check "load: quotaExceeded classifies as storageFull (no raw detail leak)" (← cloudFailsWith (cloud.load a "_u") (.issue .storageFull))
   -- the wrapping keys: synchronizable, 32 bytes
   let keys := Real.shellCloudKeys ask
   answer fun _ _ => obj [("hex", Lean.Json.null), ("status", (-25300 : Int))]
-  check "keys: missing is keyUnavailable" (match ← (keys.load a).toBaseIO with
-    | .error e => toString e == Real.CloudBackupError.keyUnavailable.description | .ok _ => false)
+  check "keys: missing is keychainUnavailable" (← cloudFailsWith (keys.load a) (.issue .keychainUnavailable))
   check "keys: asked as a synchronizable item of this app's service" ((← asked.get).any fun (n, args) =>
     n == "keychain.get" && (args.getObjValAs? Bool "synchronizable").toOption == some true && (args.getObjValAs? String "service").toOption == some Real.cloudBackupKeyService)
   answer fun _ _ => obj [("hex", "0011"), ("status", (0 : Int))]
-  check "keys: a key of the wrong size is an invalid backup" (match ← (keys.load a).toBaseIO with
-    | .error e => toString e == Real.CloudBackupError.invalidBackup.description | .ok _ => false)
+  check "keys: a key of the wrong size is unreadableBackup" (← cloudFailsWith (keys.load a) (.issue .unreadableBackup))
 
 /-- The existing wallet's preparation runs in LeanNative's EffectScope: the background or a wallet change
 while the person answers the prompt ends it before the protected part (the words, the copy) starts, and
@@ -1000,7 +1079,7 @@ def scopedPreparationTests (root : System.FilePath) : TM Unit := do
     check s!"{name} during the prompt: the preparation ends" ended
     check s!"{name} during the prompt: the words are not read" ((← loads.get) == before)
     check s!"{name} during the prompt: nothing is uploaded" ((← p.cloud.records.get).isEmpty)
-    check s!"{name} during the prompt: no failure is shown" ((← p.app.controller.get).message.isNone)
+    check s!"{name} during the prompt: no failure is shown" ((← p.app.controller.get).issue.isNone)
     p.backend.cloudScene false
     p.backend.stopNetworking
 
@@ -1029,13 +1108,13 @@ def declinedDeviceCheck (root : System.FilePath) : TM Unit := do
   let p ← cloudPhone root "check-prepare" (← newKeys) true (deviceCheck := some (WinnowApp.authenticateNow fx))
   p.bootExisting
   p.activate
-  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).message.isSome
+  discard <| waitUntil 3000 (every := 10) do return (← p.app.controller.get).issue.isSome
   let st ← p.backend.cloudStatus
   let c ← p.app.controller.get
   check "declined check: the person is asked once, for the backup" ((← prompts) == #["Protect your wallet with automatic iCloud backup"])
   check "declined check: the backup is not prepared" (!c.enabled && c.configuration.isNone && st.statusTitle == "Not backed up")
   check "declined check: nothing is uploaded" ((← p.cloud.records.get).isEmpty && (← p.cloud.saveAttempts.get) == 0)
-  check "declined check: the reason is shown" (st.message == some "Canceled by user.") (reprStr st.message)
+  check "declined check: typed authenticationRequired issue is recorded" (st.issue == some .authenticationRequired) (reprStr st.issue)
   p.backend.cloudTick
   IO.sleep 100
   check "declined check: not asked again in this foreground session" ((← prompts).size == 1 && !(← p.app.controller.get).enabled)
@@ -1048,7 +1127,7 @@ def declinedDeviceCheck (root : System.FilePath) : TM Unit := do
   discard <| a.backend.openWallet .signet a.dir
   a.activate
   let id ← a.backend.createWallet .signet a.dir
-  a.app.controller.update do
+  cloudOk <| a.app.controller.update do
     let bundle ← a.app.exportedBundle
     return { bundle, appState := some (← a.app.cloudAppState bundle).encoded }
   a.backend.cloudScene false

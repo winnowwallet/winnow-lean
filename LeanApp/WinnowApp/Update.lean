@@ -158,7 +158,7 @@ def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
     if m.current g && m.receive.address == address && !(m.receive.unconfirmed.any (·.1 == txid)) then
       ({ m with receive := { m.receive with unconfirmed := m.receive.unconfirmed ++ [(txid, amount)] } }, [])
     else (m, [])
-  | .failed g ctx msg => if m.sameWallet g then (m.fail ctx msg, []) else (m, [])
+  | .failed g target cancelled msg => if m.sameWallet g then (m.fail target cancelled msg, []) else (m, [])
   | _ => (m, [])
 
 /-- The Send sheet, its payment and a fee bump. -/

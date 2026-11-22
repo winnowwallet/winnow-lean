@@ -130,7 +130,7 @@ def onboardingView (m : Model) : H :=
                 [ .identified Ids.cancelAddWalletButton (.button "Cancel" .plain (act (.settings .cancelAddWallet))) ] ]
           else []) ++
          [ .section "" "" [Html.tone .secondary (body "Your bitcoin, on your phone. Winnow connects directly to Bitcoin and automatically backs up your wallet with iCloud when available.")]
-         , .section "" "No iCloud? Your wallet still works. You can save a backup file instead. Recovery words and backup controls are in Settings → Backup."
+         , .section "" "Recovery words and backup controls are in Settings → Backup."
              (match m.walletID with
               | some _ =>
                 [ .identified Ids.resumeImportedWalletButton (Html.symbol "arrow.right.circle" (.button "Continue with your wallet" .primary (act .finishOnboarding))) ]
@@ -146,7 +146,9 @@ def onboardingView (m : Model) : H :=
                       (.button (if c.busy then "Looking in iCloud…" else "Look for iCloud backups again") .plain
                         (if c.busy then none else act (.cloud .checkAgain)))) ])) ] ++
          (if c.busy then [.section "" "" [.progress "Checking iCloud…"]] else []) ++
-         (match c.message with | some t => [.section "" "" [caption t]] | none => []) ++
+         (match c.issue with
+          | some i => if i.isTransient then [] else [.section "" "" [caption i.message]]
+          | none => []) ++
          -- mainnet unless asked: the picker is folded behind "Use a test network" (open on a test network). A
          -- wallet added beside others is this network's: the network is chosen in Settings
          (if adding then [] else
@@ -166,7 +168,6 @@ def routedScreen (m : Model) : Option H :=
 where routedScreen' (m : Model) : Option H :=
   match m.routes.getLast? with
   | some (.payment t) => some (.screen "Payment" (some (.home .pop)) ([.list (paymentSections m t)] ++ overlays m))
-  | some .backup => some (backupScreen m (overlays m))
   | some .settings => some (.screen "Settings" (some (.home .pop)) ([.list (settingsSections m)] ++ overlays m))
   | some (.network .sync) =>
     some (.screen "Sync" (some (.home .pop)) ([.list (syncSections m)] ++ overlays m) (onRefresh := some .syncNow))

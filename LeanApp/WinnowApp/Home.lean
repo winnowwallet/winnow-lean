@@ -54,7 +54,6 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   match msg with
   | .openPayment txid => { m with routes := m.routes ++ [Route.payment txid], payment := {}, expanded := [] }.loadPayment
-  | .openBackup => ({ m with routes := m.routes ++ [Route.backup] }, [])
   | .openSettings => ({ m with routes := m.routes ++ [Route.settings] }, [])
   | .openNetwork page =>
     -- the peers screen loads the connected peers and the census line, and its staged routing edits
@@ -78,7 +77,7 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
   | .pop => ({ m with routes := m.routes.dropLast, payment := {}, expanded := [] }, [])
   | .loadPayment => m.loadPayment
   | .editRecipient address pid => m.openPerson { personID := pid } address
-  | .removeRecipient pid => (m, [.updateRecipient g pid none false "payment"])
+  | .removeRecipient pid => (m, [.updateRecipient g pid none false true])
   | .editPaymentLabel address =>
     let draft := (lookup m.records.receiveLabels address).getD ""
     ({ m with labelEditor := { address, draft } }.present .labelEditor, [])
@@ -109,7 +108,7 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
     | some (_, p) =>
       if m.feeBump.bumping then (m, [])
       else if m.spendingInFlight then
-        (m.fail "feeBump" "Another payment is already being signed and broadcast. Wait for it to finish.", [])
+        (m.fail (.payment .feeBump) false "Another payment is already being signed and broadcast. Wait for it to finish.", [])
       else ({ m with feeBump := { m.feeBump with bumping := true, error := none }, spendingInFlight := true },
             [.bumpFee g m.feeBump.txid p])
     | none => (m, [])

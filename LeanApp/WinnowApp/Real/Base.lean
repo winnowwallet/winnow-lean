@@ -67,11 +67,22 @@ def anchorFork (blockHash : ChainHashes) (height : UInt32) (anchor : ByteArray) 
     if (← blockHash h.height) != some theirs then fork := h.height - 1
   return some fork
 
+/-- Why a wallet's multisig account scripts could not be loaded for a sync pass. -/
+inductive WatchScriptsError where
+  /-- The account store's key is unavailable right now (e.g. a locked phone during a background launch); retry next pass. -/
+  | locked (message : String)
+  /-- The account store is damaged or otherwise unreadable until the person intervenes. -/
+  | failed (message : String)
+  deriving Repr, BEq, Inhabited
+
+def WatchScriptsError.message : WatchScriptsError → String
+  | .locked m | .failed m => m
+
 /-- The multisig store of one wallet kept on this device, as a sync pass uses it: the open wallet's through the
 hooks below, another's through `Hooks.multisigAt` (its own copy of its directory's file, which refuses once
 that wallet is the open one, whose store is then the only one that writes it). -/
 structure ProfileMultisig where
-  watchScripts : Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ => pure #[]
+  watchScripts : Tx.BitcoinNetwork → IO (Except WatchScriptsError (Array ByteArray)) := fun _ => pure (.ok #[])
   apply : Net.BlockMatch → Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ _ => pure #[]
   rollBack : UInt32 → IO Unit := fun _ => pure ()
   catchUp : Tx.BitcoinNetwork → (frontier : UInt32) → RangeScanner → ChainHashes → IO Unit := fun _ _ _ _ => pure ()
@@ -102,7 +113,7 @@ structure Hooks where
   -- history's ownership read. Without it no account is watched, and a bundle carrying accounts is refused
   -- rather than restored without them.
   /-- `multisigStore.watchScripts(network:)`: every account's receive and change scripts. -/
-  multisigWatchScripts : Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ => pure #[]
+  multisigWatchScripts : Tx.BitcoinNetwork → IO (Except WatchScriptsError (Array ByteArray)) := fun _ => pure (.ok #[])
   /-- `multisigStore.apply(match:network:)`: the in-flight spends a conflict in the block beat. -/
   multisigApply : Net.BlockMatch → Tx.BitcoinNetwork → IO (Array ByteArray) := fun _ _ => pure #[]
   /-- Before a forward pass from block `frontier`: accounts that arrived from another of the person's devices
@@ -238,19 +249,23 @@ def addressErrorText : AddressError → String
     s!"That address uses future Bitcoin witness version {v}. Winnow cannot safely send to it before the output type is activated."
   | .unsupportedWitnessProgram v l => s!"That address uses an unsupported witness-v{v} program length ({l} bytes)."
 
-/-- A refused silent payment code: `SilentPaymentAddressError` has no description of its own upstream, so
-the Send screen shows Swift's generic text for it. -/
-def silentPaymentErrorText (e : SilentPaymentAddressError) : String :=
-  s!"The operation couldn’t be completed. (WalletCore.SilentPaymentAddressError.{e.name})"
+/-- A refused silent payment code as the Send screen describes it. -/
+def silentPaymentErrorText : SilentPaymentAddressError → String
+  | .wrongHRP .. => "That silent payment code belongs to a different Bitcoin network."
+  | .unsupportedVersion v => s!"That silent payment code uses unsupported version {v}."
+  | _ => "That silent payment code isn't valid."
 
 /-- Text for a failure another module reports only by its case name (its payload was dropped where
 it was lifted into `WalletFailure.named`). -/
-def namedText (n : String) : String :=
-  match n with
+def namedText : String → String
   | "noUTXOs" => "There are no spendable coins."
   | "insufficientFunds" => "Insufficient funds for this payment and its fee."
   | "dataCorrupted" => "The data couldn’t be read because it isn’t in the correct format."
-  | n => s!"The operation couldn’t be completed. (WalletCore.{n})"
+  | "invalidFeeRate" => "The fee rate isn't valid."
+  | "dustOutput" => "The payment amount is too small to send on Bitcoin."
+  | "noOutputs" => "The payment has no destination."
+  | "invalidAmount" => "The payment amount isn't valid."
+  | _ => "The operation couldn’t be completed."
 
 /-- `localizedDescription` of a wallet failure. -/
 def _root_.Winnow.WalletFailure.text : WalletFailure → String

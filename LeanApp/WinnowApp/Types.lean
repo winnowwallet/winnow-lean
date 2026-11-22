@@ -236,11 +236,59 @@ structure CloudBackupInfo where
   walletID : Option String := none
   deriving Repr, Inhabited, BEq
 
-/-- What the screens say for a build without the iCloud entitlement (the shell's `missingEntitlement`). -/
-def cloudMissingEntitlementText : String := "iCloud backup isn't available in this build of Winnow."
+/-- Why automatic iCloud backup or restore cannot run right now. -/
+inductive CloudIssue where
+  /-- Not signed into iCloud, or iCloud access is restricted/denied. -/
+  | signedOut
+  /-- The backup's wrapping key has not arrived from iCloud Keychain yet (or iCloud Keychain refused to save it). -/
+  | keychainUnavailable
+  /-- Transient network or iCloud service hiccup; Winnow retries automatically. -/
+  | offline
+  /-- The Apple Account's iCloud storage is full. -/
+  | storageFull
+  /-- The device switched to a different Apple Account than the one this backup is bound to. -/
+  | accountChanged
+  /-- A saved iCloud backup could not be decoded or verified safely. -/
+  | unreadableBackup
+  /-- Automatic iCloud recovery requires a recovery phrase (e.g. an account-key-only wallet). -/
+  | unsupportedWallet
+  /-- This build of Winnow does not have the iCloud entitlement. -/
+  | unavailableInBuild
+  /-- Local iCloud backup preferences or configuration file could not be read. -/
+  | settingsUnreadable
+  /-- Device authentication (Face ID / passcode) is needed to start automatic backup. -/
+  | authenticationRequired
+  /-- A local backup preparation or update failed unexpectedly; Winnow will try again. -/
+  | backupFailed
+  deriving Repr, Inhabited, BEq
+
+/-- Whether an issue is a transient reachability/service hiccup that Winnow retries quietly on its own. -/
+def CloudIssue.isTransient : CloudIssue → Bool
+  | .offline => true
+  | _ => false
+
+/-- Plain user-facing explanation of an iCloud backup issue. -/
+def CloudIssue.message : CloudIssue → String
+  | .signedOut => "Sign in to your Apple Account in Settings and turn on iCloud and Passwords & Keychain."
+  | .keychainUnavailable => "Waiting for your backup key from iCloud Keychain. Check that Passwords & Keychain is on in Settings."
+  | .offline => "Can’t reach iCloud right now. Winnow will try again automatically."
+  | .storageFull => "Your iCloud storage is full. Free up space in iCloud Settings to keep backing up."
+  | .accountChanged => "Your Apple Account changed. Sign back into the original account, or turn automatic backup off and on in Settings → Backup → iCloud backup to use this account."
+  | .unreadableBackup => "This iCloud backup couldn’t be read safely. Your existing wallet was not replaced."
+  | .unsupportedWallet => "Automatic iCloud backup isn’t available for wallets without a recovery phrase."
+  | .unavailableInBuild => "iCloud backup isn’t available in this build of Winnow."
+  | .settingsUnreadable => "Automatic backup settings couldn’t be read. Your previous iCloud backup is unchanged."
+  | .authenticationRequired => "Authenticate with Face ID or passcode to start automatic iCloud backup."
+  | .backupFailed => "Couldn’t update your iCloud backup right now. Winnow will try again."
+
+/-- Outcome of `Backend.restoreCloudBackup`: either restored, or cancelled before completion. -/
+inductive RestoreOutcome where
+  | restored (walletID : String) (matchesBundle : Option Bool) (context : Option (String × Bool))
+  | cancelled
+  deriving Repr, BEq, Inhabited
 
 /-- `CloudBackupController` as the screens read it (`automaticEnabled`, `enabled`, `statusTitle`,
-`lastSaved`, `message`, `busy`, `available`) and AppModel's `cloudRestoreNotice`. -/
+`lastSaved`, `issue`, `busy`, `available`) and AppModel's `cloudRestoreNotice`. -/
 structure CloudStatus where
   automaticEnabled : Bool := true
   enabled : Bool := false
@@ -248,7 +296,7 @@ structure CloudStatus where
   lastSavedText : Option String := none
   /-- How long ago that was ("5 min"), for the Settings row. -/
   lastSavedAgo : Option String := none
-  message : Option String := none
+  issue : Option CloudIssue := none
   busy : Bool := false
   available : List CloudBackupInfo := []
   restoreNotice : Option String := none
@@ -256,6 +304,61 @@ structure CloudStatus where
   last read ("Checked 2 min ago"), or why they could not be. None before the first look, and in test mode. -/
   devicesNote : Option String := none
   deriving Repr, Inhabited, BEq
+
+/-! ## Typed failure routing (`Host.failed`) -/
+
+inductive WalletFail where
+  | openWallet
+  | create
+  | importWallet
+  | cloudRestore
+  | delete
+  | unlock
+  | sync
+  deriving Repr, BEq, Inhabited
+
+inductive PaymentFail where
+  | receive
+  | label
+  | send
+  | rate
+  | payment
+  | feeBump
+  deriving Repr, BEq, Inhabited
+
+inductive SettingsFail where
+  | peers
+  | catalog
+  | exportBundle
+  | reveal
+  deriving Repr, BEq, Inhabited
+
+inductive PeopleFail where
+  | personCard
+  | person
+  | recipients
+  deriving Repr, BEq, Inhabited
+
+inductive MultisigFail where
+  | overview
+  | add
+  | build
+  | account
+  | spend
+  | ledgerPair
+  | signerKeys
+  | signer
+  | collect (epoch : Nat)
+  deriving Repr, BEq, Inhabited
+
+/-- Which screen or operation a backend failure (`Host.failed`) belongs to. -/
+inductive FailTarget where
+  | wallet (t : WalletFail)
+  | payment (t : PaymentFail)
+  | settings (t : SettingsFail)
+  | people (t : PeopleFail)
+  | multisig (t : MultisigFail)
+  deriving Repr, BEq, Inhabited
 
 /-- AppModel's `SyncPhase`. -/
 inductive SyncPhase where

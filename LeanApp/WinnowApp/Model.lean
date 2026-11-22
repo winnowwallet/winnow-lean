@@ -66,8 +66,6 @@ inductive NetworkPage where
 /-- A pushed screen (NavigationLink destinations). -/
 inductive Route where
   | payment (txid : String)
-  /-- The home's Back up page. -/
-  | backup
   /-- Settings, from the home's toolbar. -/
   | settings
   /-- Settings → Network → one of its screens. -/
@@ -632,7 +630,7 @@ inductive Host where
   | updated (gen : Nat) (d : Done) (r : Records)
   | receiveAddress (gen : Nat) (address : String)
   | unconfirmed (gen : Nat) (address txid : String) (amount : Int)
-  | failed (gen : Nat) (context : String) (message : String)
+  | failed (gen : Nat) (target : FailTarget) (cancelled : Bool := false) (message : String)
   | deleted (gen : Nat)
   /-- The open profile was named, or why not. -/
   | renamed (gen : Nat) (error : Option String)
@@ -727,7 +725,6 @@ inductive ReceiveMsg where
 
 inductive HomeMsg where
   | openPayment (txid : String)
-  | openBackup
   | openSettings
   /-- Settings → Network → `page` (the peers page loads the connected peers and the census line). -/
   | openNetwork (page : NetworkPage)
@@ -1021,7 +1018,7 @@ inductive Cmd where
       (provenance : Option Provenance) (source : Option String) (labelTxid : Option String)
   /-- Rename a person and keep them saved, first attaching a destination when they had none. -/
   | editPerson (gen : Nat) (personID name : String) (attach : Option (String × Provenance × Option String))
-  | updateRecipient (gen : Nat) (personID : String) (name : Option String) (saved : Bool) (ctx : String)
+  | updateRecipient (gen : Nat) (personID : String) (name : Option String) (saved : Bool) (fromPayment : Bool)
   | labelSender (gen : Nat) (txid personID : String)
   | removeSenderLabel (gen : Nat) (txid : String)
   | lookupSender (gen : Nat) (txid baseURL : String)

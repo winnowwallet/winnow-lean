@@ -32,60 +32,80 @@ def literal (s : String) : H := Html.mono (caption s)
 
 /-! ## Failures -/
 
-/-- Route a backend failure to the state of the screen that asked (`context`), clearing that screen's busy
-flags (records-test's `failuresReachTheirScreens`, one case per context; the journey `spentElsewhere` signs a
-review whose coin has gone). -/
-def Model.fail (m : Model) (context message : String) : Model :=
-  -- a cancelled authentication prompt: revealing the phrase treats it as a decision (no error)
-  if context == "create.cancelled" || context == "import.cancelled" then { m with onboarding := { m.onboarding with busy := false, error := none } } else
-  -- a declined prompt or a cancelled restore says nothing (`catch is CancellationError { }`)
-  if context == "cloudRestore.cancelled" then { m with onboarding := { m.onboarding with restoring := false } } else
-  if context == "cloudRestore" then
-    let shown := if message == "Winnow.CancellationError" then none else some message
-    { m with onboarding := { m.onboarding with restoring := false, restoreError := shown } } else
-  if context == "reveal.cancelled" then { m with reveal := { m.reveal with revealing := false, error := none } } else
-  -- and so does an export that would have carried it: the sheet is as it was before the button
-  if context == "export.cancelled" then { m with exportState := { m.exportState with busy := false, error := none } } else
-  -- nor does a card for one person the device's owner declined to make
-  if context == "personCard.cancelled" then { m with shareCard := { m.shareCard with making := false } } else
-  let cancelled := context.endsWith ".cancelled"
-  let context := if cancelled then (context.dropEnd 10).copy else context
-  if context.startsWith "collect." then
+/-- Failures for wallet lifecycle and sync operations. -/
+def Model.failWallet (m : Model) (target : WalletFail) (cancelled : Bool) (message : String) : Model :=
+  match target with
+  | .create | .importWallet =>
+    { m with onboarding := { m.onboarding with busy := false, error := if cancelled then none else some message } }
+  | .cloudRestore =>
+    if cancelled then { m with onboarding := { m.onboarding with restoring := false } }
+    else { m with onboarding := { m.onboarding with restoring := false, restoreError := some message } }
+  | .openWallet =>
+    -- the wallet could not be opened at all: the screen that says so has Retry, where "Opening wallet…" has none
+    if m.stage == .loading then { m with stage := .storageDamaged message }
+    else { m with status := { m.status with lastSyncError := some message } }
+  | .delete => { m with confirm := some (.deleteFailed message) }
+  | .unlock => if cancelled then m else { m with status := { m.status with lastSyncError := some message } }
+  | .sync => { m with status := { m.status with lastSyncError := some message } }
+
+/-- Failures for receiving, sending, payment details, and fee bumps. -/
+def Model.failPayment (m : Model) (target : PaymentFail) (message : String) : Model :=
+  match target with
+  | .receive => { m with receive := { m.receive with error := some message, changing := false } }
+  | .label => { m with labelEditor := { m.labelEditor with saving := false, error := some message } }
+  | .send => { m with send := { m.send with error := some message, reviewing := false, sending := false }, spendingInFlight := false }
+  | .rate => { m with send := { m.send with resolvedRateMilli := none } }
+  | .payment => { m with payment := { loading := false, error := some message } }
+  | .feeBump => { m with feeBump := { m.feeBump with error := some message, bumping := false }, spendingInFlight := false }
+
+/-- Failures for Settings and manual backup screens. -/
+def Model.failSettings (m : Model) (target : SettingsFail) (cancelled : Bool) (message : String) : Model :=
+  match target with
+  | .peers => { m with settingsDraft := { m.settingsDraft with error := some message, resettingPeers := false } }
+  -- the census line is read from the shipped list; a failure leaves it unset
+  | .catalog => m
+  | .exportBundle =>
+    if cancelled then { m with exportState := { m.exportState with busy := false, error := none } }
+    else { m with exportState := { m.exportState with busy := false, error := some message, file := none } }
+  | .reveal => { m with reveal := { m.reveal with revealing := false, error := if cancelled then none else some message } }
+
+/-- Failures for people and person cards. -/
+def Model.failPeople (m : Model) (target : PeopleFail) (cancelled : Bool) (message : String) : Model :=
+  match target with
+  | .personCard =>
+    if cancelled then { m with shareCard := { m.shareCard with making := false } }
+    else { m with shareCard := { m.shareCard with making := false, error := some message } }
+  | .person => { m with person := { m.person with saving := false, inferring := false, error := some message } }
+  | .recipients => { m with recipientsError := some message }
+
+/-- Failures for multisig accounts, signers, Ledger pairing, and signature collection. -/
+def Model.failMultisig (m : Model) (target : MultisigFail) (cancelled : Bool) (message : String) : Model :=
+  match target with
+  -- the overview keeps what it last showed
+  | .overview => m
+  | .add => { m with multisigAdd := { m.multisigAdd with saving := false, error := some message } }
+  | .build => { m with multisigBuild := { m.multisigBuild with creating := false, error := some message } }
+  | .account => { m with multisigAccountError := some message }
+  | .spend => { m with payment := { m.payment with error := some message } }
+  | .ledgerPair => { m with ledgerPair := { m.ledgerPair with pairing := false, error := some message } }
+  | .signerKeys => { m with signerKeys := { m.signerKeys with saving := false, error := some message } }
+  | .signer => { m with signerDetail := { m.signerDetail with error := some message } }
+  | .collect epoch =>
     -- the collection step's `run`: only the current operation's failure shows (`accepts(token)`)
     let m := { m with spendingInFlight := false }
-    if (context.drop 8).toString.toNat? != some m.collect.epoch || !m.active then m else
-    { m with collect := { m.collect with busy := false, error := if cancelled then none else some message } }
-  else
-  match context with
-  | "onboarding" | "create" | "import" => { m with onboarding := { m.onboarding with busy := false, error := some message } }
-  | "receive" => { m with receive := { m.receive with error := some message, changing := false } }
-  | "label" => { m with labelEditor := { m.labelEditor with saving := false, error := some message } }
-  | "send" => { m with send := { m.send with error := some message, reviewing := false, sending := false }, spendingInFlight := false }
-  | "rate" => { m with send := { m.send with resolvedRateMilli := none } }
-  | "settings" | "peers" => { m with settingsDraft := { m.settingsDraft with error := some message, resettingPeers := false } }
-  | "delete" => { m with confirm := some (.deleteFailed message) }
-  -- the wallet could not be opened at all: the screen that says so has Retry, where "Opening wallet…" has none
-  | "open" => if m.stage == .loading then { m with stage := .storageDamaged message }
-              else { m with status := { m.status with lastSyncError := some message } }
-  -- the census line is read from the shipped list; a failure leaves it unset
-  | "catalog" => m
-  | "payment" => { m with payment := { loading := false, error := some message } }
-  | "feeBump" => { m with feeBump := { m.feeBump with error := some message, bumping := false }, spendingInFlight := false }
-  | "export" => { m with exportState := { m.exportState with busy := false, error := some message, file := none } }
-  | "reveal" => { m with reveal := { m.reveal with revealing := false, error := some message } }
-  | "personCard" => { m with shareCard := { m.shareCard with making := false, error := some message } }
-  | "person" => { m with person := { m.person with saving := false, inferring := false, error := some message } }
-  | "recipients" => { m with recipientsError := some message }
-  | "multisigAdd" => { m with multisigAdd := { m.multisigAdd with saving := false, error := some message } }
-  | "multisigBuild" => { m with multisigBuild := { m.multisigBuild with creating := false, error := some message } }
-  | "multisigAccount" => { m with multisigAccountError := some message }
-  | "accountSpend" => { m with payment := { m.payment with error := some message } }
-  | "ledgerPair" => { m with ledgerPair := { m.ledgerPair with pairing := false, error := some message } }
-  | "signerKeys" => { m with signerKeys := { m.signerKeys with saving := false, error := some message } }
-  | "signer" => { m with signerDetail := { m.signerDetail with error := some message } }
-  -- the overview keeps what it last showed
-  | "multisigOverview" => m
-  | _ => { m with status := { m.status with lastSyncError := some message } }
+    if epoch != m.collect.epoch || !m.active then m
+    else { m with collect := { m.collect with busy := false, error := if cancelled then none else some message } }
+
+/-- Route a backend failure to the state of the screen that asked (`target`), clearing that screen's busy
+flags (records-test's `failuresReachTheirScreens`, one case per target; the journey `spentElsewhere` signs a
+review whose coin has gone). -/
+def Model.fail (m : Model) (target : FailTarget) (cancelled : Bool := false) (message : String) : Model :=
+  match target with
+  | .wallet t => m.failWallet t cancelled message
+  | .payment t => m.failPayment t message
+  | .settings t => m.failSettings t cancelled message
+  | .people t => m.failPeople t cancelled message
+  | .multisig t => m.failMultisig t cancelled message
 
 /-! ## Sheets -/
 

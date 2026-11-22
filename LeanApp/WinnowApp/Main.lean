@@ -128,10 +128,10 @@ def loadSettingsNoting : IO (Settings × Bool) := do
 def trace (msg : String) : IO Unit := do
   if (← debugBuild.get) && (← IO.getEnv "WINNOW_LEAN_TRACE") == some "1" then IO.eprintln s!"[trace] {msg}"
 
-/-- Run `act` in a task and post its answer, or `failed gen ctx message`. -/
-def background (fx : Effects Host) (gen : Nat) (ctx : String) (act : IO Host) : IO Unit :=
+/-- Run `act` in a task and post its answer, or `failed gen target false message`. -/
+def background (fx : Effects Host) (gen : Nat) (target : FailTarget) (act : IO Host) : IO Unit :=
   discard <| IO.asTask do
-    try fx.post (← act) catch e => do trace s!"failed {gen} {ctx}: {e}"; fx.post (.failed gen ctx (toString e))
+    try fx.post (← act) catch e => do trace s!"failed {gen} {reprStr target}: {e}"; fx.post (.failed gen target false (toString e))
 
 /-- How long the shell keeps an authentication for the Keychain reads of the action it was asked for, at
 most (seconds; the shell's own ceiling). The action ends it sooner (`Real.withKeychainContext`). -/
@@ -143,25 +143,27 @@ def authRequest (reason : String) : Json :=
   Json.mkObj [("reason", Json.str reason), ("keep", toJson authenticationKeptFor)]
 
 /-- `authenticateSensitiveAction`: device-owner authentication before `act` (inside a task). A
-cancelled prompt is a decision, not a failure: `ctx ++ ".cancelled"` clears the busy state quietly. `act`
-runs under the authentication the shell kept, which ends with it; a search for cards that waits for the
-wallet's secret gets what it needs of it first (`Backend.personPresent`). -/
-def authenticated (fx : Effects Host) (gen : Nat) (ctx reason : String) (act : IO Host) : IO Unit :=
+cancelled prompt is a decision, not a failure: `cancelled := true` clears the busy state quietly for targets
+that treat cancellation as a dismissal. `act` runs under the authentication the shell kept, which ends with it;
+a search for cards that waits for the wallet's secret gets what it needs of it first (`Backend.personPresent`). -/
+def authenticated (fx : Effects Host) (gen : Nat) (target : FailTarget) (reason : String) (act : IO Host) : IO Unit :=
   discard <| IO.asTask do
     -- automated Debug runs skip it unless they ask for it (`WINNOW_E2E_DEVICE_AUTH=1`)
     if let some m ← e2eRef.get then
       if !m.requireDeviceAuthentication then
-        try fx.post (← act) catch e => fx.post (.failed gen ctx (toString e))
+        try fx.post (← act) catch e => fx.post (.failed gen target false (toString e))
         return
     let auth ← IO.wait (← fx.ask "auth" (authRequest reason))
     if (auth.getObjValAs? Bool "ok").toOption.getD false then
       Real.withKeychainContext fx.ask (auth.getObjValAs? String "context").toOption do
         try (← backendRef.get).personPresent catch _ => pure ()
-        try fx.post (← act) catch e => fx.post (.failed gen ctx (toString e))
+        try fx.post (← act) catch e => fx.post (.failed gen target false (toString e))
     else
       let err := (auth.getObjValAs? String "error").toOption.getD "Device authentication failed."
-      let cancelled := (err.toLower.splitOn "cancel").length > 1
-      fx.post (.failed gen (if cancelled then ctx ++ ".cancelled" else ctx) err)
+      let name := (auth.getObjValAs? String "name").toOption.getD ""
+      let cancelled := name == "userCancel" || name == "appCancel" || name == "systemCancel" ||
+        (err.toLower.splitOn "cancel").length > 1
+      fx.post (.failed gen target cancelled err)
 
 /-- `authenticateSensitiveAction(reason:)` for the backend's own flows (the iCloud backup's preparation
 and restore): throws when the owner declines or cancels. Skipped in automated Debug runs, as `authenticated`.
@@ -321,7 +323,7 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
           if (← settingsAsked.get) != n then return
           IO.FS.writeFile (← settingsPath) (toJson s).pretty
           b.updateSettings s
-  | .openWallet g n isBoot => background fx g "open" do
+  | .openWallet g n isBoot => background fx g (.wallet .openWallet) do
       -- the wallet that was open last, or the network's own place while it keeps none
       let r ← openPlaceAt b fx g n (← Real.resolveSlot (← networkDir n))
       if isBoot then
@@ -331,7 +333,7 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         | .missing => journal "app.booted" [("stage", "onboarding"), ("walletID", "")]
         | .damaged _ => pure ()
       return .booted g r
-  | .openSlot g n slot => background fx g "open" do
+  | .openSlot g n slot => background fx g (.wallet .openWallet) do
       let network ← networkDir n
       let slot ← match slot with
         | some slot =>
@@ -339,7 +341,7 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
           pure slot
         | none => Real.freeSlot network
       return .booted g (← openPlaceAt b fx g n slot)
-  | .createWallet g n => authenticated fx g "create" "Create and protect your wallet" do
+  | .createWallet g n => authenticated fx g (.wallet .create) "Create and protect your wallet" do
       let id ← b.createWallet n (← placeDir g n)
       tellWallets b fx g n
       return .created g id
@@ -355,16 +357,16 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
     let seeded := match Winnow.Text.parseJson json with
       | .ok j => match j.getObjVal? "mnemonic" with | .ok .null | .error _ => false | .ok _ => true
       | .error _ => false
-    if seeded then authenticated fx g "import" "Import this wallet's recovery phrase" act
-    else background fx g "import" act
+    if seeded then authenticated fx g (.wallet .importWallet) "Import this wallet's recovery phrase" act
+    else background fx g (.wallet .importWallet) act
   | .finishOnboarding _ => discard <| IO.asTask b.finishOnboarding
-  | .renameWallet g name => background fx g "rename" do
+  | .renameWallet g name => background fx g (.wallet .sync) do
       match ← (b.renameWallet name).toBaseIO with
       | .ok () =>
         tellWallets b fx g (← loadSettings).network
         return .renamed g none
       | .error e => return .renamed g (some (toString e))
-  | .deleteWallet g => background fx g "delete" do
+  | .deleteWallet g => background fx g (.wallet .delete) do
       -- the wallet open when this was asked: another opened since is not the one meant
       if let some (_, network, _) ← openPlace.get then discard <| placeDir g network
       b.deleteWallet
@@ -375,23 +377,23 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
 def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
   | .refresh g => do
-      background fx g "refresh" do
+      background fx g (.wallet .sync) do
         let (s, p) ← b.snapshot
         return .snapshot g s p
-      background fx g "refresh" do return .records g (← b.records)
-      background fx g "multisigOverview" do return .multisig g (← b.multisigOverview)
+      background fx g (.wallet .sync) do return .records g (← b.records)
+      background fx g (.multisig .overview) do return .multisig g (← b.multisigOverview)
       -- `refresh()` ends by scheduling the iCloud backup's update (and a preparation when due)
       discard <| IO.asTask (try b.cloudTick catch _ => pure ())
-  | .records g => background fx g "refresh" do return .records g (← b.records)
-  | .syncNow g => background fx g "sync" do
+  | .records g => background fx g (.wallet .sync) do return .records g (← b.records)
+  | .syncNow g => background fx g (.wallet .sync) do
       b.syncNow
       let (s, p) ← b.snapshot
       return .snapshot g s p
-  | .retryPeers g => background fx g "sync" do
+  | .retryPeers g => background fx g (.wallet .sync) do
       b.retryPeers
       let (s, p) ← b.snapshot
       return .snapshot g s p
-  | .reconnect g s => background fx g "sync" do
+  | .reconnect g s => background fx g (.wallet .sync) do
       b.reconnect s
       let (st, p) ← b.snapshot
       return .snapshot g st p
@@ -428,31 +430,31 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
 /-- Receiving, sending, a payment's details and a fee bump. -/
 def performPayments (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
-  | .receiveAddress g fresh => background fx g "receive" do return .receiveAddress g (← b.receiveAddress fresh)
+  | .receiveAddress g fresh => background fx g (.payment .receive) do return .receiveAddress g (← b.receiveAddress fresh)
   | .watchAddress g address => discard <| IO.asTask do
       try b.watchAddress address (fun txid amount => fx.post (.unconfirmed g address txid amount)) catch _ => pure ()
   | .stopWatchingAddress => discard <| IO.asTask b.stopWatchingAddress
-  | .setReceiveLabel g address label => background fx g "label" (recordsAfter g .labelSaved (b.setReceiveLabel address label))
-  | .resolveRate g inputs _ => background fx g "rate" do
+  | .setReceiveLabel g address label => background fx g (.payment .label) (recordsAfter g .labelSaved (b.setReceiveLabel address label))
+  | .resolveRate g inputs _ => background fx g (.payment .rate) do
       return .resolvedRate g inputs (← b.resolveFeeRate inputs.priority (parseRateMilli inputs.override))
-  | .previewSend g inputs => background fx g "send" do return .previewed g inputs (← b.previewSend inputs)
+  | .previewSend g inputs => background fx g (.payment .send) do return .previewed g inputs (← b.previewSend inputs)
   | .sendPayment g inputs p =>
-      authenticated fx g "send" s!"Send {satsText p.amount} to {p.destination}" do
+      authenticated fx g (.payment .send) s!"Send {satsText p.amount} to {p.destination}" do
         let r ← b.sendPayment inputs p
         return .sent g r.txid r.derivedAddresses
-  | .rawTransaction g txid => background fx g "refresh" do return .rawTransaction g txid (← b.rawTransactionHex txid)
+  | .rawTransaction g txid => background fx g (.wallet .sync) do return .rawTransaction g txid (← b.rawTransactionHex txid)
   | .watchRelay g txid => discard <| IO.asTask do
       try b.watchRelay txid (fun e => fx.post (.relay g txid e)) catch _ => pure ()
-  | .loadPaymentDetails g txid => background fx g "payment" do
+  | .loadPaymentDetails g txid => background fx g (.payment .payment) do
       b.loadPaymentDetails txid
       return .paymentLoaded g txid
-  | .pendingFeeRate g txid => background fx g "feeBump" do
+  | .pendingFeeRate g txid => background fx g (.payment .feeBump) do
       let (milli, suggested) ← b.pendingFeeRate txid
       return .pendingRate g txid milli suggested
-  | .previewFeeBump g txid text milli => background fx g "feeBump" do
+  | .previewFeeBump g txid text milli => background fx g (.payment .feeBump) do
       return .bumpPreviewed g txid text (← b.previewFeeBump txid milli)
   | .bumpFee g txid p =>
-      authenticated fx g "feeBump" "Replace this transaction with a higher fee" do
+      authenticated fx g (.payment .feeBump) "Replace this transaction with a higher fee" do
         return .bumped g txid (← b.bumpFee txid p)
   | _ => pure ()
 
@@ -460,9 +462,9 @@ def performPayments (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
 (records-test's `settingsScreen` and `receiveScreen`). -/
 def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
-  | .catalogStatus g => background fx g "catalog" do return .catalogStored g (← b.catalogStatus)
-  | .connectedPeers g => background fx g "peers" do return .peers g (← b.connectedPeers)
-  | .resetPeers g => background fx g "peers" do
+  | .catalogStatus g => background fx g (.settings .catalog) do return .catalogStored g (← b.catalogStatus)
+  | .connectedPeers g => background fx g (.settings .peers) do return .peers g (← b.connectedPeers)
+  | .resetPeers g => background fx g (.settings .peers) do
       b.resetPeers
       return .peersReset g
   | .exportBundle g e withPhrase name =>
@@ -478,15 +480,15 @@ def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
             throw (IO.userError "The backup file could not be protected on this device.")
         return .exported g e file.toString
       -- a file that carries the recovery phrase is the phrase: it is asked for as showing the phrase is
-      if withPhrase then authenticated fx g "export" "Export your recovery phrase" act
-      else background fx g "export" act
+      if withPhrase then authenticated fx g (.settings .exportBundle) "Export your recovery phrase" act
+      else background fx g (.settings .exportBundle) act
   | .removeExport file => discard <| IO.asTask do
       -- only a staging directory, never anything else a stale path could name
       let some dir := (System.FilePath.mk file).parent | return
       if (dir.fileName.getD "").startsWith Winnow.ExportStagingFile.prefix_ then
         try IO.FS.removeDirAll dir catch _ => pure ()
   | .revealPhrase g e =>
-      authenticated fx g "reveal" "Show your recovery phrase" do
+      authenticated fx g (.settings .reveal) "Show your recovery phrase" do
         let words ← b.revealMnemonic
         let required := (← e2eRef.get).any (·.requireDeviceAuthentication)
         journal "backup.phraseRevealReady" [("deviceAuthenticationRequired", toString required)]
@@ -500,8 +502,8 @@ def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
     -- making a card reads the wallet's private key, so the device's owner is asked, as before every read of
     -- it; a card already made is read back without a key
     discard <| IO.asTask do
-      if ← (try b.hasPersonCard personID personName catch _ => pure false) then background fx g "personCard" act
-      else authenticated fx g "personCard" s!"Make {personName}’s address and card" act
+      if ← (try b.hasPersonCard personID personName catch _ => pure false) then background fx g (.people .personCard) act
+      else authenticated fx g (.people .personCard) s!"Make {personName}’s address and card" act
   | _ => pure ()
 
 /-- People and sender labels. -/
@@ -510,38 +512,40 @@ def performPeople (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .parsePaste g text => discard <| IO.asTask do
       try fx.post (.pasteParsed g text (.ok (← b.parsePaste text)))
       catch e => fx.post (.pasteParsed g text (.error (toString e)))
-  | .addPerson g name paste prov source labelTxid => background fx g "person" do
+  | .addPerson g name paste prov source labelTxid => background fx g (.people .person) do
       return .updated g (if labelTxid.isSome then .senderLabeled else .personSaved)
         (← b.addPerson name paste prov source labelTxid)
-  | .editPerson g pid name attach => background fx g "person" do
+  | .editPerson g pid name attach => background fx g (.people .person) do
       if let some (paste, prov, source) := attach then discard <| b.attachDestination pid paste prov source
       return .updated g .personSaved (← b.updateRecipient pid (some name) true)
-  | .updateRecipient g pid name saved ctx => background fx g ctx (recordsAfter g .none (b.updateRecipient pid name saved))
-  | .labelSender g txid pid => background fx g "person" (recordsAfter g .senderLabeled (b.labelSender txid pid))
-  | .removeSenderLabel g txid => background fx g "payment" (recordsAfter g .none (b.removeSenderLabel txid))
-  | .lookupSender g txid base => background fx g "person" do return .senderLookup g txid base (← b.lookupSender txid base)
+  | .updateRecipient g pid name saved fromPayment =>
+      let target : FailTarget := if fromPayment then .payment .payment else .people .recipients
+      background fx g target (recordsAfter g .none (b.updateRecipient pid name saved))
+  | .labelSender g txid pid => background fx g (.people .person) (recordsAfter g .senderLabeled (b.labelSender txid pid))
+  | .removeSenderLabel g txid => background fx g (.payment .payment) (recordsAfter g .none (b.removeSenderLabel txid))
+  | .lookupSender g txid base => background fx g (.people .person) do return .senderLookup g txid base (← b.lookupSender txid base)
   | _ => pure ()
 
 /-- Multisig accounts, their drafts, the Ledger and saved signers. -/
 def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
-  | .multisigOverview g => background fx g "multisigOverview" do return .multisig g (← b.multisigOverview)
+  | .multisigOverview g => background fx g (.multisig .overview) do return .multisig g (← b.multisigOverview)
   | .checkMultisigDescriptor g text => discard <| IO.asTask do
       try fx.post (.multisigChecked g text (.ok (← b.checkMultisigDescriptor text)))
       catch e => fx.post (.multisigChecked g text (.error (toString e)))
-  | .addMultisigAccount g name d => background fx g "multisigAdd" do
+  | .addMultisigAccount g name d => background fx g (.multisig .add) do
       let (id, registration) ← b.addMultisigAccount name d
       return .multisigAdded g id registration
-  | .removeMultisigAccount g id => background fx g "multisigAccount" do
+  | .removeMultisigAccount g id => background fx g (.multisig .account) do
       b.removeMultisigAccount id
       return .multisigRemoved g id
-  | .setAsideMultisig g => background fx g "multisigAccount" do
+  | .setAsideMultisig g => background fx g (.multisig .account) do
       b.setAsideDamagedMultisig
       return .multisig g (← b.multisigOverview)
-  | .newMultisigAddress g id => background fx g "multisigAccount" do
+  | .newMultisigAddress g id => background fx g (.multisig .account) do
       b.newMultisigReceiveAddress id
       return .multisig g (← b.multisigOverview)
-  | .createMultisigAccount g name k members rec => background fx g "multisigBuild" do
+  | .createMultisigAccount g name k members rec => background fx g (.multisig .build) do
       let (id, d, registration) ← b.createMultisigAccount name k members rec
       return .multisigCreated g id d registration
   | .registerLedger g id => discard <| IO.asTask do
@@ -549,13 +553,13 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
         b.registerLedger id
         fx.post (.ledgerRegistered g id (.ok ()))
       catch e => fx.post (.ledgerRegistered g id (.error (toString e)))
-  | .pairLedger g name => background fx g "ledgerPair" do return .ledgerPaired g (← b.pairLedger name)
-  | .addSignerKeys g name text => background fx g "signerKeys" do
+  | .pairLedger g name => background fx g (.multisig .ledgerPair) do return .ledgerPaired g (← b.pairLedger name)
+  | .addSignerKeys g name text => background fx g (.multisig .signerKeys) do
       return .signerSaved g (← b.addSignerKeys name text)
-  | .renameSigner g id name => background fx g "signer" do
+  | .renameSigner g id name => background fx g (.multisig .signer) do
       b.renameSigner id name
       return .signerRenamed g id
-  | .removeSigner g id => background fx g "signer" do
+  | .removeSigner g id => background fx g (.multisig .signer) do
       b.removeSigner id
       return .signerRemoved g id
   | .verifyLedgerAddress g id index => discard <| IO.asTask do
@@ -563,31 +567,31 @@ def performMultisig (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       catch e => fx.post (.ledgerAddressShown g id index (.error (toString e)))
   | .signAndDraft g inputs p =>
       -- "Sign and continue": one device authentication, this phone's signature, the draft filed
-      authenticated fx g "send" "Sign this multisig payment" do
+      authenticated fx g (.payment .send) "Sign this multisig payment" do
         return .drafted g (← b.signAndDraft inputs p)
   | .signDraft g e id =>
-      authenticated fx g s!"collect.{e}" "Sign this multisig payment" do
+      authenticated fx g (.multisig (.collect e)) "Sign this multisig payment" do
         b.signDraft id
         return .collected g e id
-  | .handOverDraft g e id slot => background fx g s!"collect.{e}" do
+  | .handOverDraft g e id slot => background fx g (.multisig (.collect e)) do
       -- no key is read: the other wallet signs once it is open, asked for there
       b.handOverDraft id slot
       return .handedOver g e id slot
-  | .signDraftWithLedger g e id => background fx g s!"collect.{e}" do
+  | .signDraftWithLedger g e id => background fx g (.multisig (.collect e)) do
       b.signDraftWithLedger id
       return .collected g e id
-  | .adoptDraft g e id psbt => background fx g s!"collect.{e}" do
+  | .adoptDraft g e id psbt => background fx g (.multisig (.collect e)) do
       b.adoptDraft id psbt
       return .collected g e id true
-  | .broadcastDraft g e id => background fx g s!"collect.{e}" do
+  | .broadcastDraft g e id => background fx g (.multisig (.collect e)) do
       return .draftBroadcast g e id (← b.broadcastDraft id)
-  | .discardDraft g e id => background fx g s!"collect.{e}" do
+  | .discardDraft g e id => background fx g (.multisig (.collect e)) do
       b.discardDraft id
       return .collected g e id
-  | .rebroadcastSpend g id txid => background fx g "accountSpend" do
+  | .rebroadcastSpend g id txid => background fx g (.multisig .spend) do
       b.rebroadcastSpend id txid
       return .spendHandled g id txid
-  | .abandonSpend g id txid => background fx g "accountSpend" do
+  | .abandonSpend g id txid => background fx g (.multisig .spend) do
       b.abandonSpend id txid
       return .spendHandled g id txid
   | .scanLedgers g => discard <| IO.asTask do
@@ -614,17 +618,19 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .openURL url => fx.cap "open" (Json.mkObj [("url", Json.str url)]) fun _ => .copiedExpired ""
   | .setAppearance a => discard <| IO.asTask (discard <| fx.ask "appearance" (Json.mkObj [("style", Json.str a.style)]))
   | .journal name fields => journal name fields
-  | .unlockRecords g => authenticated fx g "unlock" "Unlock Winnow's records" do
+  | .unlockRecords g => authenticated fx g (.wallet .unlock) "Unlock Winnow's records" do
       let (s, p) ← b.snapshot
       return .snapshot g s p
   | .discoverCloud => discard <| IO.asTask (try b.discoverCloudBackups catch _ => pure ())
   | .setAutomaticCloud enabled => discard <| IO.asTask (try b.setAutomaticCloudBackup enabled catch _ => pure ())
-  | .restoreCloud g n id => background fx g "cloudRestore" do
+  | .restoreCloud g n id => background fx g (.wallet .cloudRestore) do
       let dir ← placeDir g n
       if ← Real.holdsWallet dir then Real.failWith .walletAlreadyHere
-      let (walletID, verified, context) ← b.restoreCloudBackup n dir id
-      tellWallets b fx g n
-      return .cloudRestored g walletID verified context
+      match ← b.restoreCloudBackup n dir id with
+      | .cancelled => return .failed g (.wallet .cloudRestore) true ""
+      | .restored walletID verified context =>
+        tellWallets b fx g n
+        return .cloudRestored g walletID verified context
   | .suspendCloud => discard <| IO.asTask b.suspendCloud
   | .cloudScene active => discard <| IO.asTask (try b.cloudScene active catch _ => pure ())
   | .scheduleBackgroundTasks => discard <| IO.asTask do

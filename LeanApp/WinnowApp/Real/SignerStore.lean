@@ -25,32 +25,6 @@ namespace WinnowApp.RecordsReal
 open Winnow SwiftJSON
 open Tx (BitcoinNetwork)
 
-/-- `SignerStorageError`. -/
-inductive SignerStorageError where
-  | invalidState (reason : String)
-  | damaged
-  | duplicate (existingName : String)
-  | unknownSigner
-  | tooMany
-  deriving Repr, BEq, Inhabited
-
-namespace SignerStorageError
-
-def name : SignerStorageError → String
-  | .invalidState _ => "invalidState" | .damaged => "damaged" | .duplicate _ => "duplicate"
-  | .unknownSigner => "unknownSigner" | .tooMany => "tooMany"
-
-def description : SignerStorageError → String
-  | .invalidState r => s!"Invalid signer storage: {r}"
-  | .damaged => "Winnow could not safely read its signers, so they cannot be changed until the file is readable again."
-  | .duplicate n => s!"That key is already saved as {n}."
-  | .unknownSigner => "That signer is no longer on this phone."
-  | .tooMany => s!"Winnow keeps at most {SignerRecord.maximumSigners} signers."
-
-def toRecords (e : SignerStorageError) : RecordsError := .named e.name e.description
-
-end SignerStorageError
-
 /-- `SignerStore`. -/
 structure SignerStore where
   records : Array SignerRecord := #[]
@@ -71,7 +45,7 @@ def damagedStorageMessage : String :=
 def unverifiedStorageMessage : String :=
   "Winnow found a signer list it could not verify: the file was not written by Winnow on this device, or its protected key is gone. The file and protected keys were left untouched. Pair the Ledger and save the keys again, or ask for help before changing anything."
 
-def fail {α} (e : SignerStorageError) : RM α := throw e.toRecords
+def fail {α} (e : SignerStorageError) : RM α := throw (.signers e)
 def invalid {α} (reason : String) : RM α := fail (.invalidState reason)
 
 def storeSeal (keys : StoreKeyVault) : StoreSeal := { store := storeName, keys }
@@ -79,7 +53,7 @@ def storeSeal (keys : StoreKeyVault) : StoreSeal := { store := storeName, keys }
 /-- A `MultisigAccount` failure (a key that does not parse) as the screens describe it. -/
 def accountFailure : MultisigFailure → RecordsError
   | .account e => .named e.name e.description
-  | .named n => .named n n
+  | .named n => .named n "That key isn't valid."
 
 /-- `identities(of:network:)`: the compressed account public keys behind key expressions, which must all
 parse as signers on this network. -/
@@ -153,7 +127,7 @@ def configure (keys : StoreKeyVault) (path : Option System.FilePath) (network : 
   discard <| ((storeSeal keys).setAsideSwiftEra network p).run
   unless ← fileExists p do return (empty, .missing)
   let attempt : RM (Array SignerRecord) := do
-    let data ← boundedRead p maximumFileBytes (SignerStorageError.invalidState "signer file too large").toRecords
+    let data ← boundedRead p maximumFileBytes (.signers (.invalidState "signer file too large"))
     let (payload, predates) ← (storeSeal keys).read data network
     if predates then throw (.seal .unsealed)
     let decoded ← decode payload

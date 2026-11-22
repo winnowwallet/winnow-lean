@@ -90,16 +90,16 @@ def labelBackups (a : CloudApp) : IO Unit := do
   let found := (← a.controller.get).available
   let known := (← a.labels.get).filter fun (id, savedAt, _) => found.any fun b => b.id == id && b.savedAt == savedAt
   let mut labels := known.filter (·.2.2.isSome)
-  let account ← match ← a.controller.store.account.toBaseIO with
+  let account ← match ← a.controller.store.account.run with
     | .ok account => pure account
     | .error _ => a.labels.set labels; return
   for b in found.extract 0 maximumLabelled do
     if labels.any fun (id, savedAt, _) => id == b.id && savedAt == b.savedAt then continue
-    let read : IO (Option String) := do
+    let read : CloudM (Option String) := do
       let key ← a.controller.keys.load b.id
       let backup ← a.controller.store.load b.id account
-      return (← runWM (backup.shared key)).walletID
-    match ← read.toBaseIO with
+      return (← CloudM.liftWM (backup.shared key)).walletID
+    match ← read.run with
     | .ok (some wallet) => labels := labels.push (b.id, b.savedAt, some wallet)
     | _ => pure ()
   a.labels.set labels
@@ -160,11 +160,11 @@ def exportedBundle (a : CloudApp) : IO ImportBundle := do
 
 /-- `cloudContents(words:walletID:)`: the public bundle with the words put back, and the context; dropped
 when the wallet or network changed meanwhile. -/
-def cloudContents (a : CloudApp) (words walletID : String) : IO CloudBackupContents := do
+def cloudContents (a : CloudApp) (words walletID : String) : CloudM CloudBackupContents := do
   let network ← a.network
   let bundle := { (← a.exportedBundle) with mnemonic := some words }
   let state ← a.cloudAppState bundle
-  unless (← a.walletID) == some walletID && (← a.network) == network do throwCancelled
+  unless (← a.walletID) == some walletID && (← a.network) == network do throw .cancelled
   return { bundle, appState := some state.encoded }
 
 /-- `scheduleCloudBackup()`: after a refresh, while active, for the open wallet. -/
@@ -174,10 +174,10 @@ def scheduleBackup (a : CloudApp) : IO Unit := do
   let c ← a.env.get
   let (true, some w, network) := (c.active, c.wallet, c.network) | return
   a.controller.schedule do
-    unless (← a.walletID) == some w.id && (← a.network) == network do throwCancelled
+    unless (← a.walletID) == some w.id && (← a.network) == network do throw .cancelled
     let bundle ← a.exportedBundle
     let state ← a.cloudAppState bundle
-    unless (← a.walletID) == some w.id && (← a.network) == network do throwCancelled
+    unless (← a.walletID) == some w.id && (← a.network) == network do throw .cancelled
     return { bundle, appState := some state.encoded }
 
 /-- `prepareCloudBackup(words:account:)`: stage the encrypted copy (only ciphertext) while the
@@ -188,11 +188,13 @@ def prepare (a : CloudApp) (words : String) (account : Option String := none) : 
   a.attempted.modify fun l => if l.contains walletID then l else l ++ [walletID]
   a.configureCurrent
   if !(← a.controller.get).needsPreparation then return
-  try
+  let run : CloudM Unit := do
     let contents ← a.cloudContents words walletID
     a.controller.prepare contents walletID account
     a.scheduleBackup
-  catch e => if !isCancellation e then a.controller.reportPreparationFailure e
+  match ← run.run with
+  | .ok () => pure ()
+  | .error e => a.controller.reportFailure e
 
 /-- `acceptsCloudPreparation(_:network:)`. -/
 def accepts (a : CloudApp) (walletID : String) (network : Option WinnowApp.Network) : IO Bool := do
@@ -202,11 +204,11 @@ def accepts (a : CloudApp) (walletID : String) (network : Option WinnowApp.Netwo
 
 /-- `cloudRecoveryWords(walletID:)`: automatic recovery needs the words; an xprv-only or missing secret is
 `unsupportedWallet`. -/
-def recoveryWords (a : CloudApp) (walletID : String) : IO String := do
+def recoveryWords (a : CloudApp) (walletID : String) : CloudM String := do
   match ← (a.env.deps.keyStore.load walletID).run with
   | .ok (.mnemonic words) => return words
-  | .ok _ | .error (.notFound _) => CloudBackupError.unsupportedWallet.throw
-  | .error e => failText e.errorDescription
+  | .ok _ | .error (.notFound _) => CloudM.throwIssue .unsupportedWallet
+  | .error _ => CloudM.throwIssue .keychainUnavailable
 
 /-- `prepareExistingCloudBackup(walletID:network:)`: the account first (no prompt when iCloud is
 unavailable), then authentication, the words, the copy. The preparation's scope is checked before the
@@ -217,27 +219,30 @@ prepared (cloud-backup-test's `declinedDeviceCheck`, over the app's `authenticat
 def prepareExisting (a : CloudApp) (walletID : String) (network : Option WinnowApp.Network)
     (token : LeanNative.Native.EffectScope.Token) : IO Unit := do
   let live : IO Bool := do return (← a.preparation.isValid token) && (← a.accepts walletID network)
-  -- the authentication's own error, as this app reports it
-  let declined ← IO.mkRef (none : Option IO.Error)
   let authenticate : IO (LeanNative.Native.Client.Result Unit) := do
     try a.authenticate "Protect your wallet with automatic iCloud backup"; return .ok ()
-    catch e =>
-      declined.set (some e)
-      return .error { kind := .failed, name := "authentication", detail := toString e }
-  try
-    let account ← a.controller.accountForPreparation
-    if !(← live) then return
-    let r ← a.preparation.authenticated token authenticate do
-      unless ← a.accepts walletID network do return
-      let words ← a.recoveryWords walletID
-      a.prepare words (some account)
-    match r with
-    | .done () | .stale _ => pure ()
-    | .failed e => throw e
-    | .denied _ | .cancelled _ | .error _ =>
-      if let some e ← declined.get then throw e
-  catch e =>
-    if !isCancellation e && (← live) then a.controller.reportPreparationFailure e
+    catch e => return .error { kind := .failed, name := "authentication", detail := toString e }
+  let account ← match ← a.controller.accountForPreparation.run with
+    | .ok acc => pure acc
+    | .error e =>
+      if ← live then a.controller.reportFailure e
+      return
+  if !(← live) then return
+  let prepError ← IO.mkRef (none : Option CloudError)
+  let r ← a.preparation.authenticated token authenticate do
+    unless ← a.accepts walletID network do return
+    match ← (a.recoveryWords walletID).run with
+    | .ok words => a.prepare words (some account)
+    | .error e => prepError.set (some e)
+  match r with
+  | .done () =>
+    if let some e ← prepError.get then
+      if ← live then a.controller.reportFailure e
+  | .stale _ => pure ()
+  | .failed e =>
+    if ← live then a.controller.reportFailure (.failed (toString e))
+  | .denied _ | .cancelled _ | .error _ =>
+    if ← live then a.controller.reportFailure (.issue .authenticationRequired)
 
 /-- `scheduleAutomaticCloudPreparation()`: a ready wallet with no backup, once per foreground session. -/
 def schedulePreparation (a : CloudApp) : IO Unit := do
@@ -293,13 +298,13 @@ def walletChanged (a : CloudApp) : IO Unit := do
 def setAutomatic (a : CloudApp) (enabled : Bool) : IO Unit := do
   let some walletID ← a.walletID | return
   a.configureCurrent
-  try
-    a.controller.setAutomatic enabled
+  match ← (a.controller.setAutomatic enabled).run with
+  | .ok () =>
     if enabled then
       a.attempted.modify (·.erase walletID)
       a.schedulePreparation
       a.scheduleBackup
-  catch e => a.controller.reportPreparationFailure e
+  | .error e => a.controller.reportFailure e
 
 /-- `applyCloudAppState(_:)`: people, signers and labels restored; the display name and Advanced switch
 handed back to the Model (which saves the name only). -/
@@ -333,30 +338,36 @@ namespace CloudApp
 /-- `restoreCloudBackup(_:)` (after authentication here): only onto a network with no wallet; nothing
 replaces a wallet already on this phone. A declined check stops it before anything is written
 (cloud-backup-test's `declinedDeviceCheck`; restored end to end in `restoreFromICloud`). -/
-def restore (a : CloudApp) (n : WinnowApp.Network) (dir id : String) : IO CloudRestored := do
-  if (← a.walletID).isSome || !a.allows then failWith .noWallet
+def restore (a : CloudApp) (n : WinnowApp.Network) (dir id : String) : CloudM CloudRestored := do
+  if (← a.walletID).isSome || !a.allows then throw (.failed AppError.noWallet.text)
   a.restoreNotice.set none
   a.authenticate "Restore your wallet and signing key from iCloud"
   let restoration ← a.controller.restoreContents id
   let bundle := restoration.contents.bundle
-  let mut appState ← RM.toIO (CloudAppState.decode restoration.contents.appState bundle)
+  let mut appState ← CloudM.io (RM.toIO (CloudAppState.decode restoration.contents.appState bundle))
   if let some saved := appState then
     let store ← a.host.store
-    let people ← RM.toIO ((← store.read).people.planRestore saved.people)
-    let signers ← RM.toIO ((← a.multisig.signers.read).planRestore (saved.signers.getD #[]))
+    let people ← CloudM.io (RM.toIO ((← store.read).people.planRestore saved.people))
+    let signers ← CloudM.io (RM.toIO ((← a.multisig.signers.read).planRestore (saved.signers.getD #[])))
     appState := some { saved with people, signers := some signers }
-  unless (← a.walletID).isNone && (← a.network) == some n do throwCancelled
+  unless (← a.walletID).isNone && (← a.network) == some n do throw .cancelled
   let validated := appState
-  let (walletID, report) ← importDecoded a.env n dir bundle fun restoredID => do
-    unless (← a.walletID) == some restoredID && (← a.network) == some n do throwCancelled
+  let cancelled ← IO.mkRef false
+  let (walletID, report) ← CloudM.io (importDecoded a.env n dir bundle fun restoredID => do
+    unless (← a.walletID) == some restoredID && (← a.network) == some n do
+      cancelled.set true
+      return
     match validated with
     | some state => a.applyAppState state
     | none => a.restoreNotice.set (some "This older backup restores your wallet and key, but does not contain saved people or address labels.")
     a.configureCurrent
-    try
+    let resume : CloudM Unit := do
       let current ← a.cloudAppState bundle
       a.controller.resume { bundle, appState := some current.encoded } restoredID restoration.account
-    catch e => a.controller.reportResumeFailure e
+    match ← resume.run with
+    | .ok () => pure ()
+    | .error e => a.controller.reportFailure e)
+  if ← cancelled.get then throw .cancelled
   return { walletID, matchesBundle := report.map (·.matchesBundle),
            context := validated.map fun s => (s.ownDisplayName, s.advancedMode) }
 
@@ -410,7 +421,7 @@ def status (a : CloudApp) : IO CloudStatus := do
     | none, some t => some <$> devicesText follow (relativeAgo (now.toUInt64.toNat - t))
     | none, none => pure none
   return { automaticEnabled := s.automaticEnabled, enabled := s.enabled, statusTitle := s.statusTitle, lastSavedText, lastSavedAgo,
-           message := s.message, busy := s.busy, available, restoreNotice := ← a.restoreNotice.get, devicesNote }
+           issue := s.issue, busy := s.busy, available, restoreNotice := ← a.restoreNotice.get, devicesNote }
 
 /-- The backend's iCloud fields over this app (creation and import prepare the backup inside the
 authentication that read the words). -/
@@ -441,8 +452,10 @@ def install (a : CloudApp) (base : Backend) : Backend :=
     discoverCloudBackups := a.discover
     setAutomaticCloudBackup := a.setAutomatic
     restoreCloudBackup := fun n dir id => do
-      let r ← a.restore n dir id
-      return (r.walletID, r.matchesBundle, r.context)
+      match ← (a.restore n dir id).run with
+      | .ok r => return .restored r.walletID r.matchesBundle r.context
+      | .error .cancelled => return .cancelled
+      | .error e => throw (IO.userError e.description)
     cloudTick := a.tick
     cloudScene := a.sceneChanged
     suspendCloud := a.controller.suspend }

@@ -529,6 +529,10 @@ def testAnAccountFileWhoseKeyIsLockedIsReadAgainAndNeverScannedWithout : IO Unit
   host.configure signet (some url.parent.get!)
   check "the host's store is unavailable while locked, with no damage notice"
     ((← host.read).unavailable && (← host.notice.get).isNone)
+  let appLocked ← Real.MultisigApp.new keys
+  appLocked.host.configure signet (some url.parent.get!)
+  check "MultisigApp.watchScripts reports locked (not failed) while the key is locked"
+    ((← appLocked.watchScripts signet) matches .error (.locked _))
   host.readAgainIfUnavailable
   check "read again while still locked: still unavailable" (← host.read).unavailable
   locked.set false
@@ -559,6 +563,10 @@ def testADamagedAccountFileStopsTheScanUntilItIsSetAside : IO Unit := do
   host.configure signet (some dir)
   check "damaged: the host says so" ((← host.read).isDamaged && (← host.notice.get).isSome)
   refused "damaged: no scripts for a scan while the file is in place" ((← host.read).watchScripts signet |>.map (·.1)) "damaged"
+  let appDamaged ← Real.MultisigApp.new keys
+  appDamaged.host.configure signet (some dir)
+  check "MultisigApp.watchScripts reports failed (not locked) when the file is damaged"
+    ((← appDamaged.watchScripts signet) matches .error (.failed _))
   -- the model: the notice has the button, the button asks, and only the confirmation sets aside
   let noticed : Model := { stage := .ready, active := true, walletID := some "w",
                            multisig := { notice := ← host.notice.get } }
@@ -1883,7 +1891,7 @@ def testAnswersFinishAcrossTheBackground : IO Unit := do
   check "the overview is asked for in the new generation" (cs.any fun | .multisigOverview g' => g' == back.generation | _ => false)
   check "and the screen says so" (contains (rendered (stepMultisig .openBuild done).1) "Create an account" &&
     !contains (rendered done) "Creating…")
-  let (failed, _) := onHost (.failed g "multisigBuild" "the Ledger did not answer in time") back
+  let (failed, _) := onHost (.failed g (.multisig .build) false "the Ledger did not answer in time") back
   check "a failure from before the background shows too" (!failed.multisigBuild.creating &&
     failed.multisigBuild.error == some "the Ledger did not answer in time")
   -- pairing: the same
@@ -2239,7 +2247,7 @@ def testASegwitAccountWithNoAddressAtOneIndexGoesOnWorking : IO Unit := do
   check "New address goes on from the one shown"
     ((← phone.record id).nextReceiveIndex == 10 && ((← shown).bind (·.receiveAddress)) == (account.address 10).toOption)
   check "the phone's scan has every script but that place's: 59 for 30 indices"
-    ((← phone.multisig.watchScripts signet).size == 59)
+    ((← phone.multisig.watchScriptsIO signet).size == 59)
 
 /-- New address: the account's next address, the one every co-signer derives, kept across a restart. -/
 def testNewAddressMovesTheAccountOn : IO Unit := do
@@ -2520,7 +2528,7 @@ def testRefusedAddressesAndPSBTsFromAnAccount : IO Unit := do
   let paste (text : String) := Real.addPastedPSBT phone.env phone.multisig id (some mine.psbt) text
   failsWith "pasted text that is no PSBT" (paste "hello") "That text is not a valid PSBT."
   failsWith "a PSBT cut short after its magic" (paste "cHNidP8=")
-    "The operation couldn’t be completed. (WalletCore.WireError.truncated)"
+    "The PSBT contains invalid transaction data."
   let savings ← Real.createMultisigSpend phone.env phone.multisig savingsID destination 25_000 2.0 false
   failsWith "a PSBT from another account is not combined" (paste savings.psbt)
     "The PSBT's input or output count does not match its transaction."

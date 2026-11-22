@@ -112,7 +112,7 @@ def stepPeople (msg : PeopleMsg) (m : Model) : Model × List Cmd :=
       let m' := { m with shareCard := { forName := p.name, forPerson := some pid, making := true } }.present .shareCard
       (m', [.personCard g (some pid) p.name own])
     | none => (m, [])
-  | .remove pid => ({ m with recipientsError := none }, [.updateRecipient g pid none false "recipients"])
+  | .remove pid => ({ m with recipientsError := none }, [.updateRecipient g pid none false false])
 
 /-! ## View -/
 

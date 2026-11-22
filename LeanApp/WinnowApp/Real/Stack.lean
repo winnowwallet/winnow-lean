@@ -472,24 +472,30 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
     -- the accounts' scripts first, outside the pass: an account file that cannot be read now (a locked phone in
     -- a background launch) leaves its wallet out of the pass, so its scan height stays where the accounts'
     -- payments are, and the next pass reads the file again; it is a transient failure, not the wallet's
+    let watchIO (m : ProfileMultisig) : IO (Array ByteArray) := do
+      match ← m.watchScripts net with
+      | .ok xs => pure xs
+      | .error e => throw (IO.userError e.message)
     let mut wallets : Array PassWallet := #[]
     let mut openOut := false
-    match ← (openMultisig.watchScripts net).toBaseIO with
+    match ← openMultisig.watchScripts net with
     | .ok scripts => wallets := wallets.push { wallet := w, multisig := openMultisig, scripts, «from» := 0 }
-    | .error e =>
-      -- a file whose key is locked comes back by itself; a damaged one waits for the person (the notice
-      -- under Settings → Security → Multisig accounts sets it aside), and says so where sync errors are said
-      let waiting := toString e == multisigUnavailableText
+    | .error (.locked msg) =>
+      -- a file whose key is locked comes back by itself
       env.modify fun c => if c.generation == gen && c.walletSerial == serial then
-          if waiting then
-            { c with transientSyncFailures := c.transientSyncFailures + 1, transientSyncError := some (toString e) }
-          else { c with lastSyncError := some (toString e), transientSyncFailures := 0, transientSyncError := none }
+          { c with transientSyncFailures := c.transientSyncFailures + 1, transientSyncError := some msg }
+        else c
+      openOut := true
+    | .error (.failed msg) =>
+      -- a damaged file waits for the person (Settings → Security → Multisig accounts sets it aside)
+      env.modify fun c => if c.generation == gen && c.walletSerial == serial then
+          { c with lastSyncError := some msg, transientSyncFailures := 0, transientSyncError := none }
         else c
       openOut := true
     for r in riders do
-      match ← (r.multisig.watchScripts net).toBaseIO with
+      match ← r.multisig.watchScripts net with
       | .ok scripts => wallets := wallets.push { wallet := r.wallet, rider := some r, multisig := r.multisig, scripts, «from» := 0 }
-      | .error e => env.journal "sync.walletSetAside" [("walletID", r.held.id), ("error", toString e)]
+      | .error e => env.journal "sync.walletSetAside" [("walletID", r.held.id), ("error", e.message)]
     -- what another device scanned further is taken first, for the blocks this chain already has
     if maxBlocks.isNone then
       try env.hooks.headStart catch _ => pure ()
@@ -513,7 +519,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
         let begin ← p.wallet.nextScanHeight
         if begin ≥ frontier then ready := true; break
         let own ← runWM p.wallet.watchScripts
-        let accounts ← p.multisig.watchScripts net
+        let accounts ← watchIO p.multisig
         let applyOne : Net.BlockMatch → IO Unit := fun m => env.withPlaceLock do
           unless ← current p do throw (IO.userError "the wallet changed")
           write p "sync.join" (discard <| p.wallet.apply m)
@@ -525,7 +531,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
             env.journal "sync.joinWaiting" [("walletID", p.wallet.id), ("error", toString e)]
             pure (none, false)
         -- a block that paid a new address: the same blocks again for the scripts that grew, from where this began
-        let grown := (← runWM p.wallet.watchScripts).size > own.size || (← p.multisig.watchScripts net).size > accounts.size
+        let grown := (← runWM p.wallet.watchScripts).size > own.size || (← watchIO p.multisig).size > accounts.size
         if complete && grown then continue
         if let some t := through then record p (if complete then frontier else t + 1)
         if complete then
@@ -533,7 +539,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
           ready := true
         break
       if ready then
-        joined := joined.push { p with scripts := (← p.multisig.watchScripts net), «from» := ← p.wallet.nextScanHeight }
+        joined := joined.push { p with scripts := (← watchIO p.multisig), «from» := ← p.wallet.nextScanHeight }
     if joined.isEmpty then return false
     let openIn := joined.any (·.rider.isNone)
     let multisigScripts := ((joined.find? (·.rider.isNone)).map (·.scripts)).getD #[]
@@ -649,7 +655,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
       -- pass. Applying a block to the accounts again changes nothing for what they already hold.
       if openIn then
         let owed := (← env.get).accountRescanFrom
-        let nowScripts ← match ← (env.hooks.multisigWatchScripts net : IO _).toBaseIO with
+        let nowScripts ← match ← (env.hooks.multisigWatchScripts net : IO _) with
           | .ok xs => pure xs
           | .error _ => pure multisigScripts
         let known : Std.HashSet ByteArray := multisigScripts.foldl (·.insert ·) {}

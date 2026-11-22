@@ -824,7 +824,7 @@ def backgroundRuns : IO Unit := do
   let (switched, _) := (away.switchNetwork (if away.settings.network == .mainnet then .signet else .mainnet))
   let (stale, _) := onHost (.booted 0 (.opened "w")) switched
   check "Model: another network's wallet opening is still dropped" (stale.stage == .loading && stale.walletID.isNone)
-  let (failed, _) := onHost (.failed 0 "open" "The wallet's folder could not be made.") away
+  let (failed, _) := onHost (.failed 0 (.wallet .openWallet) false "The wallet's folder could not be made.") away
   check "Model: a wallet that could not be opened says so, with Retry"
     (failed.stage == .storageDamaged "The wallet's folder could not be made." && contains (LeanNative.Html.toWire (view failed)).toJson.compress "Retry")
   let ready : Model := { stage := .ready, active := true, walletID := some "w" }
@@ -977,84 +977,82 @@ def busyModel : Model :=
     signerKeys := { saving := true }
     collect := { busy := true, epoch := 4 } }
 
-/-- `Model.fail` for each context it handles: where the message lands, and the busy flags it clears; every
+/-- `Model.fail` for each target it handles: where the message lands, and the busy flags it clears; every
 other flag stays set (a failure touches only the screen that asked). -/
-def failTable : List (String × (Model → Bool) × List String) :=
+def failTable : List (FailTarget × Bool × (Model → Bool) × List String) :=
   let boom := some "boom"
-  [ ("create", (·.onboarding.error == boom), ["onboarding.busy"])
-  , ("import", (·.onboarding.error == boom), ["onboarding.busy"])
-  , ("onboarding", (·.onboarding.error == boom), ["onboarding.busy"])
-  , ("create.cancelled", (·.onboarding.error.isNone), ["onboarding.busy"])
-  , ("import.cancelled", (·.onboarding.error.isNone), ["onboarding.busy"])
-  , ("cloudRestore", (·.onboarding.restoreError == boom), ["onboarding.restoring"])
-  , ("cloudRestore.cancelled", (·.onboarding.restoreError.isNone), ["onboarding.restoring"])
-  , ("reveal.cancelled", (·.reveal.error.isNone), ["reveal.revealing"])
-  , ("receive", (·.receive.error == boom), ["receive.changing"])
-  , ("label", (·.labelEditor.error == boom), ["labelEditor.saving"])
-  , ("send", (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
+  [ (.wallet .create, false, (·.onboarding.error == boom), ["onboarding.busy"])
+  , (.wallet .importWallet, false, (·.onboarding.error == boom), ["onboarding.busy"])
+  , (.wallet .create, true, (·.onboarding.error.isNone), ["onboarding.busy"])
+  , (.wallet .importWallet, true, (·.onboarding.error.isNone), ["onboarding.busy"])
+  , (.wallet .cloudRestore, false, (·.onboarding.restoreError == boom), ["onboarding.restoring"])
+  , (.wallet .cloudRestore, true, (·.onboarding.restoreError.isNone), ["onboarding.restoring"])
+  , (.wallet .delete, false, (·.confirm == some (.deleteFailed "boom")), [])
+  , (.wallet .openWallet, false, (·.status.lastSyncError == boom), [])
+  , (.wallet .unlock, false, (·.status.lastSyncError == boom), [])
+  , (.wallet .unlock, true, (·.status.lastSyncError.isNone), [])
+  , (.wallet .sync, false, (·.status.lastSyncError == boom), [])
+  , (.payment .receive, false, (·.receive.error == boom), ["receive.changing"])
+  , (.payment .label, false, (·.labelEditor.error == boom), ["labelEditor.saving"])
+  , (.payment .send, false, (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
   -- a declined Face ID before a payment: the prompt's text shows, and Send is free again
-  , ("send.cancelled", (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
-  , ("rate", (·.send.resolvedRateMilli.isNone), [])
-  , ("settings", (·.settingsDraft.error == boom), ["settingsDraft.resettingPeers"])
-  , ("peers", (·.settingsDraft.error == boom), ["settingsDraft.resettingPeers"])
-  , ("delete", (·.confirm == some (.deleteFailed "boom")), [])
-  , ("catalog", (·.settingsDraft.catalog.isNone), [])
-  , ("payment", (·.payment.error == boom), ["payment.loading"])
-  , ("feeBump", (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
-  , ("feeBump.cancelled", (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
-  , ("export", fun m => m.exportState.error == boom && m.exportState.file.isNone, ["exportState.busy"])
-  , ("reveal", (·.reveal.error == boom), ["reveal.revealing"])
-  , ("personCard", (·.shareCard.error == boom), ["shareCard.making"])
+  , (.payment .send, true, (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
+  , (.payment .rate, false, (·.send.resolvedRateMilli.isNone), [])
+  , (.payment .payment, false, (·.payment.error == boom), ["payment.loading"])
+  , (.payment .feeBump, false, (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
+  , (.payment .feeBump, true, (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
+  , (.settings .peers, false, (·.settingsDraft.error == boom), ["settingsDraft.resettingPeers"])
+  , (.settings .catalog, false, (·.settingsDraft.catalog.isNone), [])
+  , (.settings .exportBundle, false, fun m => m.exportState.error == boom && m.exportState.file.isNone, ["exportState.busy"])
+  , (.settings .exportBundle, true, (·.exportState.error.isNone), ["exportState.busy"])
+  , (.settings .reveal, false, (·.reveal.error == boom), ["reveal.revealing"])
+  , (.settings .reveal, true, (·.reveal.error.isNone), ["reveal.revealing"])
+  , (.people .personCard, false, (·.shareCard.error == boom), ["shareCard.making"])
   -- a declined Face ID before a card is made: nothing is said, and the button is free again
-  , ("personCard.cancelled", (·.shareCard.error.isNone), ["shareCard.making"])
-  , ("person", (·.person.error == boom), ["person.saving", "person.inferring"])
-  , ("recipients", (·.recipientsError == boom), [])
-  , ("multisigAdd", (·.multisigAdd.error == boom), ["multisigAdd.saving"])
-  , ("multisigBuild", (·.multisigBuild.error == boom), ["multisigBuild.creating"])
-  , ("multisigAccount", (·.multisigAccountError == boom), [])
-  , ("accountSpend", (·.payment.error == boom), [])
-  , ("ledgerPair", (·.ledgerPair.error == boom), ["ledgerPair.pairing"])
-  , ("signerKeys", (·.signerKeys.error == boom), ["signerKeys.saving"])
-  , ("signer", (·.signerDetail.error == boom), [])
-  , ("multisigOverview", (·.status.lastSyncError.isNone), [])
-  , ("collect.4", (·.collect.error == boom), ["collect.busy", "spendingInFlight"])
-  , ("collect.4.cancelled", (·.collect.error.isNone), ["collect.busy", "spendingInFlight"])
+  , (.people .personCard, true, (·.shareCard.error.isNone), ["shareCard.making"])
+  , (.people .person, false, (·.person.error == boom), ["person.saving", "person.inferring"])
+  , (.people .recipients, false, (·.recipientsError == boom), [])
+  , (.multisig .overview, false, (·.status.lastSyncError.isNone), [])
+  , (.multisig .add, false, (·.multisigAdd.error == boom), ["multisigAdd.saving"])
+  , (.multisig .build, false, (·.multisigBuild.error == boom), ["multisigBuild.creating"])
+  , (.multisig .account, false, (·.multisigAccountError == boom), [])
+  , (.multisig .spend, false, (·.payment.error == boom), [])
+  , (.multisig .ledgerPair, false, (·.ledgerPair.error == boom), ["ledgerPair.pairing"])
+  , (.multisig .signerKeys, false, (·.signerKeys.error == boom), ["signerKeys.saving"])
+  , (.multisig .signer, false, (·.signerDetail.error == boom), [])
+  , (.multisig (.collect 4), false, (·.collect.error == boom), ["collect.busy", "spendingInFlight"])
+  , (.multisig (.collect 4), true, (·.collect.error.isNone), ["collect.busy", "spendingInFlight"])
   -- an earlier collection run's failure: dropped, though the spend it held is free again
-  , ("collect.3", (·.collect.error.isNone), ["spendingInFlight"])
-  -- what no screen asked for falls through to the sync error line
-  , ("refresh", (·.status.lastSyncError == boom), [])
-  , ("sync", (·.status.lastSyncError == boom), [])
-  , ("open", (·.status.lastSyncError == boom), [])
-  , ("somethingNew", (·.status.lastSyncError == boom), []) ]
+  , (.multisig (.collect 3), false, (·.collect.error.isNone), ["spendingInFlight"]) ]
 
 /-- #48: each failure reaches the screen that asked and clears that screen's busy flags, through `onHost`
 as `perform` posts it; the screens then show it. -/
 def failuresReachTheirScreens : IO Unit := do
   for (name, flag) in busyFlags do
     check s!"fail: the busy model has {name} set" (flag busyModel)
-  for (ctx, landed, clears) in failTable do
-    let (m, cs) := onHost (.failed busyModel.generation ctx "boom") busyModel
-    check s!"fail {ctx}: the message lands on its screen" (landed m && cs.isEmpty)
+  for (target, cancelled, landed, clears) in failTable do
+    let label := s!"{reprStr target}{if cancelled then ".cancelled" else ""}"
+    let (m, cs) := onHost (.failed busyModel.generation target cancelled "boom") busyModel
+    check s!"fail {label}: the message lands on its screen" (landed m && cs.isEmpty)
     for (name, flag) in busyFlags do
-      if clears.contains name then check s!"fail {ctx}: clears {name}" (!flag m)
-      else check s!"fail {ctx}: leaves {name}" (flag m)
-  -- a cancelled restore leaves an earlier message alone; a cancelled iCloud prompt says nothing
+      if clears.contains name then check s!"fail {label}: clears {name}" (!flag m)
+      else check s!"fail {label}: leaves {name}" (flag m)
+  -- a cancelled restore leaves an earlier message alone
   let restoring := { busyModel with onboarding := { busyModel.onboarding with restoreError := some "earlier" } }
-  check "fail cloudRestore.cancelled: keeps what the restore said" ((restoring.fail "cloudRestore.cancelled" "x").onboarding.restoreError == some "earlier")
-  check "fail cloudRestore: a CancellationError says nothing" ((busyModel.fail "cloudRestore" "Winnow.CancellationError").onboarding.restoreError.isNone)
+  check "fail cloudRestore.cancelled: keeps what the restore said"
+    ((restoring.fail (.wallet .cloudRestore) true "x").onboarding.restoreError == some "earlier")
   -- the collection step only while the scene is active
-  let away := (busyModel.fail "collect.4" "boom")
+  let away := (busyModel.fail (.multisig (.collect 4)) false "boom")
   check "fail collect: the active scene's run shows" (away.collect.error == some "boom")
-  let background := { busyModel with active := false }.fail "collect.4" "boom"
+  let background := { busyModel with active := false }.fail (.multisig (.collect 4)) false "boom"
   check "fail collect: not while in the background" (background.collect.busy && background.collect.error.isNone && !background.spendingInFlight)
-  check "fail collect: a context that is not a number is an earlier run's" ((busyModel.fail "collect.x" "boom").collect.busy)
   -- another wallet's failure is dropped (a network switch since)
   let (switched, _) := busyModel.switchNetwork .mainnet
-  let (other, _) := onHost (.failed busyModel.generation "send" "boom") { switched with send := { sending := true } }
+  let (other, _) := onHost (.failed busyModel.generation (.payment .send) false "boom") { switched with send := { sending := true } }
   check "fail: another wallet's failure is dropped" (other.send.sending && other.send.error.isNone)
   -- the screens show it: Send's review, the fee bump, Pair a Ledger, the label editor
   let sending := { readyModel "w" with send := { sending := true, preview := none }, spendingInFlight := true }.present .send
-  let (m, _) := onHost (.failed 0 "send" Real.AppError.sendReviewChanged.text) sending
+  let (m, _) := onHost (.failed 0 (.payment .send) false Real.AppError.sendReviewChanged.text) sending
   check "fail send: Send shows why, and can be used again" (contains (rendered m) Real.AppError.sendReviewChanged.text && !m.send.sending)
   let replacedRow : HistoryItem := { txid := "tt", height := 0, received := 0, spent := 1000, fee := some 100, replacedBy := some "rr" }
   let sent := { (readyModel "w") with send := { sentTxid := some "tt" } }.present .send
@@ -1068,15 +1066,15 @@ def failuresReachTheirScreens : IO Unit := do
   let bump : FeeBump := { txid := "tt", bumping := true, targetText := "5", reviewed := some ("5", review) }
   let bumping := { readyModel "w" with feeBump := bump }.present .feeBump
   check "fail feeBump: the sheet says Signing while it runs" (contains (rendered bumping) "Signing & broadcasting")
-  let (m, _) := onHost (.failed 0 "feeBump" "The replacement was refused") bumping
+  let (m, _) := onHost (.failed 0 (.payment .feeBump) false "The replacement was refused") bumping
   check "fail feeBump: the sheet shows it and offers Sign & replace again"
     (contains (rendered m) "The replacement was refused" && contains (rendered m) "Sign & replace" && !m.spendingInFlight)
   let pairing := { readyModel "w" with routes := [.ledgerPair], ledgerPair := { name := "Nano X", pairing := true } }
-  let (m, _) := onHost (.failed 0 "ledgerPair" "No Ledger answered") pairing
+  let (m, _) := onHost (.failed 0 (.multisig .ledgerPair) false "No Ledger answered") pairing
   check "fail ledgerPair: Pair a Ledger shows it, Pair again" (contains (rendered m) "No Ledger answered" && contains (rendered m) "\"Pair\"")
-  let unknown := (onHost (.failed 0 "somethingNew" "the sync line") (readyModel "w")).1
-  check "fail: an unknown context is a sync problem on the home" (contains (rendered unknown) "Sync problem")
-  check "fail: and shows on the Sync screen" (contains (LeanNative.Html.toWire (.list (syncSections unknown) : H)).toJson.compress "the sync line")
+  let syncErr := (onHost (.failed 0 (.wallet .sync) false "the sync line") (readyModel "w")).1
+  check "fail: a sync failure is a sync problem on the home" (contains (rendered syncErr) "Sync problem")
+  check "fail: and shows on the Sync screen" (contains (LeanNative.Html.toWire (.list (syncSections syncErr) : H)).toJson.compress "the sync line")
 
 /-! ### Settings (#44) -/
 
@@ -1540,7 +1538,7 @@ def homeScreens (sh : Shell) (backend : Backend) (walletID robertID bobAddress o
   check "unstored: Loading… meanwhile" (contains (rendered m) "Loading payment details")
   let (m, cs) := onHost (.paymentLoaded m.generation t3) m
   check "unstored: loaded, the wallet read again" (!m.payment.loading && cs.any (· matches .refresh _))
-  let (failed, _) := onHost (.failed m.generation "payment" "The peer did not send it.") { m with payment := { loading := true } }
+  let (failed, _) := onHost (.failed m.generation (.payment .payment) false "The peer did not send it.") { m with payment := { loading := true } }
   check "unstored: a failure shows, with Load payment details again"
     (contains (rendered failed) "The peer did not send it." && contains (rendered failed) "Load payment details")
   check "unstored: not while syncing" (stepHome .loadPayment { failed with status := { failed.status with syncing := true } }).2.isEmpty
@@ -1553,11 +1551,9 @@ def homeScreens (sh : Shell) (backend : Backend) (walletID robertID bobAddress o
   check "payment: unfolded, the txid in full and View transaction" (contains (rendered adv) t1 && contains (rendered adv) "View transaction")
   let (adv2, _) := stepHome (.openPayment t2) (stepHome .pop adv).1
   check "payment: no Bump fee for a payment received" (!contains (rendered adv2) "Bump fee")
-  -- a payment gone from the history, and the Back up page
+  -- a payment gone from the history
   let (gone, _) := stepHome (.openPayment (hex (ByteArray.mk (Array.replicate 32 0x44)))) m
   check "gone: says so" (contains (rendered gone) "This payment is no longer in the wallet")
-  let (backup, _) := stepHome .openBackup m
-  check "Back up: the page" (backup.routes == [.backup])
 
 /-! ### The People store: payment indexes and pay-to checks (#35) -/
 
@@ -1801,32 +1797,32 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
   check "background: Restore from a file closes and forgets the text"
     (impGone.sheets.isEmpty && impGone.onboarding.importText.isEmpty && !contains (rendered impGone) "Import wallet")
 
-  -- Home's Save a backup file, the Back up page
+  -- Home stays focused on iCloud backup; manual backup files live in Settings → Backup
   let simple := readyModel walletID
-  check "Back up: Home offers it while nothing is backed up" (contains (rendered simple) "Save a backup file")
-  let (page, _) ← sh.tap (.home .openBackup) simple
+  check "Home: does not nudge a manual backup file while not backed up"
+    (!contains (rendered simple) "Save a backup file" && contains (rendered simple) Ids.homeCloudBackupButton)
+  let (page, _) ← sh.tap (.home .openSettings) simple
   let shown := rendered page
-  check "Back up: the page" (page.routes == [.backup] && contains shown "\"Back up\"" &&
-    contains shown "A backup file is a copy you keep yourself." && contains shown "Save a backup file")
-  check "Back up: Show recovery phrase and the iCloud control, the words themselves hidden"
-    (contains shown "Show recovery phrase" && contains shown "iCloud" && !showsWords shown)
+  check "Settings → Backup: offers backup file and recovery phrase, words hidden"
+    (page.routes == [.settings] && contains shown "A backup file is a copy you keep yourself." &&
+     contains shown "Save a backup file" && contains shown "Show recovery phrase" && contains shown "iCloud" && !showsWords shown)
   let (page, _) ← sh.tap (.backup .openExport) page
-  check "Back up: Save a backup file opens the file sheet over the page"
-    (page.topSheet == some .exportBundle && contains (rendered page) "Create backup file" && contains (rendered page) "\"Back up\"")
+  check "Backup file: opens the file sheet over Settings"
+    (page.topSheet == some .exportBundle && contains (rendered page) "Create backup file")
   let (page, _) ← sh.tap (.backup (.setIncludeMnemonic true)) page
-  check "Back up: including the phrase says what that means" (contains (rendered page) "This file includes your phone’s signing key.")
+  check "Backup file: including the phrase says what that means" (contains (rendered page) "This file includes your phone’s signing key.")
   let (page, _) ← sh.tap (.backup .createExport) page
-  check "Back up: and asks first" (contains (rendered page) "Include the recovery phrase?" && page.exportState.file.isNone)
+  check "Backup file: and asks first" (contains (rendered page) "Include the recovery phrase?" && page.exportState.file.isNone)
   let (page, _) ← sh.tap (.backup .confirmExport) page
-  let some file := page.exportState.file | check "Back up: the file is ready" false; return
-  check "Back up: the file is ready to share" (contains (rendered page) "Backup ready" &&
+  let some file := page.exportState.file | check "Backup file: the file is ready" false; return
+  check "Backup file: the file is ready to share" (contains (rendered page) "Backup ready" &&
     contains (rendered page) "Includes your recovery words. Keep this file private.")
   let bundle ← IO.FS.readFile file
   let (page, cs) := step .closeSheet page
   let (page, _) ← sh.run page cs
   let (home, _) ← sh.tap (.home .pop) page
-  check "Back up: closing the sheet, then Back, is Home" (page.sheets.isEmpty && home.routes.isEmpty &&
-    contains (rendered home) "Save a backup file")
+  check "Backup file: closing the sheet, then Back, is Home" (page.sheets.isEmpty && home.routes.isEmpty &&
+    !contains (rendered home) "Save a backup file")
 
   -- a new phone restores it: the import sheet through to the verification report
   let restoreRoot := root / "screens-restore"

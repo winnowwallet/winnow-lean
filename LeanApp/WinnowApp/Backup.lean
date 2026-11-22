@@ -55,7 +55,7 @@ def stepCloud (msg : CloudMsg) (m : Model) : Model × List Cmd :=
 /-- The iCloud backup's state in a word or two, for the Settings row: "Backed up 5 min ago", "Off",
 "Not available" (a build without the iCloud entitlement). -/
 def cloudRowStatus (c : CloudStatus) : String :=
-  if c.message == some cloudMissingEntitlementText then "Not available"
+  if c.issue == some .unavailableInBuild then "Not available"
   else if !c.automaticEnabled then "Off"
   else if c.statusTitle == "Backed up" then
     match c.lastSavedAgo with | some ago => s!"Backed up {ago} ago" | none => "Backed up"
@@ -73,17 +73,25 @@ def backupSection (m : Model) : H :=
        (Html.symbol "key" (.button "Show recovery phrase" .plain (if m.walletID.isNone || m.reveal.revealing then none else some (.backup .reveal))))] ++
      (if m.hasSheet .revealPhrase then [] else errorRows m.reveal.error))
 
-/-- BeginnerHomeView's Backup section: the iCloud backup's state, and the manual file while it is not
-backed up. -/
+/-- Home's Backup section: compact iCloud backup status. Actionable issues and off-state link to iCloud
+backup settings; transient offline retries stay quiet; manual backup files stay in Settings → Backup. -/
 def beginnerBackupSection (m : Model) : H :=
   let c := m.cloud
+  let icon := if c.statusTitle == "Backed up" then "checkmark.icloud"
+              else if !c.automaticEnabled || c.issue == some .unavailableInBuild then "icloud.slash"
+              else "icloud"
+  let actionable := match c.issue with
+    | some i => if i.isTransient then none else some i
+    | none => none
+  let showLink :=
+    c.issue != some .unavailableInBuild &&
+    (!c.automaticEnabled || actionable.isSome || c.statusTitle == "Not backed up")
   .section "Backup" ""
-    ([ .identified Ids.cloudBackupStatus (Html.symbol (if c.statusTitle == "Backed up" then "checkmark.icloud" else "icloud") (body c.statusTitle)) ] ++
+    ([ .identified Ids.cloudBackupStatus (Html.symbol icon (body c.statusTitle)) ] ++
      (match c.lastSavedText with | some t => [caption s!"Last saved {t}"] | none => []) ++
-     (match c.message with | some t => [caption t] | none => []) ++
-     (if c.statusTitle == "Not backed up" then
-       [ caption "Your wallet still works. Until iCloud backup works, keep a backup file yourself."
-       , .identified Ids.backupButton (navLink "Save a backup file" (some (.home .openBackup)) (symbol := "doc.badge.arrow.up")) ]
+     (match actionable with | some i => [caption i.message] | none => []) ++
+     (if showLink then
+       [.identified Ids.homeCloudBackupButton (navLink "iCloud backup" (some (.cloud .openBackup)) (symbol := "icloud"))]
       else []))
 
 /-- CloudBackupView (Settings → Backup → iCloud backup): the switch and the state. -/
@@ -94,14 +102,14 @@ def cloudBackupSheet (m : Model) (inner : List H) : H :=
          ([ .identified Ids.automaticCloudBackupToggle (.toggle "Automatic iCloud backup" c.automaticEnabled fun b => .cloud (.setAutomatic b))
           , .identified Ids.cloudBackupStatus (.labeled "Status" (cloudRowStatus c)) ] ++
           (match c.lastSavedText with | some t => [.labeled "Last saved to iCloud" t] | none => []) ++
-          (match c.message with | some t => [caption t] | none => []))
+          (match c.issue with | some i => [caption i.message] | none => []))
      , .section "Your other devices" "Multisig accounts and paired Ledgers follow you: each device reads the others’ backups while Winnow is open and takes what it lacks. A device none of whose wallets holds one of an account’s keys shows it as watch-only. Keys and recovery words never travel this way."
          (match c.devicesNote with
           | some t => [.identified Ids.cloudDevicesNote (caption t)]
           | none => [.identified Ids.cloudDevicesNote (caption (if c.automaticEnabled then "Not checked yet." else "Off while automatic backup is off."))])
      , .section "" ""
          [ body "Restore using the same Apple Account with iCloud and Passwords & Keychain enabled. Access to the cloud backup and its synchronized key can restore spending access."
-         , body "Turning this off leaves existing copies in iCloud. Keep a backup file too." ] ] inner (largeTitle := true)
+         , body "Turning this off leaves existing copies in iCloud." ] ] inner (largeTitle := true)
 
 /-- A saved backup as the restore list names it: which wallet, where that could be read, and when it was saved. -/
 def restoreLabel (b : CloudBackupInfo) : String :=
@@ -128,12 +136,7 @@ def cloudRestoreSheet (m : Model) (inner : List H) : H :=
           [ .button "Check again" .plain (if o.restoring || c.busy then none else some (.cloud .checkAgain)) ])]) ++
      (if o.restoring || c.busy then [.progress (if o.restoring then "Restoring wallet…" else "Checking iCloud…")] else []) ++
      (match o.restoreError with | some e => [caption e] | none => []) ++
-     (match c.message with | some t => [caption t] | none => [])) inner (largeTitle := true)
-
-/-- The home's Back up page (its "Save a backup file" while iCloud has not backed up): the Backup section
-(records-test's `backupScreens`). -/
-def backupScreen (m : Model) (overlays : List H) : H :=
-  .screen "Back up" (some (.home .pop)) ([.list [backupSection m]] ++ overlays)
+     (match c.issue with | some i => [caption i.message] | none => [])) inner (largeTitle := true)
 
 def exportSheet (m : Model) (inner : List H) : H :=
   let e := m.exportState
@@ -167,7 +170,7 @@ def wordGrid (words : List String) (captured : Bool := false) : H :=
 /-- RevealPhraseView: the words and Copy (records-test's `backupScreens`). -/
 def revealSheet (m : Model) (inner : List H) : H :=
   formSheet "Recovery phrase" (some .closeSheet) [closeBar "Close"]
-    [ .section "" "These words are this phone's signing key. Keep them private. Winnow cannot restore from the words alone; save a backup file for your history."
+    [ .section "" "These words are this phone's signing key. Keep them private. Winnow cannot restore from the words alone; use iCloud backup or a backup file for your history."
          [wordGrid m.reveal.words m.captured]
      , .section "" "Copying is less private than paper. The clipboard item stays on this device and expires after two minutes."
          [.button (if m.reveal.copied then "Copied for 2 minutes" else "Copy recovery phrase") .plain (some (.backup .copyPhrase))] ]
