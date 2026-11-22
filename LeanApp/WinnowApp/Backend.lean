@@ -61,6 +61,7 @@ in hand, onboarding finished; the wallet's id. No phrase checklist: the words ar
   sentence for a build without one. -/
   catalogStatus : IO String
   connectedPeers : IO (List PeerInfo)
+  peerIssues : IO (List (String × String)) := pure []
   resetPeers : IO Unit
   /-- The ImportBundle JSON (watch-only unless asked). -/
   exportBundle : (includeMnemonic : Bool) → IO String

@@ -719,6 +719,33 @@ def syncBookkeepingScreens : IO Unit := do
   let checked := (LeanNative.Html.toWire (.list (syncSections mm) : H)).toJson.compress
   check "Sync screen: last checked" (contains checked "Chain last checked 5 min ago")
   check "Sync screen: Background App Refresh off" (contains checked "Background App Refresh is off, so Winnow checks the chain only while open.")
+  -- Header tip, always-visible Filter scan, Copy sync diagnostics, and Recent peer issues
+  let diagModel : Model :=
+    { stage := .ready, appVersion := some "0.9.31 (38)",
+      phase := .headers 945100 945102,
+      status := { syncing := true, tipHeight := 945100, nextScanHeight := 944000, peerCount := 3,
+                  lastCheckedAgo := some "5 min", lastSyncError := some "timeout" },
+      settingsDraft :=
+        { peers := [{ endpoint := "1.2.3.4:8333", userAgent := "/Satoshi:28.0.0/", startHeight := 945102, feeFilter := some 1000, network := .clearnet }],
+          peerIssues := [("5.6.7.8:8333", "claimed height 945102 at handshake but delivered no headers past 945100 on 2 passes")] } }
+  let diagWire := (LeanNative.Html.toWire (.list (syncSections diagModel) : H)).toJson.compress
+  check "Sync screen: shows Header tip and Filter scan even while checking headers"
+    (contains diagWire Ids.syncHeaderTip && contains diagWire "945,100 / 945,102" &&
+     contains diagWire "block 944,000 of 945,100" && contains diagWire Ids.copySyncDiagnosticsButton)
+  let diagText := syncDiagnosticsText diagModel
+  check "Sync diagnostics: includes telemetry, peers, and peer issues without wallet secrets"
+    (contains diagText "Winnow 0.9.31 (38) (Mainnet)" &&
+     contains diagText "Header tip: 945,100 / 945,102" &&
+     contains diagText "Filter scan: block 944,000 of 945,100" &&
+     contains diagText "1.2.3.4:8333" &&
+     contains diagText "5.6.7.8:8333" &&
+     !contains diagText "walletID")
+  let (_, openSyncCmds) := stepHome (.openNetwork .sync) { stage := .ready }
+  check "Sync screen: opening Sync loads connected peers and recent issues for diagnostics"
+    (openSyncCmds.any (· matches .connectedPeers _))
+  let peersWire := (LeanNative.Html.toWire (.list (peersSections diagModel) : H)).toJson.compress
+  check "Peers screen: shows Recent peer issues section when issues exist"
+    (contains peersWire Ids.peerIssuesSection && contains peersWire "5.6.7.8:8333" && contains peersWire "on 2 passes")
   check "relative: under a minute" (relativeAgo 59 == "under a minute")
   check "relative: hours and minutes" (relativeAgo (2 * 3600 + 3 * 60) == "2 hr, 3 min")
   check "relative: days" (relativeAgo (3 * 86400 + 4 * 3600) == "3 days, 4 hr" && relativeAgo 86400 == "1 day")

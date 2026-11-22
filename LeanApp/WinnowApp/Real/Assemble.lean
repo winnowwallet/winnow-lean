@@ -75,6 +75,7 @@ def Env.backend (env : Env) : Backend :=
     bumpFee := fun txid p => bumpFee env txid p
     catalogStatus := catalogStatus env
     connectedPeers := connectedPeers env
+    peerIssues := peerIssues env
     resetPeers := resetPeers env
     exportBundle := fun withPhrase => exportBundle env withPhrase
     revealMnemonic := revealMnemonic env

@@ -474,7 +474,7 @@ def performPayments (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
 def performSettings (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   match c with
   | .catalogStatus g => background fx g (.settings .catalog) do return .catalogStored g (← b.catalogStatus)
-  | .connectedPeers g => background fx g (.settings .peers) do return .peers g (← b.connectedPeers)
+  | .connectedPeers g => background fx g (.settings .peers) do return .peers g (← b.connectedPeers) (← b.peerIssues)
   | .resetPeers g => background fx g (.settings .peers) do
       b.resetPeers
       return .peersReset g

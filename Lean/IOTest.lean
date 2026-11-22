@@ -977,7 +977,52 @@ def headerTurnChecks : IO Unit := do
     heights := heights.push (← store.height)
   check "header sync: two passes ask two seats, and the chain has the headers one of them held back"
     (seated && heights.back! == 5 && (← pool.connectedPeers).size == 2) s!"heights {heights}"
+  -- catching up across all seated peers lands on the VERY FIRST pass even when the gap is only 2 headers
+  check "header sync: all seated peers are asked on the first pass (no 100-block threshold)"
+    (heights[0]? == some 5) s!"heights {heights}"
   pool.stop
+  -- inflated handshake height (+2) is capped in effectiveStartHeight after an empty reply, and a non-manual
+  -- peer that repeats empty replies past its claimed height is evicted on the second pass
+  let headers2 := minedHeaders 3
+  let tip2 := headers2.back!.hash
+  let honest2 ← fakeNode regtest (startHeight := 3) (answer := fun send m => do
+    if let .getheaders r := m then
+      send (.headers (if r.locatorHashes[0]? == some tip2 then #[] else headers2)))
+  let inflated ← fakeNode regtest (startHeight := 5) (answer := fun send m => do
+    if m matches .getheaders _ then send (.headers #[]))
+  let pool2 ← PeerPool.new { regtest with dnsSeeds := #["seed.local"] }
+    (peerCount := 2) (manualPeers := #[honest2])
+    (seedResolver := some { lookup := fun _ _ _ => pure #[inflated] })
+  pool2.start
+  let seated2 ← waitUntil 5_000 (do return (← pool2.connectedPeers).size == 2)
+  let store2 ← runNet "inflated headers" (HeaderStore.open regtest none)
+  discard <| runNet "inflated pass 1" (pool2.syncHeaders store2 (timeoutPerPeerMs := 3_000))
+  let effAfter1 ← match (← pool2.connectedPeers).find? (·.endpoint == inflated) with
+    | some p => some <$> pool2.effectiveStartHeight p
+    | none => pure none
+  check "header sync: empty reply caps inflated handshake height (+2) at current tip"
+    (seated2 && (← store2.height) == 3 && effAfter1 == some 3 && (← pool2.connectedPeers).size == 2)
+    s!"tip {← store2.height}, eff {effAfter1}, peers {(← pool2.connectedPeers).size}"
+  discard <| runNet "inflated pass 2" (pool2.syncHeaders store2 (timeoutPerPeerMs := 3_000))
+  let reasons2 ← pool2.rejectionReasons
+  check "header sync: non-manual peer claiming > tip + 1 that replies empty twice is evicted and logged"
+    (!(← pool2.connectedPeers).any (·.endpoint == inflated) &&
+     (reasons2[inflated]?.map (fun r => decide ((r.splitOn "on 2 passes").length > 1))).getD false)
+    s!"peers {(← pool2.connectedPeers).size}, reason {reasons2[inflated]?}"
+  pool2.stop
+  -- persisted knownGood peers are shuffled rather than dialed in fixed insertion order
+  let tmpGood := System.FilePath.mk "/tmp" / s!"winnow-shuffle-good-{← IO.monoMsNow}.json"
+  let savedPeers : Array PeerCandidate :=
+    #["51.15.0.1", "51.16.0.1", "51.17.0.1", "51.18.0.1", "51.19.0.1", "51.20.0.1"].map fun h =>
+      { endpoint := { host := h, port := 8333 }, source := .persisted }
+  IO.FS.writeBinFile tmpGood (PersistedPeers.encode savedPeers)
+  let poolGood ← PeerPool.new NetworkParams.mainnet (peersFile := some tmpGood) (seedResolver := some noSeeds)
+  let mut goodFirsts : Array PeerEndpoint := #[]
+  for _ in [0:20] do
+    if let some first := (← poolGood.localCandidates {})[0]? then goodFirsts := goodFirsts.push first.endpoint
+  try IO.FS.removeFile tmpGood catch _ => pure ()
+  check "peer selection: persisted knownGood peers are shuffled"
+    (goodFirsts.toList.eraseDups.length > 1) s!"{goodFirsts.toList.eraseDups.length} distinct firsts"
 
 /-- Finding 8, filters: a peer whose filters fail the scan is rested, so the next pass asks another. -/
 def restedScanPeerChecks : IO Unit := do

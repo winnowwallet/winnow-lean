@@ -391,6 +391,12 @@ structure Rider where
   serial : Nat
   multisig : ProfileMultisig
 
+/-- Which stage `syncOnce` is currently executing, so `phaseOf` does not mask an active filter scan behind
+`"Checking headers…"` when new blocks arrive mid-scan. -/
+inductive SyncActivity where
+  | idle | headers | filters
+  deriving Repr, BEq, Inhabited
+
 /-- The backend's state (AppModel's stored properties that are not UI). -/
 structure Core where
   network : Option WinnowApp.Network := none
@@ -423,6 +429,8 @@ structure Core where
   buildingStack : Bool := false
   /-- `status.syncing` -/
   syncing : Bool := false
+  /-- Which stage `syncOnce` is currently running (`headers` vs `filters`). -/
+  syncActivity : SyncActivity := .idle
   /-- `operationsInFlight.contains(.spending)` -/
   spending : Bool := false
   /-- Identity of the current sync loop (`syncTask`); bumping it cancels the loop. -/

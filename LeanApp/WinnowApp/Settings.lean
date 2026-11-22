@@ -194,7 +194,10 @@ def peersSections (m : Model) : List H :=
        (if d.peers.isEmpty then [caption "No peers connected."] else []) ++
        [ .button "Refresh" .plain (some (.settings .refreshPeers))
        , .button (if d.resettingPeers then "Resetting…" else "Reset and shuffle peers") .plain
-           (if d.resettingPeers then none else some (.settings .askResetPeers)) ]) ]
+           (if d.resettingPeers then none else some (.settings .askResetPeers)) ]) ] ++
+  (if d.peerIssues.isEmpty then [] else
+    [.identified Ids.peerIssuesSection (.section "Recent peer issues" "Peers recently cooled down or dropped by Winnow's checks."
+      (d.peerIssues.map fun (endpoint, reason) => .col [literal endpoint, caption reason]))])
 
 /-- Settings → Network → Block explorer. -/
 def explorerSections (m : Model) : List H :=

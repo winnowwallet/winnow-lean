@@ -1,11 +1,14 @@
 Winnow: the same wallet, rewritten in Lean
 
-New in 0.9.30
-1. Fixed iOS 26 background continued sync Live Activity: switched the wildcard identifier to `com.btcswift.app.chain-sync.*` (matching the app's bundle ID, with unique per-run task IDs), enabled automatic continuation when a foreground sync is catching up, and added a "Background sync" status line in Settings → Network → Sync so you can see right away whether iOS accepted, ran, or refused it.
+New in 0.9.31
+1. Faster, unstuck header sync: every header pass now checks all connected peers (even 1–2 blocks ahead), caps stale/inflated peer handshake heights once they reply empty, evicts non-manual peers that repeatedly fail to deliver claimed headers, and keeps showing filter scan progress if new blocks arrive mid-scan.
+2. Randomized peer selection: persisted known-good peers and each DNS seed's returned IPs are now shuffled with the system RNG before dialing.
+3. On-device sync & peer debugging: Settings → Network → Sync now shows Header tip alongside always-visible Filter scan and a privacy-safe "Copy sync diagnostics" button; Settings → Network → Peers and routing shows "Recent peer issues" when peers are cooled down or dropped.
 
-Also recent (0.9.29)
-1. Cleaner iCloud backup & plain-English errors: Home no longer nudges you to save manual backup files when iCloud isn't synced; actionable iCloud issues link straight to iCloud backup settings, while brief offline retries stay quiet. Error screens should never show raw "The operation couldn’t be completed. (WalletCore.…)" codes.
-2. Reorgs keep a pending send's change coin counted rather than showing 0 until reconfirmation.
+Also recent (0.9.29–0.9.30)
+1. iOS 26 background continued sync: fixed bundle-ID wildcard (`com.btcswift.app.chain-sync.*`) with unique per-run IDs, auto-continue on foreground catch-up, and a "Background sync" status row in Settings → Network → Sync.
+2. Cleaner iCloud backup & plain-English errors: Home no longer nudges you to save manual backup files when iCloud isn't synced; actionable iCloud issues link straight to iCloud backup settings, while brief offline retries stay quiet.
+3. Reorgs keep a pending send's change coin counted rather than showing 0 until reconfirmation.
 
 Since 0.9.28: profiles, multi-device sync, SegWit v0 multisig, and person cards.
 - Profiles: tap the open profile on Home to switch instantly, rename, or add/restore another profile; each profile keeps its own accounts and "Watching" lists the rest.

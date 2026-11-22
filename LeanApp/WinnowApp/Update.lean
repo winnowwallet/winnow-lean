@@ -211,7 +211,7 @@ def Model.onSettingsHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
   | .catalogStored g stored =>
     if m.current g then ({ m with settingsDraft := { m.settingsDraft with catalog := some stored } }, []) else (m, [])
-  | .peers g ps => if m.current g then ({ m with settingsDraft := { m.settingsDraft with peers := ps } }, []) else (m, [])
+  | .peers g ps issues => if m.current g then ({ m with settingsDraft := { m.settingsDraft with peers := ps, peerIssues := issues } }, []) else (m, [])
   | .peersReset g =>
     if !m.sameWallet g then (m, []) else
     let g := m.generation

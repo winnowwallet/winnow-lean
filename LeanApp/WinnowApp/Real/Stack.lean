@@ -292,18 +292,19 @@ def suspendAndStop (env : Env) (keepActive : Bool) : IO Unit := do
      { c with generation := c.generation + 1, active := keepActive && c.active, http := fresh, httpGateways := routing, stack := none,
               gatewayDiscovery := none, discoveringGateways := false,
               receiveWindow := none, relayWindows := #[], syncLoop := none, phaseLoop := none,
-              loopToken := c.loopToken + 1, phase := .idle })
+              loopToken := c.loopToken + 1, phase := .idle, syncActivity := .idle })
   old.cancel
   for w in windows do w.close
   if let some s := stack then s.shutdown
 
 /-! ## The phase -/
 
-/-- `bestAdvertisedTip(in:atLeast:)`. -/
+/-- `bestAdvertisedTip(in:atLeast:)`: highest effective start height across seated peers, ignoring stale
+handshake claims from peers that already answered `getheaders` with nothing. -/
 def bestAdvertisedTip (s : Stack) (tip : UInt32) : IO UInt32 := do
   let mut estimate := tip
   for peer in ← s.pool.connectedPeers do
-    let advertised ← peer.peerStartHeight
+    let advertised ← s.pool.effectiveStartHeight peer
     if advertised > 0 && advertised.toInt.toNat.toUInt32 > estimate then estimate := advertised.toInt.toNat.toUInt32
   return estimate
 
@@ -322,15 +323,21 @@ def journalPeerStatusIfChanged (env : Env) (s : Stack) (connection : ConnectionS
      ("peers", ",".intercalate (descriptions.qsort (· < ·)).toList), ("rejected", " | ".intercalate rejections.toList)]
     (·.lastPeerFingerprint) fun c fp => { c with lastPeerFingerprint := fp }
 
-/-- `updateSyncPhase()`'s computation for a stack. -/
-def phaseOf (s : Stack) (connection : ConnectionStatus) : IO SyncPhase := do
+/-- `updateSyncPhase()`'s computation for a stack. While `syncOnce` is actively scanning filters on a proven
+chain, report filter progress even if new blocks arrive mid-scan. -/
+def phaseOf (s : Stack) (connection : ConnectionStatus) (activity : SyncActivity := .idle) : IO SyncPhase := do
   if connection.connected == 0 then
     return if connection.exhausted then .peerDiscoveryFailed else .connecting 0 connection.target
   if connection.connected < connection.target && connection.dialing then
     return .connecting connection.connected connection.target
   let tip ← s.chain.height
+  let proven ← s.chain.proven
+  if proven && activity == .filters then
+    if let some f := s.filters then
+      let next ← f.nextScanHeight
+      if next ≤ tip then return .filters next.toNat tip.toNat
   let estimate ← bestAdvertisedTip s tip
-  if estimate.toNat > tip.toNat + 1 then return .headers tip.toNat estimate.toNat
+  if !proven || estimate.toNat > tip.toNat + 1 then return .headers tip.toNat estimate.toNat
   match s.filters with
   | some f =>
     let next ← f.nextScanHeight
@@ -347,7 +354,7 @@ def updateSyncPhase (env : Env) : IO SyncPhase := do
   | some s =>
     let connection ← s.pool.connectionStatus
     journalPeerStatusIfChanged env s connection
-    let p ← phaseOf s connection
+    let p ← phaseOf s connection c.syncActivity
     env.modify fun c' => if c'.generation == c.generation then { c' with phase := p } else c'
     return p
 
@@ -594,8 +601,10 @@ private def onReorg (ctx : SyncPassCtx) (joined : Array PassWallet) (fork : UInt
   -- reactivates any own send whose confirming block fell (#157)
   ctx.s.broadcaster.rollBack fork
 
-/-- Once headers are in: take any head-start from other devices, and verify each wallet's anchor against this chain. -/
+/-- Once headers are in: move the live stage to filter scanning, take any head-start from other devices, and
+verify each wallet's anchor against this chain. -/
 private def afterHeaders (ctx : SyncPassCtx) (joined : Array PassWallet) (maxBlocks : Option UInt32) : NetM (Option UInt32) := do
+  (ctx.env.modify fun c => if c.generation == ctx.gen then { c with syncActivity := .filters } else c : IO Unit)
   if maxBlocks.isNone then
     try (ctx.env.hooks.headStart : IO Unit) catch _ => pure ()
   for p in joined do
@@ -682,7 +691,8 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
       match s.filters with
       | some f =>
         if c.syncing then (none, c)
-        else (some (w, s, f, c.generation, c.walletSerial, c.dir, c.riders), { c with syncing := true, syncPasses := c.syncPasses + 1 })
+        else (some (w, s, f, c.generation, c.walletSerial, c.dir, c.riders),
+              { c with syncing := true, syncActivity := .headers, syncPasses := c.syncPasses + 1 })
       | none => (none, c)
     | _, _ => (none, c)
   let some (w, s, f, gen, serial, dir, riders) := claim | return false
@@ -755,7 +765,7 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
         else c
       return false
   finally
-    env.modify fun c => { c with syncing := false }
+    env.modify fun c => { c with syncing := false, syncActivity := .idle }
 
 /-- `startSyncLoop()`: a pass, then 45 s, until the loop's generation or token is over. -/
 def startSyncLoop (env : Env) : IO Unit := do

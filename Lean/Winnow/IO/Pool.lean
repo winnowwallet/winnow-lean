@@ -72,6 +72,10 @@ structure PoolState where
   relaxOverlayMix : Bool := false
   /-- how many header syncs have run: each begins with the next seat (`syncHeaders`) -/
   headerTurn : Nat := 0
+  /-- highest chain tip at which each peer answered `getheaders` with 0 headers (cleared once it delivers) -/
+  emptyHeaderTip : Std.HashMap PeerEndpoint UInt32 := {}
+  /-- consecutive passes where a peer claimed `startHeight > tip + 1` at handshake yet delivered 0 headers -/
+  unfulfilledClaimStrikes : Std.HashMap PeerEndpoint Nat := {}
 
 /-- The UI snapshot (`ConnectionStatus`). -/
 structure ConnectionStatus where
@@ -165,6 +169,15 @@ def randomPeer (p : PeerPool) : IO (Option PeerConnection) := do
 def source (p : PeerPool) (e : PeerEndpoint) : BaseIO (Option PeerSource) := do return (← p.state.get).knownSource[e]?
 def rejectionReason (p : PeerPool) (e : PeerEndpoint) : BaseIO (Option String) := do return (← p.state.get).lastRejection[e]?
 def rejectionReasons (p : PeerPool) : BaseIO (Std.HashMap PeerEndpoint String) := do return (← p.state.get).lastRejection
+/-- Handshake `startHeight`, capped at the tip where this peer already answered `getheaders` with nothing so a
+stale or inflated handshake claim cannot keep the UI stuck in header sync. -/
+def effectiveStartHeight (p : PeerPool) (peer : PeerConnection) : IO Int32 := do
+  let claimed ← peer.peerStartHeight
+  match (← p.state.get).emptyHeaderTip[peer.endpoint]? with
+  | some emptyAt =>
+    let cap : Int := emptyAt.toNat
+    return if claimed.toInt > cap then Int32.ofInt cap else claimed
+  | none => return claimed
 def knownGood (p : PeerPool) : BaseIO (Array PeerEndpoint) := do return (← p.state.get).knownGood
 
 def isCoolingDown (p : PeerPool) (e : PeerEndpoint) : IO Bool := do
@@ -214,12 +227,12 @@ private def interleavedCatalogEndpoints (p : PeerPool) : IO (Array PeerEndpoint)
       if h : i < l.size then out := out.push l[i]
   return out
 
-/-- Manual peers, then persisted good peers, then the shipped census, the peers a reset left (`avoidOnReset`)
-last. io-test's "reset order" checks read this order off a mainnet-shaped census. -/
+/-- Manual peers, then persisted good peers (shuffled), then the shipped census, the peers a reset left
+(`avoidOnReset`) last. io-test's "reset order" checks read this order off a mainnet-shaped census. -/
 def localCandidates (p : PeerPool) (excluded : Std.HashSet PeerEndpoint) : IO (Array PeerCandidate) := do
   let s ← p.state.get
   let mut ordered : Array PeerCandidate := p.manualPeers.map ({ endpoint := ·, source := .manual })
-  for e in s.knownGood do
+  for e in ← shuffle s.knownGood do
     if !p.manualPeers.contains e then ordered := ordered.push { endpoint := e, source := p.rememberedSource s e }
   let automatic ← p.interleavedCatalogEndpoints
   let preferred := automatic.filter (!p.avoidOnReset.contains ·)
@@ -253,7 +266,7 @@ private def launchSeedLookups (p : PeerPool) (done : EventStream DiscoveryResult
     spawn do
       let found ← try p.seedResolver.resolve seed p.params.defaultPort p.params.allowsPrivateSeedAddresses
         catch _ => pure #[]
-      done.yield (.seeds found)
+      done.yield (.seeds (← shuffle found))
   return seeds.size
 
 /-! ## Unseating -/
@@ -281,6 +294,8 @@ def evictStaleTips (p : PeerPool) : IO (Array PeerEndpoint) := do
     p.state.modify fun st => { st with
       peers := st.peers.filter (·.endpoint != peer.endpoint)
       knownGood := st.knownGood.filter (· != peer.endpoint)
+      emptyHeaderTip := st.emptyHeaderTip.erase peer.endpoint
+      unfulfilledClaimStrikes := st.unfulfilledClaimStrikes.erase peer.endpoint
       cooldownUntil := st.cooldownUntil.insert peer.endpoint deadline
       lastRejection := st.lastRejection.insert peer.endpoint
         s!"stale tip: reports height {height}, {reference - height} blocks behind our validated tip {tip}" }
@@ -298,6 +313,8 @@ private def seatArrival (p : PeerPool) (peer : PeerConnection) (endpoint : PeerE
     else
       let isNew := !s.knownGood.contains endpoint
       let s := { s with peers := s.peers.push peer, staleTipJudged := s.staleTipJudged.erase endpoint,
+                        emptyHeaderTip := s.emptyHeaderTip.erase endpoint,
+                        unfulfilledClaimStrikes := s.unfulfilledClaimStrikes.erase endpoint,
                         seatedSources := s.seatedSources.insert endpoint source }
       let s := if isNew then { s with knownGood := s.knownGood.push endpoint, knownSource := s.knownSource.insert endpoint source } else s
       (some isNew, s)
@@ -431,7 +448,7 @@ def stop (p : PeerPool) : IO Unit := do
                                      mode := .full, relaySeats := 0 })
   for (_, c) in inFlight do c.disconnect
   for c in peers do c.disconnect
-  p.state.modify fun s => { s with peers := #[], rejectedForSession := {} }
+  p.state.modify fun s => { s with peers := #[], rejectedForSession := {}, emptyHeaderTip := {}, unfulfilledClaimStrikes := {} }
   p.persistKnownGood
 
 /-- Narrows the pool to transaction relay (`enterRelayOnly(seats:)`): keeps at most `seats` of the peers it
@@ -477,7 +494,8 @@ def forgetKnownGood (p : PeerPool) : IO Unit := do
   if let some f := p.peersFile then
     if ← fileExists f then IO.FS.removeFile f
   p.state.modify fun s => { s with knownSource := {}, seatedSources := {}, staleTipJudged := {}, knownGood := #[],
-                                   cooldownUntil := {}, rejectedForSession := {}, lastRejection := {} }
+                                   cooldownUntil := {}, rejectedForSession := {}, lastRejection := {},
+                                   emptyHeaderTip := {}, unfulfilledClaimStrikes := {} }
 
 /-- Disconnects a peer that sent something wrong and refuses it for the session (a data fault). -/
 def misbehaving (p : PeerPool) (peer : PeerConnection) (reason : String) : IO Unit := do
@@ -485,6 +503,8 @@ def misbehaving (p : PeerPool) (peer : PeerConnection) (reason : String) : IO Un
   p.state.modify fun s => { s with
     peers := s.peers.filter (·.endpoint != peer.endpoint)
     knownGood := s.knownGood.filter (· != peer.endpoint)
+    emptyHeaderTip := s.emptyHeaderTip.erase peer.endpoint
+    unfulfilledClaimStrikes := s.unfulfilledClaimStrikes.erase peer.endpoint
     rejectedForSession := s.rejectedForSession.insert peer.endpoint
     lastRejection := s.lastRejection.insert peer.endpoint reason }
   p.replenish
@@ -496,6 +516,8 @@ def transportFailure (p : PeerPool) (peer : PeerConnection) (reason : String) : 
   p.state.modify fun s =>
     let failures := (s.consecutiveTransportFailures[peer.endpoint]?.getD 0) + 1
     { s with peers := s.peers.filter (·.endpoint != peer.endpoint)
+             emptyHeaderTip := s.emptyHeaderTip.erase peer.endpoint
+             unfulfilledClaimStrikes := s.unfulfilledClaimStrikes.erase peer.endpoint
              consecutiveTransportFailures := s.consecutiveTransportFailures.insert peer.endpoint failures
              cooldownUntil := s.cooldownUntil.insert peer.endpoint (now + cooldown failures)
              lastRejection := s.lastRejection.insert peer.endpoint reason }
@@ -510,37 +532,87 @@ private def requireDelivery (o : SyncOutcome) (peer : PeerConnection) (tip : UIn
   if claimed - tip.toNat > staleTipTolerance then
     throw (.headers (.badPeerResponse s!"claimed height {claimed} at handshake but delivered no headers past {tip}"))
 
+/-- Records what `peer` delivered at `tip`: clears its cap and strike count when it advances the chain; on
+an empty reply caps its handshake claim at `tip` (`effectiveStartHeight`) and counts consecutive passes
+where it still claimed `> tip + 1`. Returns `true` once it hits 2 consecutive unfulfilled passes. -/
+private def recordHeaderDelivery (p : PeerPool) (peer : PeerConnection) (o : SyncOutcome) (tip : UInt32) : IO Bool := do
+  if o.connected > 0 then
+    p.state.modify fun s => { s with
+      emptyHeaderTip := s.emptyHeaderTip.erase peer.endpoint
+      unfulfilledClaimStrikes := s.unfulfilledClaimStrikes.erase peer.endpoint }
+    return false
+  let claimed := (← peer.peerStartHeight).toInt
+  p.state.modifyGet fun s =>
+    let prevTip := s.emptyHeaderTip[peer.endpoint]?.getD 0
+    let emptyHeaderTip := s.emptyHeaderTip.insert peer.endpoint (max prevTip tip)
+    if claimed > (tip.toNat : Int) + 1 then
+      let strikes := (s.unfulfilledClaimStrikes[peer.endpoint]?.getD 0) + 1
+      (strikes ≥ 2, { s with emptyHeaderTip, unfulfilledClaimStrikes := s.unfulfilledClaimStrikes.insert peer.endpoint strikes })
+    else
+      (false, { s with emptyHeaderTip, unfulfilledClaimStrikes := s.unfulfilledClaimStrikes.erase peer.endpoint })
+
+/-- Evicts and cools down a non-manual peer that repeatedly advertised `> tip + 1` at handshake yet delivered
+no headers past `tip`. -/
+private def evictUnfulfilledPeer (p : PeerPool) (peer : PeerConnection) (tip : UInt32) : IO Bool := do
+  let st ← p.state.get
+  if st.seatedSources[peer.endpoint]? == some .manual || !st.peers.any (·.endpoint == peer.endpoint) then return false
+  let claimed := (← peer.peerStartHeight).toInt
+  peer.disconnect
+  let deadline := (← p.now) + transportCooldownCapMs
+  p.state.modify fun s => { s with
+    peers := s.peers.filter (·.endpoint != peer.endpoint)
+    knownGood := s.knownGood.filter (· != peer.endpoint)
+    emptyHeaderTip := s.emptyHeaderTip.erase peer.endpoint
+    unfulfilledClaimStrikes := s.unfulfilledClaimStrikes.erase peer.endpoint
+    cooldownUntil := s.cooldownUntil.insert peer.endpoint deadline
+    lastRejection := s.lastRejection.insert peer.endpoint
+      s!"claimed height {claimed} at handshake but delivered no headers past {tip} on 2 passes" }
+  p.persistKnownGood
+  return true
+
+/-- Asks every other seated peer for headers on the same pass so a peer even 1–2 blocks ahead (or one that
+received new blocks after handshake) advances the chain immediately rather than waiting for `headerTurn`. -/
 private def catchUp (p : PeerPool) (chain : HeaderStore) (outcome : SyncOutcome) (primary : PeerEndpoint)
-    (timeoutMs : Nat) : IO SyncOutcome := do
+    (timeoutMs : Nat) : IO (SyncOutcome × Bool) := do
   let mut merged := outcome
+  let mut evictedAny := false
   let others := (← p.connectedPeers).filter (·.endpoint != primary)
   for other in others do
-    let claimed := (← other.peerStartHeight).toInt
-    if !(claimed - (← chain.height).toNat > staleTipTolerance) then continue
     match ← (chain.sync other timeoutMs).attempt with
     | .ok more =>
-      p.transportSucceeded other.endpoint
-      merged := { merged with connected := merged.connected + more.connected,
-                              disconnectedHeaders := merged.disconnectedHeaders + more.disconnectedHeaders }
-      if let some fork := more.minForkHeight then
-        merged := { merged with minForkHeight := some (min (merged.minForkHeight.getD fork) fork) }
+      let tipNow ← chain.height
+      let claimed := (← other.peerStartHeight).toInt
+      if more.connected == 0 && claimed - tipNow.toNat > staleTipTolerance then
+        p.misbehaving other s!"claimed height {claimed} at handshake but delivered no headers past {tipNow}"
+      else
+        p.transportSucceeded other.endpoint
+        if ← p.recordHeaderDelivery other more tipNow then
+          if ← p.evictUnfulfilledPeer other tipNow then evictedAny := true
+        merged := { merged with connected := merged.connected + more.connected,
+                                disconnectedHeaders := merged.disconnectedHeaders + more.disconnectedHeaders }
+        if let some fork := more.minForkHeight then
+          merged := { merged with minForkHeight := some (min (merged.minForkHeight.getD fork) fork) }
     | .error e =>
       match e with
-      | .headers (.storageCorrupt _) | .headers (.storageUnavailable _) => return merged
+      | .headers (.storageCorrupt _) | .headers (.storageUnavailable _) => return (merged, evictedAny)
       | .headers _ => p.misbehaving other e.description
-      | .cancelled => return merged
+      | .cancelled => return (merged, evictedAny)
       | .peer pe => if pe.isTransport then p.transportFailure other e.description else p.misbehaving other e.description
       | _ => p.misbehaving other e.description
-  return merged
+  return (merged, evictedAny)
 
 private def settledSync (p : PeerPool) (chain : HeaderStore) (peer : PeerConnection) (timeoutMs : Nat) : NetM SyncOutcome := do
   let outcome ← chain.sync peer timeoutMs
-  requireDelivery outcome peer (← chain.height)
+  let tipAfterPrimary ← chain.height
+  requireDelivery outcome peer tipAfterPrimary
   p.transportSucceeded peer.endpoint
-  let outcome ← p.catchUp chain outcome peer.endpoint timeoutMs
+  let primaryShouldEvict ← p.recordHeaderDelivery peer outcome tipAfterPrimary
+  let (outcome, catchUpEvicted) ← p.catchUp chain outcome peer.endpoint timeoutMs
+  let primaryEvicted ← if primaryShouldEvict then p.evictUnfulfilledPeer peer tipAfterPrimary else pure false
   let tip ← chain.height
   p.state.modify fun s => { s with validatedTip := some tip }
-  if !(← p.evictStaleTips).isEmpty && (← p.state.get).started then spawn p.pruneAndReplenish
+  let staleEvicted ← p.evictStaleTips
+  if (!staleEvicted.isEmpty || primaryEvicted || catchUpEvicted) && (← p.state.get).started then spawn p.pruneAndReplenish
   return outcome
 
 /-- Syncs headers against connected peers with bounded failover. Each call begins with the next seat in

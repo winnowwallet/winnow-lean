@@ -274,6 +274,8 @@ structure SettingsDraft where
   manualPeer : String := ""
   error : Option String := none
   peers : List PeerInfo := []
+  /-- Recently rejected, cooled-down, or evicted peers `(endpoint, reason)` for on-device debugging. -/
+  peerIssues : List (String × String) := []
   resettingPeers : Bool := false
   /-- The census line: "Observed …: N candidates." for the list this build ships, or the no-list sentence. -/
   catalog : Option String := none
@@ -737,7 +739,7 @@ inductive Host where
   | bumpPreviewed (gen : Nat) (txid rateText : String) (p : FeeBumpPreview)
   | bumped (gen : Nat) (txid replacement : String)
   | catalogStored (gen : Nat) (stored : String)
-  | peers (gen : Nat) (ps : List PeerInfo)
+  | peers (gen : Nat) (ps : List PeerInfo) (issues : List (String × String) := [])
   | peersReset (gen : Nat)
   | exported (gen epoch : Nat) (file : String)
   | revealed (gen epoch : Nat) (words : List String)

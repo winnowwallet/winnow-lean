@@ -105,15 +105,13 @@ def syncStatusText : SyncPhase → Option String
   | .filters s t => some s!"Filters {groupDigits (min s t)} of {groupDigits t}"
   | .peerDiscoveryFailed => some "Couldn't find filter-serving peers — check your connection."
 
-/-- `SyncPhase.filterScanText` (AppModel.swift:193): never renders a zero as progress (#99). -/
+/-- `SyncPhase.filterScanText` (AppModel.swift:193): never renders a zero as progress (#99), and keeps showing
+filter progress whenever the chain tip is known (even while headers are being checked). -/
 def filterScanText (p : SyncPhase) (fallbackScanned fallbackTip : Nat) : Option String :=
-  let progress : Option (Nat × Nat) := match p with
-    | .filters s t => some (s, t)
-    | .synced => some (fallbackScanned, fallbackTip)
-    | _ => none
-  match progress with
-  | some (s, t) => if t == 0 then none else some s!"block {groupDigits (min s t)} of {groupDigits t}"
-  | none => none
+  let (s, t) := match p with
+    | .filters s t => (s, t)
+    | _ => (fallbackScanned, fallbackTip)
+  if t == 0 then none else some s!"block {groupDigits (min s t)} of {groupDigits t}"
 
 /-- `AppModel.simpleSyncError` (upstream d2ca878, AppModel.swift:234): what the home shows under the
 balance. A peer dropping mid-scan is routine and the next pass recovers on another peer, so one or two in
