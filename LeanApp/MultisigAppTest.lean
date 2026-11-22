@@ -8,6 +8,7 @@ import LeanNative.Erase
 import LeanNative.Json
 import TestKit.Check
 import TestKit.Fixtures
+import AppTestNames
 
 /-! `multisig-app-test`: upstream 1cf93fb's app-side multisig tests, ported.
 

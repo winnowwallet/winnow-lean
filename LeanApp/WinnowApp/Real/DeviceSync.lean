@@ -401,93 +401,105 @@ def changeRecord (a : SyncApp) (id : String) (kept : MultisigStore → RM Multis
     return (all.set! i { all[i]! with record }, ())
   return done.isSome
 
+/-- Adopt an account discovered on another device into the arriving queue. -/
+private def adoptAccount (a : SyncApp) (view : SyncView) (d : AccountDecision)
+    (record : MultisigAccountRecord) (height : UInt32) (nameStamp ledgerStamp : Stamp)
+    (found : Array Replica) : IO (SyncView × Bool × Bool) := do
+  let host := a.multisig.host
+  let network := (← host.read).network
+  let store ← host.read
+  let admissible ← attempt <| RM.toIO do
+    store.requireReadable
+    MultisigStore.validate #[record] network
+    unless store.records.size + (← host.arrivingAccounts).size < MultisigStore.maximumAccounts do throw (.multisig .tooMany)
+  if admissible.isNone || store.records.any (·.id == d.id) then return (view, false, true)
+  let filed ← attempt <| RM.toIO <| host.modifyArriving fun all =>
+    -- the copy chosen is anchored to the block its backup names, which this device's chain must have
+    let anchor := (found.find? fun r => r.height == height && (r.account? d.id).isSome).bind (·.anchor)
+    pure ((all.filter (·.record.id != d.id)).push (ArrivingAccount.ofSnapshot record height anchor), ())
+  if filed.isNone then return (view, false, true)
+  a.env.journal "multisig.accountArriving" [("id", d.id), ("height", toString height)]
+  let seen : AccountSeen :=
+    { stamps := { id := d.id, added := d.added, removed := d.removed, name := nameStamp, ledger := ledgerStamp },
+      name := record.name, ledger := ledgerMark record.ledger, draft := "" }
+  return (view.setAccount seen, true, false)
+
+/-- Carry out one field-level change (`rename`, `raise`, `ledger`, `draft`, `combine`) on an existing account. -/
+private def applyAccountChange (a : SyncApp) (id : String) (mine : LocalAccount) (live : Bool)
+    (entry : AccountSeen) (change : Change) : IO (AccountSeen × Bool × Bool) := do
+  let host := a.multisig.host
+  let keys := host.keys
+  let writeData := host.writeData
+  match change with
+  | .rename name stamp =>
+    if ← a.changeRecord id (·.rename keys writeData id name) (fun r => do
+        unless DisplayName.normalized name == some name && !name.isEmpty do throw (.multisig (.invalidState "an account needs a short, single-line name"))
+        pure { r with name }) then
+      return ({ entry with stamps := { entry.stamps with name := stamp }, name }, name != mine.record.name, false)
+    else return (entry, false, true)
+  | .raise receive changeIdx =>
+    if ← a.changeRecord id (·.raiseIndices keys writeData id receive changeIdx) (fun r =>
+        pure { r with nextReceiveIndex := max r.nextReceiveIndex receive, nextChangeIndex := max r.nextChangeIndex changeIdx }) then
+      return (entry, true, false)
+    else return (entry, false, true)
+  | .ledger registration stamp =>
+    if ← a.changeRecord id (·.setLedger keys writeData id registration) (fun r => pure { r with ledger := some registration }) then
+      return ({ entry with stamps := { entry.stamps with ledger := stamp }, ledger := ledgerMark (some registration) },
+              some registration != mine.record.ledger, false)
+    else return (entry, false, true)
+  | .draft value stamp =>
+    -- an arriving account's coins are not this device's yet: its payment waits until they are
+    if !live then return (entry, false, true)
+    if (← attempt (a.multisig.withStore fun s => do return (← s.setDraft keys writeData id value, ()))).isSome then
+      a.env.journal "multisig.draftFromElsewhere" [("id", id), ("present", toString value.isSome)]
+      return ({ entry with stamps := { entry.stamps with draft := stamp }, draft := draftMark value }, true, false)
+    else return (entry, false, true)
+  | .combine others stamp =>
+    if !live then return (entry, false, true)
+    let some draft := mine.record.draft | return (entry, false, false)
+    let combined : Option String := do
+      let mine ← draft.psbt.toOption
+      let theirs := others.filterMap (·.psbt.toOption)
+      (← (mine.combined theirs).toOption).base64V0.toOption
+    match combined with
+    | none => return (entry, false, true)
+    | some text =>
+      if text == draft.psbtBase64 then
+        return ({ entry with stamps := { entry.stamps with draft := stamp } }, false, false)
+      let next : MultisigSpendDraft := { draft with psbtBase64 := text }
+      if (← attempt (a.multisig.withStore fun s => do return (← s.setDraft keys writeData id (some next), ()))).isSome then
+        return ({ entry with stamps := { entry.stamps with draft := stamp }, draft := draftMark (some next) }, true, false)
+      else return (entry, false, true)
+
 /-- One account's decision carried out. The view, whether anything of this device's changed, and whether
 anything is left to do later (a change that could not be made yet). -/
 def applyAccount (a : SyncApp) (view : SyncView) (d : AccountDecision) (here : Option LocalAccount)
     (found : Array Replica := #[]) : IO (SyncView × Bool × Bool) := do
   let host := a.multisig.host
-  let keys := host.keys
-  let writeData := host.writeData
   let entry := (view.account? d.id).getD { stamps := { id := d.id } }
   let known := { entry with stamps := { entry.stamps with added := d.added, removed := d.removed } }
   match d.existence with
   | .adopt record height nameStamp ledgerStamp =>
-    let network := (← host.read).network
-    let store ← host.read
-    let admissible ← attempt <| RM.toIO do
-      store.requireReadable
-      MultisigStore.validate #[record] network
-      unless store.records.size + (← host.arrivingAccounts).size < MultisigStore.maximumAccounts do throw (.multisig .tooMany)
-    if admissible.isNone || store.records.any (·.id == d.id) then return (view, false, true)
-    let filed ← attempt <| RM.toIO <| host.modifyArriving fun all =>
-      -- the copy chosen is anchored to the block its backup names, which this device's chain must have
-      let anchor := (found.find? fun r => r.height == height && (r.account? d.id).isSome).bind (·.anchor)
-      pure ((all.filter (·.record.id != d.id)).push (ArrivingAccount.ofSnapshot record height anchor), ())
-    if filed.isNone then return (view, false, true)
-    a.env.journal "multisig.accountArriving" [("id", d.id), ("height", toString height)]
-    let seen : AccountSeen :=
-      { stamps := { id := d.id, added := d.added, removed := d.removed, name := nameStamp, ledger := ledgerStamp },
-        name := record.name, ledger := ledgerMark record.ledger, draft := "" }
-    return (view.setAccount seen, true, false)
+    a.adoptAccount view d record height nameStamp ledgerStamp found
   | .remove =>
     let gone ← if (← host.read).records.any (·.id == d.id) then
-        attempt (a.multisig.withStore fun s => do return (← s.remove keys writeData d.id, ()))
+        attempt (a.multisig.withStore fun s => do return (← s.remove host.keys host.writeData d.id, ()))
       else attempt <| RM.toIO <| host.modifyArriving fun all => pure (all.filter (·.record.id != d.id), ())
     if gone.isNone then return (view, false, true)
     a.env.journal "multisig.accountRemovedElsewhere" [("id", d.id)]
     return (view.setAccount known, true, false)
   | .reassert => return (view.setAccount known, true, false)
   | .unchanged =>
+    let some mine := here | return (if d.isQuiet (view.account? d.id |>.map (·.stamps)) then view else view.setAccount known, false, false)
+    let live := (← host.read).records.any (·.id == d.id)
     let mut entry := known
     let mut changed := false
     let mut pending := false
-    let some mine := here | return (if d.isQuiet (view.account? d.id |>.map (·.stamps)) then view else view.setAccount entry, false, false)
-    let live := (← host.read).records.any (·.id == d.id)
     for change in d.changes do
-      match change with
-      | .rename name stamp =>
-        if ← a.changeRecord d.id (·.rename keys writeData d.id name) (fun r => do
-            unless DisplayName.normalized name == some name && !name.isEmpty do throw (.multisig (.invalidState "an account needs a short, single-line name"))
-            pure { r with name }) then
-          changed := changed || name != mine.record.name
-          entry := { entry with stamps := { entry.stamps with name := stamp }, name }
-        else pending := true
-      | .raise receive change =>
-        if ← a.changeRecord d.id (·.raiseIndices keys writeData d.id receive change) (fun r =>
-            pure { r with nextReceiveIndex := max r.nextReceiveIndex receive, nextChangeIndex := max r.nextChangeIndex change }) then
-          changed := true
-        else pending := true
-      | .ledger registration stamp =>
-        if ← a.changeRecord d.id (·.setLedger keys writeData d.id registration) (fun r => pure { r with ledger := some registration }) then
-          changed := changed || some registration != mine.record.ledger
-          entry := { entry with stamps := { entry.stamps with ledger := stamp }, ledger := ledgerMark (some registration) }
-        else pending := true
-      | .draft value stamp =>
-        -- an arriving account's coins are not this device's yet: its payment waits until they are
-        if !live then pending := true
-        else if (← attempt (a.multisig.withStore fun s => do return (← s.setDraft keys writeData d.id value, ()))).isSome then
-          changed := true
-          entry := { entry with stamps := { entry.stamps with draft := stamp }, draft := draftMark value }
-          a.env.journal "multisig.draftFromElsewhere" [("id", d.id), ("present", toString value.isSome)]
-        else pending := true
-      | .combine others stamp =>
-        if !live then pending := true else
-        let some draft := mine.record.draft | continue
-        let combined : Option String := do
-          let mine ← draft.psbt.toOption
-          let theirs := others.filterMap (·.psbt.toOption)
-          (← (mine.combined theirs).toOption).base64V0.toOption
-        match combined with
-        | none => pending := true
-        | some text =>
-          if text == draft.psbtBase64 then
-            entry := { entry with stamps := { entry.stamps with draft := stamp } }
-          else
-            let next : MultisigSpendDraft := { draft with psbtBase64 := text }
-            if (← attempt (a.multisig.withStore fun s => do return (← s.setDraft keys writeData d.id (some next), ()))).isSome then
-              changed := true
-              entry := { entry with stamps := { entry.stamps with draft := stamp }, draft := draftMark (some next) }
-            else pending := true
+      let (nextEntry, c, p) ← a.applyAccountChange d.id mine live entry change
+      entry := nextEntry
+      changed := changed || c
+      pending := pending || p
     return (view.setAccount entry, changed, pending)
 
 /-- One signer's decision carried out, as `applyAccount`. -/
@@ -550,6 +562,68 @@ def journalOnce (a : SyncApp) (name : String) (fields : List (String × String))
 
 /-! ## A head start from another device -/
 
+/-- Try to advance one local wallet (`pw`) from a farther-scanned backup on another device. -/
+private def headStartWallet (a : SyncApp) (s : Stack) (account : String) (walletSerial : Nat)
+    (found : Array Replica) (pw : Wallet) (rider : Option Rider) : IO Unit := do
+  let st ← pw.state
+  unless st.pendingSends.isEmpty && st.cardRestoreFrom.isNone do return
+  let ahead := found.filter fun r => r.walletID == some pw.id && r.height + 1 > st.nextScanHeight && r.anchor.isSome
+  let some best := ahead.foldl (fun b r => match b with
+    | some b => if r.height > b.height then some r else some b
+    | none => some r) none | return
+  unless (← s.chain.blockHash best.height) == best.anchor do
+    a.env.journal "sync.headStartRefused" [("walletID", pw.id), ("height", toString best.height)]
+    return
+  let loaded ← (do
+      let key ← a.controller.keys.load best.id
+      let backup ← a.controller.store.load best.id account
+      CloudM.liftWM (backup.state key)).run
+  let skip (why : String) : IO Unit := a.journalOnce "sync.headStartSkipped" [("walletID", pw.id), ("why", why)]
+  let bundle ← match loaded with
+    | .ok (bundle, _) => pure bundle
+    | .error e => skip s!"the backup did not open: {e.description}"; return
+  let other ← match ← (Wallet.importing bundle CloudWalletBackup.validationKeys none).run with
+    | .ok other => pure other
+    | .error e => skip s!"the backup's wallet did not read: {e.name}"; return
+  let theirs ← other.state
+  -- the same keys (the descriptor's text may be written another way), further on, with the same cards
+  unless other.id == pw.id && other.accountKey.serialized == pw.accountKey.serialized do skip "another wallet"; return
+  unless theirs.nextScanHeight > st.nextScanHeight do skip "no further on"; return
+  -- a card handed out here and not there could have been paid in the blocks taken (one a restore only
+  -- searched for, `plainToo`, was handed out there if at all, and is there if it was)
+  unless st.cards.all (fun c => c.plainToo || theirs.cards.any (·.index == c.index)) do skip "a card handed out here only"; return
+  -- under the place lock: no block of a pass reaches this wallet halfway through
+  let moved : Bool ← a.env.withPlaceLock do
+    let now ← a.env.get
+    let current := match rider with
+      | none => now.walletSerial == walletSerial
+      | some r => now.riders.any (·.serial == r.serial)
+    unless current do return false
+    let multisig : IO Bool := match rider with
+      | some r => r.multisig.headStart (bundle.vaults.getD #[])
+      | none => a.env.hooks.multisigHeadStart (bundle.vaults.getD #[])
+    unless ← multisig do
+      a.journalOnce "sync.headStartSkipped" [("walletID", pw.id), ("why", "the accounts here are not all in the backup")]
+      return false
+    let mine ← pw.state
+    let next : WalletState := { mine with
+      allUtxos := theirs.allUtxos, history := theirs.history,
+      nextReceiveIndex := max mine.nextReceiveIndex theirs.nextReceiveIndex,
+      nextChangeIndex := max mine.nextChangeIndex theirs.nextChangeIndex,
+      cards := mine.cards.map fun card => match theirs.cards.find? (·.index == card.index) with
+        | some t => { card with nextIndex := max card.nextIndex t.nextIndex }
+        | none => card,
+      nextScanHeight := theirs.nextScanHeight, scannedThroughHash := theirs.scannedThroughHash }
+    let write : WM Unit := do
+      pw.persist next
+      WM.io (pw.stateRef.set next)
+    match rider with
+    | none => a.env.walletWrite walletSerial "sync.headStart" write
+    | some r => a.env.riderWrite r.serial "sync.headStart" write
+    return true
+  if moved then
+    a.env.journal "sync.headStart" [("walletID", pw.id), ("from", toString st.nextScanHeight), ("to", toString theirs.nextScanHeight)]
+
 /-- Each wallet here that another of the person's devices has scanned further takes that device's coins,
 history and address counters, its accounts' with them, when the block its backup names is this chain's: what is
 between is not scanned here again. Not a wallet with a payment of its own on its way (its coins are reserved
@@ -562,64 +636,7 @@ def headStart (a : SyncApp) : IO Unit := do
   let some account ← (do return (← a.controller.store.account.run).toOption) | return
   let places : Array (Wallet × Option Rider) := #[(w, none)] ++ c.riders.map fun r => (r.wallet, some r)
   for (pw, rider) in places do
-    let st ← pw.state
-    unless st.pendingSends.isEmpty && st.cardRestoreFrom.isNone do continue
-    let ahead := found.filter fun r => r.walletID == some pw.id && r.height + 1 > st.nextScanHeight && r.anchor.isSome
-    let some best := ahead.foldl (fun b r => match b with
-      | some b => if r.height > b.height then some r else some b
-      | none => some r) none | continue
-    unless (← s.chain.blockHash best.height) == best.anchor do
-      a.env.journal "sync.headStartRefused" [("walletID", pw.id), ("height", toString best.height)]
-      continue
-    let loaded ← (do
-        let key ← a.controller.keys.load best.id
-        let backup ← a.controller.store.load best.id account
-        CloudM.liftWM (backup.state key)).run
-    let skip (why : String) : IO Unit := a.journalOnce "sync.headStartSkipped" [("walletID", pw.id), ("why", why)]
-    let bundle ← match loaded with
-      | .ok (bundle, _) => pure bundle
-      | .error e => skip s!"the backup did not open: {e.description}"; continue
-    let other ← match ← (Wallet.importing bundle CloudWalletBackup.validationKeys none).run with
-      | .ok other => pure other
-      | .error e => skip s!"the backup's wallet did not read: {e.name}"; continue
-    let theirs ← other.state
-    -- the same keys (the descriptor's text may be written another way), further on, with the same cards
-    unless other.id == pw.id && other.accountKey.serialized == pw.accountKey.serialized do skip "another wallet"; continue
-    unless theirs.nextScanHeight > st.nextScanHeight do skip "no further on"; continue
-    -- a card handed out here and not there could have been paid in the blocks taken (one a restore only
-    -- searched for, `plainToo`, was handed out there if at all, and is there if it was)
-    unless st.cards.all (fun c => c.plainToo || theirs.cards.any (·.index == c.index)) do skip "a card handed out here only"; continue
-    -- under the place lock: no block of a pass reaches this wallet halfway through
-    let moved : Bool ← a.env.withPlaceLock do
-      let now ← a.env.get
-      let current := match rider with
-        | none => now.walletSerial == c.walletSerial
-        | some r => now.riders.any (·.serial == r.serial)
-      unless current do return false
-      let multisig : IO Bool := match rider with
-        | some r => r.multisig.headStart (bundle.vaults.getD #[])
-        | none => a.env.hooks.multisigHeadStart (bundle.vaults.getD #[])
-      unless ← multisig do
-        a.journalOnce "sync.headStartSkipped" [("walletID", pw.id), ("why", "the accounts here are not all in the backup")]
-        return false
-      let mine ← pw.state
-      let next : WalletState := { mine with
-        allUtxos := theirs.allUtxos, history := theirs.history,
-        nextReceiveIndex := max mine.nextReceiveIndex theirs.nextReceiveIndex,
-        nextChangeIndex := max mine.nextChangeIndex theirs.nextChangeIndex,
-        cards := mine.cards.map fun card => match theirs.cards.find? (·.index == card.index) with
-          | some t => { card with nextIndex := max card.nextIndex t.nextIndex }
-          | none => card,
-        nextScanHeight := theirs.nextScanHeight, scannedThroughHash := theirs.scannedThroughHash }
-      let write : WM Unit := do
-        pw.persist next
-        WM.io (pw.stateRef.set next)
-      match rider with
-      | none => a.env.walletWrite c.walletSerial "sync.headStart" write
-      | some r => a.env.riderWrite r.serial "sync.headStart" write
-      return true
-    if moved then
-      a.env.journal "sync.headStart" [("walletID", pw.id), ("from", toString st.nextScanHeight), ("to", toString theirs.nextScanHeight)]
+    a.headStartWallet s account c.walletSerial found pw rider
   -- every wallet here past the network's scan: it begins where they all are
   let c ← a.env.get
   let some f := c.stack.bind (·.filters) | return

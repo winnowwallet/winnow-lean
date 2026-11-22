@@ -9,6 +9,7 @@ import LeanNative.Json
 import TestKit.Check
 import TestKit.Regtest
 import FoundationVectors
+import AppTestNames
 
 /-! `records-test`: a scripted run of every records operation against a temporary directory, with the
 in-memory key store and two wallets made by `Wallet.create` (two phones: A and B).
@@ -2617,10 +2618,111 @@ def continuedBackgroundSync : IO Unit := do
     return (← refusedPosted.get).any (· matches .continuedSyncRefused _)
   check "continued perform: unavailable bgtask.continue posts continuedSyncRefused" gotRefused
 
+/-- `Pure.parseDouble` (Swift `Double(_:)`): decimal, scientific, hex floats, inf/nan/snan payloads,
+overflow/underflow, and malformed forms. -/
+def parseDoubleCases : IO Unit := do
+  let isInf (o : Option Float) (neg : Bool) : Bool := match o with
+    | some f => f.isInf && (if neg then f < 0 else f > 0) | none => false
+  let isNaN (o : Option Float) : Bool := match o with | some f => f.isNaN | none => false
+  check "parseDouble: decimal, signs, leading/trailing dot, zero"
+    (parseDouble "12.5" == some 12.5 && parseDouble "+3.25" == some 3.25 && parseDouble "-0.5" == some (-0.5) &&
+     parseDouble ".5" == some 0.5 && parseDouble "5." == some 5.0 &&
+     parseDouble "0" == some 0.0 && parseDouble "-0.0" == some (-0.0))
+  check "parseDouble: decimal scientific, overflow, underflow"
+    (parseDouble "1.5e2" == some 150.0 && parseDouble "15E-1" == some 1.5 && parseDouble "2e+3" == some 2000.0 &&
+     isInf (parseDouble "1e500") false && isInf (parseDouble "-1e500") true &&
+     parseDouble "1e-500" == some 0.0)
+  check "parseDouble: hex floats (lower/upper 0x/0X, p/P, fraction, zero, overflow, underflow)"
+    (parseDouble "0x1.8p1" == some 3.0 && parseDouble "0X1.8P-1" == some 0.75 &&
+     parseDouble "0x.8p4" == some 8.0 && parseDouble "-0x10p+2" == some (-64.0) &&
+     parseDouble "0x10" == some 16.0 && parseDouble "0x0p0" == some 0.0 &&
+     isInf (parseDouble "0x1p3000") false && parseDouble "0x1p-3000" == some 0.0)
+  check "parseDouble: inf, infinity, nan, snan with decimal and hex payloads"
+    (isInf (parseDouble "inf") false && isInf (parseDouble "-INF") true && isInf (parseDouble "+Infinity") false &&
+     isNaN (parseDouble "nan") && isNaN (parseDouble "-sNaN") &&
+     isNaN (parseDouble "nan(123)") && isNaN (parseDouble "sNaN(0x1f)"))
+  check "parseDouble: malformed inputs return none"
+    (parseDouble "" == none && parseDouble "." == none && parseDouble "1e" == none &&
+     parseDouble "1e+a" == none && parseDouble "1q2" == none && parseDouble "0x" == none &&
+     parseDouble "0x." == none && parseDouble "0x1p" == none && parseDouble "0x1q2" == none &&
+     parseDouble "nan(bad)" == none && parseDouble "abc" == none)
+  check "parseRateMilli: trims, clamps non-positive/NaN to 0"
+    (parseRateMilli " 2.5 " == some 2500 && parseRateMilli "\n1.25\n" (trimNewlines := true) == some 1250 &&
+     parseRateMilli "nan" == some 0 && parseRateMilli "-3" == some 0 && parseRateMilli "bad" == none)
+
+/-- `Real.AppError.text` and `RecordsReal.StoreKeyVault.ofKeyStore` edge and failure paths. -/
+def appErrorsAndVault : IO Unit := do
+  let errs : List Real.AppError :=
+    [.noWallet, .walletReplaced, .walletAlreadyHere, .walletAlreadyHeld, .paymentDetailsUnavailable,
+     .feeDecisionRequired 1.5 5.0, .noStack, .noPeers, .mnemonicUnavailable, .invalidPeer "bad:port",
+     .wrongNetwork "mainnet", .sendReviewChanged, .storageDamaged "corrupt", .spendAlreadyInFlight, .noStorage]
+  check "AppError.text: every variant produces non-empty message" (errs.all fun e => !e.text.isEmpty)
+  -- StoreKeyVault.ofKeyStore against custom KeyStore responses
+  let goodHex := Winnow.hex (ByteArray.mk (Array.replicate 32 0xAB))
+  let liftE {α} (r : Except Keys.KeyStoreError α) : ExceptT Keys.KeyStoreError IO α := ExceptT.mk (pure r)
+  let makeKs (loadR : Except Keys.KeyStoreError Keys.WalletSecret)
+      (storeR : Except Keys.KeyStoreError Unit := .ok ())
+      (delR : Except Keys.KeyStoreError Unit := .ok ())
+      (loadBytesR : Except Keys.KeyStoreError (Option ByteArray) := .ok none)
+      (storeBytesR : Except Keys.KeyStoreError Unit := .ok ()) : Keys.KeyStore IO :=
+    { store := fun _ _ => liftE storeR, load := fun _ => liftE loadR, delete := fun _ => liftE delR,
+      loadBytes := fun _ => liftE loadBytesR, storeBytes := fun _ _ => liftE storeBytesR }
+  let v1 := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.ok (.masterKey goodHex)))
+  check "vault: valid 32-byte masterKey hex loads" ((← (v1.key "a").run) matches .ok (some _))
+  let vBadLen := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.ok (.masterKey "0011")))
+  check "vault: wrong-length key is malformedKey" ((← (vBadLen.key "a").run) matches .error (.keyVault .malformedKey))
+  let vBadHex := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.ok (.masterKey "zzzz")))
+  check "vault: non-hex key is malformedKey" ((← (vBadHex.key "a").run) matches .error (.keyVault .malformedKey))
+  let vWrongKind := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.ok (.mnemonic "words")))
+  check "vault: mnemonic secret is malformedKey" ((← (vWrongKind.key "a").run) matches .error (.keyVault .malformedKey))
+  let vErr := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error .malformedSecret))
+  check "vault: other keystore error is malformedKey" ((← (vErr.key "a").run) matches .error (.keyVault .malformedKey))
+  let vLocked := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error (.keychain RecordsReal.interactionNotAllowed)))
+  let beforeRefused ← RecordsReal.refusedStoreKeys.get
+  check "vault: interactionNotAllowed records refused account"
+    ((← (vLocked.key "locked.test").run) matches .error (.keyVault (.keychain _)) &&
+     (← RecordsReal.refusedStoreKeys.get).contains "locked.test")
+  RecordsReal.refusedStoreKeys.set beforeRefused
+  -- moving recovery path: main notFound, moving present -> restored & deleted
+  let deleted ← IO.mkRef (#[] : Array String)
+  let movingKs : Keys.KeyStore IO :=
+    { load := fun id => liftE (if id.endsWith ".moving" then .ok (.masterKey goodHex) else .error (.notFound id)),
+      store := fun _ _ => liftE (.ok ()),
+      delete := fun id => ExceptT.mk do deleted.modify (·.push id); pure (.ok ()),
+      loadBytes := fun _ => liftE (.ok (some (ByteArray.mk #[1, 2]))),
+      storeBytes := fun _ _ => liftE (.error (.alreadyExists "x")) }
+  let vm := RecordsReal.StoreKeyVault.ofKeyStore movingKs
+  check "vault: recovers key from .moving copy and cleans it up"
+    ((← (vm.key "m").run) matches .ok (some _) && (← deleted.get).any (·.endsWith ".moving"))
+  check "vault: rawKey & keepRaw handle ok and alreadyExists"
+    ((← (vm.rawKey "m").run) matches .ok (some _) && (← (vm.keepRaw "m" .empty).run) matches .ok ())
+  -- establishKey / discardKey / rawKey / keepRaw error mappings
+  let vAlready := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error (.notFound "")) (storeR := .error (.alreadyExists "a"))
+    (delR := .error (.notFound "")) (loadBytesR := .error (.keychain (-50))) (storeBytesR := .error (.keychain (-50))))
+  check "vault: establishKey alreadyExists, discardKey notFound, rawKey/keepRaw keychain error"
+    ((← (vAlready.establishKey "a").run) matches .error (.keyVault (.alreadyEstablished "a")) &&
+     (← (vAlready.discardKey "a").run) matches .ok () &&
+     (← (vAlready.rawKey "a").run) matches .error (.keyVault (.keychain (-50))) &&
+     (← (vAlready.keepRaw "a" .empty).run) matches .error (.keyVault (.keychain (-50))))
+  let vKc := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error (.notFound "")) (storeR := .error (.keychain (-1)))
+    (delR := .error (.keychain (-2))) (loadBytesR := .error .malformedSecret) (storeBytesR := .error .malformedSecret))
+  check "vault: establishKey/discardKey keychain and rawKey/keepRaw malformedKey"
+    ((← (vKc.establishKey "a").run) matches .error (.keyVault (.keychain (-1))) &&
+     (← (vKc.discardKey "a").run) matches .error (.keyVault (.keychain (-2))) &&
+     (← (vKc.rawKey "a").run) matches .error (.keyVault .malformedKey) &&
+     (← (vKc.keepRaw "a" .empty).run) matches .error (.keyVault .malformedKey))
+  let vMal := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error (.notFound "")) (storeR := .error .malformedSecret)
+    (delR := .error .malformedSecret))
+  check "vault: establishKey/discardKey other error -> malformedKey"
+    ((← (vMal.establishKey "a").run) matches .error (.keyVault .malformedKey) &&
+     (← (vMal.discardKey "a").run) matches .error (.keyVault .malformedKey))
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
   syncErrorBookkeeping
+  parseDoubleCases
+  appErrorsAndVault
   foundationURLRules
   bundleVersion
   peerGatewayModel

@@ -79,15 +79,30 @@ def capabilityFailures : Journey := ⟨"capabilityFailures", do
     shot "fail-03-delete"
     tap (.alert "OK")⟩
 
-/-- Winnow's own operations made to fail (`Run.fail`, test mode's `WinnowApp.Faults`): a fresh receive address, a
-label's save, the backup file and resetting the peers. Each failure is said where the person is, nothing changes,
-and the next try works. The control file is the host's, so this runs in a simulator as headless. -/
+/-- Winnow's own operations made to fail (`Run.fail`, test mode's `WinnowApp.Faults`) and user-facing input
+errors: an unreadable backup file, a fresh receive address, a label's save, a person's invalid paste and save
+failure, the backup file export, resetting peers, a malformed multisig descriptor, and an invalid signer key.
+Each failure is shown and screenshotted where the person is so the UI can be reviewed, nothing breaks, and the
+next try works. The control file is the host's, so this runs in a simulator as headless. -/
 def backendFailures : Journey := ⟨"backendFailures", do
   let r ← Run.new "backendfail"
   r.launch "backendfail"
+
+  step "a malformed backup file on Restore from a file says why before onboarding continues" do
+    waitFor importWalletButton 60
+    tap importWalletButton
+    waitFor importVerifyButton 20
+    r.paste "not-json" (.button "Paste from clipboard")
+    scrolled importVerifyButton
+    tap importVerifyButton
+    waitFor (.beginning "The data couldn’t be read") 20
+    shot "fail-09-import"
+    tap (.button "Close")
+    expectGone importVerifyButton 10
+
   step "create the wallet" do createWallet
 
-  step "a fresh address cannot be made: Receive says why and keeps the address it showed" do
+  let shown ← step "a fresh address cannot be made: Receive says why and keeps the address it showed" do
     let shown ← Receive.address
     r.fail "receive.fresh"
     tap freshAddressButton
@@ -97,6 +112,7 @@ def backendFailures : Journey := ⟨"backendFailures", do
     tap freshAddressButton
     waitUntil 20 "Receive did not show a fresh address" do return (← text receiveAddress) != shown
     expectGone journeyFault
+    pure shown
 
   step "the label cannot be saved: the editor says why, and Save again keeps it" do
     tap (.button "Label this address")
@@ -108,6 +124,33 @@ def backendFailures : Journey := ⟨"backendFailures", do
     tap saveReceiveAddressLabelButton
     waitFor (.button "Edit label") 20
     Receive.close
+
+  step "Add person refuses an invalid paste, reports a save failure, and saves on retry" do
+    tap openSendButton
+    scrolled savedRecipientsButton
+    tap savedRecipientsButton
+    waitFor addPersonToolbarButton 10
+    tap addPersonToolbarButton
+    waitFor personPasteButton 10
+    r.paste "not-a-bitcoin-address" personPasteButton
+    waitFor (.beginning "That isn't a valid Bitcoin address") 20
+    shot "fail-14-person-paste"
+    r.paste shown personPasteButton
+    scrolled personNameField
+    type personNameField "Alice"
+    scrolled personSaveButton
+    waitUntil 10 "Save did not enable" do return (← state personSaveButton).enabled
+    r.fail "store.write.people.json"
+    tap personSaveButton
+    waitFor journeyFault 20
+    shot "fail-15-person-save"
+    tap personSaveButton
+    expectGone personSaveButton 20
+    waitFor (.button "Alice") 20
+    tap (.button "Done")
+    expectGone addPersonToolbarButton 10
+    tap closeSendButton
+    expectGone closeSendButton 10
 
   step "the backup file cannot be written: the sheet says why, and Create again makes it" do
     openSettings
@@ -129,7 +172,29 @@ def backendFailures : Journey := ⟨"backendFailures", do
     r.fail "peers.reset"
     tap (.alert "Reset and shuffle peers")
     waitFor journeyFault 20
-    shot "fail-13-peers"⟩
+    shot "fail-13-peers"
+
+  step "Join an account explains an invalid descriptor, and Save keys explains an invalid signer key" do
+    tap .back
+    scrolled multisigAccountsButton
+    tap multisigAccountsButton
+    waitFor multisigAddButton 10
+    tap multisigAddButton
+    waitFor multisigDescriptorPasteButton 10
+    r.paste "tr(not-a-descriptor)" multisigDescriptorPasteButton
+    waitFor (.beginning "The operation couldn’t be completed") 20
+    shot "fail-16-multisig-descriptor"
+    tap .back
+    tap .back
+    scrolled signersButton
+    tap signersButton
+    waitFor signersAddKeysButton 10
+    tap signersAddKeysButton
+    waitFor signerKeysPasteButton 10
+    type signerKeysNameField "Desk"
+    r.paste "not-a-key" signerKeysPasteButton
+    waitFor signerKeysError 20
+    shot "fail-17-signer-keys"⟩
 
 /-- A payment whose broadcast fails (Winnow's `broadcast` point), and its fee bump's: each is said on the screen
 the person is on, the node is given nothing, and the next try works. (A payment's details are loaded only for a

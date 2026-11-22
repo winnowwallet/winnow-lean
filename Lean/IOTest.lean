@@ -357,6 +357,28 @@ def offlineChecks (dir : String) : IO Unit := do
   check "census duplicate" (nameOf (CensusCatalog.decode (doc (civil today) ["9.9.9.9", "::ffff:9.9.9.9"]).toUTF8) == "duplicate")
   check "census diversity" (nameOf (CensusCatalog.decode (doc (civil today) ["9.9.9.9", "9.9.1.1"]).toUTF8) == "diversity")
   check "census private host" (nameOf (CensusCatalog.decode (doc (civil today) ["192.168.1.1"]).toUTF8) == "endpoint")
+  -- every RFC reserved IPv4/IPv6 range is rejected; public IPv4, mapped public IPv4, and global IPv6 pass
+  let privateHosts := [
+    "0.0.0.1", "10.0.0.1", "100.64.0.1", "127.0.0.1", "169.254.1.1", "172.16.0.1",
+    "192.0.0.1", "192.0.2.1", "192.88.99.1", "192.168.1.1", "198.18.0.1", "198.51.100.1",
+    "203.0.113.1", "224.0.0.1", "::ffff:10.0.0.1", "fe80::1", "2001:0000::1",
+    "2001:0db8::1", "2002::1", "3fff::1", "not-an-ip", " 1.1.1.1"
+  ]
+  check "census rejects every reserved IPv4/IPv6 range and non-canonical host"
+    (privateHosts.all fun h => nameOf (CensusCatalog.decode (doc (civil today) [h]).toUTF8) == "endpoint")
+  let publicHosts := ["1.1.1.1", "100.63.0.1", "172.32.0.1", "198.20.0.1", "::ffff:1.1.1.1", "2606:4700:4700::1111"]
+  check "census accepts public IPv4, mapped IPv4, and global unicast IPv6"
+    (publicHosts.all fun h => nameOf (CensusCatalog.decode (doc (civil today) [h]).toUTF8) == "ok")
+  -- remaining CensusInvalid error cases (schema, date, size, height, decoding)
+  let badSchema := s!"\{\"schemaVersion\":2,\"date\":\"{civil today}\",\"tip\":900010,\"networks\":\{\"clearnet\":[{entry "9.9.9.9"}]}}"
+  let badDate := s!"\{\"schemaVersion\":1,\"date\":\"2026-02-30\",\"tip\":900010,\"networks\":\{\"clearnet\":[{entry "9.9.9.9"}]}}"
+  let badHeight := s!"\{\"schemaVersion\":1,\"date\":\"{civil today}\",\"tip\":900010,\"networks\":\{\"clearnet\":[\{\"host\":\"9.9.9.9\",\"port\":8333,\"userAgent\":\"/Satoshi:28.0.0/\",\"startHeight\":100}]}}"
+  check "census invalid schema, date, size, height, and decoding"
+    (nameOf (CensusCatalog.decode badSchema.toUTF8) == "schema" &&
+     nameOf (CensusCatalog.decode badDate.toUTF8) == "date" &&
+     nameOf (CensusCatalog.decode (ByteArray.mk (Array.replicate (CensusCatalog.maximumBytes + 1) 32))) == "size" &&
+     nameOf (CensusCatalog.decode badHeight.toUTF8) == "height" &&
+     nameOf (CensusCatalog.decode "not-json".toUTF8) == "dataCorrupted")
   check "census thin" (nameOf (CensusCatalog.decode (doc (civil today) ["9.9.9.9"]).toUTF8 (minimumEntries := 50)) == "thin")
   check "census bad date" (CensusCatalog.day "2026-02-30" == none && CensusCatalog.day "2026-10-26" == some 20752)
   check "no bundled census outside an app bundle" (← CensusCatalog.bundled).isNone
@@ -1351,6 +1373,33 @@ def broadcastGiveUpChecks : IO Unit := do
     (toString ((← events2.get).filterMap fun | .relaySessionEnded r => some r.rawValue | _ => none))
   b2.shutdown
   pool.stop
+  -- stopped pool cannot enter relay-only; started pool trims seats, prunes dead relay seat, and stops on stopIfRelayOnly
+  let rpool ← PeerPool.new regtest (peerCount := 2) (manualPeers := #[v4, v6]) (seedResolver := some noSeeds)
+    (monitorIntervalMs := 50)
+  check "relay-only: stopped pool keeps 0 seats" ((← rpool.enterRelayOnly 1) == 0)
+  rpool.start
+  discard <| waitUntil 5_000 (do return (← rpool.connectedPeers).size == 2)
+  let kept ← rpool.enterRelayOnly 1
+  check "relay-only: trims two peers down to one seat" (kept == 1 && (← rpool.connectedPeers).size == 1)
+  if let some p := (← rpool.connectedPeers)[0]? then p.disconnect
+  let pruned ← waitUntil 2_000 (do return (← rpool.connectedPeers).isEmpty)
+  check "relay-only: monitor prunes a disconnected relay seat without redialling" pruned
+  rpool.stopIfRelayOnly
+  check "relay-only: stopIfRelayOnly stops the relay-only pool" (!(← rpool.isRunning))
+  -- retractAnnouncement: a peer whose socket closed right before announce retracts cleanly without marking announced
+  let rpool2 ← PeerPool.new regtest (peerCount := 1) (manualPeers := #[v4]) (seedResolver := some noSeeds)
+    (monitorIntervalMs := 60_000)
+  rpool2.start
+  discard <| waitUntil 5_000 (do return (← rpool2.connectedPeers).size == 1)
+  let b3 ← runNet "retract broadcaster" (TxBroadcaster.new rpool2 (rebroadcastBaseMs := 60_000))
+  let events3 ← collect (← b3.events)
+  if let some p := (← rpool2.connectedPeers)[0]? then p.disconnect
+  let txid3 ← runNet "retract broadcast" (b3.broadcast (fakeRawTx 3))
+  let announcedZero ← waitUntil 2_000 (do
+    return (← events3.get).any fun | .announced t n => t == txid3 && n == 0 | _ => false)
+  check "retractAnnouncement: failed send retracts the peer announcement (announced 0)" announcedZero
+  b3.shutdown
+  rpool2.stop
 
 /-- Upstream `PeerPoolTests` for #175: discovery as one completion stream of dials and seed answers. -/
 def discoveryChecks (dir : String) : IO Unit := do

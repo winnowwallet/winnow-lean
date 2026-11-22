@@ -9,6 +9,7 @@ import Lean.Data.Json
 import TestKit.Check
 import TestKit.Fixtures
 import TestKit.Regtest
+import AppTestNames
 
 /-! `cloud-backup-test`: the encrypted iCloud recovery formats, headless.
 
@@ -1051,6 +1052,75 @@ def shellAdapters : TM Unit := do
     n == "keychain.get" && (args.getObjValAs? Bool "synchronizable").toOption == some true && (args.getObjValAs? String "service").toOption == some Real.cloudBackupKeyService)
   answer fun _ _ => obj [("hex", "0011"), ("status", (0 : Int))]
   check "keys: a key of the wrong size is unreadableBackup" (← cloudFailsWith (keys.load a) (.issue .unreadableBackup))
+  answer fun _ _ => obj [("hex", "zzzz"), ("status", (0 : Int))]
+  check "keys: malformed hex is unreadableBackup" (← cloudFailsWith (keys.load a) (.issue .unreadableBackup))
+  answer fun _ _ => obj [("hex", Lean.Json.str (Winnow.hex (ByteArray.mk (Array.replicate 32 0x55)))), ("status", (0 : Int))]
+  check "keys: 32-byte hex returns the key" ((← (keys.load a).run) matches .ok _)
+  answer fun _ _ => obj [("ok", true), ("status", (0 : Int))]
+  check "keys: create writes a 32-byte key" ((← (keys.create a).run) matches .ok _)
+  answer fun _ _ => obj [("ok", false), ("status", (-25299 : Int))]
+  check "keys: create failure is keychainUnavailable" (← cloudFailsWith (keys.create a) (.issue .keychainUnavailable))
+  -- shellCloudStore: account statuses, list error, save (ok, accountChanged before/after, error), load (ok, missing asset, bad payload, id mismatch, accountChanged)
+  answer fun _ _ => obj [("status", "noAccount")]
+  check "account: noAccount is signedOut" (← cloudFailsWith cloud.account (.issue .signedOut))
+  answer fun _ _ => obj [("status", "restricted")]
+  check "account: restricted is signedOut" (← cloudFailsWith cloud.account (.issue .signedOut))
+  answer fun _ _ => obj [("status", "temporarilyUnavailable")]
+  check "account: temporarilyUnavailable is offline" (← cloudFailsWith cloud.account (.issue .offline))
+  answer fun _ _ => obj [("error", "missingEntitlement")]
+  check "account: missingEntitlement is unavailableInBuild" (← cloudFailsWith cloud.account (.issue .unavailableInBuild))
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("error", "networkUnavailable")]
+  check "list: query networkUnavailable is offline" (← cloudFailsWith (cloud.list "signet") (.issue .offline))
+  let sampleBundle ← walletBundle .signet 7
+  let sampleKey ← randomKey
+  let sampleBackup ← need "shellCloudStore sample" (CloudWalletBackup.create sampleBundle sampleKey)
+  let sampleBytes ← need "shellCloudStore encode" sampleBackup.encoded
+  let sampleHex := Winnow.hex sampleBytes
+  -- save: happy path, account changed before, account changed after, CloudKit save error
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("ok", true), ("record", record sampleBackup.id "signet" 978_307_300)]
+  check "save: writes record and payload asset"
+    ((← (cloud.save sampleBackup "_u").run) matches .ok () &&
+     (← asked.get).any fun (n, args) => n == "cloudkit.save" &&
+       (args.getObjValAs? String "name").toOption == some sampleBackup.id &&
+       (args.getObjValAs? String "assetField").toOption == some "payload")
+  check "save: different account before write is accountChanged"
+    (← cloudFailsWith (cloud.save sampleBackup "_other") (.issue .accountChanged))
+  let acctCalls ← IO.mkRef 0
+  let switchingAsk : Real.Ask := fun name _ => do
+    if name == "cloudkit.account" then
+      let n ← acctCalls.modifyGet fun k => (k, k + 1)
+      return Task.pure (obj [("status", "available"), ("user", if n == 0 then "_u" else "_other")])
+    return Task.pure (obj [("ok", true), ("record", record sampleBackup.id "signet" 978_307_300)])
+  check "save: account changing during write is accountChanged"
+    (← cloudFailsWith ((Real.shellCloudStore switchingAsk).save sampleBackup "_u") (.issue .accountChanged))
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("error", "quotaExceeded")]
+  check "save: quotaExceeded is storageFull" (← cloudFailsWith (cloud.save sampleBackup "_u") (.issue .storageFull))
+  -- load: happy path, missing asset, undecodable asset, id mismatch, account mismatch
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("record", record sampleBackup.id "signet" 978_307_300), ("asset", Lean.Json.str sampleHex)]
+  check "load: decodes matching backup asset"
+    (match ← (cloud.load sampleBackup.id "_u").run with | .ok bk => bk.id == sampleBackup.id | _ => false)
+  check "load: wrong expected account before load is accountChanged"
+    (← cloudFailsWith (cloud.load sampleBackup.id "_other") (.issue .accountChanged))
+  check "load: mismatched record id in payload is accountChanged"
+    (← cloudFailsWith (cloud.load a "_u") (.issue .accountChanged))
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("record", record sampleBackup.id "signet" 978_307_300), ("asset", Lean.Json.null)]
+  check "load: missing asset is unreadableBackup"
+    (← cloudFailsWith (cloud.load sampleBackup.id "_u") (.issue .unreadableBackup))
+  answer fun name _ => match name with
+    | "cloudkit.account" => obj [("status", "available"), ("user", "_u")]
+    | _ => obj [("record", record sampleBackup.id "signet" 978_307_300), ("asset", "deadbeef")]
+  check "load: corrupt backup bytes is unreadableBackup"
+    (← cloudFailsWith (cloud.load sampleBackup.id "_u") (.issue .unreadableBackup))
 
 /-- The existing wallet's preparation runs in LeanNative's EffectScope: the background or a wallet change
 while the person answers the prompt ends it before the protected part (the words, the copy) starts, and

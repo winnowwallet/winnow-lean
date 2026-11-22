@@ -35,6 +35,10 @@ root = "BackendTest"
 [[lean_lib]]
 name = "FoundationVectors"
 
+# Test-only error case-name tables for LeanApp test executables (never imported by WinnowApp.Main).
+[[lean_lib]]
+name = "AppTestNames"
+
 [[lean_exe]]
 name = "records-test"
 root = "RecordsTest"

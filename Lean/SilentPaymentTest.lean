@@ -11,6 +11,9 @@ unsigned P2TR input. Run from `Lean/`. -/
 
 open Lean Winnow Winnow.Keys Winnow.Keys.SilentPaymentSending TestKit
 
+private def Winnow.PasteFailure.name : Winnow.PasteFailure → String
+  | .card e => e.name | .named n => n
+
 def hx (s : String) : ByteArray := (ofHex? s).getD .empty
 
 /-- The vectors' witness serialization: CompactSize count, then CompactSize-prefixed items. -/

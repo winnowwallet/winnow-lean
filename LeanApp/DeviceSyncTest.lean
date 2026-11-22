@@ -6,6 +6,7 @@ import LeanNative.Json
 import TestKit.Check
 import TestKit.Fixtures
 import TestKit.Regtest
+import AppTestNames
 
 /-! `device-sync-test`: multisig accounts and signers that follow a person between devices, headless.
 

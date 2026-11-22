@@ -2,6 +2,7 @@ import LeanNative.Journey
 import Winnow.Wallet.SegwitSpendReview
 import WinnowApp.Ids
 import Journeys.Screens
+import TestKit.Fixtures
 
 /-! # SegWit v0 multisig journey: `wsh(sortedmulti(2, FIXED, phoneKey, otherKey))` -/
 

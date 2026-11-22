@@ -38,11 +38,6 @@ inductive SealFailure where
   | verificationFailed
   deriving Repr, BEq, Inhabited
 
-/-- Swift's case name, as `RecordsError.name` reports a refused seal (records-test `sealFailures`). -/
-def SealFailure.name : SealFailure → String
-  | .unsealed => "unsealed" | .keyMissing => "keyMissing" | .malformed => "malformed"
-  | .verificationFailed => "verificationFailed"
-
 /-- `StoreKeyVaultError`. -/
 inductive StoreKeyVaultError where
   | alreadyEstablished (account : String)
@@ -84,10 +79,6 @@ inductive SignerStorageError where
   | tooMany
   deriving Repr, BEq, Inhabited
 
-def SignerStorageError.name : SignerStorageError → String
-  | .invalidState _ => "invalidState" | .damaged => "damaged" | .duplicate _ => "duplicate"
-  | .unknownSigner => "unknownSigner" | .tooMany => "tooMany"
-
 def SignerStorageError.description : SignerStorageError → String
   | .invalidState r => s!"Invalid signer storage: {r}"
   | .damaged => "Winnow could not safely read its signers, so they cannot be changed until the file is readable again."
@@ -124,24 +115,6 @@ namespace RecordsError
 def isDamaged : RecordsError → Bool
   | .people .damaged | .labels .damaged | .multisig .damaged | .signers .damaged => true
   | _ => false
-
-/-- Case name for tests (`TestKit.Describe`). -/
-def name : RecordsError → String
-  | .seal f => f.name
-  | .keyVault (.alreadyEstablished _) => "alreadyEstablished" | .keyVault .malformedKey => "malformedKey"
-  | .keyVault (.keychain _) => "keychain"
-  | .people (.invalidState _) => "invalidState" | .people .damaged => "damaged"
-  | .people (.duplicate _) => "duplicate" | .people .unknownPerson => "unknownPerson" | .people .tooMany => "tooMany"
-  | .labels .unavailable => "unavailable" | .labels .damaged => "damaged" | .labels .invalidLabel => "invalidLabel"
-  | .labels .full => "full"
-  | .multisig (.invalidState _) => "invalidState" | .multisig .damaged => "damaged"
-  | .multisig .duplicate => "duplicate" | .multisig .tooMany => "tooMany" | .multisig .unavailable => "unavailable"
-  | .signers e => e.name
-  | .app .noWallet => "noWallet"
-  | .app .sendReviewChanged => "sendReviewChanged" | .app .personCannotBePaid => "personCannotBePaid"
-  | .lookup _ => "unavailable"
-  | .named n _ => n
-  | .io _ => "ioError"
 
 def maximumPeople : Nat := 1_000
 def maximumMultisigAccounts : Nat := 100
