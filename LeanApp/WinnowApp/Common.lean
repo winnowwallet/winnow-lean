@@ -107,6 +107,99 @@ def Model.fail (m : Model) (target : FailTarget) (cancelled : Bool := false) (me
   | .people t => m.failPeople t cancelled message
   | .multisig t => m.failMultisig t cancelled message
 
+/-! ## Continued background sync (iOS 26 `BGContinuedProcessingTask`) -/
+
+/-- The networking generation still feeding a continued sync across a trip to the background. -/
+def Model.continuedSyncGen (m : Model) : Option Nat := m.continuedSync.map (·.syncGen)
+
+/-- End any active continued sync, answering `bgtask.complete` when iOS had launched it. -/
+def Model.endContinuedSync (m : Model) (success : Bool) : Model × List Cmd :=
+  match m.continuedSync with
+  | some (.running id _ _ tag _) => ({ m with continuedSync := none }, [.completeBackgroundTask id success tag])
+  | some (.requested ..) => ({ m with continuedSync := none }, [])
+  | none => (m, [])
+
+/-- Ask iOS (while foreground-active) to keep this manual sync running if the person leaves the app. -/
+def Model.requestContinuedSync (m : Model) : Model × List Cmd :=
+  if !m.active then (m, []) else
+  let net := m.settings.network
+  let id := continuedSyncID net
+  let title := continuedSyncTitle net
+  let (completed, total, subtitle) := continuedSyncProgress m.phase
+  match m.continuedSync with
+  | some (.requested id' net' _ _) =>
+    if id' == id && net' == net then ({ m with continuedSync := some (.requested id net m.generation false) }, [])
+    else ({ m with continuedSync := some (.requested id net m.generation false) }, [.continueBackgroundSync id title subtitle])
+  | some (.running id' net' _ tag _) =>
+    if id' == id && net' == net then
+      ({ m with continuedSync := some (.running id net m.generation tag false) },
+       [.progressBackgroundSync id tag completed total title subtitle])
+    else
+      ({ m with continuedSync := some (.requested id net m.generation false) },
+       [.completeBackgroundTask id' false tag, .continueBackgroundSync id title subtitle])
+  | none =>
+    ({ m with continuedSync := some (.requested id net m.generation false) },
+     [.continueBackgroundSync id title subtitle])
+
+/-- Advance a requested or running continued sync on a new snapshot: report progress while syncing, or
+complete it (and tear down networking when backgrounded) once synced or failed. -/
+def Model.advanceContinuedSync (m : Model) (s : Status) (p : SyncPhase) (settled : Bool) : Model × List Cmd :=
+  match m.continuedSync with
+  | none => (m, [])
+  | some cs =>
+    let syncingNow := s.syncing || (p != .synced && p != .peerDiscoveryFailed)
+    let seen := cs.seenSyncing || syncingNow
+    let stop := if m.active then [] else [.stopNetworking]
+    let failed := !s.syncing && (seen || settled) &&
+      (p == .peerDiscoveryFailed || (simpleSyncError s.lastSyncError s.transientSyncError s.transientSyncFailures).isSome)
+    let done := !s.syncing && p == .synced && s.lastSyncError.isNone && (seen || settled)
+    if done then
+      let (m', endCs) := m.endContinuedSync true
+      (m', endCs ++ stop)
+    else if failed then
+      let (m', endCs) := m.endContinuedSync false
+      (m', endCs ++ stop)
+    else
+      let m' := { m with continuedSync := some (cs.withSeen seen) }
+      match cs with
+      | .running id net _ tag _ =>
+        let (completed, total, subtitle) := continuedSyncProgress p
+        (m', [.progressBackgroundSync id tag completed total (continuedSyncTitle net) subtitle])
+      | .requested .. => (m', [])
+
+/-- End a continued sync if its manual sync, import, or cloud restore threw a failure. -/
+def Model.onContinuedSyncFailure (m : Model) (target : FailTarget) : Model × List Cmd :=
+  match target with
+  | .wallet .sync | .wallet .importWallet | .wallet .cloudRestore =>
+    if m.continuedSync.isNone then (m, []) else
+    let (m', endCs) := m.endContinuedSync false
+    (m', endCs ++ (if m'.active then [] else [.stopNetworking]))
+  | _ => (m, [])
+
+/-- iOS launched a continued task (`{"bgtask":{"id","kind":"continued","tag"}}`). -/
+def Model.onContinuedTaskLaunched (m : Model) (id : String) (tag : Option Nat) : Model × List Cmd :=
+  match m.continuedSync with
+  | some cs =>
+    if cs.id == id then
+      let (completed, total, subtitle) := continuedSyncProgress m.phase
+      ({ m with continuedSync := some (.running id cs.network cs.syncGen tag cs.seenSyncing) },
+       [.progressBackgroundSync id tag completed total (continuedSyncTitle cs.network) subtitle])
+    else (m, [.completeBackgroundTask id false tag])
+  | none => (m, [.completeBackgroundTask id false tag])
+
+/-- iOS expired or the person cancelled a continued task (`{"bgtaskExpired":…}`). -/
+def Model.onContinuedTaskExpired (m : Model) (id : String) (tag : Option Nat) : Model × List Cmd :=
+  let stop := if m.active then [] else [.stopNetworking]
+  match m.continuedSync with
+  | some (.running id' _ _ launchTag _) =>
+    if id' == id && sameLaunch tag launchTag then
+      ({ m with continuedSync := none }, [.completeBackgroundTask id false launchTag] ++ stop)
+    else (m, [])
+  | some (.requested id' _ _ _) =>
+    if id' == id then ({ m with continuedSync := none }, [.completeBackgroundTask id false tag] ++ stop)
+    else (m, [])
+  | none => (m, [])
+
 /-! ## Sheets -/
 
 /-- Forget what a sheet held when it goes away (the SwiftUI view's @State dies with it). -/

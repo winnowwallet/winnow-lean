@@ -492,6 +492,71 @@ structure LedgerSetup where
   error : Option String := none
   deriving Repr, Inhabited
 
+/-- An iOS 26 `BGContinuedProcessingTask` (`bgtask.continue`) keeping a user-started sync alive after the
+person leaves the app. Requested while foreground-active; iOS launches it with a `tag`, receives progress
+updates (`bgtask.progress`), and ends it when the sync reaches the tip, fails, switches wallets/networks,
+or iOS/the person cancels it (`bgtaskExpired`). -/
+inductive ContinuedSync where
+  /-- `bgtask.continue` was submitted for `id` on `network` while networking ran under `syncGen`. -/
+  | requested (id : String) (network : Network) (syncGen : Nat) (seenSyncing : Bool := false)
+  /-- iOS launched `id` with `tag`; networking stays alive across backgrounding until synced, failed, or expired. -/
+  | running (id : String) (network : Network) (syncGen : Nat) (tag : Option Nat) (seenSyncing : Bool := false)
+  deriving Repr, BEq, Inhabited
+
+def ContinuedSync.id : ContinuedSync → String
+  | .requested id .. | .running id .. => id
+
+def ContinuedSync.network : ContinuedSync → Network
+  | .requested _ n .. | .running _ n .. => n
+
+def ContinuedSync.syncGen : ContinuedSync → Nat
+  | .requested _ _ g _ | .running _ _ g _ _ => g
+
+def ContinuedSync.seenSyncing : ContinuedSync → Bool
+  | .requested _ _ _ seen | .running _ _ _ _ seen => seen
+
+def ContinuedSync.withSyncGen (c : ContinuedSync) (g : Nat) : ContinuedSync :=
+  match c with
+  | .requested id n _ seen => .requested id n g seen
+  | .running id n _ tag seen => .running id n g tag seen
+
+def ContinuedSync.withSeen (c : ContinuedSync) (seen : Bool) : ContinuedSync :=
+  match c with
+  | .requested id n g _ => .requested id n g seen
+  | .running id n g tag _ => .running id n g tag seen
+
+/-- Wildcard Info.plist identifier (`BGTaskSchedulerPermittedIdentifiers`) for continued sync tasks. -/
+def continuedSyncWildcard : String := "com.btcswift.winnow.chain-sync.*"
+def continuedSyncPrefix : String := "com.btcswift.winnow.chain-sync."
+def continuedSyncID (n : Network) : String := continuedSyncPrefix ++ n.name
+
+/-- Privacy-safe Live Activity title for a continued sync: network only, never balances or wallet names. -/
+def continuedSyncTitle : Network → String
+  | .mainnet => "Syncing Bitcoin"
+  | .signet => "Syncing Signet"
+  | .regtest => "Syncing Regtest"
+
+/-- Privacy-safe Live Activity progress `(completed, total, subtitle)` for `bgtask.progress`.
+`LNBackgroundTasks` clamps `completed` to `total - 1` so only `bgtask.complete` finishes the task. -/
+def continuedSyncProgress (p : SyncPhase) : Nat × Nat × String :=
+  match p with
+  | .idle => (0, 100, "Starting sync…")
+  | .connecting connected target =>
+    let subtitle := if target > 0 then s!"Connecting to peers… ({connected}/{target})" else "Connecting to peers…"
+    (connected, max target 1, subtitle)
+  | .headers synced estimate =>
+    if estimate > 0 then
+      (synced, max estimate 1, s!"Checking headers… {groupDigits synced} / {groupDigits estimate}")
+    else
+      (0, 100, if synced > 0 then s!"Checking headers… {groupDigits synced}" else "Checking headers…")
+  | .filters scanned tip =>
+    if tip > 0 then
+      (scanned, max tip 1, s!"Scanning blocks… {groupDigits scanned} / {groupDigits tip}")
+    else
+      (0, 100, "Scanning blocks…")
+  | .synced => (99, 100, "Finishing sync…")
+  | .peerDiscoveryFailed => (0, 100, "No peers reachable")
+
 /-- The wallet's answer at boot. -/
 inductive BootResult where
   | opened (walletID : String)
@@ -579,6 +644,9 @@ structure Model where
   /-- The background tasks iOS launched before the wallet was open (id, kind, the launch's tag), in launch
   order, one per identifier: each runs once boot lands (records-test's `backgroundTaskCommands`). -/
   pendingBackgroundTasks : List (String × String × Option Nat) := []
+  /-- An active or requested iOS 26 continued background sync (`bgtask.continue`), keeping a manual sync
+  running if the person leaves the app. -/
+  continuedSync : Option ContinuedSync := none
   /-- The generation whose 30 s Ledger scan is ticking (one chain per generation). -/
   ledgerScanGen : Option Nat := none
   /-- The Ledger the nearby card offers. -/
@@ -625,7 +693,7 @@ inductive Host where
   /-- A restore from iCloud is done: the wallet, the verification (none: no peer yet), the restored display
   name and the backup's Advanced switch (kept for the format, not applied). -/
   | cloudRestored (gen : Nat) (walletID : String) (matchesBundle : Option Bool) (context : Option (String × Bool))
-  | snapshot (gen : Nat) (s : Status) (p : SyncPhase)
+  | snapshot (gen : Nat) (s : Status) (p : SyncPhase) (settled : Bool := false)
   | records (gen : Nat) (r : Records)
   | updated (gen : Nat) (d : Done) (r : Records)
   | receiveAddress (gen : Nat) (address : String)
@@ -686,6 +754,9 @@ inductive Host where
   | bgtask (id kind : String) (tag : Option Nat)
   /-- iOS expired the launch `tag` of `id`. -/
   | bgtaskExpired (id kind : String) (tag : Option Nat)
+  /-- `bgtask.continue` was refused (before iOS 26, Mac, or system refusal): drop the pending request and
+  stop networking if the app already moved to the background. -/
+  | continuedSyncRefused (id : String)
   /-- Time for the next nearby-Ledger scan of generation `gen` (every 30 s while the app is open). -/
   | ledgerScanDue (gen : Nat) (again : Bool)
   /-- The Ledgers a scan saw (none: Bluetooth off, not allowed, or nothing in range). -/
@@ -1075,6 +1146,12 @@ inductive Cmd where
   /-- Answer the shell that launch `tag` of task `id` is over without running it: iOS expired it while the app
   was still booting, so no run was ever made for it (records-test's `backgroundTaskCommands`). -/
   | completeBackgroundTask (id : String) (success : Bool) (tag : Option Nat)
+  /-- Submit an iOS 26 continued processing task (`bgtask.continue`) while the app is foreground-active so
+  a manual sync keeps running in a Live Activity if the person leaves the app. -/
+  | continueBackgroundSync (id title subtitle : String)
+  /-- Report progress for a running continued sync (`bgtask.progress`); iOS expires continued work that
+  reports no progress. -/
+  | progressBackgroundSync (id : String) (tag : Option Nat) (completed total : Nat) (title subtitle : String)
   /-- Look for Ledgers advertising nearby, without connecting (`ble.scan`). -/
   | scanLedgers (gen : Nat)
   /-- Ask for Bluetooth (`ble.state`, which makes iOS ask the person the first time). -/

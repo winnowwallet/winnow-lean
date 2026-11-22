@@ -46,8 +46,8 @@ def stepCloud (msg : CloudMsg) (m : Model) : Model × List Cmd :=
      [.discoverCloud])
   | .restore id =>
     if m.onboarding.restoring || m.walletID.isSome then (m, []) else
-    ({ m with onboarding := { m.onboarding with restoring := true, restoreError := none } },
-     [.restoreCloud m.generation m.settings.network id])
+    let (m', cont) := ({ m with onboarding := { m.onboarding with restoring := true, restoreError := none } }).requestContinuedSync
+    (m', [.restoreCloud m.generation m.settings.network id] ++ cont)
   | .checkAgain => if m.onboarding.restoring || m.cloud.busy then (m, []) else (m, [.discoverCloud])
 
 /-! ## View -/

@@ -18,9 +18,13 @@ success. The lifecycle's races are the framework's and tested there; RecordsTest
 namespace WinnowApp.Real
 open Winnow Winnow.IO Winnow.Net
 
-/-- `BackgroundSyncScheduler.refreshID` / `processingID` (Info.plist `BGTaskSchedulerPermittedIdentifiers`). -/
+/-- `BackgroundSyncScheduler.refreshID` / `processingID` and iOS 26's continued-sync wildcard
+(Info.plist `BGTaskSchedulerPermittedIdentifiers`). -/
 def backgroundRefreshID : String := "com.btcswift.winnow.chain-refresh"
 def backgroundProcessingID : String := "com.btcswift.winnow.chain-processing"
+def backgroundContinuedWildcard : String := WinnowApp.continuedSyncWildcard
+def backgroundContinuedPrefix : String := WinnowApp.continuedSyncPrefix
+def backgroundContinuedID (n : WinnowApp.Network) : String := WinnowApp.continuedSyncID n
 
 /-- The time a task of `kind` is given before the run expires itself (`.seconds(120)` for processing,
 `.seconds(25)` for refresh). records-test's `backgroundTaskCommands` reads each kind's budget from the

@@ -798,7 +798,8 @@ def backgroundRuns : IO Unit := do
     | .ok a => a.toList
     | .error _ => []
   check "background: the identifiers are permitted in Info.plist"
-    (strs "BGTaskSchedulerPermittedIdentifiers" == [Real.backgroundRefreshID, Real.backgroundProcessingID])
+    (strs "BGTaskSchedulerPermittedIdentifiers" ==
+      [Real.backgroundRefreshID, Real.backgroundProcessingID, Real.backgroundContinuedWildcard])
   check "background: fetch and processing modes" (strs "UIBackgroundModes" == ["fetch", "processing"])
   check "background: the manifest passes LeanNative's capability checks" WinnowApp.manifest.problems.isEmpty
   -- the Model: a cold launch's task waits for boot, boot without a scene starts no networking
@@ -2426,6 +2427,196 @@ def recordsLockedRow : IO Unit := do
     contains (rendered locked) "Unlock with Face ID")
   check "locked records: the tap asks for the authentication" ((step .unlockRecords locked).2.any (· matches .unlockRecords _))
 
+/-- Continued background sync (iOS 26 `BGContinuedProcessingTask`): every manual sync requests one while
+foreground-active, keeps networking alive across backgrounding, streams privacy-safe progress, and tears
+down cleanly on completion, failure, expiry/cancel, refusal, or wallet/network switch. -/
+def continuedBackgroundSync : IO Unit := do
+  -- privacy-safe Live Activity copy & progress
+  check "continued copy: titles per network"
+    (continuedSyncTitle .mainnet == "Syncing Bitcoin" &&
+     continuedSyncTitle .signet == "Syncing Signet" &&
+     continuedSyncTitle .regtest == "Syncing Regtest")
+  check "continued copy: idle/connecting/headers/filters/synced/failed progress"
+    (continuedSyncProgress .idle == (0, 100, "Starting sync…") &&
+     continuedSyncProgress (.connecting 2 3) == (2, 3, "Connecting to peers… (2/3)") &&
+     continuedSyncProgress (.connecting 0 0) == (0, 1, "Connecting to peers…") &&
+     continuedSyncProgress (.headers 840000 900000) == (840000, 900000, "Checking headers… 840,000 / 900,000") &&
+     continuedSyncProgress (.headers 12 0) == (0, 100, "Checking headers… 12") &&
+     continuedSyncProgress (.headers 0 0) == (0, 100, "Checking headers…") &&
+     continuedSyncProgress (.filters 12400 15000) == (12400, 15000, "Scanning blocks… 12,400 / 15,000") &&
+     continuedSyncProgress (.filters 0 0) == (0, 100, "Scanning blocks…") &&
+     continuedSyncProgress .synced == (99, 100, "Finishing sync…") &&
+     continuedSyncProgress .peerDiscoveryFailed == (0, 100, "No peers reachable"))
+  let idMain := continuedSyncID .mainnet
+  let idSignet := continuedSyncID .signet
+  check "continued id: covered by the wildcard identifier"
+    (idMain == "com.btcswift.winnow.chain-sync.mainnet" && idMain.startsWith Real.backgroundContinuedPrefix)
+  -- plain foreground activation does NOT request a continued task
+  let readyMain : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .mainnet } }
+  let (activated, cs) := onHost (.scene true) { readyMain with active := false }
+  check "continued: plain scene active does not request a continued task"
+    (activated.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  -- manual sync triggers: Sync now, Retry, Verify from genesis (ON only), iCloud restore, file import, finishOnboarding
+  let (m1, cs) := step .syncNow readyMain
+  check "continued: Sync now while active requests bgtask.continue"
+    (m1.continuedSync == some (.requested idMain .mainnet 0 false) &&
+     cs.any (· matches .syncNow 0) &&
+     cs.any (· matches .continueBackgroundSync _ "Syncing Bitcoin" _))
+  let (mInactive, cs) := step .syncNow { readyMain with active := false }
+  check "continued: Sync now while inactive does not request bgtask.continue"
+    (mInactive.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let (mRetry, cs) := step .retryPeers readyMain
+  check "continued: Retry requests bgtask.continue"
+    (mRetry.continuedSync.isSome && cs.any (· matches .retryPeers 0) && cs.any (· matches .continueBackgroundSync ..))
+  let (mGenOn, cs) := step (.settings (.setVerifyFromGenesis true)) readyMain
+  check "continued: turning Verify from genesis on requests bgtask.continue"
+    (mGenOn.continuedSync.isSome && cs.any (· matches .reconnect ..) && cs.any (· matches .continueBackgroundSync ..))
+  let (mGenOff, cs) := step (.settings (.setVerifyFromGenesis false)) { readyMain with settings := { readyMain.settings with verifyFromGenesis := true } }
+  check "continued: turning Verify from genesis off does not request bgtask.continue"
+    (mGenOff.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let onboarding : Model := { stage := .onboarding, active := true, settings := { network := .signet } }
+  let (mCloud, cs) := step (.cloud (.restore "backup-1")) onboarding
+  check "continued: iCloud restore requests bgtask.continue"
+    (mCloud.continuedSync == some (.requested idSignet .signet 0 false) &&
+     cs.any (· matches .restoreCloud ..) && cs.any (· matches .continueBackgroundSync _ "Syncing Signet" _))
+  let (mImport, cs) := step .importWallet { onboarding with onboarding := { importText := "{}" } }
+  check "continued: file import requests bgtask.continue"
+    (mImport.continuedSync == some (.requested idSignet .signet 0 false) &&
+     cs.any (· matches .importWallet ..) && cs.any (· matches .continueBackgroundSync ..))
+  let (mFinSync, cs) := step .finishOnboarding { onboarding with walletID := some "w", phase := .filters 10 20 }
+  check "continued: finishOnboarding requests bgtask.continue when still syncing"
+    (mFinSync.continuedSync.isSome && cs.any (· matches .continueBackgroundSync ..))
+  let (mFinDone, cs) := step .finishOnboarding { onboarding with walletID := some "w", phase := .synced }
+  check "continued: finishOnboarding skips bgtask.continue when already synced"
+    (mFinDone.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  -- full background continuation flow: request -> iOS launches -> background -> progress -> synced -> complete + stopNetworking
+  let (m, _) := step .syncNow { readyMain with phase := .connecting 1 3 }
+  let (m, cs) := onHost (.bgtask idMain "continued" (some 7)) m
+  check "continued: launch transitions to running, sends initial progress, does not run periodic check"
+    (m.continuedSync == some (.running idMain .mainnet 0 (some 7) false) &&
+     (match cs with
+      | [.progressBackgroundSync id (some 7) 1 3 "Syncing Bitcoin" "Connecting to peers… (1/3)"] => id == idMain
+      | _ => false))
+  -- duplicate manual sync while already running reuses the task instead of submitting a second one
+  let (mDup, cs) := step .syncNow m
+  check "continued: second manual sync reuses running task"
+    (mDup.continuedSync == some (.running idMain .mainnet 0 (some 7) false) &&
+     !cs.any (· matches .continueBackgroundSync ..) &&
+     cs.any (· matches .progressBackgroundSync ..))
+  -- swipe away to background while syncing: sensitive sheets close, periodic tasks schedule, networking stays alive!
+  let mWithSecret := (m.present .revealPhrase)
+  let (bg, cs) := onHost (.scene false) mWithSecret
+  check "continued: leaving app keeps networking alive while closing sensitive sheets and scheduling periodic tasks"
+    (!bg.active && bg.sheets.isEmpty && bg.generation == 1 &&
+     bg.continuedSync == some (.running idMain .mainnet 0 (some 7) false) &&
+     !cs.any (· matches .stopNetworking) &&
+     cs.any (· matches .scheduleBackgroundTasks) &&
+     cs.any (· matches .cloudScene false))
+  -- snapshot from the kept watcher (syncGen = 0) is accepted across the generation bump and reports progress
+  let (bg2, cs) := onHost (.snapshot 0 { bg.status with syncing := true } (.filters 12000 15000)) bg
+  check "continued: background snapshot advances progress with tag"
+    (bg2.phase == .filters 12000 15000 &&
+     bg2.continuedSync == some (.running idMain .mainnet 0 (some 7) true) &&
+     (match cs with
+      | [.progressBackgroundSync id (some 7) 12000 15000 "Syncing Bitcoin" "Scanning blocks… 12,000 / 15,000"] => id == idMain
+      | _ => false))
+  -- a single transient sync error keeps going; 3 transient errors or peerDiscoveryFailed stops cleanly
+  let (bgTrans, cs) := onHost (.snapshot 0
+    { bg2.status with syncing := false, lastSyncError := some "peer dropped", transientSyncError := some "peer dropped", transientSyncFailures := 1 }
+    (.filters 12000 15000)) bg2
+  check "continued: one transient error keeps continued sync alive"
+    (bgTrans.continuedSync.isSome && !cs.any (· matches .completeBackgroundTask ..) && !cs.any (· matches .stopNetworking))
+  -- reaching synced while backgrounded completes with success=true AND stops networking
+  let (bgDone, cs) := onHost (.snapshot 0 { bg2.status with syncing := false } .synced) bg2
+  check "continued: reaching tip in background completes successfully and stops networking"
+    (bgDone.continuedSync.isNone &&
+     (match cs with
+      | [.completeBackgroundTask id true (some 7), .stopNetworking] => id == idMain
+      | _ => false))
+  -- returning to foreground mid-sync rebinds syncGen to the new generation and finishes without stopping networking
+  let (fg, _) := onHost (.scene true) bg2
+  check "continued: returning to foreground rebinds syncGen to current generation"
+    (fg.active && fg.continuedSync == some (.running idMain .mainnet fg.generation (some 7) true))
+  let (fgDone, cs) := onHost (.snapshot fg.generation { fg.status with syncing := false } .synced) fg
+  check "continued: finishing in foreground completes successfully and keeps networking running"
+    (fgDone.continuedSync.isNone &&
+     cs.any (· matches .completeBackgroundTask _ true (some 7)) &&
+     !cs.any (· matches .stopNetworking))
+  -- fast already-synced Sync now (settled := true) completes immediately
+  let (mFast, _) := step .syncNow { readyMain with phase := .synced }
+  let (mFast, _) := onHost (.bgtask idMain "continued" (some 9)) mFast
+  let (mFastPre, cs) := onHost (.snapshot 0 { mFast.status with syncing := false } .synced false) mFast
+  check "continued: pre-pass settled=false synced snapshot does not prematurely complete"
+    (mFastPre.continuedSync.isSome && !cs.any (· matches .completeBackgroundTask ..))
+  let (mFastEnd, cs) := onHost (.snapshot 0 { mFast.status with syncing := false } .synced true) mFastPre
+  check "continued: settled=true synced snapshot completes immediately"
+    (mFastEnd.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id true (some 9)] => id == idMain | _ => false))
+  -- peer discovery failure / backend throw while backgrounded completes false and stops networking
+  let (bgFail, cs) := onHost (.snapshot 0 { bg2.status with syncing := false } .peerDiscoveryFailed) bg2
+  check "continued: peerDiscoveryFailed in background completes false and stops networking"
+    (bgFail.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id false (some 7), .stopNetworking] => id == idMain | _ => false))
+  let (bgThrow, cs) := onHost (.failed 0 (.wallet .sync) false "disk full") bg2
+  check "continued: sync failure in background completes false and stops networking"
+    (bgThrow.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id false (some 7), .stopNetworking] => id == idMain | _ => false))
+  -- expiry / user cancellation from Live Activity: stale tag ignored, matching tag completes false + stops networking
+  let (bgStaleExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 6)) bg2
+  check "continued: expiry naming an older tag leaves running task alone"
+    (bgStaleExp.continuedSync.isSome && cs.isEmpty)
+  let (bgExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 7)) bg2
+  check "continued: expiry in background completes false and stops networking"
+    (bgExp.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id false (some 7), .stopNetworking] => id == idMain | _ => false))
+  let (fgExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 7)) fg
+  check "continued: expiry in foreground completes false without stopping foreground networking"
+    (fgExp.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id false (some 7)] => id == idMain | _ => false))
+  -- orphan continued launch (sync already gone) is completed immediately
+  let (_, cs) := onHost (.bgtask idMain "continued" (some 11)) readyMain
+  check "continued: orphan launch completes immediately with its tag"
+    (match cs with | [.completeBackgroundTask id false (some 11)] => id == idMain | _ => false)
+  -- refusal on iOS < 26 / Mac: clears requested state and stops networking if already backgrounded
+  let (mReq, _) := step .syncNow readyMain
+  let (bgReq, _) := onHost (.scene false) mReq
+  let (bgRefused, cs) := onHost (.continuedSyncRefused idMain) bgReq
+  check "continued: refusal after backgrounding stops networking"
+    (bgRefused.continuedSync.isNone && (cs matches [.stopNetworking]))
+  -- switching network, switching wallet, or deleting wallet cancels a running continued task
+  let (swNet, cs) := fg.switchNetwork .signet
+  check "continued: switching network completes running task unsuccessfully"
+    (swNet.continuedSync.isNone && cs.any (· matches .completeBackgroundTask _ false (some 7)))
+  let (swWal, cs) := fg.switchWallet (fun g => .openSlot g .mainnet none)
+  check "continued: switching wallet completes running task unsuccessfully"
+    (swWal.continuedSync.isNone && cs.any (· matches .completeBackgroundTask _ false (some 7)))
+  let (delWal, cs) := onHost (.deleted fg.generation) fg
+  check "continued: deleting wallet completes running task unsuccessfully"
+    (delWal.continuedSync.isNone && cs.any (· matches .completeBackgroundTask _ false (some 7)))
+  -- shell capability wiring via Main.perform (ok + unavailable refusal + progress + complete)
+  let sh ← Shell.new
+  WinnowApp.perform (.continueBackgroundSync idMain "Syncing Bitcoin" "Starting sync…") sh.fx
+  WinnowApp.perform (.progressBackgroundSync idMain (some 7) 10 20 "Syncing Bitcoin" "Scanning blocks… 10 / 20") sh.fx
+  WinnowApp.perform (.completeBackgroundTask idMain true (some 7)) sh.fx
+  discard <| waitUntil 2_000 (every := 5) do return (← sh.asks.get).size ≥ 3
+  let asks ← sh.asks.get
+  check "continued perform: sends bgtask.continue, bgtask.progress, and bgtask.complete"
+    (asks.any (fun (n, a) => n == "bgtask.continue" && (a.getObjValAs? String "id").toOption == some idMain) &&
+     asks.any (fun (n, a) => n == "bgtask.progress" && (a.getObjValAs? Nat "completed").toOption == some 10 &&
+       (a.getObjValAs? Nat "tag").toOption == some 7) &&
+     asks.any (fun (n, a) => n == "bgtask.complete" && (a.getObjValAs? Bool "success").toOption == some true &&
+       (a.getObjValAs? Nat "tag").toOption == some 7)) (reprStr (asks.map fun (n, a) => (n, a.compress)))
+  -- refusal from shell posts continuedSyncRefused
+  let refusedPosted ← IO.mkRef (#[] : Array Host)
+  let refuseFx : LeanNative.Native.Effects Host :=
+    { post := fun h => refusedPosted.modify (·.push h),
+      cap := fun _ _ _ => pure (),
+      ask := fun _ _ => pure (Task.pure (Lean.Json.mkObj [("ok", false), ("error", "unavailable")])) }
+  WinnowApp.perform (.continueBackgroundSync idMain "Syncing Bitcoin" "Starting sync…") refuseFx
+  let gotRefused ← waitUntil 2_000 (every := 5) do
+    return (← refusedPosted.get).any (· matches .continuedSyncRefused _)
+  check "continued perform: unavailable bgtask.continue posts continuedSyncRefused" gotRefused
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
@@ -2437,6 +2628,7 @@ def main : IO UInt32 := runMain "records-test" do
   syncBookkeepingScreens
   backgroundRuns
   backgroundTaskCommands
+  continuedBackgroundSync
   testModeSeed
   walletSlots root
   walletSwitcher root

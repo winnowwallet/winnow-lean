@@ -20,6 +20,9 @@ initialize tmpDir : IO.Ref String ← IO.mkRef ""
 initialize backendRef : IO.Ref Backend ← IO.mkRef Backend.pending
 /-- The running status watcher's token: starting or stopping networking bumps it, ending the old one. -/
 initialize watcherToken : IO.Ref Nat ← IO.mkRef 0
+/-- Whether an iOS 26 continued background sync is live: the status watcher sends periodic progress heartbeats
+while waiting on slow peers so iOS does not expire the task for silence. -/
+initialize continuedSyncActive : IO.Ref Bool ← IO.mkRef false
 /-- The background checks running, by task identifier, each with the serial of its launch here and the
 shell's tag for it (`BackgroundSyncRun`): at most one per identifier, since a later launch supersedes the
 run before it. -/
@@ -388,7 +391,7 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .syncNow g => background fx g (.wallet .sync) do
       b.syncNow
       let (s, p) ← b.snapshot
-      return .snapshot g s p
+      return .snapshot g s p (settled := true)
   | .retryPeers g => background fx g (.wallet .sync) do
       b.retryPeers
       let (s, p) ← b.snapshot
@@ -406,15 +409,22 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       discard <| IO.asTask (prio := .dedicated) do
         let mut last := ""
         let mut lastMultisig : Option MultisigOverview := none
+        let mut idleTicks : Nat := 0
         while (← watcherToken.get) == token do
           try
             let (st, p) ← b.snapshot
             let key := reprStr (st, p)
             if key != last then
               last := key
+              idleTicks := 0
               try b.cloudTick catch _ => pure ()
               trace s!"watcher {g} posts balance {st.balance} peers {st.peerCount} tip {st.tipHeight} scan {st.nextScanHeight} error {st.lastSyncError}"
               fx.post (.snapshot g st p)
+            else if ← continuedSyncActive.get then
+              idleTicks := idleTicks + 1
+              if idleTicks ≥ 5 then
+                idleTicks := 0
+                fx.post (.snapshot g st p)
             -- `refresh()` also mirrors `multisigAccounts`: what the sync credited reaches the screens
             let o ← b.multisigOverview
             if lastMultisig != some o then
@@ -423,6 +433,7 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
           catch e => trace s!"watcher {g}: {e}"
           IO.sleep 1000
   | .stopNetworking => do
+      continuedSyncActive.set false
       watcherToken.modify (· + 1)
       discard <| IO.asTask b.stopNetworking
   | _ => pure ()
@@ -671,9 +682,23 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
       -- task iOS launched since under the same identifier, and a task still pending is the shell's to end;
       -- an expiry naming an older launch than the run registered under `id` leaves that run alone
       | none => pure ()
-  | .completeBackgroundTask id success tag =>
-      -- expired before boot ran it (records-test's `backgroundTaskCommands`)
+  | .completeBackgroundTask id success tag => do
+      -- expired before boot ran it, or a continued sync that finished/expired
+      if id.startsWith Real.backgroundContinuedPrefix then continuedSyncActive.set false
       answerBackgroundTask fx id success tag
+  | .continueBackgroundSync id title subtitle => discard <| IO.asTask do
+      let args := Json.mkObj [("id", Json.str id), ("title", Json.str title), ("subtitle", Json.str subtitle)]
+      let r ← IO.wait (← fx.ask "bgtask.continue" args)
+      unless (r.getObjValAs? Bool "ok").toOption.getD false do
+        continuedSyncActive.set false
+        fx.post (.continuedSyncRefused id)
+  | .progressBackgroundSync id tag completed total title subtitle => discard <| IO.asTask do
+      continuedSyncActive.set true
+      let args := Json.mkObj (
+        [("id", Json.str id), ("completed", toJson completed), ("total", toJson total),
+         ("title", Json.str title), ("subtitle", Json.str subtitle)] ++
+        tag.toList.map fun t => ("tag", toJson t))
+      discard <| fx.ask "bgtask.progress" args
   | .backgroundRefreshStatus =>
     fx.cap "bgtask.refreshStatus" Json.null fun r =>
       .backgroundRefresh ((r.getObjValAs? String "status").toOption.getD "available" == "available")
@@ -718,7 +743,7 @@ def perform (c : Cmd) (fx : Effects Host) : IO Unit := do
     performMultisig b fx c
   | .copy .. | .timer .. | .openURL .. | .setAppearance .. | .journal .. | .unlockRecords .. | .discoverCloud | .setAutomaticCloud .. | .restoreCloud ..
   | .suspendCloud | .cloudScene .. | .scheduleBackgroundTasks | .runBackgroundTask .. | .expireBackgroundTask ..
-  | .completeBackgroundTask ..
+  | .completeBackgroundTask .. | .continueBackgroundSync .. | .progressBackgroundSync ..
   | .backgroundRefreshStatus | .paste .. =>
     performShell b fx c
 

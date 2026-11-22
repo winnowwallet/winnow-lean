@@ -84,7 +84,9 @@ def stepSettings (msg : SettingsMsg) (m : Model) : Model × List Cmd :=
   | .setVerifyFromGenesis b =>
     if b == m.settings.verifyFromGenesis then (m, []) else
     let s := { m.settings with verifyFromGenesis := b }
-    ({ m with settings := s }, [.saveSettings s, .journal "setting.verifyFromGenesis" [("enabled", toString b)], .reconnect g s])
+    let m' := { m with settings := s }
+    let (m', cont) := if b then m'.requestContinuedSync else (m', [])
+    (m', [.saveSettings s, .journal "setting.verifyFromGenesis" [("enabled", toString b)], .reconnect g s] ++ cont)
   | .setExplorer i => match explorers[i]? with
     | some e => save (m.settings.withScoped fun n => { n with explorer := e })
     | none => (m, [])
