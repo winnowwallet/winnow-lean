@@ -270,12 +270,16 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
       ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) },
         [.completeBackgroundTask id false t])
     else (m, [.expireBackgroundTask id tag])
-  | .continuedSyncRefused id =>
+  | .continuedSyncRefused id err detail =>
     match m.continuedSync with
     | some (.requested id' _ _ _) =>
       if id' == id then
-        let m' := { m with continuedSync := none }
+        let m' := { m with continuedSync := none, continuedSyncOutcome := .refused err detail, continuedSyncAutoSuppressed := true }
         (m', if m'.active then [] else [.stopNetworking])
+      else (m, [])
+    | none =>
+      if err == "unavailable" then
+        ({ m with continuedSyncOutcome := .refused err detail, continuedSyncAutoSuppressed := true }, [])
       else (m, [])
     | _ => (m, [])
   | .scene active =>

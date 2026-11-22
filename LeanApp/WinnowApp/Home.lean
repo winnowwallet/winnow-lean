@@ -284,6 +284,20 @@ def chainCheckStatus (m : Model) : List H :=
       "iOS may also check while Winnow is closed, through the same routing. It cannot while the phone is off or after you force-quit Winnow."
     else "Background App Refresh is off, so Winnow checks the chain only while open.") ]
 
+/-- One-line continued background sync status for Settings → Network → Sync. -/
+def continuedSyncStatusText (m : Model) : String :=
+  match m.continuedSync with
+  | some (.running ..) => "Active"
+  | some (.requested ..) => "Starting…"
+  | none =>
+    match m.continuedSyncOutcome with
+    | .none => "Idle"
+    | .completed => "Last run finished"
+    | .expired => "Stopped or cancelled"
+    | .refused "unavailable" _ => "Unavailable"
+    | .refused err "" => s!"Refused ({err})"
+    | .refused err detail => s!"Refused ({err}: {detail})"
+
 /-- Settings → Network → Sync. Its rows stay the same from pass to pass (a pass that starts or ends, an
 error that comes and goes, changes them in place): the section sits above Transactions, and a row added or
 removed every few seconds moved the list under the person's finger. -/
@@ -300,7 +314,8 @@ def syncSection (m : Model) : H :=
     ([ .identified Ids.syncStatus status
      , .labeled "Filter scan" ((filterScanText m.phase m.status.nextScanHeight m.status.tipHeight).getD "—")
      , .labeled "Peers" s!"{m.status.peerCount}"
-     , .identified Ids.syncLastError (.labeled "Last error" (m.status.lastSyncError.getD "None")) ] ++ chainCheckStatus m ++
+     , .identified Ids.syncLastError (.labeled "Last error" (m.status.lastSyncError.getD "None"))
+     , .identified Ids.continuedSyncStatus (.labeled "Background sync" (continuedSyncStatusText m)) ] ++ chainCheckStatus m ++
      (match m.status.relayStoreQuarantined with | some q => [body q] | none => []) ++
      [if failed then .identified Ids.retryPeersButton (.button "Retry" .plain (some .retryPeers))
       else .button "Sync now" .plain (if m.status.syncing then none else some .syncNow)])

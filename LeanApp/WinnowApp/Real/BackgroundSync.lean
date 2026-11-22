@@ -24,7 +24,7 @@ def backgroundRefreshID : String := "com.btcswift.winnow.chain-refresh"
 def backgroundProcessingID : String := "com.btcswift.winnow.chain-processing"
 def backgroundContinuedWildcard : String := WinnowApp.continuedSyncWildcard
 def backgroundContinuedPrefix : String := WinnowApp.continuedSyncPrefix
-def backgroundContinuedID (n : WinnowApp.Network) : String := WinnowApp.continuedSyncID n
+def backgroundContinuedID (n : WinnowApp.Network) (serial : Nat := 1) : String := WinnowApp.continuedSyncID n serial
 
 /-- The time a task of `kind` is given before the run expires itself (`.seconds(120)` for processing,
 `.seconds(25)` for refresh). records-test's `backgroundTaskCommands` reads each kind's budget from the

@@ -801,6 +801,10 @@ def backgroundRuns : IO Unit := do
   check "background: the identifiers are permitted in Info.plist"
     (strs "BGTaskSchedulerPermittedIdentifiers" ==
       [Real.backgroundRefreshID, Real.backgroundProcessingID, Real.backgroundContinuedWildcard])
+  -- Apple requires BGContinuedProcessingTask wildcard identifiers to start with `<CFBundleIdentifier>.`
+  let wildcards := (strs "BGTaskSchedulerPermittedIdentifiers").filter (·.endsWith ".*")
+  check "background: continued wildcards start with the app's bundleId"
+    (!wildcards.isEmpty && wildcards.all (·.startsWith (WinnowApp.manifest.bundleId ++ ".")))
   check "background: fetch and processing modes" (strs "UIBackgroundModes" == ["fetch", "processing"])
   check "background: the manifest passes LeanNative's capability checks" WinnowApp.manifest.problems.isEmpty
   -- the Model: a cold launch's task waits for boot, boot without a scene starts no networking
@@ -2448,15 +2452,56 @@ def continuedBackgroundSync : IO Unit := do
      continuedSyncProgress (.filters 0 0) == (0, 100, "Scanning blocks…") &&
      continuedSyncProgress .synced == (99, 100, "Finishing sync…") &&
      continuedSyncProgress .peerDiscoveryFailed == (0, 100, "No peers reachable"))
-  let idMain := continuedSyncID .mainnet
-  let idSignet := continuedSyncID .signet
-  check "continued id: covered by the wildcard identifier"
-    (idMain == "com.btcswift.winnow.chain-sync.mainnet" && idMain.startsWith Real.backgroundContinuedPrefix)
+  let idMain := continuedSyncID .mainnet 1
+  let idMain2 := continuedSyncID .mainnet 2
+  let idSignet := continuedSyncID .signet 1
+  check "continued id: bundle-prefixed, single-label suffix under the wildcard"
+    (idMain == "com.btcswift.app.chain-sync.mainnet-1" &&
+     idMain2 == "com.btcswift.app.chain-sync.mainnet-2" &&
+     idMain.startsWith Real.backgroundContinuedPrefix &&
+     idMain.startsWith (WinnowApp.manifest.bundleId ++ ".") &&
+     !(idMain.drop Real.backgroundContinuedPrefix.length).contains '.')
   -- plain foreground activation does NOT request a continued task
   let readyMain : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .mainnet } }
   let (activated, cs) := onHost (.scene true) { readyMain with active := false }
   check "continued: plain scene active does not request a continued task"
     (activated.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  -- automatic foreground catch-up sync requests continuation once, and stays quiet on already-synced polls
+  let (mPoll, cs) := onHost (.snapshot 0 { readyMain.status with syncing := true } .synced) readyMain
+  check "continued: routine synced poll does not auto-request bgtask.continue"
+    (mPoll.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let (mAuto, cs) := onHost (.snapshot 0 { readyMain.status with syncing := true } (.filters 100 5000)) readyMain
+  check "continued: automatic foreground catch-up sync requests bgtask.continue"
+    (mAuto.continuedSync == some (.requested idMain .mainnet 0 true) &&
+     mAuto.continuedSyncSerial == 1 &&
+     cs.any (· matches .continueBackgroundSync _ "Syncing Bitcoin" "Scanning blocks… 100 / 5,000"))
+  -- refusal suppresses repeated auto-requests on subsequent ticks, records error/detail for Sync screen,
+  -- and re-enables auto-requests once synced (except `unavailable`, which stays suppressed)
+  let (mAutoRef, _) := onHost (.continuedSyncRefused idMain "tooManyPending" "queue full") mAuto
+  check "continued: refusal records error/detail and suppresses auto-retry while still syncing"
+    (mAutoRef.continuedSync.isNone && mAutoRef.continuedSyncAutoSuppressed &&
+     mAutoRef.continuedSyncOutcome == .refused "tooManyPending" "queue full" &&
+     continuedSyncStatusText mAutoRef == "Refused (tooManyPending: queue full)")
+  let (mAutoStill, cs) := onHost (.snapshot 0 { mAutoRef.status with syncing := true } (.filters 200 5000)) mAutoRef
+  check "continued: suppressed auto-sync does not spam bgtask.continue"
+    (mAutoStill.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let (mAutoCleared, _) := onHost (.snapshot 0 { mAutoStill.status with syncing := false } .synced) mAutoStill
+  check "continued: reaching synced clears non-unavailable suppression for the next pass"
+    (!mAutoCleared.continuedSyncAutoSuppressed)
+  let (mAutoNext, cs) := onHost (.snapshot 0 { mAutoCleared.status with syncing := true } (.headers 10 20)) mAutoCleared
+  check "continued: next catch-up pass gets a fresh unique task id"
+    (mAutoNext.continuedSync == some (.requested idMain2 .mainnet 0 true) &&
+     cs.any (fun c => match c with | .continueBackgroundSync id .. => id == idMain2 | _ => false))
+  let (mUnavail, _) := onHost (.continuedSyncRefused idMain2 "unavailable" "needs iOS 26") mAutoNext
+  let (mUnavailSynced, _) := onHost (.snapshot 0 { mUnavail.status with syncing := false } .synced) mUnavail
+  check "continued: unavailable stays suppressed even after sync finishes"
+    (mUnavailSynced.continuedSyncAutoSuppressed && continuedSyncStatusText mUnavailSynced == "Unavailable")
+  -- manual trigger after refusal always tries again with a fresh id
+  let (mManualAfterRef, cs) := step .syncNow mAutoRef
+  check "continued: manual Sync now overrides auto suppression with fresh id"
+    (mManualAfterRef.continuedSync == some (.requested idMain2 .mainnet 0 false) &&
+     !mManualAfterRef.continuedSyncAutoSuppressed &&
+     cs.any (fun c => match c with | .continueBackgroundSync id .. => id == idMain2 | _ => false))
   -- manual sync triggers: Sync now, Retry, Verify from genesis (ON only), iCloud restore, file import, finishOnboarding
   let (m1, cs) := step .syncNow readyMain
   check "continued: Sync now while active requests bgtask.continue"
@@ -2492,9 +2537,13 @@ def continuedBackgroundSync : IO Unit := do
     (mFinDone.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
   -- full background continuation flow: request -> iOS launches -> background -> progress -> synced -> complete + stopNetworking
   let (m, _) := step .syncNow { readyMain with phase := .connecting 1 3 }
+  check "continued Sync row: shows Starting… while requested"
+    (continuedSyncStatusText m == "Starting…" &&
+     contains (LeanNative.Html.toWire (.list (syncSections m) : H)).toJson.compress Ids.continuedSyncStatus)
   let (m, cs) := onHost (.bgtask idMain "continued" (some 7)) m
   check "continued: launch transitions to running, sends initial progress, does not run periodic check"
     (m.continuedSync == some (.running idMain .mainnet 0 (some 7) false) &&
+     continuedSyncStatusText m == "Active" &&
      (match cs with
       | [.progressBackgroundSync id (some 7) 1 3 "Syncing Bitcoin" "Connecting to peers… (1/3)"] => id == idMain
       | _ => false))
@@ -2530,7 +2579,7 @@ def continuedBackgroundSync : IO Unit := do
   -- reaching synced while backgrounded completes with success=true AND stops networking
   let (bgDone, cs) := onHost (.snapshot 0 { bg2.status with syncing := false } .synced) bg2
   check "continued: reaching tip in background completes successfully and stops networking"
-    (bgDone.continuedSync.isNone &&
+    (bgDone.continuedSync.isNone && continuedSyncStatusText bgDone == "Last run finished" &&
      (match cs with
       | [.completeBackgroundTask id true (some 7), .stopNetworking] => id == idMain
       | _ => false))
@@ -2568,7 +2617,8 @@ def continuedBackgroundSync : IO Unit := do
     (bgStaleExp.continuedSync.isSome && cs.isEmpty)
   let (bgExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 7)) bg2
   check "continued: expiry in background completes false and stops networking"
-    (bgExp.continuedSync.isNone &&
+    (bgExp.continuedSync.isNone && continuedSyncStatusText bgExp == "Stopped or cancelled" &&
+     bgExp.continuedSyncAutoSuppressed &&
      (match cs with | [.completeBackgroundTask id false (some 7), .stopNetworking] => id == idMain | _ => false))
   let (fgExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 7)) fg
   check "continued: expiry in foreground completes false without stopping foreground networking"
@@ -2581,9 +2631,11 @@ def continuedBackgroundSync : IO Unit := do
   -- refusal on iOS < 26 / Mac: clears requested state and stops networking if already backgrounded
   let (mReq, _) := step .syncNow readyMain
   let (bgReq, _) := onHost (.scene false) mReq
-  let (bgRefused, cs) := onHost (.continuedSyncRefused idMain) bgReq
-  check "continued: refusal after backgrounding stops networking"
-    (bgRefused.continuedSync.isNone && (cs matches [.stopNetworking]))
+  let (bgRefused, cs) := onHost (.continuedSyncRefused idMain "notPermitted" "bad prefix") bgReq
+  check "continued: refusal after backgrounding stops networking and shows reason"
+    (bgRefused.continuedSync.isNone &&
+     continuedSyncStatusText bgRefused == "Refused (notPermitted: bad prefix)" &&
+     (cs matches [.stopNetworking]))
   -- switching network, switching wallet, or deleting wallet cancels a running continued task
   let (swNet, cs) := fg.switchNetwork .signet
   check "continued: switching network completes running task unsuccessfully"
@@ -2607,16 +2659,18 @@ def continuedBackgroundSync : IO Unit := do
        (a.getObjValAs? Nat "tag").toOption == some 7) &&
      asks.any (fun (n, a) => n == "bgtask.complete" && (a.getObjValAs? Bool "success").toOption == some true &&
        (a.getObjValAs? Nat "tag").toOption == some 7)) (reprStr (asks.map fun (n, a) => (n, a.compress)))
-  -- refusal from shell posts continuedSyncRefused
+  -- refusal from shell posts continuedSyncRefused with error and detail
   let refusedPosted ← IO.mkRef (#[] : Array Host)
   let refuseFx : LeanNative.Native.Effects Host :=
     { post := fun h => refusedPosted.modify (·.push h),
       cap := fun _ _ _ => pure (),
-      ask := fun _ _ => pure (Task.pure (Lean.Json.mkObj [("ok", false), ("error", "unavailable")])) }
+      ask := fun _ _ => pure (Task.pure (Lean.Json.mkObj [("ok", false), ("error", "notPermitted"), ("detail", "prefix mismatch")])) }
   WinnowApp.perform (.continueBackgroundSync idMain "Syncing Bitcoin" "Starting sync…") refuseFx
   let gotRefused ← waitUntil 2_000 (every := 5) do
-    return (← refusedPosted.get).any (· matches .continuedSyncRefused _)
-  check "continued perform: unavailable bgtask.continue posts continuedSyncRefused" gotRefused
+    return (← refusedPosted.get).any fun h => match h with
+      | .continuedSyncRefused id "notPermitted" "prefix mismatch" => id == idMain
+      | _ => false
+  check "continued perform: refused bgtask.continue posts continuedSyncRefused with error and detail" gotRefused
 
 /-- `Pure.parseDouble` (Swift `Double(_:)`): decimal, scientific, hex floats, inf/nan/snan payloads,
 overflow/underflow, and malformed forms. -/

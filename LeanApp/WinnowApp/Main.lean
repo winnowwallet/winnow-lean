@@ -689,9 +689,13 @@ def performShell (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .continueBackgroundSync id title subtitle => discard <| IO.asTask do
       let args := Json.mkObj [("id", Json.str id), ("title", Json.str title), ("subtitle", Json.str subtitle)]
       let r ← IO.wait (← fx.ask "bgtask.continue" args)
-      unless (r.getObjValAs? Bool "ok").toOption.getD false do
+      let ok := (r.getObjValAs? Bool "ok").toOption.getD false
+      let err := (r.getObjValAs? String "error").toOption.getD "unknown"
+      let detail := (r.getObjValAs? String "detail").toOption.getD ""
+      journal "bgtask.continue" [("id", id), ("ok", toString ok), ("error", if ok then "" else err)]
+      unless ok do
         continuedSyncActive.set false
-        fx.post (.continuedSyncRefused id)
+        fx.post (.continuedSyncRefused id err detail)
   | .progressBackgroundSync id tag completed total title subtitle => discard <| IO.asTask do
       continuedSyncActive.set true
       let args := Json.mkObj (

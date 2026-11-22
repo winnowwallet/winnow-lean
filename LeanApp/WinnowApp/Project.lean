@@ -52,7 +52,7 @@ def manifest : Manifest where
   -- BGContinuedProcessingTask (`bgtask.continue`), letting a user-started sync finish after leaving the app.
   backgroundTasks := [("com.btcswift.winnow.chain-refresh", .refresh),
                       ("com.btcswift.winnow.chain-processing", .processing),
-                      ("com.btcswift.winnow.chain-sync.*", .continued)]
+                      ("com.btcswift.app.chain-sync.*", .continued)]
   -- automatic iCloud backup (WinnowApp/Real/CloudBackup.lean): the private database of upstream's container
   -- (CloudKit/schema.ckdb's WalletBackup records)
   iCloudContainers := ["iCloud.com.btcswift.app"]

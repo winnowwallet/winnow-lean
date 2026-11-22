@@ -525,10 +525,27 @@ def ContinuedSync.withSeen (c : ContinuedSync) (seen : Bool) : ContinuedSync :=
   | .requested id n g _ => .requested id n g seen
   | .running id n g tag _ => .running id n g tag seen
 
-/-- Wildcard Info.plist identifier (`BGTaskSchedulerPermittedIdentifiers`) for continued sync tasks. -/
-def continuedSyncWildcard : String := "com.btcswift.winnow.chain-sync.*"
-def continuedSyncPrefix : String := "com.btcswift.winnow.chain-sync."
-def continuedSyncID (n : Network) : String := continuedSyncPrefix ++ n.name
+/-- Last observed outcome of an iOS 26 continued background sync (`bgtask.continue`), shown in
+Settings → Network → Sync so refusal or expiry is visible on device without Xcode logs. -/
+inductive ContinuedSyncOutcome where
+  | none
+  | completed
+  | expired
+  | refused (error : String) (detail : String := "")
+  deriving Repr, BEq, Inhabited
+
+/-- Wildcard Info.plist identifier (`BGTaskSchedulerPermittedIdentifiers`) for continued sync tasks.
+Apple requires `<bundleId>.<context>.*` (`com.btcswift.app.chain-sync.*`), with a single-label suffix
+per submitted run (`com.btcswift.app.chain-sync.<network>-<serial>`). -/
+def continuedSyncWildcard : String := "com.btcswift.app.chain-sync.*"
+def continuedSyncPrefix : String := "com.btcswift.app.chain-sync."
+def continuedSyncID (n : Network) (serial : Nat := 1) : String :=
+  s!"{continuedSyncPrefix}{n.name}-{serial}"
+
+/-- Whether an automatic foreground sync snapshot represents real catch-up work worth keeping alive in the
+background (`BGContinuedProcessingTask`). Routine already-at-tip polls (`p == .synced`) stay quiet. -/
+def shouldAutoContinueSync (s : Status) (p : SyncPhase) : Bool :=
+  s.syncing && p != .synced && p != .peerDiscoveryFailed
 
 /-- Privacy-safe Live Activity title for a continued sync: network only, never balances or wallet names. -/
 def continuedSyncTitle : Network → String
@@ -644,9 +661,17 @@ structure Model where
   /-- The background tasks iOS launched before the wallet was open (id, kind, the launch's tag), in launch
   order, one per identifier: each runs once boot lands (records-test's `backgroundTaskCommands`). -/
   pendingBackgroundTasks : List (String × String × Option Nat) := []
-  /-- An active or requested iOS 26 continued background sync (`bgtask.continue`), keeping a manual sync
+  /-- An active or requested iOS 26 continued background sync (`bgtask.continue`), keeping a sync
   running if the person leaves the app. -/
   continuedSync : Option ContinuedSync := none
+  /-- Monotonic counter giving each submitted `BGContinuedProcessingTaskRequest` a unique single-label suffix
+  under `com.btcswift.app.chain-sync.*`. -/
+  continuedSyncSerial : Nat := 0
+  /-- Last observed outcome of a continued background sync, shown in Settings → Network → Sync. -/
+  continuedSyncOutcome : ContinuedSyncOutcome := .none
+  /-- Suppresses automatic continued-sync requests after refusal or expiry until sync finishes (or forever in
+  this session when iOS reports `unavailable`); manual triggers always try again. -/
+  continuedSyncAutoSuppressed : Bool := false
   /-- The generation whose 30 s Ledger scan is ticking (one chain per generation). -/
   ledgerScanGen : Option Nat := none
   /-- The Ledger the nearby card offers. -/
@@ -754,9 +779,9 @@ inductive Host where
   | bgtask (id kind : String) (tag : Option Nat)
   /-- iOS expired the launch `tag` of `id`. -/
   | bgtaskExpired (id kind : String) (tag : Option Nat)
-  /-- `bgtask.continue` was refused (before iOS 26, Mac, or system refusal): drop the pending request and
-  stop networking if the app already moved to the background. -/
-  | continuedSyncRefused (id : String)
+  /-- `bgtask.continue` was refused (before iOS 26, Mac, or system refusal): drop the pending request,
+  record the reason for Settings → Network → Sync, and stop networking if the app already moved to the background. -/
+  | continuedSyncRefused (id : String) (error : String := "unavailable") (detail : String := "")
   /-- Time for the next nearby-Ledger scan of generation `gen` (every 30 s while the app is open). -/
   | ledgerScanDue (gen : Nat) (again : Bool)
   /-- The Ledgers a scan saw (none: Bluetooth off, not allowed, or nothing in range). -/

@@ -193,6 +193,7 @@ def signersPairLedgerButton : String := "signersPairLedgerButton"
 def silentPaymentNote : String := "silentPaymentNote"
 def skipReceiveAddressLabelButton : String := "skipReceiveAddressLabelButton"
 def syncStatus : String := "syncStatus"
+def continuedSyncStatus : String := "continuedSyncStatus"
 def syncSummaryText : String := "syncSummaryText"
 def torGatewayAddress : String := "torGatewayAddress"
 
