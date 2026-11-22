@@ -158,11 +158,14 @@ scripts/coverage                             # how much of each Lean function CI
 ```
 
 `scripts/coverage` recompiles each module's generated C with clang's coverage (Xcode's), links the test programs
-as Lake does, runs CI's suites and the headless journeys, and gives each Lean declaration the C regions of every
-C function its name mangles: `build/coverage/lean-coverage.json`. It measures the C, which has paths the Lean does
-not (failures of each step, bounds an inlined loop cannot miss); the boxed copies and the shared-value tests are
-left out, and a declaration Lean inlined everywhere is marked `inlined`, not unrun. `scripts/coverage <suite>`
-runs one suite again and keeps the others' counts; `--report` remakes the file from the counts there are.
+as Lake does, runs CI's suites and the headless journeys, and computes Lean-level branch coverage and CRAP for
+every function and declaration: `build/coverage/lean-coverage.json`. It counts decision outcomes (`if`/`switch`
+arms, or entry for straight-line functions) while leaving out C codegen noise — reference-count reuse checks and
+join points (`v_isShared`, `v_resetjp`, `v_reusejp`), redundant entry/condition headers, monadic `←` error-exit
+pass-throughs, boxed/reduced-arity trampolines, static constant initializers, and pure library specializations —
+and OR-merges peeled recursive loop clones. A declaration Lean inlined everywhere is marked `inlined`, not unrun.
+`scripts/coverage <suite>` runs one suite again and keeps the others' counts; `--report [suite ...]` remakes the
+report from existing profiles (all suites, or only those named).
 
 LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
 `LeanApp/.lake/packages/leannative`.

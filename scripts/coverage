@@ -1,29 +1,39 @@
 #!/usr/bin/env python3
-"""How much of each Lean function the tests run.
+"""Lean-level branch coverage and CRAP of every Lean function in Winnow.
 
 Lean has no coverage tool of its own. It compiles each module to C (.lake/build/ir), and every C function's name
 is the Lean declaration it came from, mangled: a closure, a specialization or a `where` helper names the function
-it belongs to. So this builds instrumented copies of the test programs (each module's C recompiled with clang's
-source-based coverage, then linked as Lake links them), runs the suites CI runs, and gives each Lean declaration
-the C regions of every C function that came from it, with how many of them ran.
+it belongs to. This script compiles instrumented copies of each module's C with clang's source-based coverage,
+links the test programs as Lake does (their .rsp), runs CI's suites (including regtest and headless journeys),
+and maps clang's branch counts back to Lean declarations and functions:
 
-    scripts/coverage [suite ...]     the suites below, or only those named (the others' counts are kept); build
-                                     them first (README, "Tests")
-    scripts/coverage --report        the report again from the counts there are
+    scripts/coverage [suite ...]          run all suites, or only those named (keeping others' counts);
+                                          build them first (README, "Build & test")
+    scripts/coverage --report [suite ...] remake the report from existing profiles (all suites, or a subset)
 
-It writes build/coverage/lean-coverage.json (and $CI_RESULTS/lean-coverage.json in CI): per declaration, its
-file, the line of its name, its C regions and how many ran, and whether Lean inlined it everywhere; and how each
-suite ended. The regtest suites need bitcoind (scripts/install-bitcoin), and the journeys the UI fixture
-(scripts/ui-fixture), as in CI. Instrumented, the programs run about three times slower.
+Output: build/coverage/lean-coverage.json (and $CI_RESULTS/lean-coverage.json in CI), or
+build/coverage/lean-coverage-<suites>.json when `--report` is given a suite subset.
 
-What the regions are: the C that Lean emits, which is more than the Lean. The boxed copies the compiler writes for
-closures, and both arms of each test of whether a value is shared (Lean's C reuses what no one else holds), are
-left out. What is left still has more than the Lean: every step that can fail has a path for the failure, and an
-inlined library loop checks bounds it cannot miss. A test seldom takes those, so a function's share run here is
-somewhat lower than its Lean would show (the curve code, tested against every vector, is at a median of 100%).
-Lean inlines small definitions into their callers before it writes C: their code counts as the callers', and a
-declaration whose own C nothing calls is marked `inlined`, not unrun. The renderer and the platform shell are
-Objective-C, not Lean, and are not here.
+Measuring Lean, not C codegen noise:
+- Lean's C emitter lowers every decision to simple `if (cond)` (no `&&`/`||`) or `switch` arms. We count branch
+  outcomes (`if` then/else, `case`/`default`), or function entry (1) for straight-line functions/closures with no
+  branches. Redundant `_start:` labels, simple `if` condition headers and IR join-point labels (`v___jp_*`) are
+  excluded.
+- Reference-counting reuse checks (`v_isShared` / `v_isSharedCheck`: condition, both arms, and `v_resetjp_*` /
+  `v_reusejp_*` labels) are memory choices, not Lean branches, and are excluded.
+- Compiler-emitted monadic `←` bind failure pass-throughs (returning an unmodified `IO`/`EIO` error or re-wrapping
+  an `Except`/`ExceptT` error payload unchanged) are excluded so sequential `do` steps match Lean's CC and Swift
+  `try` / Rust `?`. Author-written `throw`, `match`, `if`, and `catch` arms are always kept.
+- Boxed closure trampolines (`___boxed`), 0-branch full-arity trampolines with a `___redArg` body, and static
+  constant initializers (`_init_*___closed__*`) are skipped.
+- Peeled recursive loop clones (`loop._at_.loop._at_.f.spec_A.spec_B` vs `loop._at_.f.spec_A`) are OR-merged
+  elementwise so a branch taken on iteration 1 or 2+ counts as covered once.
+- Specializations of external library functions are credited to the calling Lean declaration only when every outer
+  library segment is a higher-order loop/closure combinator (e.g. `Array.forIn'Unsafe.loop`, `List.mapTR.loop`);
+  pure library internals (`Std.DHashMap.*`, `Option.instBEq.beq`, `Array.qsort.*`, `String.Slice.replace`) stay
+  uncredited so shared specializations neither penalize callers nor fake coverage on uncalled functions.
+- Cyclomatic complexity (`cc`) uses compare.winnowwallet.com's lexical Lean rule (`tools/lean.py`), joined over
+  each function's line range to compute `CRAP = CC^2 * (1 - cov)^3 + CC`.
 """
 import json
 import os
@@ -33,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -51,6 +62,7 @@ SUITES = {
     'journeys': ('LeanApp', []),
 }
 REGTEST = {'io-test', 'backend-test', 'multisig-differential', 'card-regtest', 'segwit-regtest'}
+SHIPPED_ROOT = 'LeanApp/WinnowApp.lean'
 
 
 def run(cmd, **kw):
@@ -64,6 +76,196 @@ def xcrun(tool):
 def lean_prefix():
     return run(['lean', '--print-prefix'], cwd=PACKAGES['Lean'], capture_output=True).stdout.strip()
 
+
+# ---------------------------------------------------------------------------
+# Lean lexical complexity and import closure (ported from compare/tools/lean.py)
+# ---------------------------------------------------------------------------
+
+LEAN_DECL = re.compile(
+    r'(?:@\[[^\]]*\]\s*)*(?:(?:private|protected|partial|noncomputable|unsafe|nonrec|scoped|local)\s+)*'
+    r'(def|instance|abbrev|opaque|theorem|lemma|example|structure|inductive|class)\b')
+LEAN_COMMAND = re.compile(
+    r'(?:@\[|#|(?:def|instance|abbrev|opaque|theorem|lemma|example|structure|inductive|class|'
+    r'namespace|section|end|open|variable|universe|import|set_option|attribute|macro|macro_rules|'
+    r'syntax|notation|infix|infixl|infixr|prefix|postfix|elab|elab_rules|initialize|'
+    r'builtin_initialize|export|mutual|private|protected|partial|noncomputable|unsafe|nonrec|'
+    r'scoped|local|deriving)\b)')
+LEAN_FUNCTIONS = {'def', 'instance', 'abbrev', 'opaque'}
+LEAN_TOKEN = re.compile(r'&&|\|\|\|?|<\|>|\|>\.|\|>|<\||=>|[A-Za-z_][A-Za-z_0-9!?\'.]*|\S')
+LEAN_BRANCH_WORDS = {'if', 'unless', 'for', 'while', 'repeat', 'catch'}
+
+
+def _string_end(text, i):
+    """Index after the string literal opening at text[i], handling interpolated `s!"…"`, `m!"…"`, `f!"…"`."""
+    n, interpolated = len(text), text[max(0, i - 2):i] in ('s!', 'm!', 'f!')
+    j = i + 1
+    while j < n and text[j] != '"':
+        if text[j] == '\\':
+            j += 2
+        elif interpolated and text[j] == '{':
+            depth, j = 1, j + 1
+            while j < n and depth:
+                if text[j] == '"':
+                    j = _string_end(text, j)
+                    continue
+                depth += text[j] == '{'
+                depth -= text[j] == '}'
+                j += 1
+        else:
+            j += 1
+    return min(j + 1, n)
+
+
+def lean_blank(text):
+    """Replace comments with spaces and string/char literals with their opening quote, preserving line numbers."""
+    out, i, n = [], 0, len(text)
+
+    def keep_lines(s):
+        return re.sub(r'[^\n]', ' ', s)
+
+    def quote(s, mark='"'):
+        return mark + keep_lines(s[1:])
+
+    while i < n:
+        c = text[i]
+        if text.startswith('--', i):
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+            out.append(' ' * (j - i))
+            i = j
+        elif text.startswith('/-', i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith('/-', j):
+                    depth += 1
+                    j += 2
+                elif text.startswith('-/', j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            out.append(keep_lines(text[i:j]))
+            i = j
+        elif c == 'r' and re.match(r'r#*"', text[i:i + 8]) and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] in '_\'')):
+            hashes = re.match(r'r(#*)"', text[i:]).group(1)
+            end = text.find('"' + hashes, i + 2 + len(hashes))
+            j = n if end < 0 else end + 1 + len(hashes)
+            out.append(quote(text[i:j]))
+            i = j
+        elif c == '"':
+            j = _string_end(text, i)
+            out.append(quote(text[i:j]))
+            i = j
+        elif c == "'" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] in "_'.!?")):
+            m = re.match(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.)|[^\\'\n])'", text[i:i + 16])
+            if m:
+                out.append(quote(m.group(0), "'"))
+                i += len(m.group(0))
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return ''.join(out)
+
+
+def lean_commands(text):
+    """(first line, last line, lines) of each column-0 command, 1-based, on blanked text."""
+    lines = lean_blank(text).split('\n')
+    starts = [k for k, line in enumerate(lines) if line[:1].strip() and LEAN_COMMAND.match(line)]
+    out = []
+    for a, b in zip(starts, starts[1:] + [len(lines)]):
+        end = b - 1
+        while end > a and not lines[end].strip():
+            end -= 1
+        out.append((a + 1, end + 1, lines[a:end + 1]))
+    return out
+
+
+def lean_complexity(tokens):
+    cc, arm = 1, None
+    for tok in tokens:
+        if tok in LEAN_BRANCH_WORDS or tok in ('&&', '||'):
+            cc += 1
+        elif tok == '|':
+            if arm is None:
+                arm = []
+        elif tok == '=>' and arm is not None:
+            if any(t not in ('_', ',') for t in arm):
+                cc += 1
+            arm = None
+        elif arm is not None:
+            arm.append(tok)
+    return cc
+
+
+def lean_name_of(kind, first_line):
+    rest = LEAN_DECL.match(first_line.strip())
+    after = first_line.strip()[rest.end():].strip() if rest else ''
+    word = re.match(r'[A-Za-z_][A-Za-z_0-9!?\'.]*', after)
+    if word and kind != 'instance':
+        return word.group(0)[:60]
+    if word and kind == 'instance' and not after.startswith(':'):
+        return word.group(0)[:60]
+    return f'(instance {after.lstrip(": ").split(":=")[0].split(" where")[0].strip()[:48]})'
+
+
+def analyze_lean_file(text):
+    """Return [{'name', 'line', 'end', 'lines', 'cc'}] for every function in a Lean file."""
+    out = []
+    for start, end, body in lean_commands(text):
+        joined = ' '.join(body)
+        m = LEAN_DECL.match(joined.strip())
+        if not m or m.group(1) not in LEAN_FUNCTIONS:
+            continue
+        first = body[0] if LEAN_DECL.match(body[0].strip()) else joined
+        out.append({
+            'name': lean_name_of(m.group(1), first),
+            'line': start,
+            'end': end,
+            'lines': end - start + 1,
+            'cc': lean_complexity(LEAN_TOKEN.findall(joined)),
+        })
+    return out
+
+
+def lean_imports(text):
+    return re.findall(r'^\s*(?:(?:public|meta|private)\s+)*import\s+(?:all\s+)?([A-Za-z_][\w.]*)',
+                      lean_blank(text), re.M)
+
+
+def shipped_closure(root=None, packages=None):
+    """Relative paths of all Lean files transitively imported by `LeanApp/WinnowApp.lean`."""
+    root = ROOT if root is None else Path(root)
+    packages = PACKAGES if packages is None else packages
+    entry = root / SHIPPED_ROOT
+    if not entry.exists():
+        return set()
+    search = list(packages.values())
+    todo, seen = [entry.resolve()], set()
+    while todo:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        for mod in lean_imports(f.read_text(errors='ignore')):
+            rel = Path(*mod.split('.')).with_suffix('.lean')
+            for base in search:
+                cand = (base / rel).resolve()
+                if cand.exists():
+                    todo.append(cand)
+                    break
+    return {str(f.relative_to(root.resolve())) for f in seen}
+
+
+def crap_score(cc, cov):
+    return cc * cc * ((1.0 - cov) ** 3) + cc
+
+
+# ---------------------------------------------------------------------------
+# Building, linking, running suites
+# ---------------------------------------------------------------------------
 
 def own_modules():
     """Each Lean source file in the two packages and its generated C, for the modules that are still sources."""
@@ -153,6 +355,10 @@ def run_suite(suite, exe, env):
     return suite, code
 
 
+# ---------------------------------------------------------------------------
+# Demangling, ownership, C-codegen filtering, and loop-clone merging
+# ---------------------------------------------------------------------------
+
 def declarations():
     """Every declaration Lake indexed (.ilean): name → (source file relative to the repository, line of its name),
     and name → the other declarations whose source uses it."""
@@ -187,6 +393,19 @@ def symbol(name):
     return name[len('_init_'):] if name.startswith('_init_') else name
 
 
+def split_at(parts):
+    """Split demangled name components on `_at_` specialization boundaries."""
+    segments, current = [], []
+    for p in parts:
+        if p == '_at_':
+            segments.append(current)
+            current = []
+        else:
+            current.append(p)
+    segments.append(current)
+    return segments
+
+
 def resolve(parts, decls):
     """The declaration of the source a name is, or is one of the compiler's pieces of: its closures, its boxed and
     reduced-arity copies, the constants lifted out of it."""
@@ -199,125 +418,469 @@ def resolve(parts, decls):
     return None
 
 
+# External library functions that execute a caller-supplied closure or loop body (e.g. `for`, `repeat`, `map`,
+# `foldl`, `filter`, `any`, `all`, `find?`, `Mutex.atomically`). Pure container/typeclass specializations
+# (`Std.DHashMap.Internal.Raw₀.erase`, `Option.instBEq.beq`, `Array.qsort.*`, `String.Slice.replace`) are NOT here.
+CLOSURE_COMBINATORS = {
+    'Array.forIn', 'Array.forIn\'Unsafe.loop', 'Array.mapMUnsafe.map', 'Array.mapFinIdxMUnsafe.map',
+    'Array.foldlMUnsafe.fold', 'Array.foldrMUnsafe.fold', 'Array.anyMUnsafe.any', 'Array.allMUnsafe.all',
+    'Array.filterMapM', 'Array.findIdx?.loop', 'Array.findSomeM?',
+    'ByteArray.foldlMUnsafe.fold',
+    'List.forIn\'.loop', 'List.forM', 'List.mapTR.loop', 'List.mapM.loop', 'List.flatMapTR.go',
+    'List.filterTR.loop', 'List.filterMapTR.go', 'List.foldl', 'List.foldlM', 'List.foldr', 'List.foldrTR',
+    'List.any', 'List.anyM', 'List.all', 'List.allM', 'List.find?', 'List.findSome?',
+    'List.findIdx.go', 'List.findIdx?.go', 'List.dropWhile', 'List.takeWhileTR.go',
+    'Nat.repeatTR.loop',
+    'Std.Legacy.Range.forIn\'.loop', 'Std.Mutex.atomically',
+    'Std.DHashMap.Internal.AssocList.filter.go', 'Std.DHashMap.Internal.AssocList.foldlM',
+    'Std.DHashMap.Internal.AssocList.foldrM', 'Std.DHashMap.Internal.AssocList.forInStep.go',
+    'Std.DHashMap.Internal.Raw₀.filter', 'Std.DHashMap.Internal.Raw₀.forInStep',
+    'Std.DTreeMap.Internal.Impl.foldl', 'Std.DTreeMap.Internal.Impl.foldlM',
+    'String.Slice.Pos.skipWhile', 'String.mapAux',
+    'WellFounded.opaqueFix₂', 'WellFounded.opaqueFix₃',
+    'repeatM.erased',
+}
+
+
+def is_closure_combinator(segment):
+    """True when an external specialization segment is a higher-order loop/closure combinator."""
+    seg = list(segment)
+    if seg and seg[0] == '_private':
+        try:
+            seg = seg[seg.index('#0') + 1:]
+        except ValueError:
+            pass
+    while seg and (seg[-1] in ('_redArg', '_boxed') or seg[-1].startswith(('spec_', '_lam_'))):
+        seg = seg[:-1]
+    return '.'.join(seg) in CLOSURE_COMBINATORS
+
+
 def owner(parts, decls):
-    """The declaration a C function came from. A specialization (`f._at_.g.spec_n`, nested for a specialization
-    made inside another) is f's code made for g: it is f's when f is one of the source's declarations, and
-    otherwise (a library loop, fold or map) g's, whose closure it runs."""
-    segments, current = [], []
-    for p in parts:
-        if p == '_at_':
-            segments.append(current)
-            current = []
-        else:
-            current.append(p)
-    segments.append(current)
+    """The source declaration a C function came from.
+
+    A specialization (`f._at_.g.spec_n`, nested for specializations inside specializations) belongs to `f` when `f`
+    is one of our declarations; otherwise it belongs to the first own declaration `g` ONLY when every outer library
+    segment is a higher-order loop/closure combinator (so `for`/`map`/`fold` loop bodies count toward their caller,
+    while shared `Std.DHashMap.*`, `BEq`, `qsort` or `String.Slice.replace` internals stay library code).
+    """
+    segments = split_at(parts)
     if len(segments) > 1:
         last = segments[-1]
         segments[-1] = last[:next((i for i, p in enumerate(last) if p.startswith('spec_')), len(last))]
-    for segment in segments:
+    for i, segment in enumerate(segments):
         name = resolve(segment, decls)
         if name:
             return name
+        if i < len(segments) - 1 and not is_closure_combinator(segment):
+            return None
     return None
 
 
-DEFINITION = re.compile(r'^(?:LEAN_EXPORT|static)\b[^;]*?(\w+)\([^;]*\{\s*$')
+DEFINITION = re.compile(r'^(?:LEAN_EXPORT|static)\b[^;]*?(\w+)\(([^;]*)\)\{\s*$')
 IDENT = re.compile(r'\b(?:_init_)?lp?_\w+')
+TAG_ZERO_IF = re.compile(r'^if \(lean_obj_tag\((v_\w+)\) == 0\)$')
+ALLOWED_PLUMBING_CALLS = {
+    'if', 'lean_dec', 'lean_dec_ref', 'lean_dec_ref_known', 'lean_inc', 'lean_inc_ref', 'lean_inc_n',
+    'lean_del_object', 'lean_free_object', 'lean_ctor_get', 'lean_ctor_set', 'lean_ctor_set_tag',
+    'lean_alloc_ctor', 'lean_is_exclusive', 'lean_is_scalar', 'lean_box', 'lean_unbox', 'lean_obj_tag',
+}
 
 
-SHARED_TEST = re.compile(r'^if \(v_isShared(?:Check)?_\d+_ == 0\)\s*$')
+def _c_arity(params):
+    p = params.strip()
+    return 0 if not p or p == 'void' else p.count(',') + 1
 
 
-def memory_paths(c_file):
-    """The lines that open the two arms of each test of whether a value is shared (`v_isShared…`): Lean's C reuses
-    a value no one else holds and copies one that is shared, a choice of memory and not a path of the Lean."""
-    lines = Path(c_file).read_text(errors='ignore').splitlines()
-    marks = set()
+def _block_end(lines, start):
+    depth = 0
+    for k in range(start, len(lines)):
+        depth += lines[k].count('{') - lines[k].count('}')
+        if depth == 0:
+            return k
+    return len(lines) - 1
 
-    def arm_end(start):
-        depth = 0
-        for k in range(start, len(lines)):
-            depth += lines[k].count('{') - lines[k].count('}')
-            if depth == 0:
-                return k
-        return len(lines) - 1
+
+def _is_pure_plumbing_arm(body):
+    """True when a C arm contains no constants, no domain/runtime calls, no real branches, no non-reuse gotos,
+    and exits via `return`."""
+    if '___closed__' in body or not re.search(r'\breturn\s+\w+;', body):
+        return False
+    if any(c not in ALLOWED_PLUMBING_CALLS for c in re.findall(r'\b([A-Za-z_]\w*)\s*\(', body)):
+        return False
+    if any('v_isShared' not in cond for cond in re.findall(r'if \(([^)]+)\)', body)):
+        return False
+    if any(not t.startswith(('v_resetjp_', 'v_reusejp_')) for t in re.findall(r'\bgoto\s+(\w+);', body)):
+        return False
+    return True
+
+
+def _rewraps_field0(body, var, expected_tag):
+    """True when `body` extracts `v_a_* = lean_ctor_get(var, 0)` and passes that exact payload unchanged into
+    1-object-field, 0-scalar-byte ctor(s) with `expected_tag`."""
+    gets = re.findall(r'(\w+)\s*=\s*lean_ctor_get\((\w+),\s*(\d+)\)', body)
+    if len(gets) != 1:
+        return False
+    extracted, src_var, idx = gets[0]
+    if src_var != var or idx != '0' or not extracted.startswith('v_a_'):
+        return False
+    allocs = re.findall(r'lean_alloc_ctor\((\d+),\s*(\d+),\s*(\d+)\)', body)
+    if not allocs or not all(t == expected_tag and o == '1' and s == '0' for t, o, s in allocs):
+        return False
+    set_tags = re.findall(r'lean_ctor_set_tag\([^,]+,\s*(\d+)\)', body)
+    if not all(t == expected_tag for t in set_tags):
+        return False
+    sets = re.findall(r'lean_ctor_set\([^,]+,\s*(\d+),\s*(\w+)\)', body)
+    if any(i != '0' for i, _ in sets):
+        return False
+    return any(val == extracted for _, val in sets)
+
+
+def _direct_uses_var_as_heap(lines, start, end, var):
+    """True when top-level statements of a `then` block read or free `var` as a heap ctor (not scalar `none`)."""
+    pat = re.compile(rf'(?:lean_ctor_get|lean_dec\w*|lean_is_exclusive|lean_del_object)\s*\(\s*{re.escape(var)}\b')
+    for k in range(start, min(end + 1, start + 25)):
+        s = lines[k].strip()
+        if s.startswith('if ('):
+            if f'lean_obj_tag({var})' in s:
+                return False
+            break
+        if pat.search(s):
+            return True
+    return False
+
+
+def analyze_c_lines(lines):
+    """Return `(skip_structural, skip_bind_exit)` of 1-based line numbers for Lean-generated C.
+
+    - `skip_structural`: `_start:`, `v_resetjp_*`, `v_reusejp_*`, `v___jp_*`, every `if (...)` condition header
+      (Lean emits no `&&`/`||` conditions), and both `{` arms of every `v_isShared*` memory-reuse check.
+    - `skip_bind_exit`: compiler-emitted monadic `←` bind error-propagation exits (`EIO`/`IO` tag-1 `else` in
+      erased-RealWorld functions, and `Except`/`ExceptT` tag-0 `then` rewrapping `v_a_*` unchanged).
+    """
+    arities = {}
+    for line in lines:
+        m = DEFINITION.match(line)
+        if m:
+            arities[m.group(1)] = _c_arity(m.group(2))
+    # Lean 4 erases `RealWorld` in unboxed IO/EIO functions and keeps it in `___boxed` (+1 param)
+    fn_erased_world = {name: (name + '___boxed' in arities and arities[name + '___boxed'] > n)
+                       for name, n in arities.items()}
+
+    skip_structural, skip_bind_exit = set(), set()
+    cur_io = False
+    n_lines = len(lines)
     for i, line in enumerate(lines):
-        if SHARED_TEST.match(line) and i + 1 < len(lines) and lines[i + 1].startswith('{'):
-            marks.add(i + 2)  # 1-based line of the `{`
-            j = arm_end(i + 1)
-            if j + 2 < len(lines) and lines[j + 1].strip() == 'else' and lines[j + 2].startswith('{'):
-                marks.add(j + 3)
-    return marks
+        m_fn = DEFINITION.match(line)
+        if m_fn:
+            cur_io = fn_erased_world.get(m_fn.group(1), False)
+            continue
+        s = line.strip()
+        if s == '_start:' or s.startswith(('v_resetjp_', 'v_reusejp_', 'v___jp_')):
+            skip_structural.add(i + 1)
+            continue
+        if s.startswith('if ('):
+            skip_structural.add(i + 1)
+            if 'v_isShared' in s and i + 1 < n_lines and lines[i + 1].lstrip().startswith('{'):
+                skip_structural.add(i + 2)
+                j = _block_end(lines, i + 1)
+                if j + 2 < n_lines and lines[j + 1].strip() == 'else' and lines[j + 2].lstrip().startswith('{'):
+                    skip_structural.add(j + 3)
+                continue
+            m = TAG_ZERO_IF.match(s)
+            if m and i + 1 < n_lines and lines[i + 1].lstrip().startswith('{'):
+                var = m.group(1)
+                t_end = _block_end(lines, i + 1)
+                if t_end + 2 < n_lines and lines[t_end + 1].strip() == 'else' and lines[t_end + 2].lstrip().startswith('{'):
+                    e_end = _block_end(lines, t_end + 2)
+                    then_body = '\n'.join(lines[i + 1:t_end + 1])
+                    else_body = '\n'.join(lines[t_end + 2:e_end + 1])
+                    if cur_io and _is_pure_plumbing_arm(else_body):
+                        if (_direct_uses_var_as_heap(lines, i + 1, t_end, var)
+                                and re.search(rf'\breturn\s+{re.escape(var)}\s*;', else_body)
+                                and 'lean_alloc_ctor' not in else_body and 'lean_ctor_get' not in else_body):
+                            skip_bind_exit.add(t_end + 3)
+                        elif _rewraps_field0(else_body, var, '1'):
+                            skip_bind_exit.add(t_end + 3)
+                        elif (_rewraps_field0(else_body, var, '0')
+                              and _is_pure_plumbing_arm(then_body)
+                              and re.search(r'lean_alloc_ctor\(1,\s*1,\s*0\)', then_body)):
+                            skip_bind_exit.add(t_end + 3)
+                    elif _is_pure_plumbing_arm(then_body) and _rewraps_field0(then_body, var, '0'):
+                        skip_bind_exit.add(i + 2)
+    return skip_structural, skip_bind_exit
+
+
+def analyze_c_file(c_file):
+    return analyze_c_lines(Path(c_file).read_text(errors='ignore').splitlines())
+
+
+def extract_branch_hits(regions, skip_structural, skip_bind_exit):
+    """From one C function's `llvm-cov` regions, return `(hits, num_arms)` where `hits` is a list of 0/1 values
+    for every non-plumbing branch arm, or `[entry_hit]` for a straight-line function with 0 branch arms."""
+    kept = [r for r in regions if r[7] == 0 and r[5] == 0 and r[0] not in skip_structural]
+    if not kept:
+        return [], 0
+    entry = kept[0]
+    arms = [r for r in kept[1:] if r[0] not in skip_bind_exit]
+    use = arms if arms else [entry]
+    return [1 if r[4] > 0 else 0 for r in use], len(arms)
+
+
+def clone_parent_parts(parts):
+    """If `parts` is a peeled recursive loop clone (`F._at_.F._at_.G.spec_A.spec_B`), return the parent's parts
+    (`F._at_.G.spec_A`); otherwise None."""
+    segs = split_at(parts)
+    if len(segs) < 3 or segs[0] != segs[1]:
+        return None
+    last = list(segs[-1])
+    spec_idxs = [i for i, x in enumerate(last) if x.startswith('spec_')]
+    if len(spec_idxs) < 2:
+        return None
+    last.pop(spec_idxs[-1])
+    parent = []
+    for s in segs[1:-1]:
+        parent.extend(s)
+        parent.append('_at_')
+    parent.extend(last)
+    return tuple(parent)
+
+
+def aggregate_functions(export_functions, parts_map, decls, c_analyzer=analyze_c_file):
+    """Aggregate clang `llvm-cov` function records into per-declaration Lean-branch counts.
+
+    Returns `(per_decl, library_branches, unattributed_branches)`.
+    """
+    cache = {}
+    records = {}     # raw_name -> (sym, owner_name, parts, hits, num_arms)
+    by_sym = {}      # sym -> raw_name
+    by_parts = {}    # tuple(parts) -> raw_name
+    library_branches = 0
+    unattributed_branches = 0
+
+    for fn in export_functions:
+        raw_name = fn['name'].split(':', 1)[-1]
+        sym = symbol(fn['name'])
+        p = parts_map.get(sym)
+        if p is None or sym.endswith('___boxed'):
+            continue
+        if raw_name.startswith('_init_') and '___closed__' in raw_name:
+            continue
+        src = fn['filenames'][0]
+        if src not in cache:
+            cache[src] = c_analyzer(src)
+        skip_s, skip_b = cache[src]
+        hits, n_arms = extract_branch_hits(fn['regions'], skip_s, skip_b)
+        if not hits:
+            continue
+        own = owner(p, decls)
+        if own is None:
+            segs = split_at(p)
+            if len(segs) > 1 and any(resolve(s, decls) for s in segs[1:]):
+                library_branches += len(hits)
+            else:
+                unattributed_branches += len(hits)
+            continue
+        records[raw_name] = (sym, own, p, hits, n_arms)
+        by_sym[sym] = raw_name
+        if not raw_name.startswith('_init_'):
+            by_parts[tuple(p)] = raw_name
+
+    # Skip 0-branch full-arity trampolines when a `___redArg` implementation exists
+    kept = {}
+    for rn, (sym, own, p, hits, n_arms) in records.items():
+        if not rn.startswith('_init_') and n_arms == 0 and (sym + '___redArg') in by_sym:
+            continue
+        kept[rn] = [own, p, list(hits)]
+
+    # OR-merge peeled recursive loop clones (deepest first) into their parent specialization
+    clones = sorted(
+        [(len(split_at(p)), rn) for rn, (_, p, _) in kept.items() if not rn.startswith('_init_')],
+        reverse=True,
+    )
+    for _, rn in clones:
+        if rn not in kept:
+            continue
+        own, p, hits = kept[rn]
+        parent_key = clone_parent_parts(p)
+        if parent_key is None:
+            continue
+        parent_rn = by_parts.get(parent_key)
+        if parent_rn and parent_rn in kept and len(kept[parent_rn][2]) == len(hits):
+            kept[parent_rn][2] = [max(a, b) for a, b in zip(kept[parent_rn][2], hits)]
+            del kept[rn]
+
+    per = {}
+    for own, _, hits in kept.values():
+        e = per.setdefault(own, {'branches': 0, 'covered': 0, 'c_functions': 0})
+        e['branches'] += len(hits)
+        e['covered'] += sum(hits)
+        e['c_functions'] += 1
+    return per, library_branches, unattributed_branches
+
+
+STATIC_CLOSURE = re.compile(r'^static const lean_closure_object\s+(\w+)_value\s*=.*\.m_fun\s*=\s*\(void\*\)(\w+)')
+
+
+def c_references_lines(lines):
+    """Yield `(c_func_symbol, referenced_symbols)` for every C function body (tracking brace depth so top-level
+    forward prototypes are skipped) and every top-level static closure initializer (`.m_fun = (void*)fn`)."""
+    current, depth, names = None, 0, set()
+    for line in lines:
+        if current is None:
+            m = DEFINITION.match(line)
+            if m:
+                current = m.group(1)
+                depth = line.count('{') - line.count('}')
+                names = set()
+            else:
+                mc = STATIC_CLOSURE.match(line)
+                if mc:
+                    yield mc.group(1), {mc.group(2)}
+        else:
+            names.update(IDENT.findall(line))
+            depth += line.count('{') - line.count('}')
+            if depth <= 0:
+                yield current, names
+                current = None
 
 
 def c_references(modules):
-    """(each C function's symbol, the symbols its body names) over the generated C. A function runs from its
-    definition line to the next; declarations of prototypes and globals are skipped."""
+    """`(c_func_symbol, referenced_symbols)` across every module's generated C."""
     for _, c, _ in modules:
-        current, names = None, set()
-        for line in c.read_text(errors='ignore').splitlines():
-            m = DEFINITION.match(line)
-            if m:
-                if current:
-                    yield current, names
-                current, names = m.group(1), set()
-            elif current and not (line[:1].isalpha() and line.rstrip().endswith(';')):
-                names.update(IDENT.findall(line))
-        if current:
-            yield current, names
+        yield from c_references_lines(c.read_text(errors='ignore').splitlines())
+
+
+def build_function_report(decl_rows, modules, shipped):
+    """Join Lean functions (`lean.py` CC rule) with declaration branch counts and compute CRAP."""
+    by_file = defaultdict(list)
+    for r in decl_rows:
+        by_file[r['file']].append(r)
+
+    fn_rows = []
+    seen_files = set()
+    for _, _, src in modules:
+        rel = str(src.relative_to(ROOT))
+        if rel in seen_files:
+            continue
+        seen_files.add(rel)
+        is_shipped = rel in shipped
+        for fn in analyze_lean_file(src.read_text(errors='ignore')):
+            decls_in = [d for d in by_file.get(rel, []) if fn['line'] <= d['line'] <= fn['end']]
+            active = [d for d in decls_in if not d.get('inlined')]
+            branches = sum(d['branches'] for d in active)
+            covered = sum(d['covered'] for d in active)
+            inlined = bool(decls_in) and not active
+            cov = (covered / branches) if branches > 0 else None
+            crap = round(crap_score(fn['cc'], cov), 1) if cov is not None else None
+            fn_rows.append({
+                'file': rel,
+                'line': fn['line'],
+                'end': fn['end'],
+                'lines': fn['lines'],
+                'name': fn['name'],
+                'cc': fn['cc'],
+                'branches': branches,
+                'covered': covered,
+                'coverage': round(cov, 4) if cov is not None else None,
+                'crap': crap,
+                'inlined': inlined,
+                'shipped': is_shipped,
+            })
+
+    def summarize(rows):
+        measured = [r for r in rows if r['branches'] > 0]
+        tb = sum(r['branches'] for r in measured)
+        tc = sum(r['covered'] for r in measured)
+        return {
+            'files': len({r['file'] for r in rows}),
+            'functions': len(rows),
+            'measured': len(measured),
+            'inlined': sum(1 for r in rows if r['inlined']),
+            'branches': tb,
+            'covered': tc,
+            'pct': round(100 * tc / tb, 1) if tb else 0.0,
+            'cc_gt_12': sum(1 for r in measured if r['cc'] > 12),
+            'cc_gt_30': sum(1 for r in measured if r['cc'] > 30),
+            'crap_gt_12': sum(1 for r in measured if r['crap'] > 12),
+            'crap_gt_30': sum(1 for r in measured if r['crap'] > 30),
+        }
+
+    summary = {
+        'shipped': summarize([r for r in fn_rows if r['shipped']]),
+        'all': summarize(fn_rows),
+    }
+    return fn_rows, summary
 
 
 def main():
     args = sys.argv[1:]
-    report_only = args == ['--report']
+    report_only = bool(args) and args[0] == '--report'
+    report_suites = args[1:] if report_only else []
     suites = [] if report_only else (args or list(SUITES))
-    unknown = [s for s in suites if s not in SUITES]
+    unknown = [s for s in (report_suites if report_only else suites) if s not in SUITES]
     if unknown:
         sys.exit(f'coverage: no suite {", ".join(unknown)} ({", ".join(SUITES)})')
-    # all of them start afresh; a few named are run again, the others' counts kept
-    if args:
-        for s in suites:
-            for f in (OUT / 'profiles').glob(f'{s}-*.profraw'):
-                f.unlink()
-    else:
-        for d in ('profiles', 'logs', 'bin'):
-            shutil.rmtree(OUT / d, ignore_errors=True)
+
+    if not report_only:
+        if args:
+            for s in suites:
+                for f in (OUT / 'profiles').glob(f'{s}-*.profraw'):
+                    f.unlink()
+        else:
+            for d in ('profiles', 'logs', 'bin'):
+                shutil.rmtree(OUT / d, ignore_errors=True)
+
     prefix = lean_prefix()
     modules = own_modules()
     objects = compile_all(prefix, modules)
     print(f'{len(objects)} modules compiled with coverage', flush=True)
-    env = dict(os.environ)
-    if REGTEST & set(suites):
-        bitcoin = run([str(ROOT / 'scripts' / 'install-bitcoin')], capture_output=True).stdout.strip()
-        env.update(WINNOW_BITCOIND=f'{bitcoin}/bitcoind', WINNOW_BITCOIN_CLI=f'{bitcoin}/bitcoin-cli')
-    if 'journeys' in suites and not (ROOT / 'build' / 'census' / 'peers.json').exists():
-        run([str(ROOT / 'scripts' / 'import-census')])  # the census list the app bundles, as CI's prepare step
-    exes = {s: link(s, SUITES[s][0], objects) for s in suites}
-    # the regtest suites each start their own node; CI runs its lines at the same time, and so does this
-    with ThreadPoolExecutor(int(os.environ.get('COVERAGE_JOBS', '4'))) as pool:
-        codes = dict(pool.map(lambda s: run_suite(s, exes[s], env), suites))
-    # what each suite's last run did, for the suites whose counts are kept from before
+
+    codes = {}
+    if not report_only:
+        env = dict(os.environ)
+        if REGTEST & set(suites):
+            bitcoin = run([str(ROOT / 'scripts' / 'install-bitcoin')], capture_output=True).stdout.strip()
+            env.update(WINNOW_BITCOIND=f'{bitcoin}/bitcoind', WINNOW_BITCOIN_CLI=f'{bitcoin}/bitcoin-cli')
+        if 'journeys' in suites and not (ROOT / 'build' / 'census' / 'peers.json').exists():
+            run([str(ROOT / 'scripts' / 'import-census')])
+        exes = {s: link(s, SUITES[s][0], objects) for s in suites}
+        with ThreadPoolExecutor(int(os.environ.get('COVERAGE_JOBS', '4'))) as pool:
+            codes = dict(pool.map(lambda s: run_suite(s, exes[s], env), suites))
+
     status_file = OUT / 'status.json'
-    status = json.loads(status_file.read_text()) if args and status_file.exists() else {}
-    status.update({s: ('passed' if c == 0 else f'exit {c}') for s, c in codes.items()})
-    status_file.write_text(json.dumps(status, indent=1))
-    profiles = sorted((OUT / 'profiles').glob('*.profraw'))
-    merged = OUT / 'lean.profdata'
-    # a file that cannot be read is named, not merged
+    status = json.loads(status_file.read_text()) if (args and status_file.exists()) else {}
+    if not report_only:
+        status.update({s: ('passed' if c == 0 else f'exit {c}') for s, c in codes.items()})
+        status_file.write_text(json.dumps(status, indent=1))
+
+    if report_suites:
+        profiles = sorted(p for s in report_suites for p in (OUT / 'profiles').glob(f'{s}-*.profraw'))
+        tag = '-'.join(report_suites)
+        merged = OUT / f'lean-{tag}.profdata'
+        dest_json = OUT / f'lean-coverage-{tag}.json'
+    else:
+        profiles = sorted((OUT / 'profiles').glob('*.profraw'))
+        merged = OUT / 'lean.profdata'
+        dest_json = OUT / 'lean-coverage.json'
+
+    if not profiles:
+        sys.exit(f'coverage: no .profraw profiles found in {OUT / "profiles"}')
+
     unreadable = [p.name for p in profiles
                   if subprocess.run([xcrun('llvm-profdata'), 'show', str(p)], capture_output=True).returncode != 0]
     run([xcrun('llvm-profdata'), 'merge', '-sparse', '-o', str(merged),
          *[str(p) for p in profiles if p.name not in unreadable]])
-    # every module's object, not only the programs: a function no test links is there, never run
+
     objs = [str(o) for o in objects.values()]
     with tempfile.TemporaryFile('w+') as f:
         run([xcrun('llvm-cov'), 'export', '-format=text', '-skip-expansions', '-instr-profile', str(merged),
              objs[0], *[x for o in objs[1:] for x in ('-object', o)]], stdout=f)
         f.seek(0)
         export = json.load(f)
-    functions = [fn for d in export['data'] for fn in d['functions']]
+
+    export_functions = [fn for d in export['data'] for fn in d['functions']]
     references = list(c_references(modules))
-    symbols = sorted({symbol(fn['name']) for fn in functions} |
+    symbols = sorted({symbol(fn['name']) for fn in export_functions} |
                      {symbol(x) for f, names in references for x in (f, *names)})
     demangled = run(['lean', '--run', str(ROOT / 'scripts' / 'coverage-demangle.lean')], cwd=PACKAGES['Lean'],
                     input='\n'.join(symbols) + '\n', capture_output=True).stdout
@@ -325,62 +888,64 @@ def main():
     for line in demangled.splitlines():
         sym, _, rest = line.partition('\t')
         parts[sym] = rest.split('\x1f') if rest else None
+
     decls, users = declarations()
-    per, unattributed, marks = {}, 0, {}
-    for fn in functions:
-        sym = symbol(fn['name'])
-        p = parts.get(sym)
-        if p is None:
-            continue  # the runtime's inline functions (lean.h), module initializers, main
-        if sym.endswith('___boxed'):
-            continue  # the boxed copy the compiler writes for a closure to call: no Lean of its own
-        # code regions of the function's own C file, not its expansions, less the arms of a shared-value test
-        source = fn['filenames'][0]
-        if source not in marks:
-            marks[source] = memory_paths(source)
-        regions = [r for r in fn['regions'] if r[7] == 0 and r[5] == 0 and r[0] not in marks[source]]
-        name = owner(p, decls)
-        if name is None:
-            unattributed += len(regions)  # what deriving made, and the library code of proofs
-            continue
-        e = per.setdefault(name, {'regions': 0, 'covered': 0, 'c_functions': 0})
-        e['regions'] += len(regions)
-        e['covered'] += sum(1 for r in regions if r[4] > 0)
-        e['c_functions'] += 1
-    # Lean inlines small definitions into their callers before it writes C: a declaration the source uses but
-    # whose C no other declaration's C names runs only inside its callers, and its own C never does
+    per, library_branches, unattributed_branches = aggregate_functions(export_functions, parts, decls)
+
     def owner_of(sym):
         p = parts.get(symbol(sym))
         return owner(p, decls) if p else None
+
     named = set()
     for f, names in references:
         mine = owner_of(f)
-        if mine is None:
-            continue  # module initializers compute constants; they call nothing
-        named.update(o for o in map(owner_of, names) if o and o != mine)
-    # ...and one that no source uses either is not inlined anywhere: it is code nothing runs. An instance is used
-    # where instances are resolved, which the index does not record as a use
+        for ref in names:
+            if '___closed__' in ref or '___boxed__const__' in ref:
+                continue
+            o = owner_of(ref)
+            if o and o != mine:
+                named.add(o)
     for n, e in per.items():
         instance = n.rsplit('.', 1)[-1].startswith('inst')
         e['inlined'] = e['covered'] == 0 and n not in named and (bool(users.get(n)) or instance)
-    rows = [{'decl': n, 'file': decls[n][0], 'line': decls[n][1], **v} for n, v in sorted(per.items())]
+
+    decl_rows = [{'decl': n, 'file': decls[n][0], 'line': decls[n][1], **v} for n, v in sorted(per.items())]
+    shipped = shipped_closure()
+    fn_rows, summary = build_function_report(decl_rows, modules, shipped)
+
     result = {
-        'about': 'C regions of each Lean declaration and how many the suites ran (scripts/coverage)',
+        'about': 'Lean branch coverage and CRAP per function and declaration (scripts/coverage)',
         'commit': run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True).stdout.strip(),
         'suites': dict(sorted(status.items())),
+        'report_suites': report_suites or sorted(status.keys()),
         'unreadable_profiles': unreadable,
-        'unattributed_regions': unattributed,
-        'declarations': rows,
+        'library_branches': library_branches,
+        'unattributed_branches': unattributed_branches,
+        'summary': summary,
+        'functions': fn_rows,
+        'declarations': decl_rows,
     }
     OUT.mkdir(parents=True, exist_ok=True)
     text = json.dumps(result, indent=1)
-    (OUT / 'lean-coverage.json').write_text(text)
-    if os.environ.get('CI_RESULTS'):
+    dest_json.write_text(text)
+    if not report_suites and os.environ.get('CI_RESULTS'):
         Path(os.environ['CI_RESULTS'], 'lean-coverage.json').write_text(text)
-    total = sum(r['regions'] for r in rows)
-    ran = sum(r['covered'] for r in rows)
-    print(f'{len(rows)} declarations, {ran} of {total} regions run ({100 * ran / max(total, 1):.1f}%), '
-          f'{unattributed} regions of Lean names with no declaration → {OUT / "lean-coverage.json"}')
+
+    sh = summary['shipped']
+    print(f'shipped ({sh["files"]} files, {sh["measured"]} functions): '
+          f'{sh["covered"]}/{sh["branches"]} Lean branches ({sh["pct"]:.1f}%), '
+          f'CRAP > 30: {sh["crap_gt_30"]} ({sh["cc_gt_30"]} with CC > 30), CRAP > 12: {sh["crap_gt_12"]} '
+          f'→ {dest_json}')
+    top = sorted([r for r in fn_rows if r['shipped'] and r['crap'] is not None and r['crap'] > 30],
+                 key=lambda r: -r['crap'])
+    if top:
+        print(f'{"CRAP":>7} {"CC":>4} {"Cov":>5} {"Uncov/Br":>9}  Function')
+        for r in top[:15]:
+            uncov = r['branches'] - r['covered']
+            print(f'{r["crap"]:>7.1f} {r["cc"]:>4} {100 * r["coverage"]:>4.0f}% {uncov:>4}/{r["branches"]:<4}  '
+                  f'{r["file"]}:{r["line"]} {r["name"]}')
+    if report_suites:
+        sys.exit(0 if not unreadable else 1)
     sys.exit(0 if all(v == 'passed' for v in status.values()) and not unreadable else 1)
 
 
