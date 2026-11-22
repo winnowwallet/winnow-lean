@@ -125,7 +125,7 @@ def waitSynced : UI Unit :=
 /-- Back to the home: the Send sheet closed, and whatever is pushed (Settings, the builder and the account it
 opened) popped. -/
 def backToWalletList : UI Unit := do
-  for _ in [0:6] do
+  for _ in [0:12] do
     if ← exists? closeSendButton then
       tap closeSendButton
       pause 0.5
