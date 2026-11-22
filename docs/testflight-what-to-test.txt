@@ -1,35 +1,14 @@
 Winnow: the same wallet, rewritten in Lean
 
-New: profiles. A profile is one key and what it holds: its coins, payments, contacts, backup and the multisig accounts its key is in.
-1. The home names the open profile: tap it. Switch: instant, no "Syncing" catch-up. Rename it; the name shows on your other devices after a minute.
-2. Add a profile (new, or restore another of yours from iCloud). Pay the one that is not open; open it: the payment is already there.
-3. The home lists only this profile's accounts and counts only its money; "Watching" holds the others, each saying where it signs.
-4. A 2-of-2 of two profiles here: sign in one, tap "Switch to … and sign": the other opens on the payment; add its signature.
-5. Leave one device off a while, use the other, then open the first: it should be up to date at once, without scanning the gap.
-6. Through Tor and I2P gateways the wallet now fills all three peer seats, Tor among them (before, it stopped at two, often both I2P).
-7. An account arriving from another device catches up over Tor or I2P a little more each time the app is open, even where it was paid; once it is caught up the wallet stops downloading.
+New in 0.9.29
+1. Background continued sync (iOS 26): pull to refresh, tap Sync now or Retry, turn on Verify from genesis, or restore/import a wallet, then swipe away. A Live Activity shows "Syncing Bitcoin" (or "Syncing Signet") with header/block progress — never balances or wallet names — and keeps syncing until up to date, or stops cleanly if you cancel from the Live Activity.
+2. Cleaner iCloud backup & plain-English errors: Home no longer nudges you to save manual backup files when iCloud isn't synced; actionable iCloud issues link straight to iCloud backup settings, while brief offline retries stay quiet. Error screens should never show raw "The operation couldn’t be completed. (WalletCore.…)" codes.
+3. Reorgs keep a pending send's change coin counted rather than showing 0 until reconfirmation.
 
-Since 0.9.21: more of the wallet is proved, and fees are whole-number arithmetic. Send once: the fee quoted must be the fee paid.
-
-Since 0.9.16
-
-Settings → Backup → iCloud backup says how many other backups were read and, for one that was not, why.
-
-Multisig accounts and paired Ledgers follow your devices. With iCloud backup on, they appear on your other devices under the same Apple Account. With Winnow open on both:
-1. Join or create an account on one. Within two minutes the other lists it, first as catching up, then with its balance. A device with none of its keys says "Watch-only on this device".
-2. Pair a Ledger on one: the other lists it as "Paired on another device" until used there.
-3. Start a payment from an account and sign on one: the other shows it awaiting signatures, and a signature added there reaches the first.
-
-Since 0.9.15
-
-Join an account also takes a SegWit v0 account, wsh(sortedmulti(…)), with one signer a single fixed key. On signet, with Bitcoin Core holding the other keys: paste the descriptor (policy "2 of 3", first address Core's), pay that address, then paste Core's PSBT, add this phone's signature, finalize and broadcast.
-
-Since 0.9.11
-
-A card for one person: they pay you at a new address each time. On two phones:
-1. Receiving phone: Receive. Under "From one person" type the payer's name and tap the button (Face ID). It shows "An address for …" and "A card for …".
-2. Paying phone: Send → Saved recipients → Add. Type a name, paste the card, Save. Send to them twice.
-3. The receiving phone must show both as "Received from" that name, at two different addresses.
+Since 0.9.28: profiles, multi-device sync, SegWit v0 multisig, and person cards.
+- Profiles: tap the open profile on Home to switch instantly, rename, or add/restore another profile; each profile keeps its own accounts and "Watching" lists the rest.
+- Multi-device sync (iCloud): multisig accounts, paired Ledgers, and pending PSBTs follow your devices under the same Apple Account; Settings → Backup → iCloud backup reports each other device's status.
+- SegWit v0 multisig (`wsh(sortedmulti(…))`) and person cards (Receive → "From one person") continue to work as before, with whole-number fee arithmetic.
 
 This build is Winnow rewritten in Lean 4, with no Swift. It updates the App Store's Winnow Wallet in place and keeps its wallet, receive labels and iCloud backups. Saved people, Signers and multisig accounts from the Swift app are set aside on the phone (not deleted) and start empty: pair your Ledger again under Settings → Security → Hardware wallets and keys. Please try it on a phone whose wallet you could restore from its recovery words.
 
