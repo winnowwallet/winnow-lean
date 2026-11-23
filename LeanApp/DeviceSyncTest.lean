@@ -1056,6 +1056,446 @@ def contextForms (root : System.FilePath) : TM Unit := do
     !(← cloud.records.get).any fun b => contains (String.fromUTF8! (SwiftJSON.write b.toJV).toUTF8) "\"sync\"")
   a.stop
 
+/-- Build a minimal canonical transaction and `PendingTx` for relay-file migration checks. -/
+def dummyPendingTx (tag : UInt8) (attempt : Nat := 1) (now : Float := 1_700_000_000.0) : ByteArray × Winnow.IO.PendingTx :=
+  let tx : Transaction :=
+    { version := 2
+      inputs := #[{ previousOutput := { txid := ByteArray.mk (Array.replicate 32 tag), vout := 0 },
+                    scriptSig := .empty, sequence := 0xFFFF_FFFF, witness := #[] }]
+      outputs := #[{ value := 1000, scriptPubKey := ByteArray.mk #[0x51] }]
+      locktime := 0 }
+  let raw := tx.serialized true
+  (tx.txid, { rawTx := raw, transaction := tx, feeRate := some 2.5, attempt, nextAttemptAt := now })
+
+/-- Edge cases of `migrateSlotStacks`: missing `wallets/`, rollback markers (valid with wallet + multisig,
+valid without wallet, non-numeric, `> UInt32.max`), broadcast merging (existing key wins, new key added,
+corrupt slot file preserved, corrupt shared file leaves slot untouched). -/
+def slotStacksEdges (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "foldEdges" cloud cloudKeys
+  discard <| a.create
+  -- 1. Network dir with no `wallets/` subdirectory is a clean no-op
+  let emptyNet := (root / "foldEdgesEmpty" / "signet").toString
+  IO.FS.createDirAll emptyNet
+  Real.migrateSlotStacks a.env .signet emptyNet
+  check "migrateSlotStacks without wallets/ dir is a no-op" (!(← (System.FilePath.mk emptyNet / "broadcast.json").pathExists))
+
+  -- 2. Slot with real wallet + multisig coin rolled back via valid marker
+  a.backend.stopNetworking
+  discard <| a.env.sleepWhile 2_000 (·.syncing)
+  let slot1 := Real.slotDir a.dir "1"
+  IO.FS.createDirAll slot1
+  discard <| a.backend.openWallet .signet slot1
+  discard <| a.backend.createWallet .signet slot1
+  let some w1 := (← a.env.get).wallet | throw "no wallet in slot1"
+  let recorded ← (w1.recordScanHeight 50).run
+  check "slot1 scan height recorded at 50 before rollback" ((recorded matches .ok _) && (← w1.nextScanHeight) == 50)
+  let msId ← sharedAccount a "SlotMS" 0xB4
+  let rec0 := (← a.app.multisig.host.read).records[0]!
+  let coin ← coinOf rec0.descriptor 25
+  a.app.multisig.restore #[{ rec0 with allUtxos := #[coin], nextReceiveIndex := 1 }]
+  -- switch back to main dir so slot1 is closed before migrating
+  discard <| a.backend.openWallet .signet a.dir
+  IO.FS.writeFile (System.FilePath.mk slot1 / Real.rollbackMarkerName) "10\n"
+  let now := (← Real.unixNow).toFloat
+  let (txidA, pA_slot) := dummyPendingTx 0xA1 5 now
+  let (txidB, pB_slot) := dummyPendingTx 0xB2 1 now
+  let (_, pA_shared) := dummyPendingTx 0xA1 2 now
+  let sharedRelay := System.FilePath.mk a.dir / "broadcast.json"
+  IO.FS.writeBinFile sharedRelay (Winnow.IO.TxBroadcaster.encodeStore (Std.HashMap.emptyWithCapacity.insert txidA pA_shared))
+  let slot1Relay := System.FilePath.mk slot1 / "broadcast.json"
+  IO.FS.writeBinFile slot1Relay
+    (Winnow.IO.TxBroadcaster.encodeStore ((Std.HashMap.emptyWithCapacity.insert txidA pA_slot).insert txidB pB_slot))
+
+  -- 3. Slot 2: non-numeric marker + corrupt slot broadcast.json (must be preserved)
+  let slot2 := Real.slotDir a.dir "2"
+  IO.FS.createDirAll slot2
+  IO.FS.writeFile (System.FilePath.mk slot2 / Real.rollbackMarkerName) "not-a-number"
+  IO.FS.writeFile (System.FilePath.mk slot2 / "broadcast.json") "{corrupt"
+
+  -- 4. Slot 3: overflow (> 0xFFFF_FFFF) marker
+  let slot3 := Real.slotDir a.dir "3"
+  IO.FS.createDirAll slot3
+  IO.FS.writeFile (System.FilePath.mk slot3 / Real.rollbackMarkerName) "5000000000"
+
+  -- 5. Slot 4: valid marker with NO wallet file
+  let slot4 := Real.slotDir a.dir "4"
+  IO.FS.createDirAll slot4
+  IO.FS.writeFile (System.FilePath.mk slot4 / Real.rollbackMarkerName) "7"
+
+  Real.migrateSlotStacks a.env .signet a.dir
+
+  -- Verify slot1 rollback + broadcast merge
+  let reopened1 ← (Wallet.open (Real.walletPath slot1) a.env.deps.keyStore a.env.deps.random).run
+  let rolledHeight ← match reopened1 with
+    | .ok w => some <$> w.nextScanHeight
+    | .error _ => pure none
+  check "slot rollback marker rewinds slot wallet to fork + 1" (rolledHeight == some 11) s!"{rolledHeight}"
+  let slot1Ms ← a.env.hooks.multisigAt .signet slot1
+  discard <| slot1Ms.watchScripts .signet
+  let merged ← match Winnow.IO.TxBroadcaster.decodeStore (← IO.FS.readBinFile sharedRelay) now with
+    | .ok m => pure m
+    | .error e => throw s!"decode merged broadcast.json failed: {e.description}"
+  check "merge keeps existing shared tx entry and imports new slot tx"
+    (merged.size == 2 && (merged[txidA]?.map (·.attempt)) == some 2 && (merged[txidB]?.map (·.attempt)) == some 1 &&
+     !(← slot1Relay.pathExists))
+    s!"size={merged.size} A={merged[txidA]?.map (·.attempt)} B={merged[txidB]?.map (·.attempt)}"
+  check "corrupt slot broadcast.json is left untouched" (← (System.FilePath.mk slot2 / "broadcast.json").pathExists)
+  check "rollback markers are cleaned up across slots"
+    (!(← (System.FilePath.mk slot1 / Real.rollbackMarkerName).pathExists) &&
+     !(← (System.FilePath.mk slot2 / Real.rollbackMarkerName).pathExists) &&
+     !(← (System.FilePath.mk slot3 / Real.rollbackMarkerName).pathExists) &&
+     !(← (System.FilePath.mk slot4 / Real.rollbackMarkerName).pathExists))
+
+  -- 6. Corrupt shared broadcast.json must leave a valid slot broadcast.json untouched
+  let slot5 := Real.slotDir a.dir "5"
+  IO.FS.createDirAll slot5
+  let slot5Relay := System.FilePath.mk slot5 / "broadcast.json"
+  IO.FS.writeBinFile slot5Relay (Winnow.IO.TxBroadcaster.encodeStore (Std.HashMap.emptyWithCapacity.insert txidB pB_slot))
+  IO.FS.writeFile sharedRelay "{corrupt-shared"
+  Real.migrateSlotStacks a.env .signet a.dir
+  check "corrupt shared broadcast.json leaves valid slot relay file intact" (← slot5Relay.pathExists)
+  let _ := msId
+  a.stop
+
+/-- Edge and guard paths of `syncOnce`: no stack, concurrent `syncing` guard, `joined.isEmpty`,
+transient (`.noPeers`) vs non-transient (`.relayOnly`) failure accounting, and `maxBlocks` background mode. -/
+def syncOnceGuards (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let d ← device root "syncGuards" cloud cloudKeys
+  discard <| d.create
+  -- Add a second wallet (rider) so `catchUpArriving` exercises both open and rider loops
+  let added := Real.slotDir d.dir (← Real.freeSlot d.dir)
+  IO.FS.createDirAll added
+  discard <| d.backend.openWallet .signet added
+  d.backend.startNetworking d.settings
+  discard <| d.backend.createWallet .signet added
+  discard <| d.backend.openWallet .signet d.dir
+  d.backend.stopNetworking
+  -- 1. No stack -> false
+  check "syncOnce without stack returns false" (!(← Real.syncOnce d.env))
+  -- Build stack (peer 127.0.0.1:1 is unreachable, so connectedPeers is empty -> fast error)
+  Real.buildStackIfNeeded d.env
+  -- 2. Concurrent `syncing == true` guard -> false, syncPasses unchanged
+  let passesBefore := (← d.env.get).syncPasses
+  d.env.modify fun c => { c with syncing := true }
+  let blocked ← Real.syncOnce d.env
+  d.env.modify fun c => { c with syncing := false }
+  check "syncOnce while already syncing returns false without claiming" (!blocked && (← d.env.get).syncPasses == passesBefore)
+  -- 3. `maxBlocks := none` with unreachable peer -> transient `.noPeers` failure recorded
+  let r1 ← Real.syncOnce d.env none
+  let c1 ← d.env.get
+  check "syncOnce transient noPeers records failure and clears syncing"
+    (!r1 && !c1.syncing && c1.lastSyncError.isSome && c1.transientSyncFailures == 1 && c1.transientSyncError.isSome)
+    s!"r1={r1} syncing={c1.syncing} tf={c1.transientSyncFailures} err={c1.lastSyncError}"
+  -- 4. `maxBlocks := some 1` (background check) with pool in `.relayOnly` -> non-transient failure resets transient counter
+  if let some s := c1.stack then
+    s.pool.state.modify fun st => { st with mode := .relayOnly }
+  let r2 ← Real.syncOnce d.env (some 1)
+  let c2 ← d.env.get
+  check "syncOnce non-transient relayOnly clears transient failure counter"
+    (!r2 && !c2.syncing && c2.lastSyncError.isSome && c2.transientSyncFailures == 0 && c2.transientSyncError.isNone)
+    s!"r2={r2} tf={c2.transientSyncFailures} err={c2.lastSyncError}"
+  -- 5. `joined.isEmpty` when open wallet's multisig scripts fail and there are no riders
+  d.env.modify fun c => { c with riders := #[] }
+  let brokenEnv : Real.Env := { d.env with deps := { d.env.deps with hooks := { d.env.hooks with
+    multisigWatchScripts := fun _ => pure (.error (.locked "keychain locked")) } } }
+  let r3 ← Real.syncOnce brokenEnv none
+  check "syncOnce with no joinable wallets returns false cleanly" (!r3 && !(← d.env.get).syncing)
+  d.stop
+
+/-- Exercise all paths of `SyncApp.renewWaiting`: empty list, entry without `note`, replicas not ahead,
+invalid replica descriptor rejected by validation, and picking the highest of multiple newer replicas
+while preserving local name, clearing draft and note, and leaving other arriving entries untouched. -/
+def renewWaitingChecks (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "renewA" cloud cloudKeys
+  let b ← device root "renewB" cloud cloudKeys
+  discard <| a.create
+  discard <| b.create
+  -- 1. Empty arriving list -> clean no-op (exercises `loop.skip`)
+  b.app.follow.renewWaiting #[]
+  let id1 ← sharedAccount a "KeepQuiet" 0xB2
+  let id2 ← sharedAccount a "NeedsRenew" 0xC3
+  let recs := (← a.app.multisig.host.read).records
+  let some rec1 := recs.find? (·.id == id1) | throw "missing rec1"
+  let some rec2 := recs.find? (·.id == id2) | throw "missing rec2"
+  let anchorOld := ByteArray.mk (Array.replicate 32 0x11)
+  let anchor200 := ByteArray.mk (Array.replicate 32 0x22)
+  let e1 : ArrivingAccount := ArrivingAccount.ofSnapshot rec1 100 (some anchorOld)
+  let e2 : ArrivingAccount := { ArrivingAccount.ofSnapshot { rec2 with name := "LocalName" } 100 (some anchorOld) with
+                                note := some Real.waitingForNewerCopyText }
+  (RM.toIO (b.app.multisig.host.modifyArriving fun _ => pure (#[e1, e2], ())) : IO Unit)
+
+  -- 2. Only older/same-height replicas -> e2 stays waiting at 100
+  let rOlder : Replica := { id := "r90", height := 90, accounts := #[rec2] }
+  let rSame : Replica := { id := "r100", height := 100, accounts := #[rec2] }
+  b.app.follow.renewWaiting #[rOlder, rSame]
+  let afterOlder := (← b.app.multisig.host.arrivingAccounts).find? (·.record.id == id2)
+  check "renewWaiting ignores replicas not ahead of scannedThrough"
+    ((afterOlder.map (·.scannedThrough)) == some 100 && (afterOlder.bind (·.note)).isSome)
+
+  -- 3. Newer replica with invalid descriptor -> rejected by MultisigStore.validate, e2 stays waiting
+  let badRec2 : MultisigAccountRecord := { rec2 with descriptor := "not-a-valid-descriptor" }
+  b.app.follow.renewWaiting #[{ id := "rBad", height := 150, accounts := #[badRec2] }]
+  let afterBad := (← b.app.multisig.host.arrivingAccounts).find? (·.record.id == id2)
+  check "renewWaiting skips invalid snapshot records"
+    ((afterBad.map (·.scannedThrough)) == some 100 && (afterBad.bind (·.note)).isSome)
+
+  -- 4. Three newer replicas (120, 200, 160) -> picks 200, preserves local name, strips draft, clears note, leaves e1 alone
+  let r120 : Replica := { id := "r120", height := 120, anchor := some anchorOld,
+                          accounts := #[{ rec2 with name := "Remote120", nextReceiveIndex := 2 }] }
+  let r200 : Replica := { id := "r200", height := 200, anchor := some anchor200,
+                          accounts := #[{ rec2 with name := "Remote200", nextReceiveIndex := 5, draft := some (draftOf "x") }] }
+  let r160 : Replica := { id := "r160", height := 160, anchor := some anchorOld,
+                          accounts := #[{ rec2 with name := "Remote160", nextReceiveIndex := 3 }] }
+  b.app.follow.renewWaiting #[r120, r200, r160]
+  let allAfter ← b.app.multisig.host.arrivingAccounts
+  let got1 := allAfter.find? (·.record.id == id1)
+  let got2 := allAfter.find? (·.record.id == id2)
+  check "renewWaiting leaves non-waiting entry untouched" (got1 == some e1)
+  check "renewWaiting picks highest valid replica, keeps local name, drops draft, clears note"
+    (match got2 with
+     | some g => g.scannedThrough == 200 && g.anchor == some anchor200 && g.note.isNone &&
+                 g.record.name == "LocalName" && g.record.draft.isNone && g.record.nextReceiveIndex == 5
+     | none => false)
+    s!"{got2.map fun g => (g.scannedThrough, g.note, g.record.name, g.record.nextReceiveIndex)}"
+  a.stop
+  b.stop
+
+/-- Build a minimal v0 PSBT spending `coinOf`'s outpoint with one distinct input key-value pair so two copies combine. -/
+def testPsbtBase64 (extraKeyByte : UInt8) (extraValByte : UInt8) : String :=
+  let unsigned : Transaction :=
+    { version := 2
+      inputs := #[{ previousOutput := { txid := ByteArray.mk (Array.replicate 32 7), vout := 0 },
+                    scriptSig := .empty, sequence := 0xFFFF_FFFF, witness := #[] }]
+      outputs := #[{ value := 1000, scriptPubKey := ByteArray.mk #[0x51] }]
+      locktime := 0 }
+  let p : PSBT :=
+    { globals := #[{ key := ByteArray.mk #[0x00], value := unsigned.serialized false }]
+      inputs := #[⟨#[{ key := ByteArray.mk #[0xFC, extraKeyByte], value := ByteArray.mk #[extraValByte] }]⟩]
+      outputs := #[⟨#[]⟩] }
+  p.base64V0.toOption.getD ""
+
+/-- Exercise every arm and guard of `SyncApp.applyAccountChange` (via `applyAccount`):
+`rename` (valid/invalid/same-name on arriving & missing), `raise` (arriving & live & missing),
+`ledger` (arriving & same-value & live & missing), `draft` (`!live` deferred, `live` set/clear),
+and `combine` (`!live` deferred, missing local draft, invalid PSBT, identical PSBT, distinct PSBTs combined). -/
+def applyAccountChangeChecks (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "applyA" cloud cloudKeys
+  let b ← device root "applyB" cloud cloudKeys
+  discard <| a.create
+  discard <| b.create
+  let id ← sharedAccount a "Initial" 0xB2
+  let some rec0 := (← a.app.multisig.host.read).records.find? (·.id == id) | throw "missing rec0"
+  let coin ← coinOf rec0.descriptor 10
+  a.app.multisig.restore #[{ rec0 with allUtxos := #[coin], nextReceiveIndex := 1 }]
+  let some recA := (← a.app.multisig.host.read).records.find? (·.id == id) | throw "missing recA"
+
+  -- Put account into b's arriving list (`live == false`)
+  let arr := ArrivingAccount.ofSnapshot recA 10 none
+  (RM.toIO (b.app.multisig.host.modifyArriving fun _ => pure (#[arr], ())) : IO Unit)
+  let applyChanges (d : Device) (acctId : String) (rec : MultisigAccountRecord) (changes : Array Change) :
+      IO (Real.SyncView × Bool × Bool) := do
+    let view ← d.view
+    let localAcct : LocalAccount := { record := rec, seen := { stamps := { id := acctId }, name := rec.name }, removable := true }
+    let dec : AccountDecision := { id := acctId, added := {}, removed := {}, existence := .unchanged, changes }
+    d.app.follow.applyAccount view dec (some localAcct)
+
+  -- Construct a valid LedgerRegistration belonging to `recA`'s parsed Taproot account
+  let tapAcct ← need "taproot account" (MultisigAccount.parse recA.descriptor .signet)
+  let some origin := tapAcct.allKeys.findSome? (·.origin) | throw "no key origin in descriptor"
+  let .ok policy := Ledger.WalletPolicy.ofAccount "Shared" tapAcct | throw "ledger policy"
+  let reg : LedgerRegistration :=
+    { policyName := "Shared", policyID := policy.id, hmac := ByteArray.mk (Array.replicate 32 0x42),
+      masterFingerprint := origin.fingerprint, keyPath := origin.path }
+
+  -- 1. Arriving (`!live`): invalid rename refused (pending=true), valid rename/raise/ledger succeed, draft & combine deferred (pending=true)
+  let (_, cBad, pBad) ← applyChanges b id recA #[.rename "" (stampOf 10)]
+  check "applyAccountChange refuses empty name on arriving account" (!cBad && pBad)
+  let (_, cMulti, pMulti) ← applyChanges b id recA #[.rename "Line1\nLine2" (stampOf 11)]
+  check "applyAccountChange refuses multiline name on arriving account" (!cMulti && pMulti)
+  let (_, cRen, pRen) ← applyChanges b id recA #[.rename "RenamedArriving" (stampOf 12), .raise 4 2, .ledger reg (stampOf 13)]
+  let arrAfter := ((← b.app.multisig.host.arrivingAccounts).find? (·.record.id == id)).map (·.record)
+  check "applyAccountChange updates rename, raise, and ledger on arriving account"
+    (cRen && !pRen && (arrAfter.map fun r => (r.name, r.nextReceiveIndex, r.nextChangeIndex, r.ledger)) ==
+      some ("RenamedArriving", 4, 2, some reg))
+  let (_, cSame, pSame) ← applyChanges b id (arrAfter.getD recA) #[.rename "RenamedArriving" (stampOf 14), .ledger reg (stampOf 15)]
+  check "applyAccountChange reports unchanged when rename/ledger match existing value" (!cSame && !pSame)
+  let (_, cDraftDef, pDraftDef) ← applyChanges b id recA #[.draft (some (draftOf "x")) (stampOf 16)]
+  let (_, cCombDef, pCombDef) ← applyChanges b id recA #[.combine #[draftOf "x"] (stampOf 17)]
+  check "applyAccountChange defers draft and combine while account is arriving"
+    (!cDraftDef && pDraftDef && !cCombDef && pCombDef)
+
+  -- 2. Missing account ID -> store errors return pending=true on rename/raise/ledger/draft
+  let (_, _, pMissRen) ← applyChanges a "nonexistent-id" recA #[.rename "X" (stampOf 20)]
+  let (_, _, pMissRaise) ← applyChanges a "nonexistent-id" recA #[.raise 3 1]
+  let (_, _, pMissLed) ← applyChanges a "nonexistent-id" recA #[.ledger reg (stampOf 21)]
+  check "applyAccountChange marks pending when target account is missing" (pMissRen && pMissRaise && pMissLed)
+
+  -- 3. Live account (`a`): ledger, draft set/clear, combine (none, invalid, identical, distinct)
+  let (_, cLedLive, pLedLive) ← applyChanges a id recA #[.ledger reg (stampOf 30), .raise 2 1]
+  check "applyAccountChange updates ledger and indices on live account" (cLedLive && !pLedLive)
+  let (_, cCombNone, pCombNone) ← applyChanges a id { recA with draft := none } #[.combine #[draftOf "x"] (stampOf 31)]
+  check "applyAccountChange combine without local draft is a clean no-op" (!cCombNone && !pCombNone)
+  let (_, cCombBad, pCombBad) ← applyChanges a id { recA with draft := some (draftOf "not-base64!!!") } #[.combine #[draftOf "x"] (stampOf 32)]
+  check "applyAccountChange combine with invalid PSBT returns pending" (!cCombBad && pCombBad)
+
+  let psbtA := testPsbtBase64 0x01 0xAA
+  let psbtB := testPsbtBase64 0x02 0xBB
+  let (_, cDraftSet, pDraftSet) ← applyChanges a id recA #[.draft (some (draftOf psbtA)) (stampOf 33)]
+  check "applyAccountChange sets draft on live account" (cDraftSet && !pDraftSet)
+  let recWithDraft := ((← a.app.multisig.host.read).records.find? (·.id == id)).getD recA
+  let (_, cCombSame, pCombSame) ← applyChanges a id recWithDraft #[.combine #[draftOf psbtA] (stampOf 34)]
+  check "applyAccountChange combine with identical PSBT makes no write" (!cCombSame && !pCombSame)
+  let (_, cCombDiff, pCombDiff) ← applyChanges a id recWithDraft #[.combine #[draftOf psbtB] (stampOf 35)]
+  let recCombined := ((← a.app.multisig.host.read).records.find? (·.id == id)).getD recA
+  check "applyAccountChange combines distinct partial PSBTs and stores result"
+    (cCombDiff && !pCombDiff && recCombined.draft.map (·.psbtBase64) != some psbtA && recCombined.draft.isSome)
+  let (_, cDraftClr, pDraftClr) ← applyChanges a id recCombined #[.draft none (stampOf 36)]
+  check "applyAccountChange clears draft on live account"
+    (cDraftClr && !pDraftClr && (((← a.app.multisig.host.read).records.find? (·.id == id)).bind (·.draft)).isNone)
+  a.stop
+  b.stop
+
+/-- Exercise all guard and success paths of `SyncApp.headStartWallet` (via `headStart`):
+pending sends guard, cardRestoreFrom guard, no ahead replica, highest-of-multiple-replicas fold,
+anchor mismatch refusal, unreadable backup skip, different-wallet skip, not-further-on skip,
+local-only-card skip, missing-multisig-account skip, and successful head start advancing height and card index. -/
+def headStartWalletChecks (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "hsUnitA" cloud cloudKeys
+  let b ← device root "hsUnitB" cloud cloudKeys
+  let c ← device root "hsUnitC" cloud cloudKeys
+  let idA ← a.create
+  discard <| c.create
+  -- b imports a's seed so both hold the same wallet ID & account key
+  discard <| b.backend.openWallet .signet b.dir
+  b.backend.startNetworking b.settings
+  let (idB, _) ← b.backend.importBundle .signet b.dir (← a.backend.exportBundle true)
+  check "headStart unit: b holds the same wallet as a" (idA == idB)
+  discard <| waitUntil 2_000 (every := 10) do
+    let s ← b.app.controller.get
+    return !s.scheduled && !s.busy
+  b.backend.stopNetworking
+  Real.buildStackIfNeeded b.env
+  let some stackB := (← b.env.get).stack | throw "no stack on b"
+  let some wA := (← a.env.get).wallet | throw "no wallet on a"
+  let some wB := (← b.env.get).wallet | throw "no wallet on b"
+  let some genesis ← stackB.chain.blockHash 0 | throw "no genesis hash"
+  let wrongAnchor := ByteArray.mk (Array.replicate 32 0xEE)
+  let setBState (f : WalletState → WalletState) : IO Unit := do
+    let next := f (← wB.state)
+    discard <| (wB.persist next).run
+    wB.stateRef.set next
+  let setAState (f : WalletState → WalletState) : IO Unit := do
+    let next := f (← wA.state)
+    discard <| (wA.persist next).run
+    wA.stateRef.set next
+
+  -- Issue a real card on `a`, advance its cursor to 4 and nextScanHeight to 1, and publish `a` and `c`
+  a.backend.stopNetworking
+  discard <| (wA.issueCard).run
+  setAState fun st => { st with nextScanHeight := 1, cards := st.cards.map fun x => { x with nextIndex := 4 } }
+  a.publish
+  let some backupA := (← a.app.controller.get).configuration.map (·.backup.id) | throw "no backupA"
+  let some card0A := (← wA.state).cards[0]? | throw "no card0A"
+  c.publish
+  let some backupC := (← c.app.controller.get).configuration.map (·.backup.id) | throw "no backupC"
+  -- Crafted backup whose wallet fails Wallet.importing (`lastKnownHeight == 0xFFFF_FFFF`)
+  let (badWalletBackup, _) ← craftedCopy cloud cloudKeys a
+    (bundle := editKey "lastKnownHeight" (fun _ => SwiftJSON.ofInt 0xFFFF_FFFF))
+
+  -- Put b at nextScanHeight = 0 so replica height 0 satisfies `r.height + 1 > 0`
+  setBState fun st => { st with nextScanHeight := 0 }
+  let mkRep (bid : String) (h : UInt32 := 0) (anc : Option ByteArray := some genesis) : Replica :=
+    { id := bid, height := h, anchor := anc, walletID := some idB }
+
+  -- 1. Pending sends guard -> early return
+  let dummyPending : PendingSend :=
+    { rawTransaction := ByteArray.mk #[1], selected := #[], changeIndex := none, changeOutputIndex := none, fee := 100 }
+  setBState fun st => { st with pendingSends := #[dummyPending] }
+  b.app.follow.lastFound.set #[mkRep backupA]
+  b.app.follow.headStart
+  check "headStartWallet skips while pendingSends is non-empty" ((← b.app.follow.journaled.get).isNone)
+  setBState fun st => { st with pendingSends := #[] }
+
+  -- 2. cardRestoreFrom guard -> early return
+  setBState fun st => { st with cardRestoreFrom := some 0 }
+  b.app.follow.headStart
+  check "headStartWallet skips while cardRestoreFrom is active" ((← b.app.follow.journaled.get).isNone)
+  setBState fun st => { st with cardRestoreFrom := none }
+
+  -- 3. No ahead replica -> early return
+  b.app.follow.lastFound.set #[]
+  b.app.follow.headStart
+  check "headStartWallet with no ahead replicas is a no-op" ((← wB.nextScanHeight) == 0)
+
+  -- 4. Multiple ahead replicas (0, 2, 1) -> fold picks highest (2), whose anchor disagrees -> refused
+  b.app.follow.lastFound.set #[mkRep backupA 0 (some genesis), mkRep backupA 2 (some wrongAnchor), mkRep backupA 1 (some wrongAnchor)]
+  b.app.follow.headStart
+  check "headStartWallet refuses mismatched anchor on highest replica" ((← wB.nextScanHeight) == 0)
+
+  -- 5. Missing backup/key -> "the backup did not open"
+  b.app.follow.lastFound.set #[mkRep "00000000-0000-0000-0000-000000000000"]
+  b.app.follow.headStart
+  check "headStartWallet skips unreadable backup"
+    ((← b.app.follow.journaled.get).any (contains · "the backup did not open"))
+    s!"{← b.app.follow.journaled.get}"
+
+  -- 6. Backup whose wallet fails validation -> "the backup's wallet did not read"
+  b.app.follow.lastFound.set #[mkRep badWalletBackup]
+  b.app.follow.headStart
+  check "headStartWallet skips backup whose wallet fails to import"
+    ((← b.app.follow.journaled.get).any (contains · "the backup's wallet did not read"))
+    s!"{← b.app.follow.journaled.get}"
+
+  -- 7. Different wallet backup -> "another wallet"
+  b.app.follow.lastFound.set #[mkRep backupC]
+  b.app.follow.headStart
+  check "headStartWallet skips backup of another wallet"
+    ((← b.app.follow.journaled.get).any (contains · "another wallet"))
+    s!"{← b.app.follow.journaled.get}"
+
+  -- 8. Local card handed out here only (`plainToo := false`) -> "a card handed out here only"
+  let localOnlyCard : IssuedCard := { index := 7, tweak := ByteArray.mk (Array.replicate 32 0x44), nextIndex := 1, plainToo := false }
+  setBState fun st => { st with cards := #[localOnlyCard] }
+  b.app.follow.lastFound.set #[mkRep backupA]
+  b.app.follow.headStart
+  check "headStartWallet skips when a local-only card is missing from backup"
+    ((← b.app.follow.journaled.get).any (contains · "a card handed out here only"))
+    s!"{← b.app.follow.journaled.get}"
+
+  -- 9. Local multisig account not in backup -> "the accounts here are not all in the backup"
+  setBState fun st => { st with cards := #[] }
+  let extraId ← sharedAccount b "LocalOnlyAcct" 0xD4
+  b.app.follow.headStart
+  check "headStartWallet skips when local accounts are absent from backup"
+    ((← b.app.follow.journaled.get).any (contains · "the accounts here are not all in the backup"))
+    s!"{← b.app.follow.journaled.get}"
+  b.backend.removeMultisigAccount extraId
+
+  -- 10. Success: matching card0 (nextIndex 1 -> 4) + plainToo card kept -> advances nextScanHeight 0 -> 1
+  let card0B : IssuedCard := { card0A with nextIndex := 1 }
+  let plainCard : IssuedCard := { index := 2, tweak := ByteArray.mk (Array.replicate 32 0x55), nextIndex := 2, plainToo := true }
+  setBState fun st => { st with cards := #[card0B, plainCard] }
+  b.app.follow.headStart
+  let finalB ← wB.state
+  check "headStartWallet advances scan height and raises matching card nextIndex while keeping plainToo card"
+    (finalB.nextScanHeight == 1 &&
+     (finalB.cards.find? (·.index == 0)).map (·.nextIndex) == some 4 &&
+     (finalB.cards.find? (·.index == 2)).map (·.nextIndex) == some 2)
+    s!"next={finalB.nextScanHeight} cards={finalB.cards.map fun x => (x.index, x.nextIndex)}"
+  a.stop
+  b.stop
+  c.stop
+
 def main : IO UInt32 := runMain "device-sync-test" do
   runTest "stampForms" stampForms
   runTest "stampingRules" stampingRules
@@ -1069,6 +1509,11 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "accountsFollow" (accountsFollow root)
   runTest "anchoredArrivals" (anchoredArrivals root)
   runTest "slotStacksFold" (slotStacksFold root)
+  runTest "slotStacksEdges" (slotStacksEdges root)
+  runTest "syncOnceGuards" (syncOnceGuards root)
+  runTest "renewWaitingChecks" (renewWaitingChecks root)
+  runTest "applyAccountChangeChecks" (applyAccountChangeChecks root)
+  runTest "headStartWalletChecks" (headStartWalletChecks root)
   runTest "namesFollow" (namesFollow root)
   runTest "scanBehindWallets" (scanBehindWallets root)
   runTest "removalStopsAtCoins" (removalStopsAtCoins root)

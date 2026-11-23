@@ -263,6 +263,68 @@ def offlineChecks (dir : String) : IO Unit := do
     PeerPool.cooldown 5 == 480_000 && PeerPool.cooldown 6 == 600_000 && PeerPool.cooldown 40 == 600_000)
   check "rebroadcast backoff" (TxBroadcaster.backoffInterval 0 60 3600 == 60 && TxBroadcaster.backoffInterval 5 60 3600 == 1920 &&
     TxBroadcaster.backoffInterval 6 60 3600 == 3600)
+  -- TxBroadcaster.decodeStore format, version, legacy, and validation edge cases
+  let sampleTx : Transaction :=
+    { version := 2
+      inputs := #[{ previousOutput := { txid := ByteArray.mk (Array.replicate 32 0x12), vout := 0 },
+                    scriptSig := .empty, sequence := 0xFFFF_FFFF, witness := #[] }]
+      outputs := #[{ value := 1000, scriptPubKey := ByteArray.mk #[0x51] }]
+      locktime := 0 }
+  let sampleRaw := sampleTx.serialized true
+  let sampleTxid := sampleTx.txid
+  let sampleTxidHex := Winnow.hex sampleTxid
+  let sampleRawHex := Winnow.hex sampleRaw
+  let now : Float := 1000.0
+  check "decodeStore: invalid UTF-8 is damaged"
+    ((TxBroadcaster.decodeStore (ByteArray.mk #[0xFF, 0xFE]) now) matches .error (.damaged _))
+  check "decodeStore: invalid JSON is damaged"
+    ((TxBroadcaster.decodeStore "{bad".toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: non-object top level is damaged"
+    ((TxBroadcaster.decodeStore "[1,2]".toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: overflowing version number is damaged"
+    ((TxBroadcaster.decodeStore "{\"version\":1e400,\"transactions\":{}}".toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: fractional version number is damaged"
+    ((TxBroadcaster.decodeStore "{\"version\":1.5,\"transactions\":{}}".toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: string version is damaged"
+    ((TxBroadcaster.decodeStore "{\"version\":\"1\",\"transactions\":{}}".toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: unsupported integer version reports unsupportedVersion"
+    ((TxBroadcaster.decodeStore "{\"version\":99,\"transactions\":{}}".toUTF8 now) matches .error (.unsupportedVersion 99))
+  check "decodeStore: bool false version reports unsupportedVersion 0"
+    ((TxBroadcaster.decodeStore "{\"version\":false,\"transactions\":{}}".toUTF8 now) matches .error (.unsupportedVersion 0))
+  check "decodeStore: bool true version fails nat check as damaged"
+    ((TxBroadcaster.decodeStore "{\"version\":true,\"transactions\":{}}".toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: versioned with non-object transactions is damaged"
+    ((TxBroadcaster.decodeStore "{\"version\":1,\"transactions\":[]}".toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: versioned with malformed tx entry is damaged"
+    ((TxBroadcaster.decodeStore "{\"version\":1,\"transactions\":{\"abc\":{\"rawTx\":5}}}".toUTF8 now) matches .error (.damaged _))
+  let v1Full := s!"\{\"version\":1,\"transactions\":\{\"{sampleTxidHex}\":\{\"rawTx\":\"{sampleRawHex}\",\"feeRateSatPerVByte\":2.5,\"attempt\":1,\"nextAttemptAt\":1050,\"confirmedAtHeight\":42,\"served\":true}}}"
+  check "decodeStore: versioned full entry with feeRate, confirmedAtHeight and served decodes"
+    (match TxBroadcaster.decodeStore v1Full.toUTF8 now with
+     | .ok m => match m[sampleTxid]? with
+       | some p => p.feeRate == some 2.5 && p.attempt == 1 && p.confirmedAtHeight == some 42 && p.served
+       | none => false
+     | .error _ => false)
+  let unversionedModern := s!"\{\"transactions\":\{\"{sampleTxidHex}\":\{\"rawTx\":\"{sampleRawHex}\",\"attempt\":2,\"nextAttemptAt\":1020,\"served\":null}}}"
+  check "decodeStore: unversioned modern records decode"
+    (match TxBroadcaster.decodeStore unversionedModern.toUTF8 now with
+     | .ok m => (m[sampleTxid]?.map fun p => (p.attempt, p.served)) == some (2, false)
+     | .error _ => false)
+  let legacySingle := s!"\{\"transactions\":\{\"{sampleTxidHex}\":\"{sampleRawHex}\"}}"
+  check "decodeStore: legacy txid->rawHex format decodes"
+    (match TxBroadcaster.decodeStore legacySingle.toUTF8 now with
+     | .ok m => (m[sampleTxid]?.map fun p => (p.attempt, p.feeRate, p.nextAttemptAt)) == some (0, none, now)
+     | .error _ => false)
+  let legacyMismatch := s!"\{\"transactions\":\{\"{String.ofList (List.replicate 64 '0')}\":\"{sampleRawHex}\"}}"
+  check "decodeStore: legacy txid mismatch is damaged"
+    ((TxBroadcaster.decodeStore legacyMismatch.toUTF8 now) matches .error (.damaged _))
+  let tooManyLegacyEntries := (List.range (TxBroadcaster.maximumStoredTransactions + 1)).map fun i => s!"\"k{i}\":\"00\""
+  let tooManyLegacy := "{\"transactions\":{" ++ ",".intercalate tooManyLegacyEntries ++ "}}"
+  check "decodeStore: legacy over maximumStoredTransactions is damaged"
+    ((TxBroadcaster.decodeStore tooManyLegacy.toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: unversioned missing transactions is damaged"
+    ((TxBroadcaster.decodeStore "{\"other\":1}".toUTF8 now) matches .error (.damaged _))
+  check "decodeStore: unversioned unrecognized entry type is damaged"
+    ((TxBroadcaster.decodeStore "{\"transactions\":{\"k\":123}}".toUTF8 now) matches .error (.damaged _))
   -- peers.json formats
   let legacy := "[{\"host\":\"1.2.3.4\",\"port\":8333}]".toUTF8
   check "peers.json legacy array reads as persisted"
@@ -883,28 +945,45 @@ def serveOnlyTheToldChecks : IO Unit := do
   -- a fee filter above the payment's rate: this peer is never told of it
   let untold ← talkingNode (onConnect := #[.feefilter 50_000_000])
   let early ← talkingNode
+  let second ← talkingNode
   let late ← talkingNode
-  let pool ← PeerPool.new regtest (peerCount := 3) (manualPeers := #[untold.endpoint, early.endpoint, late.endpoint])
+  let pool ← PeerPool.new regtest (peerCount := 4) (manualPeers := #[untold.endpoint, early.endpoint, second.endpoint, late.endpoint])
     (seedResolver := some noSeeds)
   pool.start
-  let seated ← waitUntil 5_000 (do return (← pool.connectedPeers).size == 3)
+  let seated ← waitUntil 5_000 (do return (← pool.connectedPeers).size == 4)
   let filtered ← waitUntil 3_000 (do
     return (← (← pool.connectedPeers).filterM fun c => do return (← c.feeFilter).isSome).size == 1)
-  check "serve: three peers seated, one with a fee filter" (seated && filtered)
+  check "serve: four peers seated, one with a fee filter" (seated && filtered)
   let b ← runNet "serve broadcaster" (TxBroadcaster.new pool (rebroadcastBaseMs := 60_000))
   let events ← collect (← b.events)
   let txid ← runNet "serve broadcast" (b.broadcast (fakeRawTx 3) (feeRate := some 1.0))
-  let told ← waitUntil 3_000 (do return (← early.gotInv txid) && (← late.gotInv txid))
-  check "serve: the payment is announced to the two peers that take its fee, not the third"
+  let told ← waitUntil 3_000 (do return (← early.gotInv txid) && (← second.gotInv txid) && (← late.gotInv txid))
+  check "serve: the payment is announced to the three peers that take its fee, not the fourth"
     (told && !(← untold.gotInv txid))
+  -- Empty getdata, non-tx vector, unknown txid, and duplicate txid vectors in one message
+  let unknownHash := ByteArray.mk (Array.replicate 32 0x99)
+  early.send (.getdata { vectors := #[] })
+  early.send (.getdata { vectors := #[
+    { type := InventoryType.block, hash := txid },
+    { type := InventoryType.witnessTx, hash := unknownHash },
+    { type := InventoryType.witnessTx, hash := txid },
+    { type := InventoryType.witnessTx, hash := txid }] })
+  check "serve: a peer that was told and asks is sent it" (← waitUntil 3_000 (early.gotTx txid))
+  -- Re-asking from an already-served peer is silently ignored (served count stays 1)
   let ask : PeerMessage := .getdata { vectors := #[{ type := InventoryType.witnessTx, hash := txid }] }
   early.send ask
-  check "serve: a peer that was told and asks is sent it" (← waitUntil 3_000 (early.gotTx txid))
-  untold.send ask
-  -- a ping after it: the pong shows the peer's messages up to here were read
   let pinged (n : TalkingNode) (nonce : UInt64) : IO Bool := do
     n.send (.ping nonce)
     waitUntil 3_000 (do return (← n.heard.get).any fun | .pong k => k == nonce | _ => false)
+  discard <| pinged early 40
+  IO.sleep 150
+  let earlyServedCount := ((← events.get).filter fun | .served t p => t == txid && p == early.endpoint | _ => false).size
+  check "serve: duplicate vector and repeat getdata serve an announced peer only once" (earlyServedCount == 1)
+    s!"{earlyServedCount}"
+  -- Second announced peer asks (exercises `firstServe == false`)
+  second.send ask
+  check "serve: a second announced peer is also served" (← waitUntil 3_000 (second.gotTx txid))
+  untold.send ask
   let read ← pinged untold 41
   IO.sleep 200
   check "serve: a peer that was never told asks and is sent nothing"

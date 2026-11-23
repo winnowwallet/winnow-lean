@@ -454,7 +454,17 @@ private def rangeScan : Target := {
 
 private def broadcastStore : Target := {
   name := "broadcast-store"
-  seeds := #[.empty, utf8 "{\"version\":1,\"transactions\":{}}"]
+  seeds :=
+    let tx := match Transaction.decode minimalTransaction with
+      | .ok t => t
+      | .error _ => default
+    let txidHex := Winnow.hex tx.txid
+    let rawHex := Winnow.hex minimalTransaction
+    #[.empty,
+      utf8 "{\"version\":1,\"transactions\":{}}",
+      utf8 s!"\{\"version\":1,\"transactions\":\{\"{txidHex}\":\{\"rawTx\":\"{rawHex}\",\"feeRateSatPerVByte\":2.5,\"attempt\":1,\"nextAttemptAt\":100,\"confirmedAtHeight\":10,\"served\":true}}}",
+      utf8 s!"\{\"transactions\":\{\"{txidHex}\":\{\"rawTx\":\"{rawHex}\",\"attempt\":0,\"nextAttemptAt\":50}}}",
+      utf8 s!"\{\"transactions\":\{\"{txidHex}\":\"{rawHex}\"}}"]
   tokens := jsonTokens
   check := fun _ data => do
     let .ok pending := TxBroadcaster.decodeStore data 0 | return false

@@ -189,6 +189,30 @@ def preparePeerGateways (env : Env) : IO Unit := do
     if c.generation == epoch then (some c.http, { c with activeGateways := config, http := fresh, httpGateways := config }) else (none, c)
   if let some o := replaced then o.cancel
 
+/-- Finish an interrupted rollback recorded in a legacy per-slot directory. -/
+private def finishSlotRollback (env : Env) (network : WinnowApp.Network) (dir : String) : IO Unit := do
+  let marker := dirFile dir rollbackMarkerName
+  let some text ← (try some <$> IO.FS.readFile marker catch _ => pure none) | return
+  let some fork := text.trimAscii.copy.toNat? | return
+  unless fork ≤ 0xFFFF_FFFF do return
+  match ← (Wallet.open (walletPath dir) env.deps.keyStore env.deps.random).run with
+  | .ok w => discard <| (w.rollBack fork.toUInt32).run
+  | .error _ => pure ()
+  try (← env.hooks.multisigAt network dir).rollBack fork.toUInt32 catch _ => pure ()
+
+/-- Fold a legacy slot's pending relay file into the network's shared `broadcast.json`. -/
+private def mergeSlotBroadcast (networkDir dir : String) : IO Unit := do
+  let relay := dirFile dir "broadcast.json"
+  unless ← relay.pathExists do return
+  let now := (← unixNow).toFloat
+  let shared := dirFile networkDir "broadcast.json"
+  let some theirs ← (try pure (TxBroadcaster.decodeStore (← IO.FS.readBinFile relay) now).toOption catch _ => pure none) | return
+  let some ours ← (if ← shared.pathExists then
+      try pure (TxBroadcaster.decodeStore (← IO.FS.readBinFile shared) now).toOption catch _ => pure none
+    else pure (some {})) | return
+  writeAtomic shared (TxBroadcaster.encodeStore (theirs.fold (fun m k v => if m.contains k then m else m.insert k v) ours))
+  removeQuietly relay
+
 /-- Each added wallet's own stack (0.9.20 to 0.9.23 kept one per slot) folded into the network's, once: its
 pending payments join the network's relay file, a rollback it was in the middle of is finished on its wallet
 and accounts, and its chain, scan and peers go (the network's serve every wallet; its frontier is its wallet
@@ -199,25 +223,8 @@ def migrateSlotStacks (env : Env) (network : WinnowApp.Network) (networkDir : St
   let slots ← if ← base.isDir then pure (((← base.readDir).map (·.fileName)).filter validSlot) else pure #[]
   for slot in slots do
     let dir := slotDir networkDir slot
-    let marker := dirFile dir rollbackMarkerName
-    if let some text ← (try some <$> IO.FS.readFile marker catch _ => pure none) then
-      if let some fork := text.trimAscii.copy.toNat? then
-        if fork ≤ 0xFFFF_FFFF then
-          match ← (Wallet.open (walletPath dir) env.deps.keyStore env.deps.random).run with
-          | .ok w => discard <| (w.rollBack fork.toUInt32).run
-          | .error _ => pure ()
-          try (← env.hooks.multisigAt network dir).rollBack fork.toUInt32 catch _ => pure ()
-    let relay := dirFile dir "broadcast.json"
-    if ← relay.pathExists then
-      let now := (← unixNow).toFloat
-      let shared := dirFile networkDir "broadcast.json"
-      let theirs ← try pure (TxBroadcaster.decodeStore (← IO.FS.readBinFile relay) now).toOption catch _ => pure none
-      let ours ← if ← shared.pathExists then
-          try pure (TxBroadcaster.decodeStore (← IO.FS.readBinFile shared) now).toOption catch _ => pure none
-        else pure (some {})
-      if let (some theirs, some ours) := (theirs, ours) then
-        writeAtomic shared (TxBroadcaster.encodeStore (theirs.fold (fun m k v => if m.contains k then m else m.insert k v) ours))
-        removeQuietly relay
+    finishSlotRollback env network dir
+    mergeSlotBroadcast networkDir dir
     for name in oldSlotStackFiles do removeQuietly (dirFile dir name)
 
 /-- `buildStackIfNeeded()`. Unlike AppModel it does not require `isActive`: the Lean app creates and
@@ -676,7 +683,69 @@ private def collectScripts (joined : Array PassWallet) : NetM (Array ByteArray) 
         scripts := scripts.push x
   return scripts
 
+/-- Range scanner wired to this pass's filter sync. -/
+private def rangeScanner (ctx : SyncPassCtx) : RangeScanner := fun fromHeight toHeight scripts onMatch => do
+  match ← (ctx.f.scanRange fromHeight toHeight scripts (limits := arrivingScanLimits)
+      (onMatch := fun m => (onMatch m : IO Unit)) (stopAtCaps := true)).attempt with
+  | .ok outcome => return (outcome.scannedThrough, outcome.isComplete)
+  | .error (.range (.rangeBelowChain ..)) => throw (IO.userError waitingForNewerCopyText)
+  | .error e => throw (IO.userError e.description)
+
+/-- Catch up arriving multisig accounts on the open wallet and every rider before scanning. -/
+private def catchUpArriving (ctx : SyncPassCtx) (openMultisig : ProfileMultisig) (scanner : RangeScanner) : IO Unit := do
+  try openMultisig.catchUp ctx.net (← ctx.f.nextScanHeight) scanner ctx.hashes catch _ => pure ()
+  for r in ctx.riders do
+    try r.multisig.catchUp ctx.net (← ctx.f.nextScanHeight) scanner ctx.hashes catch _ => pure ()
+
+/-- Record each non-dropped current wallet's scan frontier. -/
+private def recordFrontiers (ctx : SyncPassCtx) (joined : Array PassWallet) (scanned : UInt32)
+    (ignoreErrors : Bool := false) : IO Unit := do
+  for p in joined do
+    if ← ctx.isDropped p then continue
+    if ignoreErrors then
+      try if ← ctx.current p then ctx.record p scanned catch _ => pure ()
+    else
+      if ← ctx.current p then ctx.record p scanned
+
+/-- Update completion timestamps and clear errors after a successful pass. -/
+private def recordSuccess (ctx : SyncPassCtx) (openOut : Bool) : IO Bool := do
+  -- the scan reached the tip: when it did is what Settings → Network → Sync shows
+  let complete := (← ctx.f.nextScanHeight) > (← ctx.s.chain.height)
+  let now ← unixNow
+  let current ← ctx.env.modifyGet fun c =>
+    if c.generation == ctx.gen && !openOut then
+      (true, { c with lastSyncError := none, transientSyncFailures := 0, transientSyncError := none,
+                      lastCompleteCheck := if complete then some now else c.lastCompleteCheck })
+    else (false, c)
+  if complete && current then
+    if let some d := ctx.network then
+      try IO.FS.writeFile (lastCompleteCheckPath d) (toString now) catch _ => pure ()
+  return complete && !openOut
+
+/-- Record partial frontiers and update sync error counters after a failed pass. -/
+private def recordFailure (ctx : SyncPassCtx) (joined : Array PassWallet) (e : NetError) : IO Unit := do
+  let scanned ← ctx.f.nextScanHeight
+  ctx.recordFrontiers joined scanned (ignoreErrors := true)
+  -- a suspend, network switch or expired background check ended this generation, or the wallet was erased or
+  -- replaced: nothing failed
+  let transient := isTransientSyncError e
+  ctx.env.modify fun c => if c.generation == ctx.gen && c.walletSerial == ctx.serial then
+      { c with lastSyncError := some e.description,
+               transientSyncFailures := if transient then c.transientSyncFailures + 1 else 0,
+               transientSyncError := if transient then some e.description else none }
+    else c
+
 end SyncPassCtx
+
+/-- Atomically claim the single in-flight sync slot if a wallet and filter sync are ready. -/
+private def claimSync (env : Env) : IO (Option (Wallet × Stack × FilterSyncIO × Nat × Nat × Option String × Array Rider)) :=
+  env.modifyGet fun c =>
+    match c.wallet, c.stack.bind (fun s => s.filters.map (s, ·)) with
+    | some w, some (s, f) =>
+      if c.syncing then (none, c)
+      else (some (w, s, f, c.generation, c.walletSerial, c.dir, c.riders),
+            { c with syncing := true, syncActivity := .headers, syncPasses := c.syncPasses + 1 })
+    | _, _ => (none, c)
 
 /-- `syncOnce()`: every wallet kept on the network in one filter stream, each with its multisig accounts (an
 account is just more watched scripts). The scan is the network's (`filters.json` in its directory): a wallet
@@ -685,39 +754,20 @@ scan, as an arriving account is, then joins. Matched blocks update each wallet a
 pending broadcasts; each wallet's frontier is recorded either way. A wallet whose accounts cannot be read now
 is left out of the pass, and waits for the next, without holding the others back. -/
 def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
-  let claim ← env.modifyGet fun c =>
-    match c.wallet, c.stack with
-    | some w, some s =>
-      match s.filters with
-      | some f =>
-        if c.syncing then (none, c)
-        else (some (w, s, f, c.generation, c.walletSerial, c.dir, c.riders),
-              { c with syncing := true, syncActivity := .headers, syncPasses := c.syncPasses + 1 })
-      | none => (none, c)
-    | _, _ => (none, c)
-  let some (w, s, f, gen, serial, dir, riders) := claim | return false
+  let some (w, s, f, gen, serial, dir, riders) ← claimSync env | return false
   let ctx : SyncPassCtx :=
     { env, w, s, f, gen, serial, network := dir.map networkDirOf, net := w.network, riders, dropped := ← IO.mkRef #[] }
   try
-    let scanner : RangeScanner := fun fromHeight toHeight scripts onMatch => do
-      match ← (f.scanRange fromHeight toHeight scripts (limits := arrivingScanLimits)
-          (onMatch := fun m => (onMatch m : IO Unit)) (stopAtCaps := true)).attempt with
-      | .ok outcome => return (outcome.scannedThrough, outcome.isComplete)
-      | .error (.range (.rangeBelowChain ..)) => throw (IO.userError waitingForNewerCopyText)
-      | .error e => throw (IO.userError e.description)
+    let scanner := ctx.rangeScanner
     let openMultisig : ProfileMultisig :=
       { watchScripts := env.hooks.multisigWatchScripts, apply := env.hooks.multisigApply,
         rollBack := env.hooks.multisigRollBack, catchUp := env.hooks.multisigCatchUp }
     -- accounts that arrived from another of the person's devices are brought up to this phone's scan first, so
     -- one that is ready is watched by this very pass. Not in a background check, whose minute is the wallet's.
-    if maxBlocks.isNone then
-      try openMultisig.catchUp ctx.net (← f.nextScanHeight) scanner ctx.hashes catch _ => pure ()
-      for r in riders do
-        try r.multisig.catchUp ctx.net (← f.nextScanHeight) scanner ctx.hashes catch _ => pure ()
+    if maxBlocks.isNone then ctx.catchUpArriving openMultisig scanner
     let (wallets, openOut) ← ctx.collectWallets openMultisig
     -- what another device scanned further is taken first, for the blocks this chain already has
-    if maxBlocks.isNone then
-      try env.hooks.headStart catch _ => pure ()
+    if maxBlocks.isNone then try env.hooks.headStart catch _ => pure ()
     let joined ← ctx.joinWallets wallets scanner maxBlocks
     if joined.isEmpty then return false
     let openIn := joined.any (·.rider.isNone)
@@ -730,40 +780,13 @@ def syncOnce (env : Env) (maxBlocks : Option UInt32 := none) : IO Bool := do
         (onMatch := ctx.applyAll joined) (afterHeaders := some (ctx.afterHeaders joined maxBlocks))
         (forwardTo := some ctx.forwardTo)
       let scanned ← f.nextScanHeight
-      for p in joined do
-        if ← ctx.isDropped p then continue
-        if ← ctx.current p then (ctx.record p scanned : IO Unit)
+      (ctx.recordFrontiers joined scanned : IO Unit)
       if openIn then ctx.finishOpenWork multisigScripts began scanned
       s.broadcaster.pruneConfirmed (← f.nextScanHeight)
       if let some d := ctx.network then (finishRollback d : IO Unit)
     match ← pass.attempt with
-    | .ok () =>
-      -- the scan reached the tip: when it did is what Settings → Network → Sync shows
-      let complete := (← f.nextScanHeight) > (← s.chain.height)
-      let now ← unixNow
-      let current ← env.modifyGet fun c =>
-        if c.generation == gen && !openOut then
-          (true, { c with lastSyncError := none, transientSyncFailures := 0, transientSyncError := none,
-                          lastCompleteCheck := if complete then some now else c.lastCompleteCheck })
-        else (false, c)
-      if complete && current then
-        if let some d := ctx.network then
-          try IO.FS.writeFile (lastCompleteCheckPath d) (toString now) catch _ => pure ()
-      return complete && !openOut
-    | .error e =>
-      let scanned ← f.nextScanHeight
-      for p in joined do
-        if ← ctx.isDropped p then continue
-        try if ← ctx.current p then ctx.record p scanned catch _ => pure ()
-      -- a suspend, network switch or expired background check ended this generation, or the wallet was erased or
-      -- replaced: nothing failed
-      let transient := isTransientSyncError e
-      env.modify fun c => if c.generation == gen && c.walletSerial == serial then
-          { c with lastSyncError := some e.description,
-                   transientSyncFailures := if transient then c.transientSyncFailures + 1 else 0,
-                   transientSyncError := if transient then some e.description else none }
-        else c
-      return false
+    | .ok () => ctx.recordSuccess openOut
+    | .error e => ctx.recordFailure joined e; return false
   finally
     env.modify fun c => { c with syncing := false, syncActivity := .idle }
 
