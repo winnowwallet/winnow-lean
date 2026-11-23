@@ -20,6 +20,9 @@ initialize tmpDir : IO.Ref String ← IO.mkRef ""
 initialize backendRef : IO.Ref Backend ← IO.mkRef Backend.pending
 /-- The running status watcher's token: starting or stopping networking bumps it, ending the old one. -/
 initialize watcherToken : IO.Ref Nat ← IO.mkRef 0
+/-- The last `(Status, SyncPhase)` snapshot posted to the model, shared between direct sync commands and the 1 s
+status watcher so a transient `syncing = true` posted by `reconnect`/`refresh` is always cleared on the next tick. -/
+initialize lastPostedSnapshot : IO.Ref String ← IO.mkRef ""
 /-- Whether an iOS 26 continued background sync is live: the status watcher sends periodic progress heartbeats
 while waiting on slow peers so iOS does not expire the task for silence. -/
 initialize continuedSyncActive : IO.Ref Bool ← IO.mkRef false
@@ -378,11 +381,13 @@ def performWallet (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
 
 /-- Syncing: refreshes, the peers and the networking with its status watcher. -/
 def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
+  let snapshotMsg (g : Nat) (settled : Bool := false) : IO Host := do
+    let (s, p) ← b.snapshot
+    lastPostedSnapshot.set (reprStr (s, p))
+    return .snapshot g s p settled
   match c with
   | .refresh g => do
-      background fx g (.wallet .sync) do
-        let (s, p) ← b.snapshot
-        return .snapshot g s p
+      background fx g (.wallet .sync) (snapshotMsg g)
       background fx g (.wallet .sync) do return .records g (← b.records)
       background fx g (.multisig .overview) do return .multisig g (← b.multisigOverview)
       -- `refresh()` ends by scheduling the iCloud backup's update (and a preparation when due)
@@ -390,32 +395,29 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .records g => background fx g (.wallet .sync) do return .records g (← b.records)
   | .syncNow g => background fx g (.wallet .sync) do
       b.syncNow
-      let (s, p) ← b.snapshot
-      return .snapshot g s p (settled := true)
+      snapshotMsg g (settled := true)
   | .retryPeers g => background fx g (.wallet .sync) do
       b.retryPeers
-      let (s, p) ← b.snapshot
-      return .snapshot g s p
+      snapshotMsg g
   | .reconnect g s => background fx g (.wallet .sync) do
       b.reconnect s
-      let (st, p) ← b.snapshot
-      return .snapshot g st p
+      snapshotMsg g
   | .startNetworking g s => do
       discard <| IO.asTask (b.startNetworking s)
       -- AppModel's 1 s `phaseTask`: what the sync loop changed reaches the model as a snapshot.
       -- It runs while the scene is active, so it gets its own thread: on Lean's shared pool a task
       -- queued right behind it can wait forever (LeanNative's `Native.App.perform` says why)
+      lastPostedSnapshot.set ""
       let token ← watcherToken.modifyGet fun t => (t + 1, t + 1)
       discard <| IO.asTask (prio := .dedicated) do
-        let mut last := ""
         let mut lastMultisig : Option MultisigOverview := none
         let mut idleTicks : Nat := 0
         while (← watcherToken.get) == token do
           try
             let (st, p) ← b.snapshot
             let key := reprStr (st, p)
-            if key != last then
-              last := key
+            if key != (← lastPostedSnapshot.get) then
+              lastPostedSnapshot.set key
               idleTicks := 0
               try b.cloudTick catch _ => pure ()
               trace s!"watcher {g} posts balance {st.balance} peers {st.peerCount} tip {st.tipHeight} scan {st.nextScanHeight} error {st.lastSyncError}"
@@ -434,6 +436,7 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
           IO.sleep 1000
   | .stopNetworking => do
       continuedSyncActive.set false
+      lastPostedSnapshot.set ""
       watcherToken.modify (· + 1)
       discard <| IO.asTask b.stopNetworking
   | _ => pure ()

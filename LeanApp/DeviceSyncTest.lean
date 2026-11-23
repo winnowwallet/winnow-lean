@@ -495,7 +495,8 @@ def scanBehindWallets (root : System.FilePath) : TM Unit := do
   let saved ← f.nextScanHeight
   let opened (behind : String) : TM Unit := do
     d.backend.stopNetworking
-    d.backend.startNetworking d.settings
+    discard <| d.env.sleepWhile 2_000 (·.syncing)
+    d.env.modify fun c => { c with lastSyncError := none }
     Real.buildStackIfNeeded d.env
     let c ← d.env.get
     check s!"the stack opens with the saved scan behind {behind}"

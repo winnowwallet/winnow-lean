@@ -9,6 +9,7 @@ import Journeys.Tags
 import Journeys.Failures
 import Journeys.Routing
 import Journeys.Chain
+import Journeys.Controls
 
 /-! # The UI journeys
 
@@ -718,7 +719,8 @@ def retryAfterNoPeers : Journey := ⟨"retryAfterNoPeers", do
 def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
    silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson,
-   cardRestoreFromBackup, segwitMultisigJoinSign, accountFollowsDevices, twoWalletsOneDevice, capabilityFailures, backendFailures, paymentFailures, torOnly, peerFailures, reorgBackToPending]
+   cardRestoreFromBackup, segwitMultisigJoinSign, accountFollowsDevices, twoWalletsOneDevice, capabilityFailures, backendFailures, paymentFailures, torOnly, peerFailures, reorgBackToPending,
+   settingsAndSyncControls, signersPeopleAndSendControls, multisigLifecycleAndNestedBuilder]
 
 end WinnowJourneys
 

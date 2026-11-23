@@ -623,20 +623,23 @@ def replenishChecks : IO Unit := do
     s!"on {(← pool.connectedPeers).map (·.endpoint.description)}"
   pool.stop
 
-/-- Regtest headers on genesis, for a chain tall enough to have filter checkpoints. -/
-def minedHeaders (count : Nat) : Array BlockHeader := Id.run do
+/-- Regtest headers on genesis, with a distinct merkle-root tag so competing chains diverge cleanly. -/
+def minedHeadersTagged (count : Nat) (tag : UInt8) : Array BlockHeader := Id.run do
   let mut previous := HeaderChain.genesisHeader regtest
   let mut out := #[]
   for i in [0:count] do
     let time := regtest.genesisTime + (i.toUInt32 + 1) * 600
     let mut nonce : UInt32 := 0
-    let mut h := BlockHeader.mk' 1 previous.hash (filled 32 0) time regtest.genesisBits nonce
+    let mut h := BlockHeader.mk' 1 previous.hash (filled 32 tag) time regtest.genesisBits nonce
     while !(HeaderChain.checkedWork h regtest 1).isOk do
       nonce := nonce + 1
-      h := BlockHeader.mk' 1 previous.hash (filled 32 0) time regtest.genesisBits nonce
+      h := BlockHeader.mk' 1 previous.hash (filled 32 tag) time regtest.genesisBits nonce
     out := out.push h
     previous := h
   return out
+
+/-- Regtest headers on genesis, for a chain tall enough to have filter checkpoints. -/
+def minedHeaders (count : Nat) : Array BlockHeader := minedHeadersTagged count 0
 
 /-- A peer with no headers to give, answering the filter questions with these tags as its filter data. -/
 def filterAnswers (checkpoint cfheader : UInt8) (send : PeerMessage → IO Unit) : PeerMessage → IO Unit
@@ -1024,6 +1027,162 @@ def headerTurnChecks : IO Unit := do
   check "peer selection: persisted knownGood peers are shuffled"
     (goodFirsts.toList.eraseDups.length > 1) s!"{goodFirsts.toList.eraseDups.length} distinct firsts"
 
+/-- A fake peer that handshakes normally, then hands the raw socket to `onGetHeaders` on `getheaders`. -/
+def fakeRawOnGetHeaders (onGetHeaders : Std.Async.TCP.Socket.Client → IO Unit) : IO PeerEndpoint := do
+  let server ← Std.Async.TCP.Socket.Server.mk
+  server.bind (.v4 ⟨Std.Net.IPv4Addr.ofParts 127 0 0 1, 0⟩)
+  server.listen 8
+  let port := (← server.getSockName).port
+  spawn do
+    let keep := server
+    repeat
+      let sock ← keep.accept.block
+      spawn do
+        let magic := regtest.magic
+        let send (m : PeerMessage) : IO Unit :=
+          (sock.send (MessageFramer.frame m.command m.payload magic)).block
+        let mut framer : MessageFramer := { magic }
+        repeat
+          let some chunk ← (sock.recv? 65536).block | break
+          if chunk.isEmpty then break
+          framer := framer.append chunk
+          let mut alive := true
+          repeat
+            match framer.nextMessage with
+            | .ok (some (cmd, _), f) =>
+              framer := f
+              if cmd == "version" then
+                send (.version { version := 70016, services := 64 ||| 1, timestamp := 0, receiver := .unspecified,
+                                 sender := .unspecified, nonce := 9, userAgent := "/fake-raw:0/", startHeight := 3,
+                                 relay := false })
+                send .verack
+              else if cmd == "getheaders" then
+                onGetHeaders sock
+            | .ok (none, _) => break
+            | .error _ => alive := false; break
+          if !alive then break
+        discard <| sock.shutdown.toIO
+  return { host := "127.0.0.1", port }
+
+/-- Every branch of `PeerPool.catchUp`: stale-tip misbehavior, fork height merging (none→some and some→some),
+header validation failure, transport timeout cooldown, non-transport protocol violation, bad-magic framing error,
+2-pass unfulfilled-claim eviction in a secondary seat, and storage-unavailable early return without blaming peers. -/
+def catchUpChecks (dir : String) : IO Unit := do
+  let serve (hs : Array BlockHeader) (send : PeerMessage → IO Unit) : PeerMessage → IO Unit
+    | .getheaders r =>
+      let tip := hs.back?.map (·.hash)
+      send (.headers (if tip.isSome && r.locatorHashes[0]? == tip then #[] else hs))
+    | _ => pure ()
+  let seatPool (primary : PeerEndpoint) (secondaries : Array PeerEndpoint) : IO (PeerPool × Bool) := do
+    let gate ← IO.mkRef false
+    let pool ← PeerPool.new { regtest with dnsSeeds := #["seed.local"] }
+      (peerCount := 1 + secondaries.size) (manualPeers := #[primary])
+      (seedResolver := some { lookup := fun _ _ _ => do
+        discard <| waitUntil 5_000 gate.get
+        return secondaries })
+    spawn pool.start
+    let p1 ← waitUntil 5_000 (do return (← pool.connectedPeers).size == 1) (every := 20)
+    gate.set true
+    let pAll ← waitUntil 5_000 (do return (← pool.connectedPeers).size == 1 + secondaries.size) (every := 20)
+    return (pool, p1 && pAll)
+  let baseHeaders := minedHeadersTagged 3 1
+  -- 1. Stale claim (> 100 blocks ahead) in catchUp -> misbehaving
+  let honest1 ← fakeNode regtest (startHeight := 3) (answer := serve baseHeaders)
+  let liar ← fakeNode regtest (startHeight := 500) (answer := fun send m => do
+    if m matches .getheaders _ then send (.headers #[]))
+  let (pool1, s1) ← seatPool honest1 #[liar]
+  let store1 ← runNet "catchUp liar headers" (HeaderStore.open regtest none)
+  let out1 ← runNet "catchUp liar sync" (pool1.syncHeaders store1 (timeoutPerPeerMs := 3_000))
+  let liarReason ← pool1.rejectionReason liar
+  check "catchUp: secondary claiming > 100 blocks ahead with empty reply is marked misbehaving"
+    (s1 && out1.connected == 3 && !(← pool1.connectedPeers).any (·.endpoint == liar) &&
+     (liarReason.map (fun r => decide ((r.splitOn "claimed height 500").length > 1))).getD false)
+    s!"connected {out1.connected}, reason {liarReason}"
+  pool1.stop
+  -- 2. Fork height merging: both none -> some and some -> some
+  let forkA := minedHeadersTagged 2 10
+  let forkB := minedHeadersTagged 3 11
+  let forkC := minedHeadersTagged 5 12
+  let quietF ← fakeNode regtest (startHeight := 2) (answer := fun send m => do
+    if m matches .getheaders _ then send (.headers #[]))
+  let pForkB ← fakeNode regtest (startHeight := 3) (answer := serve forkB)
+  let pForkC ← fakeNode regtest (startHeight := 5) (answer := serve forkC)
+  let storeFork1 ← runNet "catchUp fork1 store" (HeaderStore.open regtest none)
+  discard <| runNet "catchUp fork1 seed" (storeFork1.connect forkA)
+  let (poolF1, sf1) ← seatPool quietF #[pForkB]
+  let outF1 ← runNet "catchUp fork1 sync" (poolF1.syncHeaders storeFork1 (timeoutPerPeerMs := 3_000))
+  check "catchUp: merges minForkHeight when primary had no fork"
+    (sf1 && (← storeFork1.height) == 3 && outF1.minForkHeight == some 0)
+    s!"tip {← storeFork1.height}, fork {outF1.minForkHeight}"
+  poolF1.stop
+  let storeFork2 ← runNet "catchUp fork2 store" (HeaderStore.open regtest none)
+  discard <| runNet "catchUp fork2 seed" (storeFork2.connect forkA)
+  let (poolF2, sf2) ← seatPool pForkB #[pForkC]
+  let outF2 ← runNet "catchUp fork2 sync" (poolF2.syncHeaders storeFork2 (timeoutPerPeerMs := 3_000))
+  check "catchUp: merges minForkHeight when both primary and secondary reorg"
+    (sf2 && (← storeFork2.height) == 5 && outF2.minForkHeight == some 0)
+    s!"tip {← storeFork2.height}, fork {outF2.minForkHeight}"
+  poolF2.stop
+  -- 3. Error branches in catchUp: header doesNotConnect, transport timeout, protocolViolation, framing badMagic
+  let strayNode ← fakeNode regtest (startHeight := 3) (answer := fun send m => do
+    if m matches .getheaders _ then
+      let bad := BlockHeader.mk' 1 (filled 32 9) (filled 32 1) 1 0x207fffff 0
+      send (.headers #[bad]))
+  let muteNode ← fakeNode regtest (startHeight := 3)
+  let protoNode ← fakeRawOnGetHeaders fun sock =>
+    (sock.send (MessageFramer.frame "headers" (ByteArray.mk #[0xFF]) regtest.magic)).block
+  let badMagicNode ← fakeRawOnGetHeaders fun sock =>
+    (sock.send (MessageFramer.frame "headers" (ByteArray.mk #[0x00]) (ofHex! "deadbeef"))).block
+  let (poolErr, sErr) ← seatPool honest1 #[strayNode, muteNode, protoNode, badMagicNode]
+  let storeErr ← runNet "catchUp err store" (HeaderStore.open regtest none)
+  let outErr ← runNet "catchUp err sync" (poolErr.syncHeaders storeErr (timeoutPerPeerMs := 700))
+  check "catchUp: bad headers, timeout, protocol violation, and framing errors are classified per peer"
+    (sErr && outErr.connected == 3 &&
+     (← poolErr.rejectionReason strayNode) == some (HeaderChainError.description .doesNotConnect) &&
+     (← poolErr.isCoolingDown muteNode) &&
+     (← poolErr.rejectionReason protoNode).isSome &&
+     (← poolErr.rejectionReason badMagicNode).isSome &&
+     (← poolErr.connectedPeers).map (·.endpoint) == #[honest1])
+    s!"stray={← poolErr.rejectionReason strayNode} muteCool={← poolErr.isCoolingDown muteNode} proto={← poolErr.rejectionReason protoNode} magic={← poolErr.rejectionReason badMagicNode}"
+  poolErr.stop
+  -- 4. 2-pass unfulfilled claim eviction inside catchUp (inflated peer stays in secondary seat on both passes)
+  let honest2 ← fakeNode regtest (startHeight := 3) (answer := serve baseHeaders)
+  let inflatedSec ← fakeNode regtest (startHeight := 5) (answer := fun send m => do
+    if m matches .getheaders _ then send (.headers #[]))
+  let gate3 ← IO.mkRef false
+  let poolEvict ← PeerPool.new { regtest with dnsSeeds := #["seed.local"] }
+    (peerCount := 3) (manualPeers := #[honest1, honest2])
+    (seedResolver := some { lookup := fun _ _ _ => do
+      discard <| waitUntil 5_000 gate3.get
+      return #[inflatedSec] })
+  spawn poolEvict.start
+  let sEv1 ← waitUntil 5_000 (do return (← poolEvict.connectedPeers).size == 2) (every := 20)
+  gate3.set true
+  let sEv2 ← waitUntil 5_000 (do return (← poolEvict.connectedPeers).size == 3) (every := 20)
+  let storeEvict ← runNet "catchUp evict store" (HeaderStore.open regtest none)
+  discard <| runNet "catchUp evict pass 1" (poolEvict.syncHeaders storeEvict (timeoutPerPeerMs := 3_000))
+  discard <| runNet "catchUp evict pass 2" (poolEvict.syncHeaders storeEvict (timeoutPerPeerMs := 3_000))
+  check "catchUp: secondary peer with 2 unfulfilled +2 claims is evicted during catchUp"
+    (sEv1 && sEv2 && !(← poolEvict.connectedPeers).any (·.endpoint == inflatedSec) &&
+     (← poolEvict.isCoolingDown inflatedSec))
+    s!"peers {(← poolEvict.connectedPeers).size}, cool {← poolEvict.isCoolingDown inflatedSec}"
+  poolEvict.stop
+  -- 5. Storage unavailable during catchUp returns early without blaming the honest secondary peer
+  let roDir := System.FilePath.mk s!"{dir}/catchup-gone"
+  IO.FS.createDirAll roDir
+  let storeGone ← runNet "catchUp gone store" (HeaderStore.open regtest (some (roDir / "headers.bin").toString))
+  let quietGone ← fakeNode regtest (startHeight := 0) (answer := fun send m => do
+    if m matches .getheaders _ then
+      try IO.FS.removeDirAll roDir catch _ => pure ()
+      send (.headers #[]))
+  let (poolGone, sGone) ← seatPool quietGone #[honest1]
+  let outGone ← runNet "catchUp gone sync" (poolGone.syncHeaders storeGone (timeoutPerPeerMs := 3_000))
+  check "catchUp: storageUnavailable stops catchUp cleanly without rejecting the secondary peer"
+    (sGone && outGone.connected == 0 && (← poolGone.connectedPeers).any (·.endpoint == honest1) &&
+     (← poolGone.rejectionReason honest1).isNone)
+    s!"connected {outGone.connected}, reason {← poolGone.rejectionReason honest1}"
+  poolGone.stop
+
 /-- Finding 8, filters: a peer whose filters fail the scan is rested, so the next pass asks another. -/
 def restedScanPeerChecks : IO Unit := do
   let headers := minedHeaders 3
@@ -1381,6 +1540,7 @@ def hardeningChecks (dir : String) : IO Unit := do
   serveOnlyTheToldChecks
   broadcastRaceChecks dir
   headerTurnChecks
+  catchUpChecks dir
   restedScanPeerChecks
   sharedScanChecks
   cappedRangeKeepsChunks dir

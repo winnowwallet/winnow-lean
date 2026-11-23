@@ -310,8 +310,10 @@ def link(suite, pkg, objects):
             built.append(str(objects.get(Path(a[:-len('.o.export')]), a)))
         elif a not in ('-fuse-ld=lld', '-Wl,-dead_strip'):
             flags.append(a)
-    exe = OUT / 'bin' / suite
+    exe = OUT / 'bin' / 'journeys-run' / suite if suite == 'journeys' else OUT / 'bin' / suite
     exe.parent.mkdir(parents=True, exist_ok=True)
+    if suite != 'journeys':
+        (exe.parent / 'peers.json').unlink(missing_ok=True)
     run([xcrun('clang'), '-fprofile-instr-generate', '-o', str(exe), *built, *flags])
     return exe
 
