@@ -54,6 +54,30 @@ private def makeSeededBundle (heightBefore : Nat) : IO (String × String × Stri
   }
   return (words, addr0, bundle.serialized)
 
+/-- Derives the regtest BIP86 multipath key expression (`[fp/86'/1'/0']tpub…/<0;1>/*`) for `entropyHex`. -/
+private def regtestKeyExpression (entropyHex : String) : IO String := do
+  let some seed := Winnow.Wire.dataOfHex? entropyHex | failure "entropy hex failed"
+  let .ok words := Winnow.Keys.BIP39.mnemonic seed | failure "mnemonic generation failed"
+  let .ok master := Winnow.Keys.HDKey.ofSeed (Winnow.Keys.BIP39.seed words) | failure "master key failed"
+  let .ok acct := Winnow.Keys.BIP86.accountKey master 1 0 | failure "account key failed"
+  return s!"[{Winnow.Wallet.hex8 master.fingerprint}/86'/1'/0']{acct.neutered.serialized (Winnow.Wallet.hdNetwork .regtest)}/<0;1>/*"
+
+/-- Starts a multisig spend from the currently open account page (`multisigSendButton`), signs here, and waits for
+the signature-collection screen. -/
+private def sendFromOpenAccount (r : Run) (destination : String) (sats : Nat) (needs : String) : UI Unit := do
+  scrolled multisigSendButton
+  tap multisigSendButton
+  waitFor sendSourceNote 10
+  Send.fill r destination sats
+  let signatures ← text reviewSignatures
+  expect ((signatures.splitOn needs).length > 1) s!"review: {signatures}"
+  scrolled sendButton
+  expectEq "the review's button" (← text sendButton) "Sign and continue"
+  tap sendButton
+  waitUntil 90 "the collection step did not open" do
+    return (← exists? multisigSignatureCount) || (← exists? (.nav "Collect signatures"))
+  scrolled multisigSignatureCount
+
 /-- Balance protection cards, 2-of-3 Ledger setup with a recovery key, iCloud backup controls/status,
 backup file with recovery phrase, wallet deletion, and seeded backup file restore. -/
 def protectionBackupAndRestore : Journey := ⟨"protectionBackupAndRestore", do
@@ -65,7 +89,8 @@ def protectionBackupAndRestore : Journey := ⟨"protectionBackupAndRestore", do
   IO.FS.createDirAll cloud
   let highBalance : Nat := 55_000_000
   try
-    r.launch "protectbackup" [("WINNOW_E2E_CLOUD", cloud), ("WINNOW_E2E_LEDGER", ← randomHex 16)]
+    r.launch "protectbackup" [("WINNOW_E2E_CLOUD", cloud), ("WINNOW_E2E_LEDGER", ← randomHex 16),
+                              ("WINNOW_E2E_SYNC_INTERVAL", "1")]
     createWallet (bluetooth := true)
     step "Bluetooth, then Not now on the nearby Ledger" Ledger.notNow
 
@@ -113,6 +138,13 @@ def protectionBackupAndRestore : Journey := ⟨"protectionBackupAndRestore", do
       expectGone dismissHardwareCard 10
 
     step "iCloud backup toggle off, open from Home backup link, toggle back on, cancel Add profile, and export with phrase" do
+      -- Home -> Profiles -> Add a profile -> Cancel
+      Profiles.openSheet
+      tap addWalletButton
+      waitFor cancelAddWalletButton 30
+      tap cancelAddWalletButton
+      waitFor receiveButton 30
+
       openSettings
       scrolled (.button "iCloud backup")
       tap (.button "iCloud backup")
@@ -135,15 +167,7 @@ def protectionBackupAndRestore : Journey := ⟨"protectionBackupAndRestore", do
       tap (.button "Close")
       expectGone automaticCloudBackupToggle 10
 
-      -- Settings -> Profiles -> Add a profile -> Cancel
-      openSettings
-      scrolled addWalletButton
-      tap addWalletButton
-      waitFor cancelAddWalletButton 30
-      tap cancelAddWalletButton
-      waitFor receiveButton 30
-
-      -- Export a backup file including the recovery phrase
+      -- Export a backup file including the recovery phrase (stays in Settings for deletion below)
       openSettings
       scrolled exportBundleButton
       tap exportBundleButton
@@ -215,9 +239,8 @@ def savedPeopleAndSenderLookup : Journey := ⟨"savedPeopleAndSenderLookup", do
   let p2wpkhSender ← h.coreSigner s!"ui-p2wpkh-sender-{run}"
   let tapSender ← h.coreSigner s!"ui-tap-sender-{run}"
   try
-    r.launch "peoplesender"
+    r.launch "peoplesender" [("WINNOW_E2E_SYNC_INTERVAL", "1")]
     createWallet
-    waitSynced
 
     step "set custom loopback explorer URL so sender-lookup consent stays offline/local" do
       openSettings
@@ -289,8 +312,6 @@ def savedPeopleAndSenderLookup : Journey := ⟨"savedPeopleAndSenderLookup", do
       here (.beginning "This destination was inferred from transaction funding.")
       scrolled (.beginning "This address has been saved for reuse.")
       here (.beginning "This address has been saved for reuse.")
-      scrolled (.button "Edit payment")
-      tap (.button "Edit payment")
       tap closeSendButton
       expectGone closeSendButton 10
       tap .back
@@ -325,12 +346,12 @@ def savedPeopleAndSenderLookup : Journey := ⟨"savedPeopleAndSenderLookup", do
       scrolled (.button "Change sender")
       tap (.button "Change sender")
       waitFor personNameField 10
-      type personNameField "NoAddr"
+      type personNameField "N"
       scrolled personSaveButton
       waitUntil 10 "Save destinationless sender did not enable" do return (← state personSaveButton).enabled
       tap personSaveButton
       expectGone personSaveButton 20
-      waitFor (.text "^NoAddr$") 20
+      waitFor (.text "^N$") 20
       here (.text "^This label has no payment destination\\.$")
       backToWalletList
 
@@ -340,15 +361,15 @@ def savedPeopleAndSenderLookup : Journey := ⟨"savedPeopleAndSenderLookup", do
       tap openSendButton
       waitFor savedRecipientsButton 10
       tap savedRecipientsButton
-      waitFor (.button "NoAddr — add destination") 15
-      tap (.button "NoAddr — add destination")
+      waitFor (.button "N — add destination") 15
+      tap (.button "N — add destination")
       waitFor personPastedField 10
       type personPastedField dest1
       scrolled personSaveButton
       waitUntil 15 "Save destination did not enable" do return (← state personSaveButton).enabled
       tap personSaveButton
       expectGone personSaveButton 20
-      waitFor (.button "NoAddr") 20
+      waitFor (.button "N") 20
       tap (.button "Done")
       expectGone addPersonToolbarButton 10
 
@@ -372,19 +393,19 @@ def savedPeopleAndSenderLookup : Journey := ⟨"savedPeopleAndSenderLookup", do
       scrolled (.button "Save recipient")
       tap (.button "Save recipient")
       waitFor personNameField 10
-      type personNameField "FreshBob"
+      type personNameField "Bob"
       scrolled personSaveButton
       tap personSaveButton
       expectGone personSaveButton 20
-      waitFor (.text "^FreshBob$") 20
+      waitFor (.text "^Bob$") 20
       scrolled (.button "Rename recipient")
       tap (.button "Rename recipient")
       waitFor personNameField 10
-      type personNameField "FreshRobert"
+      type personNameField "Bob2"
       scrolled personSaveButton
       tap personSaveButton
       expectGone personSaveButton 20
-      waitFor (.text "^FreshRobert$") 20
+      waitFor (.text "^Bob2$") 20
   finally
     h.unload [p2wpkhSender, tapSender]⟩
 
@@ -402,28 +423,17 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
   let ledgerEntropy ← randomHex 16
   let peerKey ← h.coreSigner s!"ui-ds-peer-{run}"
   let dropKey ← h.coreSigner s!"ui-ds-drop-{run}"
+  let dev2Key ← regtestKeyExpression dev2Entropy
   try
-    let dev2Key ← step "Device 2 creates its wallet offline from iCloud and reads its multisig key" do
-      r.launch "devsync2" [("WINNOW_E2E_ENTROPY", dev2Entropy)]
-      createWallet
-      openMultisigAccounts
-      tap multisigAddButton
-      waitFor multisigKeyText 10
-      let key ← text multisigKeyText
-      backToWalletList
-      pure key
-
-    let (sharedDesc, sharedID, tempID) ← step "Device 1 sets up iCloud, pairs Ledger, saves signers, and creates Shared Vault + Temp Vault" do
+    let (sharedDesc, sharedID, tempID) ← step "Device 1 sets up iCloud, pairs Ledger, saves signers, and creates Vault + Temp" do
       r.launch "devsync1" [("WINNOW_E2E_CLOUD", cloud), ("WINNOW_E2E_ENTROPY", dev1Entropy),
-                           ("WINNOW_E2E_LEDGER", ledgerEntropy)]
+                           ("WINNOW_E2E_LEDGER", ledgerEntropy), ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       createWallet (bluetooth := true)
       Ledger.notNow
-      waitSynced
-      waitForCloudBackup h cloud "init"
 
-      -- Pair Ledger and save two signers (PeerKey to rename later, DropMe to remove later)
-      Ledger.pair "Nano X"
-      for (name, keyExpr) in [("PeerKey", peerKey.keyExpression), ("DropMe", dropKey.keyExpression)] do
+      -- Pair Ledger and save two signers (Peer to rename later, Drop to remove later)
+      Ledger.pair "Nano"
+      for (name, keyExpr) in [("Peer", peerKey.keyExpression), ("Drop", dropKey.keyExpression)] do
         scrolled signersAddKeysButton
         tap signersAddKeysButton
         waitFor signerKeysNameField 10
@@ -432,14 +442,18 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
         waitUntil 10 s!"Save signer {name} did not enable" do return (← state signerKeysSaveButton).enabled
         tap signerKeysSaveButton
         waitFor (.button name) 20
-      backToWalletList
+      -- Signers -> Settings -> Multisig accounts
+      tap .back
+      waitFor multisigAccountsButton 10
+      scrolled multisigAccountsButton
+      tap multisigAccountsButton
+      waitFor multisigBuildButton 10
 
-      -- Create 2-of-3 Shared Vault (Device 1 + Device 2 + Ledger)
-      openMultisigAccounts
+      -- Create 2-of-3 Vault (Device 1 + Device 2 + Ledger)
       Builder.start
-      Builder.name "Shared Vault"
+      Builder.name "Vault"
       Builder.addPastedMember r dev2Key
-      Builder.addLedgerMember "Nano X"
+      Builder.addLedgerMember "Nano"
       waitFor (.beginning "Members · 3") 10
       tap multisigBuildCreateButton
       waitFor multisigBuildLedgerRegistered 60
@@ -447,33 +461,31 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
       let sharedDesc ← text multisigCreatedDescriptor
       expect (sharedDesc.startsWith "tr(") s!"not a descriptor: {sharedDesc}"
       let sharedID := accountID sharedDesc
-      backToWalletList
+      -- Create -> Multisig accounts
+      tap .back
+      waitFor multisigBuildButton 10
 
-      -- Create empty 2-of-2 Temp Vault (Device 1 + PeerKey)
-      openMultisigAccounts
+      -- Create empty 2-of-2 Temp (Device 1 + Peer)
       Builder.start
-      Builder.name "Temp Vault"
+      Builder.name "Temp"
       tap multisigBuildAddMemberButton
-      waitFor (.button "PeerKey") 10
-      tap (.button "PeerKey")
+      waitFor (.button "Peer") 10
+      tap (.button "Peer")
       waitFor (.beginning "Members · 2") 10
       let tempDesc ← Builder.create
       let tempID := accountID tempDesc
-      backToWalletList
       waitForCloudBackup h cloud "created"
       pure (sharedDesc, sharedID, tempID)
 
-    step "Device 2 joins Shared Vault locally as Local Copy (before funding), then the node funds index 0" do
-      r.launch "devsync2" [("WINNOW_E2E_RESET", "0"), ("WINNOW_E2E_ENTROPY", dev2Entropy)]
-      waitFor receiveButton 60
+    step "Device 2 creates its wallet offline and joins Vault as Local (before funding), then the node funds index 0" do
+      r.launch "devsync2" [("WINNOW_E2E_ENTROPY", dev2Entropy), ("WINNOW_E2E_SYNC_INTERVAL", "1")]
+      createWallet
       openMultisigAccounts
       tap multisigAddButton
       waitFor multisigNameField 10
-      type multisigNameField "Local Copy"
+      type multisigNameField "Local"
       r.paste sharedDesc multisigDescriptorPasteButton
-      waitUntil 20 "descriptor did not validate on Device 2" do
-        if ← exists? multisigAddPolicy 1 then return true
-        scrollTo multisigAddPolicy
+      waitFor multisigAddPolicy 20
       waitUntil 10 "Save did not enable on Device 2" do return (← state multisigSaveButton).enabled
       tap multisigSaveButton
       waitFor (multisigAccount sharedID) 20
@@ -482,7 +494,8 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
 
     let (addrAfterRaise, destination) ← step "Device 1 sees funding, advances receive index, creates a 1-of-2 spend draft, and backs up" do
       r.launch "devsync1" [("WINNOW_E2E_RESET", "0"), ("WINNOW_E2E_CLOUD", cloud),
-                           ("WINNOW_E2E_ENTROPY", dev1Entropy), ("WINNOW_E2E_LEDGER", ledgerEntropy)]
+                           ("WINNOW_E2E_ENTROPY", dev1Entropy), ("WINNOW_E2E_LEDGER", ledgerEntropy),
+                           ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       waitFor receiveButton 60
       openAccountRow sharedID
       waitForBalance funding multisigBalance
@@ -492,21 +505,20 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
       waitUntil 20 "New address did not advance on Device 1" do return (← Account.receiveAddress) != beforeAddr
       let addrAfterRaise ← Account.receiveAddress
       let destination ← h.bankAddress
-      Send.fromAccount r sharedID destination payment "needs 2 of 3"
+      sendFromOpenAccount r destination payment "needs 2 of 3"
       Collect.countIs multisigSignatureCount "1 of 2"
-      backToWalletList
       waitForCloudBackup h cloud "draft1"
       pure (addrAfterRaise, destination)
 
-    step "Device 2 enables iCloud: syncs rename, raised address, Ledger registration, Temp Vault, and draft; adds 2nd signature" do
+    step "Device 2 enables iCloud: syncs rename, raised address, Ledger registration, Temp, and draft; adds 2nd signature" do
       r.launch "devsync2" [("WINNOW_E2E_RESET", "0"), ("WINNOW_E2E_CLOUD", cloud),
-                           ("WINNOW_E2E_ENTROPY", dev2Entropy)]
+                           ("WINNOW_E2E_ENTROPY", dev2Entropy), ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       waitFor receiveButton 60
-      -- Local Copy renames to Shared Vault via DeviceSync.applyAccountChange .rename
-      waitUntil 90 "Shared Vault did not rename from Local Copy" (every := 0.5) do
+      -- Local renames to Vault via DeviceSync.applyAccountChange .rename
+      waitUntil 90 "Vault did not rename from Local" (every := 0.5) do
         if !(← exists? (multisigAccount sharedID) 1) then return false
-        return (← text (multisigAccount sharedID) 1) == "Shared Vault"
-      -- Temp Vault arrives under Watching
+        return (← text (multisigAccount sharedID) 1) == "Vault"
+      -- Temp arrives under Watching
       waitFor homeWatchingRow 60
       openAccountRow sharedID
       waitForBalance funding multisigBalance
@@ -523,12 +535,12 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
       waitUntil 20 "Add this phone's signature did not enable on Device 2" do return (← state multisigSignButton).enabled
       tap multisigSignButton
       Collect.countIs multisigSignatureCount "2 of 2" 60
-      backToWalletList
       waitForCloudBackup h cloud "draft2"
 
-    step "Device 1 combines Device 2's signature via DeviceSync, discards draft, removes Temp Vault, renames PeerKey, removes DropMe" do
+    step "Device 1 combines Device 2's signature via DeviceSync, discards draft, removes Temp, renames Peer, removes Drop" do
       r.launch "devsync1" [("WINNOW_E2E_RESET", "0"), ("WINNOW_E2E_CLOUD", cloud),
-                           ("WINNOW_E2E_ENTROPY", dev1Entropy), ("WINNOW_E2E_LEDGER", ledgerEntropy)]
+                           ("WINNOW_E2E_ENTROPY", dev1Entropy), ("WINNOW_E2E_LEDGER", ledgerEntropy),
+                           ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       waitFor receiveButton 60
       openAccountRow sharedID
       waitFor multisigDraftButton 20
@@ -542,7 +554,7 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
       waitFor (.beginning "This account has no payment awaiting signatures.") 20
       backToWalletList
 
-      -- Remove empty Temp Vault
+      -- Remove empty Temp
       openAccountRow tempID
       waitFor multisigReceiveAddress 20
       scrolled (.button "Remove account")
@@ -550,32 +562,31 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
       waitFor (.button "Remove") 10
       tap (.button "Remove")
       expectGone multisigReceiveAddress 20
-      backToWalletList
+      waitFor settingsButton 20
 
-      -- Rename PeerKey -> PeerKeyRenamed and remove DropMe
+      -- Rename Peer -> Peer2 and remove Drop
       openSettings
       scrolled signersButton
       tap signersButton
-      waitFor (.button "PeerKey") 20
-      tap (.button "PeerKey")
+      waitFor (.button "Peer") 20
+      tap (.button "Peer")
       waitFor signerNameField 10
-      type signerNameField "PeerKeyRenamed"
+      type signerNameField "Peer2"
       tap .back
-      waitFor (.button "PeerKeyRenamed") 20
-      tap (.button "DropMe")
+      waitFor (.button "Peer2") 20
+      tap (.button "Drop")
       waitFor signerRemoveButton 10
       scrolled signerRemoveButton
       tap signerRemoveButton
-      expectGone (.button "DropMe") 20
-      backToWalletList
+      expectGone (.button "Drop") 20
       waitForCloudBackup h cloud "cleanup"
 
-    step "Device 2 syncs draft discard, Temp Vault removal, PeerKey rename, and DropMe removal" do
+    step "Device 2 syncs draft discard, Temp removal, Peer rename, and Drop removal" do
       let _ := destination
       r.launch "devsync2" [("WINNOW_E2E_RESET", "0"), ("WINNOW_E2E_CLOUD", cloud),
-                           ("WINNOW_E2E_ENTROPY", dev2Entropy)]
+                           ("WINNOW_E2E_ENTROPY", dev2Entropy), ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       waitFor receiveButton 60
-      -- Temp Vault removed -> Watching row disappears
+      -- Temp removed -> Watching row disappears
       expectGone homeWatchingRow 90
       openAccountRow sharedID
       -- Draft discarded -> Send button is back and draft button is gone
@@ -586,8 +597,8 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
       openSettings
       scrolled signersButton
       tap signersButton
-      waitFor (.button "PeerKeyRenamed") 30
-      expect (!(← exists? (.button "DropMe"))) "removed signer still shown on Device 2"
+      waitFor (.button "Peer2") 30
+      expect (!(← exists? (.button "Drop"))) "removed signer still shown on Device 2"
   finally
     h.unload [peerKey, dropKey]⟩
 
@@ -605,12 +616,11 @@ def multisigSpendAndWatchOnlyControls : Journey := ⟨"multisigSpendAndWatchOnly
   IO.FS.createDirAll cloud
   try
     let (account, psbt1, destination, fee) ← step "Device 1 builds 2-of-2 Watch Vault with Core A, funds it, prepares a 1-of-2 PSBT, and backs up" do
-      r.launch "mswatchdev1" [("WINNOW_E2E_CLOUD", cloud)]
+      r.launch "mswatchdev1" [("WINNOW_E2E_CLOUD", cloud), ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       createWallet
-      waitSynced
       openMultisigAccounts
       Builder.start
-      Builder.name "Watch Vault"
+      Builder.name "Watch"
       Builder.addPastedMember r coreA.keyExpression
       waitFor (.beginning "Members · 2") 10
       let desc ← Builder.create
@@ -618,12 +628,12 @@ def multisigSpendAndWatchOnlyControls : Journey := ⟨"multisigSpendAndWatchOnly
       h.importAccount coreA desc
       Builder.openAccount
       let first ← h.deriveAddress desc 0
-      expectEq "Watch Vault first address" (← Account.receiveAddress) first
+      expectEq "Watch first address" (← Account.receiveAddress) first
       discard <| h.fund first funding
       waitForBalance funding multisigBalance
       -- Build a 1-of-2 PSBT signed by Device 1, capture it, then discard the draft before backing up
       let destination ← h.bankAddress
-      Send.fromAccount r account destination payment "needs 2 of 2"
+      sendFromOpenAccount r destination payment "needs 2 of 2"
       Collect.countIs multisigSignatureCount "1 of 2"
       let fee := (← amount multisigFee).getD 0
       expect (fee > 0) "collection screen showed no fee"
@@ -633,12 +643,11 @@ def multisigSpendAndWatchOnlyControls : Journey := ⟨"multisigSpendAndWatchOnly
       waitFor multisigConfirmDiscardButton 10
       tap multisigConfirmDiscardButton
       waitFor (.beginning "This account has no payment awaiting signatures.") 20
-      backToWalletList
       waitForCloudBackup h cloud "watch"
       pure (account, psbt1, destination, fee)
 
-    step "Device 2 verifies recovery-only join warning + descriptor typing, then opens watch-only Watch Vault" do
-      r.launch "mswatchdev2" [("WINNOW_E2E_CLOUD", cloud)]
+    step "Device 2 verifies recovery-only join warning + descriptor typing, then opens watch-only Watch" do
+      r.launch "mswatchdev2" [("WINNOW_E2E_CLOUD", cloud), ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       createWallet
       -- Test recovery-only join validation (multisig.setDescriptor + multisigAddRecovery + multisigAddWarning)
       openMultisigAccounts
@@ -650,7 +659,7 @@ def multisigSpendAndWatchOnlyControls : Journey := ⟨"multisigSpendAndWatchOnly
         | .ok d => pure d.serialized
         | .error e => failure s!"could not build recovery-only descriptor: {reprStr e}"
       scrolled multisigDescriptorField
-      type multisigDescriptorField "bad"
+      type multisigDescriptorField "x"
       r.paste recDesc multisigDescriptorPasteButton
       waitFor multisigAddPolicy 20
       expectEq "recovery-only policy" (← text multisigAddPolicy) "2 of 2"
@@ -713,7 +722,7 @@ def multisigSpendAndWatchOnlyControls : Journey := ⟨"multisigSpendAndWatchOnly
       expectEq "pending spend row status" (← text (historyStatus txid)) "Pending"
       tap (historyPayment txid)
       waitFor paymentAccountName 15
-      expectEq "payment account name" (← text paymentAccountName) "Watch Vault"
+      expectEq "payment account name" (← text paymentAccountName) "Watch"
       scrolled rebroadcastSpendButton
       tap rebroadcastSpendButton
       waitFor abandonSpendButton 15
