@@ -79,8 +79,15 @@ def stampForms : TM Unit := do
     | .obj kvs => SwiftJSON.JV.obj (kvs.map fun (k, v) => if k == "version" then (k, SwiftJSON.ofInt 2) else (k, v))
     | v => v
   check "a later version's is not read" ((SyncMeta.ofJV later).toOption.isNone)
+  let exactAccounts : SyncMeta := { device := 1, accounts := (Array.range maximumEntries).map fun i => { id := toString i } }
+  let exactSigners : SyncMeta := { device := 1, signers := (Array.range maximumEntries).map fun i => { key := toString i } }
   let many : SyncMeta := { device := 1, accounts := (Array.range (maximumEntries + 1)).map fun i => { id := toString i } }
-  check "more accounts than a backup remembers are refused" ((SyncMeta.ofJV many.toJV).toOption.isNone)
+  let manySigners : SyncMeta := { device := 1, signers := (Array.range (maximumEntries + 1)).map fun i => { key := toString i } }
+  check "exact maximumEntries of accounts and signers are accepted"
+    ((SyncMeta.ofJV exactAccounts.toJV).toOption == some exactAccounts &&
+     (SyncMeta.ofJV exactSigners.toJV).toOption == some exactSigners)
+  check "more accounts or signers than a backup remembers are refused"
+    ((SyncMeta.ofJV many.toJV).toOption.isNone && (SyncMeta.ofJV manySigners.toJV).toOption.isNone)
 
 def stampingRules : TM Unit := do
   let r := account "acct"
@@ -142,6 +149,20 @@ def existenceRules : TM Unit := do
     ((judge none (some known) #[replica #[r] #[{ id := "acct", added := stampOf 30 }]]).existence matches .unchanged)
   check "removed here: one another device joined again since is taken"
     ((judge none (some known) #[replica #[r] #[{ id := "acct", added := stampOf 50 }]]).existence matches .adopt ..)
+  let knownMany : Array AccountMeta :=
+    #[{ id := "other", added := stampOf 1, removed := stampOf 10 }, { id := "acct", added := stampOf 10, removed := stampOf 60 }]
+  let decs := decideAccounts fresh paymentOf #[] knownMany #[replica #[r] #[{ id := "acct", added := stampOf 30 }]]
+  check "decideAccounts matches each account against its own known tombstone"
+    (match decs.find? (·.id == "acct") with | some d => (d.existence matches .unchanged) && d.removed == stampOf 60 | none => false)
+  let quietAcct : AccountDecision := { id := "acct", added := stampOf 5, removed := stampOf 10 }
+  let knownAcct : AccountMeta := { id := "acct", added := stampOf 5, removed := stampOf 10 }
+  check "AccountDecision.isQuiet checks existence, changes, and known/empty stamps"
+    (quietAcct.isQuiet (some knownAcct) &&
+     ({ id := "acct", added := {}, removed := {} } : AccountDecision).isQuiet none &&
+     !({ quietAcct with existence := .remove }).isQuiet (some knownAcct) &&
+     !({ quietAcct with changes := #[.raise 3 0] }).isQuiet (some knownAcct) &&
+     !quietAcct.isQuiet none &&
+     !quietAcct.isQuiet (some { knownAcct with removed := stampOf 9 }))
 
 def changeRules : TM Unit := do
   let r := account "acct"
@@ -194,6 +215,20 @@ def signerRules : TM Unit := do
     ((decideSigner "02ab" none (some { key := "02ab", removed := stampOf 60 }) #[there "Bob" { key := "02ab", added := stampOf 5 }]).existence matches .unchanged)
   check "paired again there since: taken"
     ((decideSigner "02ab" none (some { key := "02ab", removed := stampOf 60 }) #[there "Bob" { key := "02ab", added := stampOf 70 }]).existence matches .adopt ..)
+  let knownSigs : Array SignerMeta :=
+    #[{ key := "other", added := stampOf 1, removed := stampOf 10 }, { key := "02ab", added := stampOf 10, removed := stampOf 60 }]
+  let sigDecs := decideSigners #[] knownSigs #[there "Bob" { key := "02ab", added := stampOf 30 }]
+  check "decideSigners matches each signer against its own known tombstone"
+    (match sigDecs.find? (·.key == "02ab") with | some d => (d.existence matches .unchanged) && d.removed == stampOf 60 | none => false)
+  let quietSig : SignerDecision := { key := "02ab", added := stampOf 5, removed := stampOf 10 }
+  let knownSig : SignerMeta := { key := "02ab", added := stampOf 5, removed := stampOf 10 }
+  check "SignerDecision.isQuiet checks existence, rename, and known/empty stamps"
+    (quietSig.isQuiet (some knownSig) &&
+     ({ key := "02ab", added := {}, removed := {} } : SignerDecision).isQuiet none &&
+     !({ quietSig with existence := .remove }).isQuiet (some knownSig) &&
+     !({ quietSig with rename := some ("Rob", stampOf 20) }).isQuiet (some knownSig) &&
+     !quietSig.isQuiet none &&
+     !quietSig.isQuiet (some { knownSig with removed := stampOf 9 }))
 
 /-! ## Devices -/
 

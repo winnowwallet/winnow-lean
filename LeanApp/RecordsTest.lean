@@ -3185,11 +3185,13 @@ def looksSecretCases : IO Unit := do
   let invalid24 := " ".intercalate (List.replicate 24 "abandon")
   check "looksSecret: invalid 12-word and 24-word BIP39 checksums return false"
     (!WinnowApp.E2E.looksSecret invalid12 && !WinnowApp.E2E.looksSecret invalid24)
-  let filler505 := " ".intercalate (List.replicate 505 "hello")
-  check "looksSecret: >512 words skips BIP39 scan and returns false without xprv prefix"
-    (!WinnowApp.E2E.looksSecret s!"{filler505} {m12}")
+  let filler500 := " ".intercalate (List.replicate 500 "hello")
+  let filler501 := " ".intercalate (List.replicate 501 "hello")
+  check "looksSecret: exact 512-word window scans BIP39 while >512 words skips it"
+    (WinnowApp.E2E.looksSecret s!"{filler500} {m12}" &&
+     !WinnowApp.E2E.looksSecret s!"{filler501} {m12}")
   check "looksSecret: >512 words still detects extended private key prefixes"
-    (WinnowApp.E2E.looksSecret s!"{filler505} XPRV9s21ZrQH143K")
+    (WinnowApp.E2E.looksSecret s!"{filler501} XPRV9s21ZrQH143K")
   let prefixes := ["xprv", "tprv", "yprv", "zprv", "vprv", "uprv",
                    "XPRV", "TpRv", "YPRV", "zPrV", "VPRV", "UPRV"]
   check "looksSecret: detects all extended private key prefixes case-insensitively"
@@ -3200,6 +3202,38 @@ def looksSecretCases : IO Unit := do
      !WinnowApp.E2E.looksSecret "Sent 12,345 sats to Alice" &&
      !WinnowApp.E2E.looksSecret "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8" &&
      !WinnowApp.E2E.looksSecret "tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7wf1vwgmpnY6k")
+
+  -- E2E.Mode.carriesThisRunsSeed and E2E.refusesFieldName
+  let ent16 := ByteArray.mk (Array.replicate 16 0xAB)
+  let words16 := match Winnow.Keys.BIP39.mnemonic ent16 with | .ok w => w | .error _ => ""
+  let baseMode : WinnowApp.E2E.Mode :=
+    { runID := "unit", peer := none, challenge := none, entropy := some ent16, reset := false,
+      clipboard := none, forcedNetwork := none, requireDeviceAuthentication := false,
+      controlFile := none, peerCount := none, syncIntervalSeconds := none }
+  let noSeedMode := { baseMode with entropy := none }
+  let emptySeedMode := { baseMode with entropy := some ByteArray.empty }
+  let nonBip39SeedMode := { baseMode with entropy := some (ByteArray.mk #[0xDE, 0xAD, 0xBE, 0xEF]) }
+  check "carriesThisRunsSeed: none and empty entropy return false"
+    (!noSeedMode.carriesThisRunsSeed "clean" &&
+     !noSeedMode.carriesThisRunsSeed "" &&
+     !emptySeedMode.carriesThisRunsSeed "clean" &&
+     !emptySeedMode.carriesThisRunsSeed "")
+  check "carriesThisRunsSeed: detects run entropy hex and derived mnemonic case-insensitively, allows clean text"
+    (!words16.isEmpty &&
+     baseMode.carriesThisRunsSeed s!"seed={(Winnow.hex ent16).toUpper}" &&
+     baseMode.carriesThisRunsSeed s!"backup: {words16.toUpper}" &&
+     !baseMode.carriesThisRunsSeed "Sent 5,000 sats to Bob")
+  check "carriesThisRunsSeed: non-BIP39 entropy length still detects hex and returns false on clean text"
+    (nonBip39SeedMode.carriesThisRunsSeed "leak=DEADBEEF!" &&
+     !nonBip39SeedMode.carriesThisRunsSeed "Sent 5,000 sats to Bob")
+
+  let forbiddenKeys := ["entropy", "user_entropy_hex", "Mnemonic", "recovery-mnemonic",
+                        "privateKey", "wallet_private_key", "secretNonce", "SECRET_NONCE_2",
+                        "seedHex", "my-seed-hex"]
+  let allowedKeys := ["", "12345", "txid", "amount", "phase", "id", "public_key", "address"]
+  check "refusesFieldName: blocks all forbidden secret field substrings and allows normal keys"
+    (forbiddenKeys.all WinnowApp.E2E.refusesFieldName &&
+     allowedKeys.all (!WinnowApp.E2E.refusesFieldName ·))
 
 /-- Pure unit tests covering every remaining branch of `stepHome`, `stepSend`, and `Model.onRelay`. -/
 def stepHomeAndSendCases : IO Unit := do
