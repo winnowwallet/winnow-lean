@@ -1496,6 +1496,168 @@ def headStartWalletChecks (root : System.FilePath) : TM Unit := do
   b.stop
   c.stop
 
+/-- Exercise all branches of `MultisigApp.catchUpOne` and `MultisigApp.catchUp`:
+`frontier == 0` early return, missing arriving entry, `blockHash == none` anchor pause, concurrent replacement
+during anchor resolution, `applyBlock` match callback advancing the frontier and rewinding to `passFrom - 1`
+for a second scan pass, already-admitted idempotency, concurrent replacement mid-scan (`scannedThrough`,
+`passFrom`, and deletion), and removal mid-scan throwing `"the arriving account is gone"` recorded in `note`
+by `catchUp`. -/
+def catchUpOneChecks (root : System.FilePath) : TM Unit := do
+  let cloud ← Real.MemoryCloud.new
+  let cloudKeys ← Real.memoryCloudKeys
+  let a ← device root "catchUpA" cloud cloudKeys
+  let b ← device root "catchUpB" cloud cloudKeys
+  discard <| a.create
+  discard <| b.create
+  let id ← sharedAccount a "CatchUpAcct" 0xB2
+  let some rec0 := (← a.app.multisig.host.read).records.find? (·.id == id) | throw "missing rec0"
+  let acct ← need "parsed account" (AnyMultisigAccount.parse rec0.descriptor .signet)
+  let script0 ← need "receive script 0" (acct.scriptPubKey 0 AddressChain.receive.rawValue)
+
+  let setArriving (entries : Array ArrivingAccount) : IO Unit :=
+    RM.toIO (b.app.multisig.host.modifyArriving fun _ => pure (entries, ()))
+  let getArriving : IO (Option ArrivingAccount) := do
+    return (← b.app.multisig.host.arrivingAccounts).find? (·.record.id == id)
+
+  -- Build a matched block at height 102 paying 25,000 sats to receive address 0
+  let coinbaseTx : Transaction :=
+    { version := 2
+      inputs := #[{ previousOutput := { txid := ByteArray.mk (Array.replicate 32 0), vout := 0xFFFF_FFFF },
+                    scriptSig := ByteArray.mk #[0x01], sequence := 0xFFFF_FFFF, witness := #[] }]
+      outputs := #[{ value := 50_000_000, scriptPubKey := ByteArray.mk #[0x51] }]
+      locktime := 0 }
+  let payTx : Transaction :=
+    { version := 2
+      inputs := #[{ previousOutput := { txid := ByteArray.mk (Array.replicate 32 0x12), vout := 0 },
+                    scriptSig := .empty, sequence := 0xFFFF_FFFF, witness := #[] }]
+      outputs := #[{ value := 25_000, scriptPubKey := script0 }]
+      locktime := 0 }
+  let blkHash := ByteArray.mk (Array.replicate 32 0x34)
+  let blkHeader : Net.BlockHeader :=
+    { version := 2, previousHash := ByteArray.mk (Array.replicate 32 0),
+      merkleRoot := ByteArray.mk (Array.replicate 32 0x56), time := 1_700_000_102,
+      bits := 0x207F_FFFF, nonce := 0, hash := blkHash }
+  let blkMatch : Net.BlockMatch :=
+    { height := 102, blockHash := blkHash, block := { header := blkHeader, transactions := #[coinbaseTx, payTx] } }
+  let neverScan : Real.RangeScanner := fun _ _ _ _ => throw (IO.userError "scanner should not be called")
+
+  -- 1. `catchUp` with frontier == 0 returns immediately without touching arriving entries
+  let anchor := ByteArray.mk (Array.replicate 32 0xAA)
+  let anchored := ArrivingAccount.ofSnapshot rec0 100 (some anchor)
+  setArriving #[anchored]
+  b.app.multisig.catchUp .signet 0 neverScan (fun _ => pure none)
+  check "catchUp with frontier == 0 is a no-op" ((← getArriving) == some anchored)
+
+  -- 2. Missing arriving id returns cleanly without scanning
+  b.app.multisig.catchUpOne "no-such-account" 120 neverScan (fun _ => pure none)
+  check "catchUpOne on absent id leaves other arriving entries alone" ((← getArriving) == some anchored)
+
+  -- 3. `blockHash entry.scannedThrough == none` pauses early leaving anchor intact
+  b.app.multisig.catchUpOne id 120 neverScan (fun _ => pure none)
+  check "catchUpOne pauses when blockHash at scannedThrough is none"
+    ((← getArriving) == some anchored && (← b.app.multisig.host.read).records.isEmpty)
+
+  -- 4. Concurrent replacement while resolving anchor (mismatch and agreement) preserves newer entry
+  let ours := ByteArray.mk (Array.replicate 32 0xBB)
+  let newerAnchored : ArrivingAccount := { ArrivingAccount.ofSnapshot rec0 130 none with note := some "replaced-during-anchor" }
+  setArriving #[anchored]
+  b.app.multisig.catchUpOne id 120 neverScan fun _ => do
+    setArriving #[newerAnchored]
+    pure (some ours)
+  check "catchUpOne anchor mismatch does not overwrite concurrently replaced entry"
+    ((← getArriving) == some newerAnchored)
+  let agreeCalls ← IO.mkRef (0 : Nat)
+  setArriving #[anchored]
+  b.app.multisig.catchUpOne id 120 neverScan fun _ => do
+    let n ← agreeCalls.modifyGet fun k => (k, k + 1)
+    if n == 1 then setArriving #[newerAnchored]
+    pure (some anchor)
+  check "catchUpOne anchor agreement does not overwrite concurrently replaced entry"
+    ((← getArriving) == some newerAnchored)
+
+  -- 5. `applyBlock` callback advances frontier -> `finishOrRewindCatchUp` rewinds to `passFrom - 1` and re-scans
+  setArriving #[ArrivingAccount.ofSnapshot rec0 100 none]
+  let passes ← IO.mkRef (#[] : Array (UInt32 × UInt32 × Nat))
+  let rewindScanner : Real.RangeScanner := fun fromH toH scripts onMatch => do
+    let passIdx := (← passes.get).size
+    passes.modify (·.push (fromH, toH, scripts.size))
+    if passIdx == 0 then onMatch blkMatch
+    pure (some toH, true)
+  b.app.multisig.catchUpOne id 105 rewindScanner (fun _ => pure none)
+  let baseWatch := (MultisigStore.watchCount rec0).toNat * 2
+  let keptRec := (← b.app.multisig.host.read).records.find? (·.id == id)
+  check "catchUpOne executes applyBlock, rewinds to passFrom - 1 when watch frontier grows, and admits on second pass"
+    ((← passes.get) == #[(101, 105, baseWatch), (101, 105, baseWatch + 2)] &&
+     (← b.app.multisig.host.arrivingAccounts).isEmpty &&
+     (keptRec.map fun r => (r.nextReceiveIndex, r.allUtxos.size, r.allUtxos.foldl (fun s u => s + u.amount) 0)) == some (1, 1, 25_000))
+    s!"passes={← passes.get} kept={keptRec.map fun r => (r.nextReceiveIndex, r.allUtxos.size)}"
+
+  -- 6. Already-admitted idempotency: arriving copy at target removes cleanly without duplicating or clobbering kept record
+  --    Also covers `watch > entry.passWatch && entry.passFrom > target` (does not rewind when passFrom > target)
+  let dupArriving : ArrivingAccount := { ArrivingAccount.ofSnapshot rec0 105 none with passWatch := 1 }
+  setArriving #[dupArriving]
+  b.app.multisig.catchUpOne id 105 neverScan (fun _ => pure none)
+  let keptAfterDup := (← b.app.multisig.host.read).records.find? (·.id == id)
+  check "catchUpOne removes arriving entry cleanly when account is already admitted"
+    ((← b.app.multisig.host.arrivingAccounts).isEmpty &&
+     (keptAfterDup.map (·.allUtxos.size)) == some 1)
+
+  -- Clear kept accounts for remaining scan-step concurrency/error tests
+  b.app.multisig.restore #[]
+
+  -- 7. Concurrent replacement mid-scan (`scannedThrough` changed, `passFrom` changed, or entry deleted)
+  let replaceCalls ← IO.mkRef (0 : Nat)
+  let newerCopy : ArrivingAccount := { ArrivingAccount.ofSnapshot rec0 115 none with note := some "newer-copy" }
+  setArriving #[ArrivingAccount.ofSnapshot rec0 100 none]
+  b.app.multisig.catchUpOne id 120 (fun _ toH _ _ => do
+    replaceCalls.modify (· + 1)
+    setArriving #[newerCopy]
+    pure (some toH, true)) (fun _ => pure none)
+  check "catchUpOne stops without overwriting when scannedThrough changes mid-scan"
+    ((← replaceCalls.get) == 1 && (← getArriving) == some newerCopy)
+
+  let passFromCopy : ArrivingAccount := { ArrivingAccount.ofSnapshot rec0 100 none with passFrom := 95, note := some "rewound-elsewhere" }
+  setArriving #[ArrivingAccount.ofSnapshot rec0 100 none]
+  replaceCalls.set 0
+  b.app.multisig.catchUpOne id 120 (fun _ toH _ _ => do
+    replaceCalls.modify (· + 1)
+    setArriving #[passFromCopy]
+    pure (some toH, true)) (fun _ => pure none)
+  check "catchUpOne stops without overwriting when passFrom changes mid-scan"
+    ((← replaceCalls.get) == 1 && (← getArriving) == some passFromCopy)
+
+  setArriving #[ArrivingAccount.ofSnapshot rec0 100 none]
+  b.app.multisig.catchUpOne id 120 (fun _ toH _ _ => do
+    setArriving #[]
+    pure (some toH, true)) (fun _ => pure none)
+  check "catchUpOne handles arriving entry removed before post-scan update"
+    ((← b.app.multisig.host.arrivingAccounts).isEmpty)
+
+  -- 8. Account removed mid-scan before match callback throws "the arriving account is gone", and `catchUp` records `note`
+  setArriving #[ArrivingAccount.ofSnapshot rec0 100 none]
+  let directErr ← match ← (b.app.multisig.catchUpOne id 120 (fun _ toH _ onMatch => do
+      setArriving #[]
+      onMatch blkMatch
+      pure (some toH, true)) (fun _ => pure none)).toBaseIO with
+    | .error e => pure (some (toString e))
+    | .ok () => pure none
+  check "catchUpOne throws when arriving account is removed mid-scan before match callback"
+    (directErr.any (contains · "the arriving account is gone")) s!"{directErr}"
+
+  let freshArriving := ArrivingAccount.ofSnapshot rec0 100 none
+  setArriving #[freshArriving]
+  b.app.multisig.catchUp .signet 121 (fun _ toH _ onMatch => do
+    setArriving #[]
+    try onMatch blkMatch
+    finally setArriving #[freshArriving]
+    pure (some toH, true)) (fun _ => pure none)
+  let noted := (← getArriving).bind (·.note)
+  check "catchUp catches mid-scan removal error and records it in arriving note"
+    (noted.any (contains · "the arriving account is gone")) s!"{noted}"
+
+  a.stop
+  b.stop
+
 def main : IO UInt32 := runMain "device-sync-test" do
   runTest "stampForms" stampForms
   runTest "stampingRules" stampingRules
@@ -1514,6 +1676,7 @@ def main : IO UInt32 := runMain "device-sync-test" do
   runTest "renewWaitingChecks" (renewWaitingChecks root)
   runTest "applyAccountChangeChecks" (applyAccountChangeChecks root)
   runTest "headStartWalletChecks" (headStartWalletChecks root)
+  runTest "catchUpOneChecks" (catchUpOneChecks root)
   runTest "namesFollow" (namesFollow root)
   runTest "scanBehindWallets" (scanBehindWallets root)
   runTest "removalStopsAtCoins" (removalStopsAtCoins root)

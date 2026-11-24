@@ -14,7 +14,7 @@ Usage:
   scripts/leancov --list                    list available suites
 
 Environment:
-  LEANCOV_DIR       Path to the `leancov` repository (default: <repo>/../leancov)
+  LEANCOV_DIR       Path to the `leancov` repository (default: <repo>/../leancov, else `leancov` on PATH)
   COVERAGE_JOBS     Parallel suite workers (default: 4)
   CI_RESULTS        If set, copies the combined JSON report to $CI_RESULTS/leancov.json
 """
@@ -74,18 +74,48 @@ def run(cmd, **kw):
     return subprocess.run(cmd, check=True, text=True, **kw)
 
 
-def resolve_leancov(arg_dir):
-    leancov_dir = Path(arg_dir or os.environ.get('LEANCOV_DIR') or (ROOT.parent / 'leancov')).resolve()
-    if not (leancov_dir / 'lakefile.lean').exists():
-        sys.exit(f'leancov: repository not found at {leancov_dir} (set LEANCOV_DIR or pass --leancov-dir)')
-    exe = leancov_dir / '.lake' / 'build' / 'bin' / 'leancov'
-    if not exe.exists():
-        print(f'Building leancov in {leancov_dir}...', flush=True)
-        run(['lake', 'build', 'leancov'], cwd=leancov_dir)
-    return leancov_dir, exe
+def _find_leancov_repo(exe_path):
+    for parent in exe_path.resolve().parents:
+        if (parent / 'lakefile.lean').exists():
+            return parent
+    return None
+
+
+def resolve_leancov(arg_dir=None):
+    explicit = arg_dir or os.environ.get('LEANCOV_DIR')
+    if explicit:
+        leancov_dir = Path(explicit).resolve()
+        if not (leancov_dir / 'lakefile.lean').exists():
+            sys.exit(f'leancov: repository not found at {leancov_dir} (set LEANCOV_DIR or pass --leancov-dir)')
+        exe = leancov_dir / '.lake' / 'build' / 'bin' / 'leancov'
+        if not exe.exists():
+            print(f'Building leancov in {leancov_dir}...', flush=True)
+            run(['lake', 'build', 'leancov'], cwd=leancov_dir)
+        return leancov_dir, exe
+
+    sibling = (ROOT.parent / 'leancov').resolve()
+    if (sibling / 'lakefile.lean').exists():
+        exe = sibling / '.lake' / 'build' / 'bin' / 'leancov'
+        if not exe.exists():
+            print(f'Building leancov in {sibling}...', flush=True)
+            run(['lake', 'build', 'leancov'], cwd=sibling)
+        return sibling, exe
+
+    which = shutil.which('leancov')
+    if which:
+        exe = Path(which).resolve()
+        if exe != Path(__file__).resolve():
+            return _find_leancov_repo(exe), exe
+
+    sys.exit(
+        f'leancov: not found at {sibling} or on PATH '
+        '(set LEANCOV_DIR, pass --leancov-dir, or install leancov on PATH)'
+    )
 
 
 def stage_packages(leancov_dir, leancov_exe):
+    if leancov_dir is None:
+        sys.exit('leancov: staging requires the leancov package directory (set LEANCOV_DIR or pass --leancov-dir)')
     OUT.mkdir(parents=True, exist_ok=True)
     if SITES.exists():
         SITES.unlink()
@@ -194,7 +224,25 @@ def run_suite(leancov_exe, suite, base_env):
     return suite, code
 
 
-def parse_args():
+def select_suites(suites, fast=False):
+    selected = list(FAST_SUITES) if (fast and not suites) else (list(suites) if suites else list(SUITES))
+    unknown = [s for s in selected if s not in SUITES]
+    if unknown:
+        sys.exit(f'leancov: unknown suite(s): {", ".join(unknown)} (use --list)')
+    return selected
+
+
+def report_selection(args):
+    if not args.report:
+        return [], ''
+    if args.suites:
+        return list(args.suites), '-'.join(args.suites)
+    if args.fast:
+        return list(FAST_SUITES), 'fast'
+    return [], ''
+
+
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description='Source-level Lean 4 coverage & CRAP via leancov')
     p.add_argument('suites', nargs='*', help='Suite names to run (or report with --report); default all')
     p.add_argument('--fast', action='store_true', help='Run the 13 fast suites (skip regtest and journeys)')
@@ -204,7 +252,8 @@ def parse_args():
     p.add_argument('--list', action='store_true', help='List available suite names and exit')
     p.add_argument('--jobs', type=int, default=int(os.environ.get('COVERAGE_JOBS', '4')),
                    help='Parallel suite workers (default: COVERAGE_JOBS or 4)')
-    p.add_argument('--leancov-dir', default=None, help='Path to leancov repo (default: $LEANCOV_DIR or ../leancov)')
+    p.add_argument('--leancov-dir', default=None,
+                   help='Path to leancov repo (default: $LEANCOV_DIR, ../leancov, or leancov on PATH)')
     p.add_argument('--sort', choices=['cog', 'crap', 'cc', 'uncov'], default='cog',
                    help='Sort order for top functions (default: cog)')
     p.add_argument('--top', type=int, default=20, help='Number of top functions to display (default: 20)')
@@ -214,7 +263,7 @@ def parse_args():
     p.add_argument('--min-cov', type=float, default=None, help='Fail if branch coverage is below PCT')
     p.add_argument('--max-crap', type=float, default=None, help='Fail if max McCabe CRAP exceeds VAL')
     p.add_argument('--max-cog-crap', type=float, default=None, help='Fail if max Cognitive CRAP exceeds VAL')
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def main():
@@ -225,10 +274,7 @@ def main():
             print(f'{s:24s} {SUITES[s][0]:8s} {kind}')
         return
 
-    selected = FAST_SUITES if (args.fast and not args.suites) else (args.suites or list(SUITES))
-    unknown = [s for s in selected if s not in SUITES]
-    if unknown:
-        sys.exit(f'leancov: unknown suite(s): {", ".join(unknown)} (use --list)')
+    selected = select_suites(args.suites, fast=args.fast)
 
     leancov_dir, leancov_exe = resolve_leancov(args.leancov_dir)
 
@@ -268,13 +314,12 @@ def main():
     if not SITES.exists():
         sys.exit(f'leancov: {SITES} not found; run suites first')
 
-    report_subset = args.suites if args.report else []
+    report_subset, tag = report_selection(args)
     if report_subset:
         cov_files = [PROFILES / f'{s}.cov' for s in report_subset]
         missing = [str(p) for p in cov_files if not p.exists()]
         if missing:
             sys.exit(f'leancov: missing profile(s): {", ".join(missing)}')
-        tag = '-'.join(report_subset)
         dest_json = OUT / f'coverage-{tag}.json'
         dest_lcov = OUT / f'lcov-{tag}.info'
         profile_args = [a for p in cov_files for a in ('--profile', str(p))]

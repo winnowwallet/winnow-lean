@@ -10,6 +10,7 @@ import Journeys.Failures
 import Journeys.Routing
 import Journeys.Chain
 import Journeys.Controls
+import Journeys.Lifecycle
 
 /-! # The UI journeys
 
@@ -720,7 +721,9 @@ def all : List Journey :=
   [createReceiveSendConfirm, multisigTwoOfThreeWithRecovery, ledgerPairVerifySpend, ledgerCardTwoOfTwo, shippedCensus,
    silentPaymentSend, feeBumpReplaceConfirm, spentElsewhere, retryAfterNoPeers, cardForOnePerson,
    cardRestoreFromBackup, segwitMultisigJoinSign, accountFollowsDevices, twoWalletsOneDevice, capabilityFailures, backendFailures, paymentFailures, torOnly, peerFailures, reorgBackToPending,
-   settingsAndSyncControls, signersPeopleAndSendControls, multisigLifecycleAndNestedBuilder]
+   settingsAndSyncControls, signersPeopleAndSendControls, multisigLifecycleAndNestedBuilder,
+   protectionBackupAndRestore, savedPeopleAndSenderLookup, crossDeviceMultisigChanges,
+   multisigSpendAndWatchOnlyControls]
 
 end WinnowJourneys
 

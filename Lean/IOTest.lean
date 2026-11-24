@@ -1,4 +1,5 @@
 import Winnow.IO
+import Winnow.Wallet.ExportStagingFile
 import TestKit.Check
 import TestKit.FakeNode
 import TestKit.Regtest
@@ -220,8 +221,226 @@ def errorTextChecks : IO Unit := do
   for (w, text) in wireTexts do
     check s!"wire error text: {w.name}" (wireErrorText w == text) (wireErrorText w)
 
+/-- `parseURL`, `ParsedURL.render`, and `resolveLocation` edge cases (`Winnow/IO/Http.lean`). -/
+def urlParserChecks : IO Unit := do
+  -- control characters and spaces rejected
+  check "parseURL: rejects space, control chars, and DEL"
+    ((parseURL "https://a b/x").isNone &&
+     (parseURL "https://a\tb/x").isNone &&
+     (parseURL "https://a\nb/x").isNone &&
+     (parseURL s!"https://a{Char.ofNat 0x7F}/x").isNone)
+  -- missing colon, empty/bad scheme, missing `//`
+  check "parseURL: rejects missing colon, empty or invalid scheme, and missing //"
+    ((parseURL "example.com/path").isNone &&
+     (parseURL "://example.com/x").isNone &&
+     (parseURL "1http://example.com/x").isNone &&
+     (parseURL "ht_tp://example.com/x").isNone &&
+     (parseURL "http:example.com/x").isNone &&
+     (parseURL "http:/example.com/x").isNone)
+  check "parseURL: accepts RFC 3986 scheme punctuation (+, -, .)"
+    (parseURL "my+s-c.1://example.com" == some { scheme := "my+s-c.1", host := "example.com" })
+  -- userinfo: user-only, user:pass, and multiple `@`
+  check "parseURL: userinfo user-only, user:pass, and multiple @"
+    (parseURL "https://alice@example.com/x" ==
+       some { scheme := "https", user := some "alice", password := none, host := "example.com", rest := "/x" } &&
+     parseURL "https://alice:secret@example.com/x" ==
+       some { scheme := "https", user := some "alice", password := some "secret", host := "example.com", rest := "/x" } &&
+     parseURL "https://a@b:p@w@example.com/x" ==
+       some { scheme := "https", user := some "a@b", password := some "p@w", host := "example.com", rest := "/x" } &&
+     parseURL "https://a@b@example.com/x" ==
+       some { scheme := "https", user := some "a@b", password := none, host := "example.com", rest := "/x" })
+  -- IPv6 bracketed hosts and malformed brackets
+  check "parseURL: IPv6 bracketed hosts (bare, port, empty port, malformed, unclosed)"
+    (parseURL "http://[::1]/x" ==
+       some { scheme := "http", host := "::1", port := none, rest := "/x" } &&
+     parseURL "http://[::1]:8080/x" ==
+       some { scheme := "http", host := "::1", port := some 8080, rest := "/x" } &&
+     parseURL "http://[::1]:/x" ==
+       some { scheme := "http", host := "::1", port := none, rest := "/x" } &&
+     (parseURL "http://[::1]x/y").isNone &&
+     (parseURL "http://[::1/x").isNone)
+  -- empty port and non-digit port
+  check "parseURL: empty port yields none and non-digit port is rejected"
+    (parseURL "http://a:/x" == some { scheme := "http", host := "a", port := none, rest := "/x" } &&
+     (parseURL "http://a:abc/x").isNone &&
+     (parseURL "http://[::1]:abc/x").isNone)
+  -- query and fragment tails
+  check "parseURL: query, fragment, and bare authority tails"
+    (parseURL "https://a?k=v" == some { scheme := "https", host := "a", rest := "?k=v" } &&
+     parseURL "https://a#frag" == some { scheme := "https", host := "a", rest := "#frag" } &&
+     parseURL "https://a/p?k=v#frag" == some { scheme := "https", host := "a", rest := "/p?k=v#frag" } &&
+     parseURL "https://a" == some { scheme := "https", host := "a", rest := "" })
+  -- ParsedURL.render across IPv6, userinfo, and port shapes
+  check "ParsedURL.render: preserves IPv6 brackets, userinfo, port, and tail"
+    ((parseURL "http://alice:secret@[::1]:8080/p?q=1#f").map (·.render) ==
+       some "http://alice:secret@[::1]:8080/p?q=1#f" &&
+     (parseURL "https://alice@example.com/p").map (·.render) == some "https://alice@example.com/p" &&
+     (parseURL "https://example.com").map (·.render) == some "https://example.com")
+  -- resolveLocation: absolute, protocol-relative, root-relative, and directory-relative
+  let baseDir := (parseURL "https://example.com/a/b/c?x=1").get!
+  let baseNoSlash := (parseURL "https://example.com?x=1").get!
+  check "resolveLocation: absolute, protocol-relative, root-relative, and relative paths"
+    ((resolveLocation baseDir "https://other.example/z").map (·.render) == some "https://other.example/z" &&
+     (resolveLocation baseDir "//cdn.example:8443/f").map (·.render) == some "https://cdn.example:8443/f" &&
+     (resolveLocation baseDir "/root/file").map (·.render) == some "https://example.com/root/file" &&
+     (resolveLocation baseDir "d.json").map (·.render) == some "https://example.com/a/b/d.json" &&
+     (resolveLocation baseNoSlash "d.json").map (·.render) == some "https://example.com/d.json")
+
+/-- `ExportStagingFile.sweep` and staging lifecycle (`Winnow/Wallet/ExportStagingFile.lean`). -/
+def exportStagingChecks (dir : String) : IO Unit := do
+  -- missing root dir
+  let missing := System.FilePath.mk s!"{dir}/staging-missing"
+  ExportStagingFile.sweep missing
+  check "ExportStagingFile.sweep: missing root dir is a no-op" (!(← missing.pathExists))
+  -- empty root dir
+  let emptyRoot := System.FilePath.mk s!"{dir}/staging-empty"
+  IO.FS.createDirAll emptyRoot
+  ExportStagingFile.sweep emptyRoot
+  check "ExportStagingFile.sweep: empty root dir stays intact"
+    ((← emptyRoot.isDir) && (← emptyRoot.readDir).isEmpty)
+  -- populated root: winnow-export-* file and directory removed, unrelated entries untouched
+  let popRoot := System.FilePath.mk s!"{dir}/staging-populated"
+  let staleDir := popRoot / (ExportStagingFile.prefix_ ++ "stale-dir")
+  let staleFile := popRoot / (ExportStagingFile.prefix_ ++ "stale-file")
+  let keepDir := popRoot / "keep-dir"
+  let keepFile := popRoot / "keep-file.txt"
+  IO.FS.createDirAll staleDir
+  IO.FS.writeFile (staleDir / "wallet.json") "{\"stale\":true}"
+  IO.FS.writeFile staleFile "stale"
+  IO.FS.createDirAll keepDir
+  IO.FS.writeFile (keepDir / "note.txt") "keep-dir-body"
+  IO.FS.writeFile keepFile "keep-file-body"
+  ExportStagingFile.sweep popRoot
+  check "ExportStagingFile.sweep: removes winnow-export-* dir and file"
+    (!(← staleDir.pathExists) && !(← staleFile.pathExists))
+  check "ExportStagingFile.sweep: leaves unrelated file and dir untouched"
+    ((← keepFile.pathExists) && (← IO.FS.readFile keepFile) == "keep-file-body" &&
+     (← (keepDir / "note.txt").pathExists) && (← IO.FS.readFile (keepDir / "note.txt")) == "keep-dir-body")
+  -- write / remove / safeFileName sanity
+  let staging ← ExportStagingFile.new popRoot
+  let staged ← staging.write "{\"ok\":true}" "nested/backup.json"
+  check "ExportStagingFile.write stages under winnow-export-* and safeFileName handles empty segments"
+    ((← staged.pathExists) && staged.fileName == some "backup.json" &&
+     ExportStagingFile.safeFileName "///" == "wallet.json")
+  staging.remove
+  check "ExportStagingFile.remove deletes staged directory"
+    (!(← staged.pathExists) && !(← (staged.parent.getD staged).pathExists))
+
+/-- Pure unit tests for `jsonString`, `percentEncode`, `DNSJSON.hosts`, `PeerNetwork.canonicalOverlayHost`,
+`GatewayDNSQuery.name`/`addresses`, and `CensusCatalog.validatedOverlayEntries`. -/
+def pureHelperBranchChecks : IO Unit := do
+  let isErr {α ε} (e : Except ε α) : Bool := match e with | .error _ => true | .ok _ => false
+  -- Winnow.IO.jsonString: all escape arms and low control chars
+  let special := String.ofList ['"', '\\', '/', Char.ofNat 0x08, Char.ofNat 0x0c, '\n', '\r', '\t',
+    Char.ofNat 0x00, Char.ofNat 0x1f, 'a']
+  check "jsonString: escapes quotes, slashes, control chars, and preserves empty/plain text"
+    (jsonString "" == "\"\"" &&
+     jsonString special == "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u0000\\u001fa\"")
+    (jsonString special)
+  -- Winnow.IO.percentEncode & DNSJSON.hosts
+  check "percentEncode: keeps unreserved ASCII and encodes punctuation and non-ASCII UTF-8"
+    (percentEncode "Az09-._~ /?é" == "Az09-._~%20%2F%3F%C3%A9")
+    (percentEncode "Az09-._~ /?é")
+  check "DNSJSON.hosts: invalid UTF-8, bad Status/Answer/entry shapes, null Answer, and blank data"
+    (isErr (DNSJSON.hosts (ByteArray.mk #[0xFF, 0xFE])) &&
+     isErr (DNSJSON.hosts "{\"Status\":\"ok\"}".toUTF8) &&
+     (DNSJSON.hosts "{\"Status\":0,\"Answer\":null}".toUTF8).toOption == some #[] &&
+     isErr (DNSJSON.hosts "{\"Status\":0,\"Answer\":42}".toUTF8) &&
+     isErr (DNSJSON.hosts "{\"Status\":0,\"Answer\":[{\"type\":\"A\",\"data\":\"1.1.1.1\"}]}".toUTF8) &&
+     isErr (DNSJSON.hosts "{\"Status\":0,\"Answer\":[{\"type\":1,\"data\":123}]}".toUTF8) &&
+     (DNSJSON.hosts "{\"Status\":0,\"Answer\":[{\"type\":1,\"data\":\"   \"}]}".toUTF8).toOption == some #[])
+  -- PeerNetwork.canonicalOverlayHost, ofRaw?, ofHost
+  let tor56 := String.ofList (List.replicate 50 'A' ++ ['2', '3', '4', '5', '6', '7']) ++ ".ONION"
+  let i2p52 := String.ofList (List.replicate 46 'B' ++ ['2', '3', '4', '5', '6', '7']) ++ ".B32.I2P"
+  check "PeerNetwork.canonicalOverlayHost: canonicalizes Tor/I2P and rejects bad whitespace, clearnet, suffix, length, and base32"
+    (PeerNetwork.tor.canonicalOverlayHost tor56 == some tor56.toLower &&
+     PeerNetwork.i2p.canonicalOverlayHost i2p52 == some i2p52.toLower &&
+     (PeerNetwork.tor.canonicalOverlayHost (" " ++ tor56)).isNone &&
+     (PeerNetwork.clearnet.canonicalOverlayHost "1.2.3.4").isNone &&
+     (PeerNetwork.tor.canonicalOverlayHost "example.com").isNone &&
+     (PeerNetwork.i2p.canonicalOverlayHost "example.onion").isNone &&
+     (PeerNetwork.tor.canonicalOverlayHost "short.onion").isNone &&
+     (PeerNetwork.tor.canonicalOverlayHost (String.ofList (List.replicate 55 'a' ++ ['0']) ++ ".onion")).isNone &&
+     (PeerNetwork.tor.canonicalOverlayHost (String.ofList (List.replicate 55 'a' ++ ['8']) ++ ".onion")).isNone &&
+     (PeerNetwork.tor.canonicalOverlayHost (String.ofList (List.replicate 55 'a' ++ ['{']) ++ ".onion")).isNone &&
+     PeerNetwork.ofRaw? "clearnet" == some .clearnet && PeerNetwork.ofRaw? "tor" == some .tor &&
+     PeerNetwork.ofRaw? "i2p" == some .i2p && PeerNetwork.ofRaw? "other" == none &&
+     PeerNetwork.ofHost ".foo.onion." == .tor && PeerNetwork.ofHost ".bar.i2p." == .i2p &&
+     PeerNetwork.ofHost "1.2.3.4" == .clearnet)
+  -- GatewayDNSQuery.name: empty, multi-hop pointer, truncated/bad pointers, loop, hop limit, bad/truncated labels
+  let hdr12 := ByteArray.mk (Array.replicate 12 0)
+  let multiHop := hdr12 ++ ByteArray.mk #[1, 'a'.toNat.toUInt8, 0, 1, 'B'.toNat.toUInt8, 0xc0, 12, 0xc0, 15]
+  let loopName := hdr12 ++ ByteArray.mk #[2, 'a'.toNat.toUInt8, 'b'.toNat.toUInt8, 0xc0, 12]
+  let deepName := Id.run do
+    let mut b := ByteArray.empty
+    for _ in [0:16] do b := b ++ ByteArray.mk #[1, 'a'.toNat.toUInt8]
+    return b ++ ByteArray.mk #[0]
+  check "GatewayDNSQuery.name: multi-hop pointers and malformed/cyclic/deep/truncated names"
+    (GatewayDNSQuery.name multiHop 19 == some ("b.a", 21) &&
+     (GatewayDNSQuery.name ByteArray.empty 0).isNone &&
+     (GatewayDNSQuery.name (ByteArray.mk #[0xc0]) 0).isNone &&
+     (GatewayDNSQuery.name (hdr12 ++ ByteArray.mk #[0xc0, 4]) 12).isNone &&
+     (GatewayDNSQuery.name (hdr12 ++ ByteArray.mk #[0xc0, 12]) 12).isNone &&
+     (GatewayDNSQuery.name loopName 12).isNone &&
+     (GatewayDNSQuery.name deepName 0).isNone &&
+     (GatewayDNSQuery.name (ByteArray.mk #[64, 0, 0]) 0).isNone &&
+     (GatewayDNSQuery.name (ByteArray.mk #[5, 'a'.toNat.toUInt8, 'b'.toNat.toUInt8]) 0).isNone)
+  -- GatewayDNSQuery.addresses: header, question, and answer edge cases
+  let u16 (v : UInt16) : ByteArray := ByteArray.mk #[(v >>> 8).toUInt8, (v &&& 255).toUInt8]
+  let q : GatewayDNSQuery := { host := "gw", id := 0x1234 }
+  let qName := ByteArray.mk #[2] ++ "gw".toUTF8 ++ ByteArray.mk #[0]
+  let mkHdr (qd an : UInt16) (flags : UInt16 := 0x8180) : ByteArray :=
+    u16 0x1234 ++ u16 flags ++ u16 qd ++ u16 an ++ u16 0 ++ u16 0
+  let ttl := ByteArray.mk #[0, 0, 0, 60]
+  let recWrongOwner := ByteArray.mk #[2, 'x'.toNat.toUInt8, 'x'.toNat.toUInt8, 0] ++ u16 1 ++ u16 1 ++ ttl ++ u16 4 ++ ByteArray.mk #[100, 101, 102, 104]
+  let recWrongType := ByteArray.mk #[0xc0, 12] ++ u16 28 ++ u16 1 ++ ttl ++ u16 4 ++ ByteArray.mk #[100, 101, 102, 105]
+  let recWrongClass := ByteArray.mk #[0xc0, 12] ++ u16 1 ++ u16 3 ++ ttl ++ u16 4 ++ ByteArray.mk #[100, 101, 102, 106]
+  let recWrongLen := ByteArray.mk #[0xc0, 12] ++ u16 1 ++ u16 1 ++ ttl ++ u16 2 ++ ByteArray.mk #[100, 101]
+  let recValid := ByteArray.mk #[0xc0, 12] ++ u16 1 ++ u16 1 ++ ttl ++ u16 4 ++ ByteArray.mk #[100, 101, 102, 103]
+  let mixedAns := mkHdr 1 5 ++ qName ++ u16 1 ++ u16 1 ++ recWrongOwner ++ recWrongType ++ recWrongClass ++ recWrongLen ++ recValid
+  check "GatewayDNSQuery.addresses: rejects malformed headers/questions/answers and skips non-matching records"
+    (q.addresses (ByteArray.mk #[1, 2, 3]) == [] &&
+     q.addresses (mkHdr 0 0) == [] &&
+     q.addresses (mkHdr 1 17 ++ qName ++ u16 1 ++ u16 1) == [] &&
+     q.addresses (mkHdr 1 0 ++ ByteArray.mk #[64]) == [] &&
+     q.addresses (mkHdr 1 0 ++ qName ++ u16 1) == [] &&
+     q.addresses (mkHdr 1 0 ++ qName ++ u16 28 ++ u16 1) == [] &&
+     q.addresses (mkHdr 1 0 ++ qName ++ u16 1 ++ u16 3) == [] &&
+     q.addresses (mkHdr 1 0 ++ qName ++ u16 1 ++ u16 1) == [] &&
+     q.addresses (mkHdr 1 1 ++ qName ++ u16 1 ++ u16 1 ++ ByteArray.mk #[0xc0]) == [] &&
+     q.addresses (mkHdr 1 1 ++ qName ++ u16 1 ++ u16 1 ++ ByteArray.mk #[0xc0, 12, 0, 1]) == [] &&
+     q.addresses (mkHdr 1 1 ++ qName ++ u16 1 ++ u16 1 ++ ByteArray.mk #[0xc0, 12] ++ u16 1 ++ u16 1 ++ ttl ++ u16 4 ++ ByteArray.mk #[100, 64]) == [] &&
+     q.addresses mixedAns == ["100.101.102.103"])
+  -- CensusCatalog.validatedOverlayEntries: size, port, userAgent, host, height, duplicate, and (host, port) sorting
+  let clearnetOk : Array CensusEntry := #[{ host := "9.9.9.9", port := 8333, userAgent := "/Satoshi:28.0.0/", startHeight := 900000 }]
+  let torA := String.ofList (List.replicate 56 'a') ++ ".onion"
+  let torB := String.ofList (List.replicate 56 'b') ++ ".onion"
+  let i2pA := String.ofList (List.replicate 52 'c') ++ ".b32.i2p"
+  let i2pB := String.ofList (List.replicate 52 'd') ++ ".b32.i2p"
+  let mkCat (tor i2p : Array CensusEntry) : CensusCatalog :=
+    { schemaVersion := 1, date := "2026-10-26", tip := 900010, networks := #[("clearnet", clearnetOk), ("tor", tor), ("i2p", i2p)] }
+  let mkE (host : String) (port : UInt16 := 8333) (userAgent : String := "/Satoshi:28.0.0/") (startHeight : Int32 := 900000) : CensusEntry :=
+    { host, port, userAgent, startHeight }
+  let validOverlay := (mkCat #[mkE torB 8333, mkE torA.toUpper 8334, mkE torA 8333] #[mkE i2pB 8333, mkE i2pA 8333]).validated
+  check "CensusCatalog.validatedOverlayEntries: validates size, port, userAgent, host, height, duplicates, and sorts"
+    (((mkCat (Array.replicate (CensusCatalog.maximumEntries + 1) (mkE torA)) #[]).validated matches .error .size) &&
+     ((mkCat #[mkE torA (port := 0)] #[]).validated matches .error .endpoint) &&
+     ((mkCat #[mkE torA (userAgent := String.ofList (List.replicate 257 'x'))] #[]).validated matches .error .endpoint) &&
+     ((mkCat #[mkE torA (userAgent := "bad\nua")] #[]).validated matches .error .endpoint) &&
+     ((mkCat #[mkE torA (userAgent := s!"bad{Char.ofNat 127}ua")] #[]).validated matches .error .endpoint) &&
+     ((mkCat #[mkE "short.onion"] #[]).validated matches .error .endpoint) &&
+     ((mkCat #[mkE torA (startHeight := 100)] #[]).validated matches .error .height) &&
+     ((mkCat #[mkE torA, mkE torA.toUpper] #[]).validated matches .error .duplicate) &&
+     (match validOverlay with
+      | .ok c => (c.entries .tor).map (fun e => (e.host, e.port)) == #[(torA, 8333), (torA, 8334), (torB, 8333)] &&
+                 (c.entries .i2p).map (·.host) == #[i2pA, i2pB]
+      | .error _ => false))
+
 def offlineChecks (dir : String) : IO Unit := do
   errorTextChecks
+  urlParserChecks
+  pureHelperBranchChecks
+  exportStagingChecks dir
   say "policy (offline)"
   -- Seed filtering and IP literals (BSD inet_pton)
   check "inet_pton4 refuses leading zeros" ((inetPton4 "01.2.3.4").isNone && (inetPton4 "1.2.3.4").isSome)
@@ -1612,6 +1831,189 @@ def disputedPinChecks (dir : String) : IO Unit := do
   check "disputed pin: and the file starts again from the wallet's first height"
     (match Progress.ofJsonText saved with | .ok p => p.nextScanHeight == 990 && p.filterHeaders.isEmpty | .error _ => false) saved
 
+/-- RFC 1928 reply descriptions (`PeerConnection.socksReplyDescription`) and every handshake, reply,
+address-type, and early-EOF branch of `PeerConnection.negotiateSOCKS5` over a local scripted TCP server. -/
+def socksNegotiationChecks : IO Unit := do
+  let replyCodes : List (UInt8 × String) := [
+    (0x01, "general failure"),
+    (0x02, "connection not allowed by ruleset"),
+    (0x03, "network unreachable"),
+    (0x04, "host unreachable"),
+    (0x05, "connection refused"),
+    (0x06, "TTL expired"),
+    (0x07, "command not supported"),
+    (0x08, "address type not supported"),
+    (0xFF, "reply code 255")]
+  for (code, expected) in replyCodes do
+    let got := PeerConnection.socksReplyDescription code
+    check s!"socksReplyDescription 0x{hex (ByteArray.mk #[code])}" (got == expected) got
+  let readExact (sock : Std.Async.TCP.Socket.Client) (n : Nat) : IO Bool := do
+    let mut got := 0
+    while got < n do
+      match ← (sock.recv? (n - got).toUInt64).block.toBaseIO with
+      | .ok (some chunk) =>
+        if chunk.isEmpty then return false
+        got := got + chunk.size
+      | _ => return false
+    return true
+  let runSocks (dest : PeerEndpoint) (handler : Std.Async.TCP.Socket.Client → IO Unit) :
+      IO (Except PeerError Unit) := do
+    let server ← Std.Async.TCP.Socket.Server.mk
+    server.bind (.v4 ⟨Std.Net.IPv4Addr.ofParts 127 0 0 1, 0⟩)
+    server.listen 4
+    let port := (← server.getSockName).port
+    let srv ← BaseIO.asTask (prio := .dedicated) (do
+      try
+        let keep := server
+        let sock ← keep.accept.block
+        try handler sock
+        finally discard <| sock.shutdown.toIO
+      catch _ => pure () : IO Unit).toBaseIO
+    let client ← Std.Async.TCP.Socket.Client.mk
+    (client.connect (.v4 ⟨Std.Net.IPv4Addr.ofParts 127 0 0 1, port⟩)).block
+    let res ← try (PeerConnection.negotiateSOCKS5 client dest).block
+              finally discard <| client.shutdown.toIO
+    discard <| IO.wait srv
+    return res
+  let target : PeerEndpoint := { host := "peer.example.onion", port := 8333 }
+  let connectLen := 5 + target.host.utf8ByteSize + 2
+  let afterConnect (reply : ByteArray) : Std.Async.TCP.Socket.Client → IO Unit := fun sock => do
+    if !(← readExact sock 3) then return
+    (sock.send (ByteArray.mk #[0x05, 0x00])).block
+    if !(← readExact sock connectLen) then return
+    if !reply.isEmpty then (sock.send reply).block
+  let isOk : Except PeerError Unit → Bool
+    | .ok () => true | .error _ => false
+  let isErr (want : PeerError) : Except PeerError Unit → Bool
+    | .error e => e == want | .ok () => false
+  -- auth refused (05 FF)
+  let rAuth ← runSocks target fun sock => do
+    if ← readExact sock 3 then (sock.send (ByteArray.mk #[0x05, 0xFF])).block
+  check "negotiateSOCKS5: auth refused (05 FF)"
+    (isErr (.handshakeFailed "SOCKS5 proxy refused an unauthenticated connection") rAuth) s!"{repr rAuth}"
+  -- early EOF during greeting
+  let rEofGreeting ← runSocks target fun sock => do
+    discard <| readExact sock 3
+  check "negotiateSOCKS5: early EOF during greeting"
+    (rEofGreeting matches .error (.disconnected _)) s!"{repr rEofGreeting}"
+  -- oversized (>255 bytes) and empty destination names
+  let oversized : PeerEndpoint := { host := String.ofList (List.replicate 256 'a'), port := 8333 }
+  let rOver ← runSocks oversized fun sock => do
+    if ← readExact sock 3 then (sock.send (ByteArray.mk #[0x05, 0x00])).block
+  check "negotiateSOCKS5: oversized destination name (>255 bytes)"
+    (isErr (.handshakeFailed "SOCKS5 destination name too long") rOver) s!"{repr rOver}"
+  let rEmpty ← runSocks { host := "", port := 8333 } fun sock => do
+    if ← readExact sock 3 then (sock.send (ByteArray.mk #[0x05, 0x00])).block
+  check "negotiateSOCKS5: empty destination name"
+    (isErr (.handshakeFailed "SOCKS5 destination name too long") rEmpty) s!"{repr rEmpty}"
+  -- early EOF before reply header
+  let rEofHead ← runSocks target (afterConnect ByteArray.empty)
+  check "negotiateSOCKS5: early EOF before reply header"
+    (rEofHead matches .error (.disconnected _)) s!"{repr rEofHead}"
+  -- bad reply headers (wrong version 04 00 00 01 and non-zero reserved byte 05 00 01 01)
+  let rBadVer ← runSocks target (afterConnect (ByteArray.mk #[0x04, 0x00, 0x00, 0x01]))
+  check "negotiateSOCKS5: bad reply header version (04 00 00 01)"
+    (isErr (.handshakeFailed "SOCKS5 proxy returned an invalid reply header") rBadVer) s!"{repr rBadVer}"
+  let rBadRsv ← runSocks target (afterConnect (ByteArray.mk #[0x05, 0x00, 0x01, 0x01]))
+  check "negotiateSOCKS5: bad reply header reserved byte (05 00 01 01)"
+    (isErr (.handshakeFailed "SOCKS5 proxy returned an invalid reply header") rBadRsv) s!"{repr rBadRsv}"
+  -- non-zero reply code (05 05 00 01)
+  let rRefused ← runSocks target (afterConnect (ByteArray.mk #[0x05, 0x05, 0x00, 0x01]))
+  check "negotiateSOCKS5: non-zero reply code (05 05 00 01)"
+    (isErr (.disconnected "SOCKS5 proxy: connection refused") rRefused) s!"{repr rRefused}"
+  -- IPv4 (0x01), IPv6 (0x04), and domain (0x03) bound addresses
+  let rV4 ← runSocks target (afterConnect (ByteArray.mk #[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x20, 0x8D]))
+  check "negotiateSOCKS5: IPv4 (0x01) bound address" (isOk rV4) s!"{repr rV4}"
+  let rV6 ← runSocks target (afterConnect (ByteArray.mk #[0x05, 0x00, 0x00, 0x04] ++ filled 16 0x01 ++ ByteArray.mk #[0x20, 0x8D]))
+  check "negotiateSOCKS5: IPv6 (0x04) bound address" (isOk rV6) s!"{repr rV6}"
+  let dom := "bound.example".toUTF8
+  let rDom ← runSocks target (afterConnect (ByteArray.mk #[0x05, 0x00, 0x00, 0x03, dom.size.toUInt8] ++ dom ++ ByteArray.mk #[0x20, 0x8D]))
+  check "negotiateSOCKS5: domain (0x03) bound address" (isOk rDom) s!"{repr rDom}"
+  let rDomEof ← runSocks target (afterConnect (ByteArray.mk #[0x05, 0x00, 0x00, 0x03]))
+  check "negotiateSOCKS5: domain (0x03) early EOF on length byte"
+    (rDomEof matches .error (.disconnected _)) s!"{repr rDomEof}"
+  -- unknown address type (0x09)
+  let rUnknown ← runSocks target (afterConnect (ByteArray.mk #[0x05, 0x00, 0x00, 0x09]))
+  check "negotiateSOCKS5: unknown address type (0x09)"
+    (isErr (.handshakeFailed "SOCKS5 proxy answered with an unknown address type") rUnknown) s!"{repr rUnknown}"
+  -- early EOF during bound address payload
+  let rPayloadEof ← runSocks target (afterConnect (ByteArray.mk #[0x05, 0x00, 0x00, 0x01, 127, 0]))
+  check "negotiateSOCKS5: early EOF during bound address payload"
+    (rPayloadEof matches .error (.disconnected _)) s!"{repr rPayloadEof}"
+
+/-- `FilterSyncIO.sync` hooks (`afterHeaders`, `forwardTo`, `maxBlocks := some 0`, no-peers) and `jumpTo`. -/
+def syncHookChecks : IO Unit := do
+  let headers := minedHeaders 3
+  let hashes := #[(HeaderChain.genesisHeader regtest).hash] ++ headers.map (·.hash)
+  let heightOf : Std.HashMap ByteArray Nat := (List.range hashes.size).foldl (fun m i => m.insert hashes[i]! i) {}
+  let filter := ByteArray.mk #[0]
+  let fhash := GCSFilter.filterHash filter
+  let fheaders : Array ByteArray := Id.run do
+    let mut out := Array.mkEmpty hashes.size
+    let mut prev := filled 32 0
+    for _ in [0:hashes.size] do
+      let next := sha256d (fhash ++ prev)
+      out := out.push next
+      prev := next
+    return out
+  let askedStarts ← IO.mkRef (#[] : Array UInt32)
+  let node ← fakeNode regtest (startHeight := 3) (answer := fun send m => do
+    match m with
+    | .getheaders _ => send (.headers #[])
+    | .getcfcheckpt r => send (.cfcheckpt { stopHash := r.stopHash, filterHeaders := #[] })
+    | .getcfheaders r =>
+      let stop := heightOf[r.stopHash]?.getD 0
+      let prev := if r.startHeight == 0 then filled 32 0 else fheaders[r.startHeight.toNat - 1]!
+      send (.cfheaders { stopHash := r.stopHash, previousFilterHeader := prev,
+                         filterHashes := Array.replicate (stop + 1 - r.startHeight.toNat) fhash })
+    | .getcfilters r =>
+      askedStarts.modify (·.push r.startHeight)
+      let stop := heightOf[r.stopHash]?.getD 0
+      for h in [r.startHeight.toNat:stop + 1] do
+        send (.cfilter { blockHash := hashes[h]!, filter })
+    | _ => pure ())
+  let store ← runNet "hook headers" (HeaderStore.open regtest none)
+  discard <| runNet "hook chain" (store.connect headers)
+  let emptyPool ← PeerPool.new regtest (peerCount := 1) (seedResolver := some noSeeds)
+  let emptyFs ← runNet "hook empty filters" (FilterSyncIO.new emptyPool store 0)
+  check "sync hooks: no connected peers throws noPeers"
+    ((← (emptyFs.sync #[] (onMatch := fun _ => pure ())).attempt) matches .error (.filters .noPeers))
+  let pool ← PeerPool.new regtest (peerCount := 1) (manualPeers := #[node]) (seedResolver := some noSeeds)
+  pool.start
+  discard <| waitUntil 5_000 (do return (← pool.connectedPeers).size == 1)
+  let fs ← runNet "hook filters" (FilterSyncIO.new pool store 0)
+  -- maxBlocks := some 0 returns cleanly without fetching filters
+  runNet "hook maxBlocks 0" (fs.sync #[] (maxBlocks := some 0) (onMatch := fun _ => pure ()))
+  check "sync hooks: maxBlocks := some 0 scans nothing"
+    ((← fs.nextScanHeight) == 0 && (← askedStarts.get).isEmpty)
+  -- forwardTo advances frontier to 2 before scanning, skipping heights 0..1
+  runNet "hook forwardTo" (fs.sync #[] (onMatch := fun _ => pure ()) (forwardTo := some (pure (some 2))))
+  check "sync hooks: forwardTo advances frontier and scans only remaining heights"
+    ((← fs.nextScanHeight) == 4 && (← askedStarts.get) == #[2]) s!"asked {← askedStarts.get}, next {← fs.nextScanHeight}"
+  -- already at tip with none hooks is a no-op
+  askedStarts.set #[]
+  runNet "hook at tip" (fs.sync #[] (onMatch := fun _ => pure ())
+    (afterHeaders := some (pure none)) (forwardTo := some (pure none)))
+  check "sync hooks: already at tip with none hooks scans nothing" ((← askedStarts.get).isEmpty)
+  -- afterHeaders returning a fork fires onReorg, rewinds, and rescans from fork + 1
+  let reorgs ← IO.mkRef (#[] : Array UInt32)
+  runNet "hook afterHeaders" (fs.sync #[]
+    (onReorg := some fun h => reorgs.modify (·.push h)) (onMatch := fun _ => pure ())
+    (afterHeaders := some (pure (some 1))))
+  check "sync hooks: afterHeaders fork fires onReorg and rescans from fork + 1"
+    ((← reorgs.get) == #[1] && (← askedStarts.get) == #[2] && (← fs.nextScanHeight) == 4)
+    s!"reorgs {← reorgs.get}, asked {← askedStarts.get}"
+  -- jumpTo refuses backward/same and beyond-tip, accepts valid forward jump and keeps pins below target
+  check "jumpTo: refuses non-advancing and beyond-tip targets"
+    (!(← runNet "jumpTo same" (fs.jumpTo 4)) && !(← runNet "jumpTo beyond" (fs.jumpTo 5)))
+  let fs2 ← runNet "hook jump filters" (FilterSyncIO.new pool store 0)
+  runNet "hook jump seed" (fs2.sync #[] (maxBlocks := some 2) (onMatch := fun _ => pure ()))
+  let jumped ← runNet "jumpTo valid" (fs2.jumpTo 3)
+  check "jumpTo: advances frontier and preserves pins below target"
+    (jumped && (← fs2.nextScanHeight) == 3 && (← fs2.pinnedFilterHeaders).contains "1" &&
+     !(← fs2.pinnedFilterHeaders).contains "3")
+  pool.stop
+
 def hardeningChecks (dir : String) : IO Unit := do
   framerOffsetChecks
   subscriberQueueChecks
@@ -1626,6 +2028,7 @@ def hardeningChecks (dir : String) : IO Unit := do
   timeCappedHitChecks
   blockFallbackChecks
   disputedPinChecks dir
+  syncHookChecks
 
 /-- The broadcaster giving up on peers that take the inv and never ask for the transaction (#39), over an
 IPv4 and an IPv6 fake node (ephemeral, so high, ports): an announcement unanswered past
@@ -1742,6 +2145,7 @@ def discoveryChecks (dir : String) : IO Unit := do
 def fakeChecks (dir : String) : IO Unit := do
   say "transport and pool failure paths (fake peers)"
   closedPeerChecks
+  socksNegotiationChecks
   discoveryChecks dir
   let ep (port : UInt16) : PeerEndpoint := { host := "127.0.0.1", port }
   let silent ← fakePeer .silent

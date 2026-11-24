@@ -154,18 +154,16 @@ lake build backend-test records-test        # Lean toolchain leanprover/lean4:v4
 cd ..
 scripts/build-ios Debug                      # the app for the simulator, from a clean checkout
 scripts/journeys                             # the UI journeys (Lean) against a regtest fixture (--wire: headless)
-scripts/coverage                             # how much of each Lean function CI's suites run (build them first)
+scripts/leancov                              # source-level Lean coverage, McCabe CRAP, and Cognitive Complexity
 ```
 
-`scripts/coverage` recompiles each module's generated C with clang's coverage (Xcode's), links the test programs
-as Lake does, runs CI's suites and the headless journeys, and computes Lean-level branch coverage and CRAP for
-every function and declaration: `build/coverage/lean-coverage.json`. It counts decision outcomes (`if`/`switch`
-arms, or entry for straight-line functions) while leaving out C codegen noise — reference-count reuse checks and
-join points (`v_isShared`, `v_resetjp`, `v_reusejp`), redundant entry/condition headers, monadic `←` error-exit
-pass-throughs, boxed/reduced-arity trampolines, static constant initializers, and pure library specializations —
-and OR-merges peeled recursive loop clones. A declaration Lean inlined everywhere is marked `inlined`, not unrun.
-`scripts/coverage <suite>` runs one suite again and keeps the others' counts; `--report [suite ...]` remakes the
-report from existing profiles (all suites, or only those named).
+`scripts/leancov` stages out-of-tree instrumented copies of `Lean/Winnow` and `LeanApp/WinnowApp` under
+`build/leancov/`, builds and runs CI's test suites and headless wire journeys in parallel, and prints a strict
+source-level branch coverage, McCabe CRAP, and Cognitive Complexity report alongside `build/leancov/coverage.json`
+and `build/leancov/lcov.info`. It resolves the `leancov` tool from `--leancov-dir`, `$LEANCOV_DIR`, `../leancov`,
+or `PATH`. Use `scripts/leancov --fast` for the 13 non-regtest, non-journey suites, `scripts/leancov <suite ...>`
+to re-run specific suites, `scripts/leancov --report [suite ...]` to regenerate reports from existing `.cov`
+profiles, and `scripts/leancov --list` to list all available suites.
 
 LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
 `LeanApp/.lake/packages/leannative`.
@@ -223,7 +221,18 @@ what was on screen, and the log shows each step's time:
   connection and then stalls on an open one; Home says so each time, and the wallet finds the next payment once
   the peer serves again;
 - `reorgBackToPending`: a confirmed payment's block is replaced by a longer chain without it; the payment is
-  pending again with its change still counted, and confirms again in the new chain.
+  pending again with its change still counted, and confirms again in the new chain;
+- `protectionBackupAndRestore`: balance protection cards, 2-of-3 Ledger setup with a recovery key, automatic
+  iCloud backup toggle and Home link, backup file export with recovery phrase, wallet deletion, and seeded
+  backup file restore;
+- `savedPeopleAndSenderLookup`: revealed local funding-address selection with unverified-funding and reuse
+  warnings, Taproot sender-lookup consent UI, saved-sender selection, destinationless saved recipients, and
+  saving/renaming recipients;
+- `crossDeviceMultisigChanges`: two devices sharing stand-in iCloud (`WINNOW_E2E_CLOUD`) synchronizing account
+  rename, receive-index advance, Ledger registration, partial PSBT draft adoption and signature combination,
+  draft discard, account removal, and signer rename/removal;
+- `multisigSpendAndWatchOnlyControls`: watch-only Taproot 2-of-2 join, watch-only PSBT review/combination and
+  broadcast, plus in-flight multisig spend Rebroadcast and Give up (`abandonSpend`) with post-mining confirmation.
 
 And three that fail on purpose, each where a failure happens on a phone, then try again
 (`LeanApp/Journeys/Failures.lean`):
@@ -264,7 +273,7 @@ goes. Every run is the same, full run:
 | job | what |
 |---|---|
 | `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: `scripts/check-core`, `scripts/secp-vectors --check`, census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test, segwit-test, secpct-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, device-sync-test, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested), card-regtest and segwit-regtest; and every journey headless, the twenty (LeanNative's `wire-journey`), with `coverage.json` among the evidence |
-| `app` (three at once) | the same build and census import; Debug for the simulator, checked for Swift; fourteen of the journeys split across the three, four or five each (`ui-journey-shards`; `scripts/ui-fixture` as the hooks); the three that fail on purpose, `torOnly`, `peerFailures` and `reorgBackToPending` run headless only |
+| `app` (three at once) | the same build and census import; Debug for the simulator, checked for Swift; eighteen of the journeys split across the three, six each (`ui-journey-shards`; `scripts/ui-fixture` as the hooks); the three that fail on purpose, `torOnly`, `peerFailures`, `reorgBackToPending` and the three control journeys run headless only |
 | `media` | once both parts pass, the website's media from their evidence (LeanNative's `journey-media`: one video, the journeys in order) |
 | `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |
 

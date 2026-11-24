@@ -105,25 +105,26 @@ private def beginRequest (f : FilterSyncIO) : NetM Unit := do
   let ok ← f.requesting.modifyGet fun r => (!r, true)
   if !ok then throw (.filters .busy)
 
+private def advanceFrontierTo (f : FilterSyncIO) (next : UInt32) : NetM Bool := do
+  let p ← f.progress.get
+  if next ≤ p.nextScanHeight then return false
+  if next.toNat > (← f.chain.height).toNat + 1 then return false
+  let candidate : Progress := { nextScanHeight := next,
+                                filterHeaders := p.filterHeaders.filter fun k _ => match parseUInt32? k with
+                                  | some h => h < next
+                                  | none => false }
+  f.persist candidate
+  f.progress.set candidate
+  return true
+
 /-- Moves the frontier forward to `next`, as a scan begun there would start (`new` at that height): what is
 below it was scanned elsewhere, by a scan the caller trusts with it (another of the person's devices, its state
 anchored to a block of this chain). Pins below `next` stay; nothing moves back, and nothing moves while a run
 is under way. -/
 def jumpTo (f : FilterSyncIO) (next : UInt32) : NetM Bool := do
   f.beginRequest
-  try
-    let p ← f.progress.get
-    if next ≤ p.nextScanHeight then return false
-    if next.toNat > (← f.chain.height).toNat + 1 then return false
-    let candidate : Progress := { nextScanHeight := next,
-                                  filterHeaders := p.filterHeaders.filter fun k _ => match parseUInt32? k with
-                                    | some h => h < next
-                                    | none => false }
-    f.persist candidate
-    f.progress.set candidate
-    return true
-  finally
-    f.requesting.set false
+  try f.advanceFrontierTo next
+  finally f.requesting.set false
 
 private def noPeersError (f : FilterSyncIO) : IO NetError := do
   let cooling := (← f.pool.coolingEndpoints).size
@@ -530,6 +531,66 @@ private def scanFilters (f : FilterSyncIO) (batchStart batchStop : UInt32) (peer
     deliveredThrough := some work[i]!.2
   return (deliveredThrough, batchHalt)
 
+private def rollBackWithNotify (f : FilterSyncIO) (forkHeight : UInt32)
+    (onReorg : Option (UInt32 → NetM Unit)) : NetM Unit := do
+  if let some cb := onReorg then cb forkHeight
+  f.rollBack forkHeight
+
+private def checkAfterHeaders (f : FilterSyncIO) (afterHeaders : Option (NetM (Option UInt32)))
+    (onReorg : Option (UInt32 → NetM Unit)) : NetM Unit := do
+  let some check := afterHeaders | return
+  let some fork ← check | return
+  f.rollBackWithNotify fork onReorg
+
+private def applyForwardTo (f : FilterSyncIO) (forwardTo : Option (NetM (Option UInt32))) : NetM Unit := do
+  let some ask := forwardTo | return
+  let some next ← ask | return
+  discard <| f.advanceFrontierTo next
+
+/-- Syncs headers, applies any header or `afterHeaders` reorg, and advances the frontier via `forwardTo`.
+Returns `false` when the chain is not yet proven past its checkpoint, ending the pass before filter work. -/
+private def prepareHeaders (f : FilterSyncIO) (onReorg : Option (UInt32 → NetM Unit))
+    (afterHeaders : Option (NetM (Option UInt32))) (forwardTo : Option (NetM (Option UInt32))) :
+    NetM Bool := do
+  let headerOutcome ← f.pool.syncHeaders f.chain
+  if let some fork := headerOutcome.minForkHeight then
+    f.rollBackWithNotify fork onReorg
+  -- a chain held from genesis that has not reached the checkpoint may be a peer's invention: nothing is
+  -- scanned on it, and the pass ends as one that did not reach the tip
+  if !(← f.chain.proven) then return false
+  f.checkAfterHeaders afterHeaders onReorg
+  -- what was scanned elsewhere for every script the caller watches is not scanned here again (`jumpTo`)
+  f.applyForwardTo forwardTo
+  return true
+
+/-- Pins, verifies, scans, and commits one batch; returns `none` when a disputed pin rewound the frontier
+and ended the pass early, or `some peers` (the refreshed approved set) to continue. -/
+private def syncBatch (f : FilterSyncIO) (ceiling tip : UInt32) (reference : CFCheckptMessage)
+    (approvedEndpoints : Array String) (receipt : CrossCheckReceipt) (peers : Array PeerConnection)
+    (watchScripts : Array ByteArray) (onReorg : Option (UInt32 → NetM Unit))
+    (onMatch : BlockMatch → NetM Unit) : NetM (Option (Array PeerConnection)) := do
+  let progress ← f.progress.get
+  let batchStart := progress.nextScanHeight
+  let batchStop := FilterSync.batchStop batchStart ceiling
+  let some stopHash ← f.chain.blockHash batchStop | throw (.filters (.badPeerResponse s!"missing header at {batchStop}"))
+  let proposed ← match ← f.pinFilterHeaders batchStart batchStop stopHash peers progress.filterHeaders (rewinds := true) with
+    | .headers h => pure h
+    | .disputed anchor =>
+      -- the pass ends here as one that did not reach the tip, and the next scans again from the boundary
+      f.rewindDisputedPin anchor onReorg
+      return none
+  if let .error e := checkPinnedBoundaries proposed reference tip then throw (.filters e)
+  let peers ← f.approved approvedEndpoints
+  let (_, halt) ← f.scanFilters batchStart batchStop peers watchScripts proposed onMatch
+  if let some e := halt then throw e
+  -- the receipt is written on every batch, so the corroboration on disk never describes an older pass
+  let candidate : Progress := { nextScanHeight := batchStop + 1,
+                                filterHeaders := prunedFilterHeaders proposed (batchStop + 1),
+                                crossCheck := some receipt }
+  f.persist candidate
+  f.progress.set candidate
+  return some peers
+
 /-- One sync run (see the module doc). `maxBlocks` bounds it; `onReorg` is awaited before any filter work.
 `forwardTo`, asked after that, may move the frontier forward to a height every watched script was scanned to
 elsewhere.
@@ -543,30 +604,8 @@ def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option
   try
     -- a pool holding seats so a signed payment can go out is not a pool to scan over
     if (← f.pool.mode) != .full then throw (.filters .relayOnly)
-    let peers ← f.pool.connectedPeers
-    if peers.isEmpty then throw (← f.noPeersError)
-    let headerOutcome ← f.pool.syncHeaders f.chain
-    if let some fork := headerOutcome.minForkHeight then
-      if let some cb := onReorg then cb fork
-      f.rollBack fork
-    -- a chain held from genesis that has not reached the checkpoint may be a peer's invention: nothing is
-    -- scanned on it, and the pass ends as one that did not reach the tip
-    if !(← f.chain.proven) then return
-    if let some check := afterHeaders then
-      if let some fork ← check then
-        if let some cb := onReorg then cb fork
-        f.rollBack fork
-    -- what was scanned elsewhere for every script the caller watches is not scanned here again (`jumpTo`)
-    if let some ask := forwardTo then
-      if let some next ← ask then
-        let p ← f.progress.get
-        if next > p.nextScanHeight && next.toNat ≤ (← f.chain.height).toNat + 1 then
-          let candidate : Progress := { nextScanHeight := next,
-                                        filterHeaders := p.filterHeaders.filter fun k _ => match parseUInt32? k with
-                                          | some h => h < next
-                                          | none => false }
-          f.persist candidate
-          f.progress.set candidate
+    if (← f.pool.connectedPeers).isEmpty then throw (← f.noPeersError)
+    if !(← f.prepareHeaders onReorg afterHeaders forwardTo) then return
     let peers ← f.pool.connectedPeers
     if peers.isEmpty then throw (.filters .noPeers)
     let tip ← f.chain.height
@@ -578,26 +617,9 @@ def sync (f : FilterSyncIO) (watchScripts : Array ByteArray) (maxBlocks : Option
     let mut peers ← f.approved approvedEndpoints
     let ceiling := (scanCeiling (← f.progress.get).nextScanHeight maxBlocks tip).getD room
     while (← f.progress.get).nextScanHeight ≤ ceiling do
-      let progress ← f.progress.get
-      let batchStart := progress.nextScanHeight
-      let batchStop := FilterSync.batchStop batchStart ceiling
-      let some stopHash ← f.chain.blockHash batchStop | throw (.filters (.badPeerResponse s!"missing header at {batchStop}"))
-      let proposed ← match ← f.pinFilterHeaders batchStart batchStop stopHash peers progress.filterHeaders (rewinds := true) with
-        | .headers h => pure h
-        | .disputed anchor =>
-          -- the pass ends here as one that did not reach the tip, and the next scans again from the boundary
-          f.rewindDisputedPin anchor onReorg
-          return
-      if let .error e := checkPinnedBoundaries proposed reference tip then throw (.filters e)
-      peers ← f.approved approvedEndpoints
-      let (_, halt) ← f.scanFilters batchStart batchStop peers watchScripts proposed onMatch
-      if let some e := halt then throw e
-      -- the receipt is written on every batch, so the corroboration on disk never describes an older pass
-      let candidate : Progress := { nextScanHeight := batchStop + 1,
-                                    filterHeaders := prunedFilterHeaders proposed (batchStop + 1),
-                                    crossCheck := some receipt }
-      f.persist candidate
-      f.progress.set candidate
+      let some nextPeers ← f.syncBatch ceiling tip reference approvedEndpoints receipt peers watchScripts onReorg onMatch
+        | return
+      peers := nextPeers
     if let .error e := finalCheckpointGuard (← f.progress.get).filterHeaders reference tip then throw (.filters e)
   finally
     f.requesting.set false
