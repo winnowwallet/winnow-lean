@@ -206,7 +206,7 @@ def explorerSections (m : Model) : List H :=
   [.section "External block explorer" "Winnow does not use the explorer for balances, synchronization, fees or broadcasting. Every funding-address lookup asks for consent and explains the transaction-ID disclosure; you must explicitly select any result. External browser links have their own warning: the browser shares its IP address with the site. On signet, the blockstream.info preset uses mempool.space."
     ([ .picker "Block explorer" ["blockstream.info", "mempool.space", "Custom"] (explorers.idxOf s.scoped.explorer) (fun i => .settings (.setExplorer i)) ] ++
      (if s.scoped.explorer == .custom then
-       [.input .plain "" "Esplora-compatible website URL" s.scoped.esploraURL (set .setEsploraURL) none] else []) ++
+       [.identified Ids.esploraURLField (.input .plain "" "Esplora-compatible website URL" s.scoped.esploraURL (set .setEsploraURL) none)] else []) ++
      [ caption s!"Selected: {s.esploraBaseURL}"
      , .button "What this trades away" .plain (some (.settings .openReadSide)) ])]
 

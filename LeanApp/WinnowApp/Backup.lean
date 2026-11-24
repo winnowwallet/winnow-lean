@@ -143,7 +143,7 @@ def exportSheet (m : Model) (inner : List H) : H :=
   formSheet "Backup file" (some .closeSheet) [closeBar "Close"]
     ([ .section "" "Without the recovery phrase the file restores your history but not the ability to spend."
          ([ .identified Ids.exportExplanation (body "Saves a file you can keep in Files or send to yourself. Restore it from Restore from a file.")
-          , .toggle "Include recovery phrase" e.includeMnemonic (fun b => .backup (.setIncludeMnemonic b))] ++
+          , .identified Ids.exportIncludePhraseToggle (.toggle "Include recovery phrase" e.includeMnemonic (fun b => .backup (.setIncludeMnemonic b)))] ++
           (if e.includeMnemonic then [body "This file includes your phone’s signing key. Keep it as private as your recovery words."] else [])) ] ++
      (match e.error with | some err => [.section "" "" (errorRows (some err))] | none => []) ++
      (match e.file with

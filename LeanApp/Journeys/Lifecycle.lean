@@ -74,18 +74,20 @@ def protectionBackupAndRestore : Journey := ⟨"protectionBackupAndRestore", do
       Receive.close
       discard <| h.fund addr highBalance
       waitForBalance highBalance
-      waitFor hardwareWalletCard 20
-      waitFor multipartyCard 20
+      waitFor dismissHardwareCard 20
+      here (.button "Protect it with a Ledger")
+      waitFor dismissMultipartyCard 20
+      here (.button "Build an account with other people's keys")
 
     step "protection cards: open builder, dismiss multiparty card, and complete 2-of-3 Ledger setup with recovery key" do
       scrolled (.button "Build an account with other people's keys")
       tap (.button "Build an account with other people's keys")
       waitFor multisigBuildNameField 20
       tap .back
-      waitFor multipartyCard 20
+      waitFor dismissMultipartyCard 20
       scrolled dismissMultipartyCard
       tap dismissMultipartyCard
-      expectGone multipartyCard 10
+      expectGone dismissMultipartyCard 10
       scrolled (.button "Protect it with a Ledger")
       tap (.button "Protect it with a Ledger")
       waitFor ledgerSetUpButton 10
@@ -105,8 +107,10 @@ def protectionBackupAndRestore : Journey := ⟨"protectionBackupAndRestore", do
       tap ledgerAddressesMatchButton
       waitFor multisigPolicy 20
       expectEq "the 2-of-3 Ledger setup policy" (← text multisigPolicy) "2 of 3"
-      backToWalletList
-      expectGone hardwareWalletCard 10
+      tap .back
+      expectGone multisigPolicy 20
+      waitFor settingsButton 20
+      expectGone dismissHardwareCard 10
 
     step "iCloud backup toggle off, open from Home backup link, toggle back on, cancel Add profile, and export with phrase" do
       openSettings
@@ -144,7 +148,7 @@ def protectionBackupAndRestore : Journey := ⟨"protectionBackupAndRestore", do
       scrolled exportBundleButton
       tap exportBundleButton
       waitFor exportExplanation 10
-      tap (.text "^Include recovery phrase$")
+      tap exportIncludePhraseToggle
       waitFor (.beginning "This file includes your phone") 10
       scrolled (.button "Create backup file")
       tap (.button "Create backup file")
@@ -222,8 +226,8 @@ def savedPeopleAndSenderLookup : Journey := ⟨"savedPeopleAndSenderLookup", do
       waitFor (.text "^blockstream\\.info$") 10
       tap (.text "^blockstream\\.info$")
       tap (.button "Custom")
-      waitFor (.text "^Esplora-compatible website URL$") 10
-      type (.text "^Esplora-compatible website URL$") "http://127.0.0.1:1"
+      waitFor esploraURLField 10
+      type esploraURLField "http://127.0.0.1:1"
       waitFor (.beginning "Selected: http://127.0.0.1:1") 10
       backToWalletList
 
@@ -238,10 +242,11 @@ def savedPeopleAndSenderLookup : Journey := ⟨"savedPeopleAndSenderLookup", do
       waitForBalance (2 * funding)
       waitFor (historyPayment tx1) 30
       -- 10,000,000 sats crosses the hardware-wallet card threshold; dismiss it
-      waitFor hardwareWalletCard 20
+      waitFor dismissHardwareCard 20
+      here (.button "Protect it with a Ledger")
       scrolled dismissHardwareCard
       tap dismissHardwareCard
-      expectGone hardwareWalletCard 10
+      expectGone dismissHardwareCard 10
 
       -- Second receive address funded from a Taproot key-path coin (reveals no local funding address)
       let shown ← Receive.address
@@ -532,8 +537,8 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
       Collect.countIs multisigSignatureCount "2 of 2" 90
       scrolled multisigDiscardDraftButton
       tap multisigDiscardDraftButton
-      waitFor (.alert "Discard") 10
-      tap (.alert "Discard")
+      waitFor multisigConfirmDiscardButton 10
+      tap multisigConfirmDiscardButton
       waitFor (.beginning "This account has no payment awaiting signatures.") 20
       backToWalletList
 
@@ -542,8 +547,8 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
       waitFor multisigReceiveAddress 20
       scrolled (.button "Remove account")
       tap (.button "Remove account")
-      waitFor (.alert "Remove") 10
-      tap (.alert "Remove")
+      waitFor (.button "Remove") 10
+      tap (.button "Remove")
       expectGone multisigReceiveAddress 20
       backToWalletList
 
@@ -625,8 +630,8 @@ def multisigSpendAndWatchOnlyControls : Journey := ⟨"multisigSpendAndWatchOnly
       let psbt1 ← Collect.psbt
       scrolled multisigDiscardDraftButton
       tap multisigDiscardDraftButton
-      waitFor (.alert "Discard") 10
-      tap (.alert "Discard")
+      waitFor multisigConfirmDiscardButton 10
+      tap multisigConfirmDiscardButton
       waitFor (.beginning "This account has no payment awaiting signatures.") 20
       backToWalletList
       waitForCloudBackup h cloud "watch"
@@ -647,15 +652,11 @@ def multisigSpendAndWatchOnlyControls : Journey := ⟨"multisigSpendAndWatchOnly
       scrolled multisigDescriptorField
       type multisigDescriptorField "bad"
       r.paste recDesc multisigDescriptorPasteButton
-      waitUntil 20 "recovery-only descriptor did not validate" do
-        if ← exists? multisigAddPolicy 1 then return true
-        scrollTo multisigAddPolicy
-      scrolled multisigAddPolicy
+      waitFor multisigAddPolicy 20
       expectEq "recovery-only policy" (← text multisigAddPolicy) "2 of 2"
-      scrolled multisigAddRecovery
       here multisigAddRecovery
-      scrolled multisigAddWarning
       here multisigAddWarning
+      here (.beginning "This phone is not one of the signers.")
       backToWalletList
 
       -- Watch Vault arrives from Device 1 under Watching
@@ -718,11 +719,14 @@ def multisigSpendAndWatchOnlyControls : Journey := ⟨"multisigSpendAndWatchOnly
       waitFor abandonSpendButton 15
       scrolled abandonSpendButton
       tap abandonSpendButton
-      waitFor (.alert "Cancel") 10
-      tap (.alert "Cancel")
-      waitFor abandonSpendButton 10
-      tap abandonSpendButton
       waitFor abandonConfirmButton 10
+      -- iOS 26 renders an anchored action sheet as a popover without a Cancel button (tapping outside dismisses it).
+      if ← exists? (.button "Cancel") 1 then
+        tap (.button "Cancel")
+        expectGone abandonConfirmButton 10
+        waitFor abandonSpendButton 10
+        tap abandonSpendButton
+        waitFor abandonConfirmButton 10
       tap abandonConfirmButton
       waitFor (.text "^This payment is no longer in the wallet’s history\\.$") 20
       backToWalletList
