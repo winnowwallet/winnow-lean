@@ -497,6 +497,8 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
                            ("WINNOW_E2E_ENTROPY", dev1Entropy), ("WINNOW_E2E_LEDGER", ledgerEntropy),
                            ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       waitFor receiveButton 60
+      waitSynced
+      waitForBalance funding balanceText
       openAccountRow sharedID
       waitForBalance funding multisigBalance
       let beforeAddr ← Account.receiveAddress
@@ -542,6 +544,7 @@ def crossDeviceMultisigChanges : Journey := ⟨"crossDeviceMultisigChanges", do
                            ("WINNOW_E2E_ENTROPY", dev1Entropy), ("WINNOW_E2E_LEDGER", ledgerEntropy),
                            ("WINNOW_E2E_SYNC_INTERVAL", "1")]
       waitFor receiveButton 60
+      waitSynced
       openAccountRow sharedID
       waitFor multisigDraftButton 20
       tap multisigDraftButton
