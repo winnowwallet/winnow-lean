@@ -544,6 +544,19 @@ def offlineChecks (dir : String) : IO Unit := do
     ((TxBroadcaster.decodeStore "{\"other\":1}".toUTF8 now) matches .error (.damaged _))
   check "decodeStore: unversioned unrecognized entry type is damaged"
     ((TxBroadcaster.decodeStore "{\"transactions\":{\"k\":123}}".toUTF8 now) matches .error (.damaged _))
+  -- validatedRecords boundaries: bad feeRate, bad attempt, bad nextAttemptAt, >maximumStoredTransactions
+  let mkV1Entry (extra : String) :=
+    s!"\{\"version\":1,\"transactions\":\{\"{sampleTxidHex}\":\{\"rawTx\":\"{sampleRawHex}\"{extra}}}}"
+  check "decodeStore: validatedRecords rejects zero/neg feeRate, out-of-range attempt, negative/far-future retry time"
+    ((TxBroadcaster.decodeStore (mkV1Entry ",\"feeRateSatPerVByte\":0,\"attempt\":0,\"nextAttemptAt\":100").toUTF8 now matches .error (.damaged _)) &&
+     (TxBroadcaster.decodeStore (mkV1Entry ",\"attempt\":-1,\"nextAttemptAt\":100").toUTF8 now matches .error (.damaged _)) &&
+     (TxBroadcaster.decodeStore (mkV1Entry s!",\"attempt\":{TxBroadcaster.maximumAttempt + 1},\"nextAttemptAt\":100").toUTF8 now matches .error (.damaged _)) &&
+     (TxBroadcaster.decodeStore (mkV1Entry ",\"attempt\":0,\"nextAttemptAt\":-1").toUTF8 now matches .error (.damaged _)) &&
+     (TxBroadcaster.decodeStore (mkV1Entry ",\"attempt\":0,\"nextAttemptAt\":999999999999").toUTF8 now matches .error (.damaged _)))
+  let tooManyV1Entries := (List.range (TxBroadcaster.maximumStoredTransactions + 1)).map fun i =>
+    s!"\"k{i}\":\{\"rawTx\":\"00\",\"attempt\":0,\"nextAttemptAt\":100}"
+  check "decodeStore: versioned over maximumStoredTransactions is damaged"
+    ((TxBroadcaster.decodeStore ("{\"version\":1,\"transactions\":{" ++ ",".intercalate tooManyV1Entries ++ "}}").toUTF8 now) matches .error (.damaged _))
   -- peers.json formats
   let legacy := "[{\"host\":\"1.2.3.4\",\"port\":8333}]".toUTF8
   check "peers.json legacy array reads as persisted"
@@ -715,6 +728,17 @@ def offlineChecks (dir : String) : IO Unit := do
   check "frontier: nothing scanned has no hash" ((← (← open? 0).frontier) == (0, none))
   check "frontier: the hash of the last block scanned" ((← (← open? 1).frontier) == (1, ← store.blockHash 0) &&
     (← store.blockHash 0).isSome)
+  -- FilterSyncIO.new readProgressFile error cases: non-UTF8 and oversized progress file
+  let nonUtf8Path := System.FilePath.mk dir / "non-utf8-filters.json"
+  IO.FS.writeBinFile nonUtf8Path (ByteArray.mk #[0xFF, 0xFE, 0xFD])
+  check "FilterSyncIO.new: non-UTF8 progress file reports damaged"
+    (match ← (FilterSyncIO.new pool store 0 (some nonUtf8Path)).toBaseIO with
+     | .error (.filterStorage (.damaged _)) => true | _ => false)
+  let hugePath := System.FilePath.mk dir / "huge-filters.json"
+  IO.FS.writeBinFile hugePath (ByteArray.mk (Array.replicate (FilterSync.maximumProgressBytes + 1) 0x20))
+  check "FilterSyncIO.new: oversized progress file reports tooLarge"
+    (match ← (FilterSyncIO.new pool store 0 (some hugePath)).toBaseIO with
+     | .error (.filterStorage (.tooLarge _)) => true | _ => false)
   let _ := dir
 
 /-! ## Against the node -/

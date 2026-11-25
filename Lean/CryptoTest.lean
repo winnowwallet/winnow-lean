@@ -955,6 +955,38 @@ def headerBranches : IO Unit := do
 
 end HeaderBranches
 
+def unicodeNormalization : IO Unit := do
+  -- Hangul algorithmic decomposition: without trailing consonant (t = 0) and with one (t != 0)
+  check "unicode: Hangul t=0 (U+AC00 가 -> U+1100 U+1161)"
+    (Unicode.nfd "가" == "\u1100\u1161" && Unicode.nfkd "가" == "\u1100\u1161")
+  check "unicode: Hangul t!=0 (U+D55C 한 -> U+1112 U+1161 U+11AB)"
+    (Unicode.nfd "한" == "\u1112\u1161\u11AB" && Unicode.nfkd "한" == "\u1112\u1161\u11AB")
+  -- Compatibility vs canonical decomposition
+  check "unicode: compat preserves ligature in NFD, splits in NFKD (U+FB01 ﬁ)"
+    (Unicode.nfd "\uFB01" == "\uFB01" && Unicode.nfkd "\uFB01" == "fi")
+  check "unicode: compat preserves superscript/fullwidth in NFD, splits in NFKD"
+    (Unicode.nfd "\u00B2\uFF21" == "\u00B2\uFF21" && Unicode.nfkd "\u00B2\uFF21" == "2A")
+  -- Multi-level decomposition + canonical ordering (ccc=230 acute before ccc=220 dot below)
+  check "unicode: canonicalOrder reorders combining marks by class"
+    (Unicode.nfd "e\u0301\u0323" == "e\u0323\u0301" &&
+     Unicode.nfd "\u1EC7" == "e\u0323\u0302" &&
+     Unicode.nfkd "\u1E69" == "s\u0323\u0307")
+  -- Non-starter boundary rule matches Foundation (U+0F73 has ccc=0 yet decomposes into marks)
+  check "unicode: Foundation combining run boundary"
+    (Unicode.nfd "\u0F73\u0323" == "\u0F71\u0F72\u0323")
+  -- Whitespace classification
+  check "unicode: isWhitespaceOrNewline covers ASCII, NBSP, U+200B, U+3000"
+    (Unicode.isWhitespaceOrNewline ' ' && Unicode.isWhitespaceOrNewline '\n' &&
+     Unicode.isWhitespaceOrNewline '\u00A0' && Unicode.isWhitespaceOrNewline '\u200B' &&
+     Unicode.isWhitespaceOrNewline '\u3000' && !Unicode.isWhitespaceOrNewline 'a')
+  -- BIP39 seed matches across NFC, NFD, and NFKD passphrase spellings
+  let words := "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+  let seedNFC := BIP39.seed words "caf\u00E9 \uFB01 \uD55C"
+  let seedNFD := BIP39.seed words "cafe\u0301 \uFB01 \u1112\u1161\u11AB"
+  let seedNFKD := BIP39.seed words "cafe\u0301 fi \u1112\u1161\u11AB"
+  check "unicode: BIP39.seed agrees across NFC and NFD" (seedNFC == seedNFD)
+  check "unicode: BIP39.seed agrees across NFC/NFKD compat forms" (seedNFC == seedNFKD)
+
 def main : IO UInt32 := runMain "crypto-test" do
   fips197
   wycheproof
@@ -963,6 +995,7 @@ def main : IO UInt32 := runMain "crypto-test" do
   roundTrips
   bip32
   utf8
+  unicodeNormalization
   jsonExponents
   retargetRules
   mainnetRetargets

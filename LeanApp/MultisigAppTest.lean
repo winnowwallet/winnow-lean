@@ -3237,12 +3237,48 @@ def testATamperedFileUnderThisAppsKeyIsStillDamage : IO Unit := do
   check "tampered: the key stays" ((← ref.get)["store-key.multisig.signet"]? == before["store-key.multisig.signet"]? &&
     !(← ref.get).contains "store-key.swift-era.multisig.signet")
 
+def testMultisigDraftAndPreviewEdgeCases : IO Unit := do
+  -- draftError & draftPSBT on missing draft
+  let rWallet ← (Real.draftError (.inl WalletError.accountKeyMismatch) : IO Unit).toBaseIO
+  let rPsbt ← (Real.draftError (.inr PSBTError.invalidMagic) : IO Unit).toBaseIO
+  check "draftError surfaces WalletError and PSBTError descriptions"
+    (rWallet matches .error _ && rPsbt matches .error _)
+  let a ← twoOfTwo
+  let rec0 := recordOf a #[← coin a 80_000]
+  check "draftPSBT refuses record without draft"
+    (match ← (Real.draftPSBT rec0).toBaseIO with
+     | .error e => toString e == Real.noDraftText
+     | _ => false)
+  let phone ← phoneWith 0xA1
+  check "draftDetails returns none without draft" ((← Real.draftDetails phone.env phone.multisig rec0).isNone)
+  -- draftDetails returns reviewError for corrupt base64 draft and caches the result
+  let badDraft : MultisigSpendDraft := { psbtBase64 := "not-valid-base64!!!", createdAtHeight := 1 }
+  let recBad := { rec0 with draft := some badDraft }
+  let d1 ← Real.draftDetails phone.env phone.multisig recBad
+  let d2 ← Real.draftDetails phone.env phone.multisig recBad
+  check "draftDetails returns reviewError on corrupt base64 and hits cache"
+    ((d1.bind (·.info.reviewError)).isSome && (d2.bind (·.info.reviewError)) == (d1.bind (·.info.reviewError)))
+  -- previewAccountSend & signAndDraft & broadcastMultisigSpend refusal paths
+  let (pairId, _) ← phone.buildWith "Pair" 2 [← keyExpression (← master 0xD4)]
+  let noAcct ← (Real.previewAccountSend phone.env phone.multisig { destination := "tb1q", amount := "1000" }).toBaseIO
+  let badRate ← (Real.previewAccountSend phone.env phone.multisig { accountID := some pairId, destination := "tb1q", amount := "1000", override := "0" }).toBaseIO
+  let spSend ← (Real.previewAccountSend phone.env phone.multisig { accountID := some pairId, destination := "tsp1qqqq", amount := "1000", priority := 1 }).toBaseIO
+  check "previewAccountSend refuses missing accountID, zero override rate, and silent payment code"
+    (noAcct matches .error _ && badRate matches .error _ && spSend matches .error _)
+  let emptyPreview : Preview :=
+    { destination := "", amount := 0, fee := 0, feeRateMilli := 0, inputCount := 0, change := none, locktimeLagsTip := false }
+  let noRev ← (Real.signAndDraft phone.env phone.multisig { accountID := some pairId } emptyPreview).toBaseIO
+  let badBcast ← (Real.broadcastMultisigSpend phone.env phone.multisig pairId "not-psbt").toBaseIO
+  check "signAndDraft and broadcastMultisigSpend refuse invalid/missing preview or PSBT"
+    (noRev matches .error _ && badBcast matches .error _)
+
 /-! ## main -/
 
 def storeTests : List (String × IO Unit) :=
   [ ("testSwiftEraStoresAreSetAsideAndStartEmpty", testSwiftEraStoresAreSetAsideAndStartEmpty)
   , ("testAnInterruptedSetAsideFinishes", testAnInterruptedSetAsideFinishes)
   , ("testATamperedFileUnderThisAppsKeyIsStillDamage", testATamperedFileUnderThisAppsKeyIsStillDamage)
+  , ("testMultisigDraftAndPreviewEdgeCases", testMultisigDraftAndPreviewEdgeCases)
   , ("testBackupPreservesAccountsAndRejectsChangedOwnership", testBackupPreservesAccountsAndRejectsChangedOwnership)
   , ("testBackupCarriesPendingAccountPayments", testBackupCarriesPendingAccountPayments)
   , ("testPaymentsSpendsAndRollbacks", testPaymentsSpendsAndRollbacks)

@@ -1265,6 +1265,85 @@ def declinedDeviceCheck (root : System.FilePath) : TM Unit := do
      (mode [("WINNOW_E2E_KEYCHAIN_PROTECTION", "1")]).map (·.keychainProtection) == some true)
   WinnowApp.e2eRef.set none
 
+def cloudEdgeCasesAndCloudAppTests (root : System.FilePath) : TM Unit := do
+  let original ← walletBundle .signet 7
+  let key ← randomKey
+  -- decode edge rejections: > maximumBytes, non-UTF8, bad UUID, unknown network, oversized sealedPhrase
+  let oversized := ByteArray.mk (Array.replicate (CloudWalletBackup.maximumBytes + 1) 0x20)
+  check "decode: > maximumBytes refused" (← refusedW (CloudWalletBackup.decode oversized))
+  check "decode: non-UTF8 refused" (← refusedW (CloudWalletBackup.decode (ByteArray.mk #[0xFF, 0xFE])))
+  let backup ← need "create backup" (CloudWalletBackup.create original key)
+  let baseJson ← jsonOf backup
+  check "decode: invalid UUID refused"
+    (← refusedW (CloudWalletBackup.decode (bytesOfJson (baseJson.setObjVal! "id" (.str "not-a-uuid")))))
+  check "decode: unknown network refused"
+    (← refusedW (CloudWalletBackup.decode (bytesOfJson (baseJson.setObjVal! "network" (.str "signet2")))))
+  let bigPhrase := Base64.encode (ByteArray.mk (Array.replicate (CloudWalletBackup.maximumSealedPhraseBytes + 1) 0))
+  check "decode: oversized sealedPhrase refused"
+    (← refusedW (CloudWalletBackup.decode (bytesOfJson (baseJson.setObjVal! "sealedPhrase" (.str bigPhrase)))))
+  -- CloudWalletBackup.shared: v2 unread corrupt entries, Shared.walletID, lastKnownBlockHash, and v1 support
+  let pub := { original with mnemonic := none, lastKnownBlockHash := some (String.ofList (List.replicate 64 'a')) }
+  let pubJV := pub.toJV
+  -- Inject corrupt vault & signer arrays into inner bundle object
+  let innerObj := match pubJV with
+    | .obj kvs => kvs.map fun (k, v) =>
+      if k == "vaults" then (k, .arr #[.str "corrupt-vault"]) else (k, v)
+    | _ => #[]
+  let innerWithBad :=
+    let hasVaults := innerObj.any (·.1 == "vaults")
+    let xs := if hasVaults then innerObj else innerObj.push ("vaults", SwiftJSON.JV.arr #[SwiftJSON.JV.str "corrupt-vault"])
+    let hasSigners := xs.any (·.1 == "signers")
+    if hasSigners then xs else xs.push ("signers", SwiftJSON.JV.arr #[SwiftJSON.JV.str "corrupt-signer"])
+  let customSealedJson := SwiftJSON.write (.obj #[("bundle", .obj innerWithBad)])
+  let sealedWalletBad ← match ← AESGCM.sealRandom key customSealedJson.toUTF8
+      (CloudWalletBackup.context backup.id backup.network (CloudWalletBackup.walletPurpose backup.savedAt)) with
+    | .ok b => pure b.combined.get!
+    | .error e => throw e.name
+  let sharedRes ← need "shared with unread" ({ backup with sealedWallet := sealedWalletBad }.shared key)
+  check "shared: counts corrupt vault + signer as unread and derives walletID + blockHash"
+    (sharedRes.unread == 2 && sharedRes.walletID.isSome && sharedRes.lastKnownBlockHash.isSome)
+  -- Shared.walletID without descriptor returns none
+  check "Shared.walletID: none without descriptor" (({ sharedRes with descriptor := none }).walletID.isNone)
+  -- v1 backup opens via shared
+  let v1 ← legacyBackup original key backup.id backup.savedAt
+  let v1Shared ← need "shared v1" (v1.shared key)
+  check "shared: v1 backup decodes via shared" (v1Shared.lastKnownHeight == original.lastKnownHeight)
+  -- unsupported version on state & shared
+  let v3 := { backup with version := 3 }
+  check "state/shared: version 3 refused"
+    ((← refusedW (v3.state key)) && (← refusedW (v3.shared key)))
+  -- identity mismatch in shared (wallet payload says mainnet for signet backup)
+  let wrongNet := { pub with network := "mainnet" }
+  let wrongSealed ← match ← AESGCM.sealRandom key (SwiftJSON.write (.obj #[("bundle", wrongNet.toJV)])).toUTF8
+      (CloudWalletBackup.context backup.id backup.network (CloudWalletBackup.walletPurpose backup.savedAt)) with
+    | .ok b => pure b.combined.get!
+    | .error e => throw e.name
+  check "shared: mismatched inner network refused"
+    (← refusedW ({ backup with sealedWallet := wrongSealed }.shared key))
+  -- Real.CloudApp.devicesText across all status shapes (empty, all read, >3 keyMissing, notOpened, notFetched, skipped)
+  let t0 := ← Real.CloudApp.devicesText { listed := 0 } "5m"
+  let tOk := ← Real.CloudApp.devicesText { listed := 1 } "2m"
+  let manyMissing := #[1.0, 2.0, 3.0, 4.0].map fun d => (d, Real.Unread.keyMissing)
+  let tMixed ← Real.CloudApp.devicesText
+    { listed := 7, unread := manyMissing ++ #[(5.0, .notOpened), (6.0, .notFetched)], skipped := 2 } "10m"
+  let tSingular ← Real.CloudApp.devicesText
+    { listed := 2, unread := #[(1.0, .notOpened)], skipped := 1 } "1m"
+  check "devicesText covers all branches"
+    (contains t0 "no other backup" &&
+     contains tOk "in step with 1 backup" &&
+     contains tMixed "and 1 more" && contains tMixed "did not hand over 1 backup" && contains tMixed "2 accounts or signers" &&
+     contains tSingular "1 account or signer in those backups is")
+  -- CloudApp with allows=false / restore guards
+  let pDisabled ← cloudPhone root "disabled-cloud" (← newKeys) false
+  pDisabled.bootExisting
+  pDisabled.app.discover
+  pDisabled.app.scheduleBackup
+  pDisabled.app.prepare "abandon"
+  pDisabled.app.schedulePreparation
+  check "CloudApp: allows=false keeps controller disabled" (!(← pDisabled.app.controller.get).enabled)
+  check "CloudApp.restore fails cleanly when wallet is open or !allows"
+    (← cloudFails (pDisabled.app.restore .signet pDisabled.dir "no-such-id"))
+
 def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
   let writeDir := match args with | "--write" :: d :: _ => some d | _ => none
   runTest "roundTripRestoresSigningAndAddressCounters" roundTripRestoresSigningAndAddressCounters
@@ -1289,4 +1368,5 @@ def main (args : List String) : IO UInt32 := runMain "cloud-backup-test" do
   runTest "restoreFromICloud" (restoreFromICloud root)
   runTest "secondWalletFromICloud" (secondWalletFromICloud root)
   runTest "declinedDeviceCheck" (declinedDeviceCheck root)
+  runTest "cloudEdgeCasesAndCloudAppTests" (cloudEdgeCasesAndCloudAppTests root)
   try IO.FS.removeDirAll root catch _ => pure ()

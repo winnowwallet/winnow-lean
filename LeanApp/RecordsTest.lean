@@ -832,6 +832,57 @@ def backgroundRuns : IO Unit := do
   let wildcards := (strs "BGTaskSchedulerPermittedIdentifiers").filter (·.endsWith ".*")
   check "background: continued wildcards start with the app's bundleId"
     (!wildcards.isEmpty && wildcards.all (·.startsWith (WinnowApp.manifest.bundleId ++ ".")))
+  check "backgroundContinuedID formats per network and serial"
+    (Real.backgroundContinuedID .mainnet 1 == Real.backgroundContinuedPrefix ++ "mainnet-1" &&
+     Real.backgroundContinuedID .signet 2 == Real.backgroundContinuedPrefix ++ "signet-2" &&
+     Real.backgroundContinuedID .regtest 3 == Real.backgroundContinuedPrefix ++ "regtest-3")
+  -- BackgroundSyncRun.wait on completed and expired runs, plus scanInBackground/runBackgroundSync guards
+  let doneRun ← Real.BackgroundSyncRun.new 5_000 (pure true) (pure ()) (fun _ => pure ())
+  doneRun.start
+  doneRun.wait
+  let expRun ← Real.BackgroundSyncRun.new 10_000 (cancellableSleep 5_000 *> pure true) (pure ()) (fun _ => pure ())
+  expRun.start
+  expRun.expire
+  expRun.wait
+  let envIdle ← gatewayEnv none
+  check "scanInBackground returns false without wallet/dir" (!(← Real.scanInBackground envIdle))
+  envIdle.modify fun c => { c with backgroundRunning := true }
+  check "runBackgroundSync refuses when another background check is running" (!(← Real.runBackgroundSync envIdle {}))
+  -- RecordsError.isDamaged & writeAtomically direct tests
+  check "RecordsError.isDamaged classifies store damage vs other errors"
+    ((RecordsError.people .damaged).isDamaged &&
+     (RecordsError.labels .damaged).isDamaged &&
+     (RecordsError.multisig .damaged).isDamaged &&
+     (RecordsError.signers .damaged).isDamaged &&
+     !(RecordsError.seal .malformed).isDamaged &&
+     !(RecordsError.app .noWallet).isDamaged)
+  let atomDir ← IO.FS.createTempDir
+  let atomPath := atomDir / "atomic-test.bin"
+  let payload := ByteArray.mk #[1, 2, 3, 4]
+  RecordsReal.writeAtomically payload atomPath
+  RecordsReal.writeAtomically (ByteArray.mk #[5, 6]) atomPath
+  check "writeAtomically creates and overwrites target cleanly"
+    ((← IO.FS.readBinFile atomPath) == ByteArray.mk #[5, 6])
+  IO.FS.removeDirAll atomDir
+  -- Phase 3: Real.sameSummary, Real.bumpFee, Real.watchAddress, Real.watchRelay early/offline paths
+  let pBase : Preview :=
+    { destination := "tb1qbase", amount := 10_000, fee := 200, feeRateMilli := 1_500,
+      inputCount := 1, change := some 5_000, locktimeLagsTip := false }
+  check "Real.sameSummary detects equality and each differing field"
+    (Real.sameSummary pBase pBase &&
+     !Real.sameSummary pBase { pBase with destination := "tb1qother" } &&
+     !Real.sameSummary pBase { pBase with amount := 10_001 } &&
+     !Real.sameSummary pBase { pBase with fee := 201 } &&
+     !Real.sameSummary pBase { pBase with feeRateMilli := 2_000 } &&
+     !Real.sameSummary pBase { pBase with inputCount := 2 } &&
+     !Real.sameSummary pBase { pBase with change := none } &&
+     Real.sameSummary pBase { pBase with locktimeLagsTip := true })
+  let fakeBump : WinnowApp.FeeBumpPreview := { feeRateMilli := 2_000, fee := 300, change := some 4_900 }
+  let envNoStack ← gatewayEnv none
+  let bumpNoWallet ← (Real.bumpFee envNoStack "00" fakeBump).toBaseIO
+  check "Real.bumpFee fails without open wallet" (bumpNoWallet matches .error _)
+  Real.watchAddress envNoStack "tb1qbase" (fun _ _ => pure ())
+  Real.watchRelay envNoStack "00" (fun _ => pure ())
   check "background: fetch and processing modes" (strs "UIBackgroundModes" == ["fetch", "processing"])
   check "background: the manifest passes LeanNative's capability checks" WinnowApp.manifest.problems.isEmpty
   -- the Model: a cold launch's task waits for boot, boot without a scene starts no networking
