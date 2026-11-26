@@ -1607,7 +1607,7 @@ def devicesFlow (dir : String) (n : Node) : IO Unit := do
     discard <| b.createWallet .regtest d
     return (b, app)
   let publish (app : Real.CloudApp) : IO Unit :=
-    app.controller.update do
+    Real.CloudM.toIO <| app.controller.update do
       let bundle ← app.exportedBundle
       return { bundle, appState := some (← app.cloudAppState bundle).encoded }
   -- 1. Device A: the account, its first coin, its backup.
@@ -1991,7 +1991,7 @@ def headStartFlow (dir : String) (n : Node) : IO Unit := do
     b.startNetworking settings
     return (b, app, d)
   let publish (app : Real.CloudApp) : IO Unit :=
-    app.controller.update do
+    Real.CloudM.toIO <| app.controller.update do
       let bundle ← app.exportedBundle
       return { bundle, appState := some (← app.cloudAppState bundle).encoded }
   let synced (b : Backend) : IO Bool := do
@@ -2020,7 +2020,7 @@ def headStartFlow (dir : String) (n : Node) : IO Unit := do
   check "head start: the first device scans on" ((← synced a) && (← a.snapshot).1.balance == 50_000_000)
   publish appA
   -- the second looks at the other backups, then comes back
-  appB.follow.round
+  Real.CloudM.toIO appB.follow.round
   b.startNetworking settings
   check "head start: the second device is at the tip with the payment" ((← synced b) && (← b.snapshot).1.balance == 50_000_000)
     s!"{(← b.snapshot).1.balance}"

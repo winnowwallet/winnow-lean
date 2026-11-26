@@ -805,6 +805,26 @@ def sendRecordsItsOutputs : TM Unit := do
   check "history: no longer bumpable" (← w.feeBumpableTxids).isEmpty
   check "history: outputs kept" (confirmed.outputs == some outputs)
 
+/-- A send confirmed, then its block lost to a longer chain: the send is back in the mempools (`HistoryLedger.rewind`
+re-pends it), so its change is a pending coin again, as before a block took it, and is not dropped with the block
+(the journey `reorgBackToPending` found the balance at 0 until the send confirmed again). -/
+def aReorgKeepsASendsChange : TM Unit := do
+  let w ← fundedWallet (← newKeyStore)
+  let prepared ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit prepared)
+  let signed := prepared.built.transaction
+  let pending ← w.balance
+  discard (need "confirm" (w.apply (fakeMatch 150 #[signed])))
+  check "reorg send: confirmed, the change counted" ((← w.balance) == pending) s!"{← w.balance} {pending}"
+  need "roll back" (w.rollBack 149)
+  check "reorg send: pending again" (((← w.history).find? (·.txid == signed.txid)).map (·.height) == some 0)
+  check "reorg send: its change still counted" ((← w.balance) == pending) s!"{← w.balance} {pending}"
+  check "reorg send: the change a pending coin" ((← w.allUtxos).any fun u => u.txid == signed.txid && u.height == 0 && u.spent.isNone)
+  discard (need "confirm again" (w.apply (fakeMatch 151 #[signed])))
+  check "reorg send: confirmed again, the change once" ((← w.balance) == pending &&
+    ((← w.allUtxos).filter (·.txid == signed.txid)).size == 1 &&
+    ((← w.allUtxos).filter (·.txid == signed.txid)).all (·.height == 151))
+
 def sendToOwnAddressIsNotExternal : TM Unit := do
   let w ← fundedWallet (← newKeyStore)
   let ours ← need "spk" (w.scriptPubKey .receive 1)
@@ -1638,6 +1658,9 @@ def feeResolution : TM Unit := do
   check "fee: one seat" (FeePolicy.seatMajorityFloor #[200] 1 == some 200)
   check "fee: no seats" (FeePolicy.seatMajorityFloor #[] 0 == none)
   check "fee: NaN counts as zero" (FeePolicy.seatMajorityFloor #[nan, 200] 3 == none)
+  for badCap in [nan, inf, -inf] do
+    let uncappedByNonFinite := FeePolicy.resolution .low (floor := some 2_000) (peerFloorCap := some badCap)
+    check "fee: non-finite cap is uncapped" (uncappedByNonFinite.rate == 2_000 && uncappedByNonFinite.clampedFloor.isNone)
 
 /-! ## NestedMultisigTests (upstream d2ca878, #256; the three Ledger cases are in `ledger-test`) -/
 
@@ -2340,6 +2363,8 @@ def sendAuthorization : TM Unit := do
   check "a change output where none was reviewed: refused" (!accepts (tx outputs) (fee := 25_000) (change := none) (r := exact))
   check "a change payment reviewed with no change amount: refused"
     (!accepts (tx outputs) (change := none) (r := { reviewed with changeAmount := none }))
+  check "a change amount reviewed with no change payment: refused"
+    (!accepts (tx withoutChange) (fee := 25_000) (change := some 24_000) (r := { exact with changeAmount := some 24_000 }))
   -- silent payments: the wallet hands over the scripts it derived, one per reviewed amount, in order
   let silent : ReviewedSend := { exact with payments := #[pay 5_000 0xB0], silentAmounts := #[60_000, 61_000], fee := 9_000 }
   let resolved := #[pay 60_000 0xE1, pay 61_000 0xE2]
@@ -2420,10 +2445,489 @@ def coinSelection : TM Unit := do
         | .error _ => pure ()
   check s!"a sweep of {swept} selections: each adds up, at the rate asked for" (bad == 0 && swept ≥ 60) s!"{bad} bad of {swept}"
 
+def spendReviewBoundaries : TM Unit := do
+  let (account, ms) ← accountWith
+  let exprs ← ms.mapM keyExpression
+  let recAccount ← need "rec10" (do
+    MultisigAccount.make (← MultisigAccount.makeDescriptor 2 exprs (some (.fewerSigners 1 10)) .signet) .signet)
+  let rec1Account ← need "rec1" (do
+    MultisigAccount.make (← MultisigAccount.makeDescriptor 2 exprs (some (.fewerSigners 1 1)) .signet) .signet)
+  let utxo ← funding account 100_000
+  let recCoin ← funding recAccount 100_000 (height := 100)
+  let rec1Coin ← funding rec1Account 100_000 (height := 100)
+
+  -- Recovery unlock & unlock-height boundaries (unconfirmed, chainTip == height, chainTip < height, 2^32 - 1 vs 2^32)
+  check "recovery: ordinary account without recovery never unlocks" (!account.isUnlockedForRecovery utxo testChainTip)
+  check "recovery: unconfirmed coin is neither unlocked nor given an unlock height"
+    (!recAccount.isUnlockedForRecovery { recCoin with height := 0 } 200 &&
+     (recAccount.recoveryUnlockHeight { recCoin with height := 0 }).isNone)
+  check "recovery: 1-block lock unlocks at coin height, never before coin height"
+    (rec1Account.isUnlockedForRecovery rec1Coin 100 && !rec1Account.isUnlockedForRecovery rec1Coin 99)
+  check "recovery: unlock height accepts UInt32.max and refuses 2^32 overflow"
+    (recAccount.recoveryUnlockHeight { recCoin with height := 0xFFFF_FFFF - 10 } == some 0xFFFF_FFFF &&
+     (recAccount.recoveryUnlockHeight { recCoin with height := 0xFFFF_FFFF - 9 }).isNone)
+
+  let unconfCoin := { recCoin with height := 0 }
+  let recPsbtBase ← need "rec spend" (tspend recAccount unconfCoin 200 .signers)
+  let recPsbtUnconf := recPsbtBase.modifyInput 0 (·.setSequence (some 10))
+  refusedWith "recovery: unconfirmed coin refuses with once-it-confirms message"
+    (recAccount.reviewSpend recPsbtUnconf #[unconfCoin] owned 200)
+    (.invalidSpend "input 1 unlocks for recovery only once it confirms")
+
+  -- PSBT output builder & global txVersion helper
+  let mkOut (amt : Int64) (spk : ByteArray) : PSBT.Output :=
+    ⟨#[PSBT.KeyValue.make PSBT.OutType.amount .empty (i64LE amt),
+       PSBT.KeyValue.make PSBT.OutType.script .empty spk]⟩
+  let setWitnessAmount (i : PSBT.Input) (amt : Int64) (spk : ByteArray) : PSBT.Input :=
+    i.set (PSBT.KeyValue.make PSBT.InType.witnessUTXO .empty (Wire.appendVarData (i64LE amt) spk))
+  let setTxVer (p : PSBT) (v : Int32) : PSBT :=
+    { p with globals := PSBT.setPair p.globals (PSBT.KeyValue.make PSBT.GlobalType.txVersion .empty (i32LE v)) }
+
+  let basePsbt ← need "base spend" (spend account utxo)
+
+  -- Exact 10% fee ceiling (10,000 of 100,000 accepted; 10,001 refused) and zero-fee (total == inputTotal) accepted
+  let exact10Pct := { basePsbt with outputs := #[mkOut 90_000 destination] }
+  let over10Pct := { basePsbt with outputs := #[mkOut 89_999 destination] }
+  let zeroFee := { basePsbt with outputs := #[mkOut 100_000 destination] }
+  check "fee ceiling: exact 10% fee is accepted"
+    ((← need "10%" (account.reviewSpend exact10Pct #[utxo] #[] testChainTip)).fee == 10_000)
+  refusedWith "fee ceiling: 1 sat over 10% is refused"
+    (account.reviewSpend over10Pct #[utxo] #[] testChainTip)
+    (.invalidSpend "the 10001-sat fee exceeds the 10% safety limit for these inputs")
+  check "fee ceiling: zero-fee spend (outputTotal == inputTotal) is accepted"
+    ((← need "0-fee" (account.reviewSpend zeroFee #[utxo] #[] testChainTip)).fee == 0)
+
+  -- Leaf tampering in `sameLeaves` (script changed, controlBlock parity flipped, leafVersion changed)
+  let origLeaves := basePsbt.inputs[0]!.tapLeafScripts
+  let leaf0 := origLeaves[0]!
+  let badScriptPsbt := basePsbt.modifyInput 0 (·.setTapLeafScripts #[{ leaf0 with script := leaf0.script.push 0x51 }])
+  let badCbPsbt := basePsbt.modifyInput 0 (·.setTapLeafScripts
+    #[{ leaf0 with controlBlock := { leaf0.controlBlock with outputKeyParity := !leaf0.controlBlock.outputKeyParity } }])
+  let badVerPsbt := basePsbt.modifyInput 0 (·.setTapLeafScripts #[{ leaf0 with leafVersion := 0xC2 }])
+  for (label, tampered) in [("script", badScriptPsbt), ("controlBlock", badCbPsbt), ("leafVersion", badVerPsbt)] do
+    refusedWith s!"sameLeaves: tampered {label} is refused"
+      (account.reviewSpend tampered #[utxo] owned testChainTip)
+      (.invalidSpend "input 1 changes the spending policy")
+
+  -- Input checks: missing witnessUTXO, zero-amount coin, exact coinbase maturity height, and maxMoney boundaries
+  let missingWitness := basePsbt.modifyInput 0 (·.remove PSBT.InType.witnessUTXO)
+  refusedWith "input: missing witnessUTXO is refused"
+    (account.reviewSpend missingWitness #[utxo] owned testChainTip)
+    (.invalidSpend "input 1 has the wrong amount or locking script")
+
+  let zeroCoin := { utxo with amount := 0 }
+  let zeroInPsbt := { (basePsbt.modifyInput 0 (setWitnessAmount · 0 utxo.scriptPubKey)) with outputs := #[mkOut 1 destination] }
+  refusedWith "input: zero-satoshi coin is refused"
+    (account.reviewSpend zeroInPsbt #[zeroCoin] #[] testChainTip)
+    (.invalidSpend "input 1 has the wrong amount or locking script")
+
+  let exactMatureHeight := testChainTip - Wallet.coinbaseMaturity + 1
+  let exactMature := { utxo with isCoinbase := true, height := exactMatureHeight }
+  let oneShort := { utxo with isCoinbase := true, height := exactMatureHeight + 1 }
+  check "coinbase: exact maturity block (height + 99 == tip) is accepted"
+    (account.reviewSpend basePsbt #[exactMature] owned testChainTip).isOk
+  refusedWith "coinbase: 1 block short of maturity is refused"
+    (account.reviewSpend basePsbt #[oneShort] owned testChainTip)
+    (.invalidSpend "input 1 spends a coinbase that matures in 1 blocks")
+
+  let maxSats := Int64.ofInt MultisigAccount.maxMoney
+  let overMaxSats := Int64.ofInt (MultisigAccount.maxMoney + 1)
+  let maxCoin := { utxo with amount := maxSats }
+  let maxPsbt := { (basePsbt.modifyInput 0 (setWitnessAmount · maxSats utxo.scriptPubKey)) with
+                   outputs := #[mkOut maxSats destination] }
+  check "supply: exact maxMoney input and output are accepted"
+    ((← need "maxMoney" (account.reviewSpend maxPsbt #[maxCoin] #[] testChainTip)).inputTotal == maxSats)
+
+  let overMaxCoin := { utxo with amount := overMaxSats }
+  let overMaxInPsbt := { (basePsbt.modifyInput 0 (setWitnessAmount · overMaxSats utxo.scriptPubKey)) with
+                         outputs := #[mkOut maxSats destination] }
+  refusedWith "supply: single input over maxMoney is refused"
+    (account.reviewSpend overMaxInPsbt #[overMaxCoin] #[] testChainTip)
+    (.invalidSpend "input 1 has the wrong amount or locking script")
+
+  let utxo2 ← funding account 1 (index := 1) (txidByte := 0x5B)
+  let twoInputsTx : Transaction :=
+    { version := 2, locktime := 0
+      inputs := #[{ previousOutput := maxCoin.outpoint, scriptSig := .empty, sequence := 0xFFFF_FFFD },
+                  { previousOutput := utxo2.outpoint, scriptSig := .empty, sequence := 0xFFFF_FFFD }]
+      outputs := #[{ value := maxSats, scriptPubKey := destination }] }
+  let twoInPsbt ← need "psbt2" (MultisigAccount.lift (·.name) (PSBT.create twoInputsTx
+    #[{ spentOutput := { amount := maxSats, scriptPubKey := maxCoin.scriptPubKey } },
+      { spentOutput := { amount := 1, scriptPubKey := utxo2.scriptPubKey } }]
+    #[{}]))
+  let leaves0 ← need "l0" (account.leaves 0 0)
+  let leaves1 ← need "l1" (account.leaves 0 1)
+  let attach (p : PSBT) (k : Nat) (ls : Array MultisigAccount.Leaf) : PSBT :=
+    p.modifyInput k fun i =>
+      (i.setTapInternalKey (ls[0]?.map (·.internalKey))).setTapLeafScripts
+        (ls.map fun l => { controlBlock := l.controlBlock, script := l.script, leafVersion := l.version })
+  let twoInPsbt := attach (attach twoInPsbt 0 leaves0) 1 leaves1
+  refusedWith "supply: sum of inputs exceeding maxMoney is refused"
+    (account.reviewSpend twoInPsbt #[maxCoin, utxo2] #[] testChainTip)
+    (.invalidSpend "input amounts exceed Bitcoin's supply")
+
+  -- Output validation: zero amount, empty script, >maxMoney single output, >maxMoney sum of outputs
+  let zeroOutPsbt := { basePsbt with outputs := #[mkOut 0 destination, mkOut 95_000 destination] }
+  let emptyScriptPsbt := { basePsbt with outputs := #[mkOut 95_000 .empty] }
+  let overMaxOutPsbt := { maxPsbt with outputs := #[mkOut overMaxSats destination] }
+  let overMaxOutSumPsbt := { maxPsbt with outputs := #[mkOut maxSats destination, mkOut 1 destination] }
+  for (label, badOut) in [("zero amount", zeroOutPsbt), ("empty script", emptyScriptPsbt), ("over maxMoney", overMaxOutPsbt)] do
+    refusedWith s!"output: {label} is refused"
+      (account.reviewSpend badOut (if label == "over maxMoney" then #[maxCoin] else #[utxo]) #[] testChainTip)
+      (.invalidSpend "output 1 has an invalid amount or script")
+  refusedWith "output: sum of outputs exceeding maxMoney is refused"
+    (account.reviewSpend overMaxOutSumPsbt #[maxCoin] #[] testChainTip)
+    (.invalidSpend "output amounts exceed Bitcoin's supply")
+
+  -- Output candidates: receive choice 0 owned, out-of-range choices ignored, duplicates deduplicated, 1024 vs 1025 cap
+  let recv3 ← need "recv3" (account.scriptPubKey 3 0)
+  let toRecv3 := { basePsbt with outputs := #[mkOut 95_000 recv3] }
+  let revRecv ← need "review recv3"
+    (account.reviewSpend toRecv3 #[utxo] #[{ choice := 0, index := 3 }, { choice := 2, index := 0 }, { choice := -1, index := 0 }] testChainTip)
+  check "candidates: receive coordinate (choice 0) is owned and invalid choices are ignored"
+    (revRecv.outputs.size == 1 && revRecv.outputs[0]!.isAccountOwned)
+  let dupCoords := Array.replicate 1_030 ({ choice := 1, index := 0 } : OutputCoordinate)
+  check "candidates: duplicate coordinates deduplicate below the 1024 limit"
+    ((← need "dedup" (MultisigAccount.outputCandidates dupCoords)).size == 1)
+  let coords1024 := (Array.range 512).map (fun i => ({ choice := 0, index := i.toUInt32 } : OutputCoordinate)) ++
+                    (Array.range 512).map (fun i => ({ choice := 1, index := i.toUInt32 } : OutputCoordinate))
+  check "candidates: exact 1024 distinct coordinates are accepted"
+    ((← need "1024" (MultisigAccount.outputCandidates coords1024)).size == 1_024)
+  refusedWith "candidates: 1025 distinct coordinates are refused"
+    (MultisigAccount.outputCandidates (coords1024.push { choice := 0, index := 999 }))
+    (.invalidSpend "too many candidate account output paths")
+
+  -- Output count bounds (0 refused, 1000 accepted, 1001 refused) and txVersion (1 & 2 accepted, 0 & 3 refused)
+  refusedWith "reviewSpend: 0 outputs refused"
+    (account.reviewSpend { basePsbt with outputs := #[] } #[utxo] #[] testChainTip)
+    (.invalidSpend "it has no outputs or more than 1,000")
+  let outs1000 := Array.replicate 1_000 (mkOut 100 destination)
+  let outs1001 := Array.replicate 1_001 (mkOut 99 destination)
+  check "reviewSpend: exact 1000 outputs accepted"
+    ((← need "1000 outs" (account.reviewSpend { basePsbt with outputs := outs1000 } #[utxo] #[] testChainTip)).outputs.size == 1_000)
+  refusedWith "reviewSpend: 1001 outputs refused"
+    (account.reviewSpend { basePsbt with outputs := outs1001 } #[utxo] #[] testChainTip)
+    (.invalidSpend "it has no outputs or more than 1,000")
+
+  check "reviewSpend: txVersion 1 is accepted"
+    (account.reviewSpend (setTxVer basePsbt 1) #[utxo] owned testChainTip).isOk
+  refusedWith "reviewSpend: txVersion 0 is refused"
+    (account.reviewSpend (setTxVer basePsbt 0) #[utxo] owned testChainTip)
+    (.invalidSpend "transaction version 0 is not supported")
+  refusedWith "reviewSpend: txVersion 3 is refused"
+    (account.reviewSpend (setTxVer basePsbt 3) #[utxo] owned testChainTip)
+    (.invalidSpend "transaction version 3 is not supported")
+
+def multisigPolicyEdgeCases : TM Unit := do
+  let k1 := ByteArray.mk (Array.replicate 32 0x11)
+  let k2 := ByteArray.mk (Array.replicate 32 0x22)
+  let badKey := ByteArray.mk (Array.replicate 31 0x11)
+  -- Kill survivors in Multisig.lean: scriptNumber trailing zero & maxKeys = 999 vs 1000
+  check "multisig: scriptNumber rejects non-minimal trailing zero byte"
+    ((Multisig.scriptNumber (ByteArray.mk #[0x02, 0x11, 0x00]) 0).isNone)
+  let s999 ← needE "s999" (·.name) (Multisig.script 1 (Array.replicate 999 k1) false)
+  check "multisig: parsePolicy accepts maxKeys (999)" ((Multisig.parsePolicy s999).map (·.keys.size) == some 999)
+  -- checkedKeys & checkLock
+  check "multisig: checkedKeys refuses invalid threshold"
+    ((Multisig.checkedKeys 0 #[k1] false matches .error .invalidThreshold) &&
+     (Multisig.checkedKeys 2 #[k1] false matches .error .invalidThreshold))
+  check "multisig: checkedKeys refuses too many keys"
+    (Multisig.checkedKeys 1 (Array.replicate 1000 k1) false matches .error .tooManyKeys)
+  check "multisig: checkedKeys refuses bad key length"
+    (Multisig.checkedKeys 1 #[badKey] false matches .error .invalidKey)
+  check "multisig: checkLock bounds (0 and 2^31 refused, 1 and 2^31-1 accepted)"
+    ((Multisig.checkLock 0 matches .error .invalidTimelock) &&
+     (Multisig.checkLock 0x8000_0000 matches .error .invalidTimelock) &&
+     (Multisig.checkLock 1).toBool && (Multisig.checkLock 0x7FFF_FFFF).toBool)
+  -- scriptNumber boundaries (OP_1..OP_16, multi-byte minimal vs negative/non-minimal/truncated)
+  check "multisig: scriptNumber OP_16 and multi-byte minimal"
+    (Multisig.scriptNumber (ByteArray.mk #[0x60]) 0 == some (16, 1) &&
+     Multisig.scriptNumber (ByteArray.mk #[0x01, 0x11]) 0 == some (17, 2) &&
+     Multisig.scriptNumber (ByteArray.mk #[0x02, 0x80, 0x00]) 0 == some (128, 3))
+  check "multisig: scriptNumber rejects empty, negative, non-minimal high zero, and <=16 push"
+    ((Multisig.scriptNumber .empty 0).isNone &&
+     (Multisig.scriptNumber (ByteArray.mk #[0x01, 0x80]) 0).isNone &&
+     (Multisig.scriptNumber (ByteArray.mk #[0x02, 0x01, 0x00]) 0).isNone &&
+     (Multisig.scriptNumber (ByteArray.mk #[0x01, 0x10]) 0).isNone)
+  -- parsePolicy negative shapes: timelocked pk edge cases
+  let tlPk ← needE "tlPk" (·.name) (Multisig.timelockedKeyScript k1 144)
+  check "parsePolicy: tlPk accepts canonical and rejects empty/wrong opcode/trailing/bad blocks"
+    ((Multisig.parsePolicy tlPk).isSome &&
+     (Multisig.parsePolicy ⟨.empty⟩).isNone &&
+     (Multisig.parsePolicy ⟨tlPk.bytes.set! 33 Script.Op.checkSig⟩).isNone &&
+     (Multisig.parsePolicy ⟨tlPk.bytes.set! (tlPk.bytes.size - 1) Script.Op.numEqual⟩).isNone &&
+     (Multisig.parsePolicy ⟨tlPk.bytes.push 0x00⟩).isNone &&
+     (Multisig.parsePolicy ⟨tlPk.bytes.extract 0 34 ++ ByteArray.mk #[0x04, 0x00, 0x00, 0x00, 0x00, Script.Op.checkSequenceVerify]⟩).isNone)
+  -- parsePolicy multi_a edge cases
+  let m12 ← needE "m12" (·.name) (Multisig.script 1 #[k1, k2] false)
+  check "parsePolicy: multi_a rejects bad checkSigAdd, bad final op, trailing byte, threshold 0 or >keys"
+    ((Multisig.parsePolicy m12).isSome &&
+     (Multisig.parsePolicy ⟨m12.bytes.set! 67 Script.Op.checkSig⟩).isNone &&
+     (Multisig.parsePolicy ⟨m12.bytes.set! (m12.bytes.size - 1) Script.Op.checkSig⟩).isNone &&
+     (Multisig.parsePolicy ⟨m12.bytes.push Script.Op.numEqual⟩).isNone &&
+     (Multisig.parsePolicy ⟨(m12.bytes.set! 68 0x00)⟩).isNone &&
+     (Multisig.parsePolicy ⟨m12.bytes.set! 68 0x53⟩).isNone)
+  let tlm ← needE "tlm" (·.name) (Multisig.timelockedMultiScript 1 #[k1, k2] 144)
+  check "parsePolicy: timelocked multi_a rejects bad csv/trailing/zero blocks"
+    ((Multisig.parsePolicy tlm).isSome &&
+     (Multisig.parsePolicy ⟨tlm.bytes.push 0x00⟩).isNone &&
+     (Multisig.parsePolicy ⟨tlm.bytes.set! (tlm.bytes.size - 1) Script.Op.numEqual⟩).isNone)
+  -- RelativeLock disable/type flags on blocks param
+  check "bip68: blocks with disable or time flag rejected"
+    (!RelativeLock.isSatisfied 0x8000_0001 10 2 &&
+     !RelativeLock.isSatisfied 0x0040_0001 10 2)
+
+def psbtRolesEdgeCases : TM Unit := do
+  let (account, ms) ← accountWith
+  let utxo ← funding account 100_000
+  let p0 ← need "p0" (spend account utxo)
+  let tx ← needE "tx" (·.name) p0.unsignedTransaction
+  let spk := utxo.scriptPubKey
+  let inInfo : PSBT.InputInfo := { spentOutput := { amount := 100_000, scriptPubKey := spk } }
+  let fakeKey : PSBT.TaprootKey :=
+    { internalKey := ByteArray.mk (Array.replicate 32 0x22), masterFingerprint := 0x12345678, path := #[86, 1, 0] }
+  -- PSBT.create count mismatches, negative amount, output key origins
+  check "psbt create: mismatched input/output counts & negative amount refused"
+    ((PSBT.create tx #[] #[{}]).isOk == false &&
+     (PSBT.create tx #[inInfo] #[]).isOk == false &&
+     (PSBT.create tx #[{ spentOutput := { amount := -1, scriptPubKey := spk } }] #[{}]).isOk == false)
+  let outInfos := tx.outputs.map (fun _ => ({ key := some fakeKey } : PSBT.OutputInfo))
+  let withKey ← needE "create with key" (·.name) (PSBT.create tx #[{ spentOutput := inInfo.spentOutput, key := some fakeKey }] outInfos)
+  check "psbt create: accepts 0-satoshi witnessUTXO and attaches output key origin"
+    (!withKey.outputs[0]!.tapBIP32Derivation.isEmpty &&
+     (PSBT.create tx #[{ spentOutput := { amount := 0, scriptPubKey := spk } }] outInfos).isOk)
+  -- attachScriptPaths validation & key origin overwrite
+  let leaves := p0.inputs[0]!.tapLeafScripts
+  let leaf0 := leaves[0]!
+  check "attachScriptPaths: bad/boundary index and empty leaves refused"
+    ((p0.attachScriptPaths p0.inputs.size #[(leaf0.controlBlock, ⟨leaf0.script⟩, leaf0.leafVersion)] #[]).isOk == false &&
+     (p0.attachScriptPaths 5 #[] #[]).isOk == false &&
+     (p0.attachScriptPaths 0 #[] #[]).isOk == false)
+  let kOrig := ByteArray.mk (Array.replicate 32 0x33)
+  let o1 : PSBT.KeyOrigin := { leafHashes := #[], masterFingerprint := 1, path := #[0] }
+  let o2 : PSBT.KeyOrigin := { leafHashes := #[leaf0.leafHash], masterFingerprint := 2, path := #[1] }
+  let attached ← needE "attach" (·.name)
+    (withKey.attachScriptPaths 0 #[(leaf0.controlBlock, ⟨leaf0.script⟩, leaf0.leafVersion)] #[(kOrig, o1), (kOrig, o2)])
+  check "attachScriptPaths: deduplicates/updates tapBIP32Derivation"
+    ((attached.inputs[0]!.tapBIP32Derivation.filter (·.1 == kOrig)).size == 1)
+  -- combined: mismatched input count, different unsignedTx, conflicting pairs
+  let extraIn : PSBT := { p0 with inputs := p0.inputs.push p0.inputs[0]! }
+  let diffLock := { p0 with globals := PSBT.setPair p0.globals (PSBT.KeyValue.make PSBT.GlobalType.fallbackLocktime .empty (u32LE 777)) }
+  let conflictPair := p0.modifyInput 0 (·.set (PSBT.KeyValue.make 0xFD .empty (ByteArray.mk #[0x01])))
+  let conflictPair2 := p0.modifyInput 0 (·.set (PSBT.KeyValue.make 0xFD .empty (ByteArray.mk #[0x02])))
+  check "combined: count mismatch, diff tx, and conflict refused"
+    ((PSBT.combined p0 #[extraIn]).toBool == false &&
+     (PSBT.combined p0 #[diffLock]).toBool == false &&
+     (PSBT.combined conflictPair #[conflictPair2]).toBool == false)
+  -- validatedKeyPathWitness & validScriptPathSignatures negative cases
+  let spent : Array SighashBIP341.SpentOutput := #[{ amount := 100_000, scriptPubKey := spk }]
+  let zeroSig64 := ByteArray.mk (Array.replicate 64 0x00)
+  let sig65Default := zeroSig64.push 0x00
+  let sig65None := zeroSig64.push 0x02
+  let nonP2TR : Array SighashBIP341.SpentOutput := #[{ amount := 100_000, scriptPubKey := ByteArray.mk (#[0x00, 0x14] ++ Array.replicate 20 0xAA) }]
+  let nonCurveSig64 := ByteArray.mk (Array.replicate 64 0xFF)
+  check "validatedKeyPathWitness: bad sig length, unsafe/0x00 sighash, non-P2TR, invalid & off-curve sig refused"
+    (!(PSBT.validatedKeyPathWitness 0 (ByteArray.mk (Array.replicate 63 0)) tx spent).isOk &&
+     (match PSBT.validatedKeyPathWitness 0 sig65Default tx spent with
+      | .error (.psbt (.malformed msg)) => msg == "input 0 unsafe tap key sighash type" | _ => false) &&
+     !(PSBT.validatedKeyPathWitness 0 sig65None tx spent).isOk &&
+     !(PSBT.validatedKeyPathWitness 0 zeroSig64 tx nonP2TR).isOk &&
+     !(PSBT.validatedKeyPathWitness 0 zeroSig64 tx spent).isOk &&
+     !(PSBT.validatedKeyPathWitness 0 nonCurveSig64 tx spent).isOk)
+  -- committingHashType exact error for 255 vs 256
+  let psbt255 := p0.modifyInput 0 (·.setSighashType (some 255))
+  check "committingHashType: 255 triggers non-DEFAULT/ALL message, not >255"
+    (match PSBT.committingHashType psbt255.inputs[0]! with
+     | .error (.psbt (.malformed msg)) => msg == "refusing non-DEFAULT/ALL sighash type 255" | _ => false)
+  -- leafCommitsToOutput checks both key AND parity
+  let flippedParityLeaf := { leaf0 with controlBlock := { leaf0.controlBlock with outputKeyParity := !leaf0.controlBlock.outputKeyParity } }
+  check "leafCommitsToOutput rejects flipped outputKeyParity"
+    (PSBT.leafCommitsToOutput leaf0 spk && !PSBT.leafCommitsToOutput flippedParityLeaf spk)
+  -- signScriptPath deduplicates when signing twice with same key
+  let signed1 ← need "sign1" (sign account p0 ms[0]! #[utxo])
+  let signedAgain ← need "signAgain" (sign account signed1 ms[0]! #[utxo])
+  check "signScriptPath deduplicates repeated signature for same key and leaf"
+    (signedAgain.inputs[0]!.tapScriptSignatures.size == signed1.inputs[0]!.tapScriptSignatures.size)
+  let bogusId : PSBT.TapScriptSignatureID := { publicKey := kOrig, leafHash := ByteArray.mk (Array.replicate 32 0x99) }
+  let leafKey := signed1.inputs[0]!.tapScriptSignatures[0]!.1.publicKey
+  let realSig := signed1.inputs[0]!.tapScriptSignatures[0]!.2
+  let policy ← match Multisig.parsePolicy ⟨leaf0.script⟩ with | some pol => pure pol | none => throw "policy"
+  let otherLeafKey := (policy.keys.find? (· != leafKey)).getD leafKey
+  -- First test bogus/invalid signatures directly via a PSBT carrying each bad signature kind
+  let junkBad := signed1.modifyInput 0 fun inp =>
+    inp.setTapScriptSignatures #[
+      (bogusId, zeroSig64),
+      ({ publicKey := kOrig, leafHash := leaf0.leafHash }, zeroSig64),
+      ({ publicKey := otherLeafKey, leafHash := leaf0.leafHash }, ByteArray.mk #[0x01, 0x02]),
+      ({ publicKey := otherLeafKey, leafHash := leaf0.leafHash }, sig65None),
+      ({ publicKey := leafKey, leafHash := leaf0.leafHash }, zeroSig64)
+    ]
+  check "validScriptPathSignatures rejects stranger, wrong-leaf, bad-len, unsafe-sighash, and invalid sig"
+    ((junkBad.validScriptPathSignatures 0 leaf0 tx spent policy.keys).isEmpty)
+  -- Duplicate valid entry on raw pairs exercises the `some j => valid.set! j` overwrite branch
+  let dupPSBT : PSBT := { signed1 with inputs := #[⟨#[
+    PSBT.KeyValue.make PSBT.InType.tapScriptSignature (leafKey ++ leaf0.leafHash) realSig,
+    PSBT.KeyValue.make PSBT.InType.tapScriptSignature (leafKey ++ leaf0.leafHash) realSig
+  ]⟩] }
+  let validSigs := dupPSBT.validScriptPathSignatures 0 leaf0 tx spent policy.keys
+  check "validScriptPathSignatures deduplicates valid signer"
+    (validSigs.size == 1 && validSigs[0]!.1 == leafKey)
+  -- finalize fails cleanly when missing/incomplete or invalid witness; extractedTransaction fails before finalize
+  check "finalize & extractedTransaction error paths"
+    (!(PSBT.finalize p0).isOk && !(PSBT.extractedTransaction p0).isOk &&
+     !(PSBT.finalize { p0 with inputs := #[{ p0.inputs[0]! with pairs := p0.inputs[0]!.pairs.filter (·.type != PSBT.InType.tapLeafScript) }] }).isOk)
+
+def coinSelectionAndBuilderBoundaries : TM Unit := do
+  let p2tr := ByteArray.mk (#[0x51, 0x20] ++ Array.replicate 32 0x01)
+  let p2wpkh := ByteArray.mk (#[0x00, 0x14] ++ Array.replicate 20 0x02)
+  let witnessV16 := ByteArray.mk (#[0x60, 0x20] ++ Array.replicate 32 0x03)
+  let p2pkh := ByteArray.mk (#[0x76, 0xA9, 0x14] ++ Array.replicate 20 0x04 ++ #[0x88, 0xAC])
+  check "dustThreshold across P2WPKH, P2TR, witness v16, P2PKH, empty"
+    (CoinSelection.dustThreshold p2wpkh == 294 &&
+     CoinSelection.dustThreshold p2tr == 330 &&
+     CoinSelection.dustThreshold witnessV16 == 330 &&
+     CoinSelection.dustThreshold p2pkh == 546 &&
+     CoinSelection.dustThreshold .empty > 0)
+  let mkCoin (amt : Int64) (b : UInt8 := 0x11) (vout : UInt32 := 0) (spk : ByteArray := p2tr) : WalletUTXO :=
+    { txid := ByteArray.mk (Array.replicate 32 b), vout, amount := amt, scriptPubKey := spk, chain := .receive, index := 0, height := 100 }
+  let pay1 : Payment := { amount := 50_000, scriptPubKey := p2tr }
+  -- checkArguments & checkPayment errors
+  refused "select: empty change script" (CoinSelection.select #[mkCoin 100_000] #[pay1] .empty 1) "emptyScript"
+  refused "select: witness size 0" (CoinSelection.select #[mkCoin 100_000] #[pay1] p2tr 1 0) "invalidWitnessSize"
+  refused "select: witness size > 100000" (CoinSelection.select #[mkCoin 100_000] #[pay1] p2tr 1 100_001) "invalidWitnessSize"
+  refused "select: NaN rate" (CoinSelection.select #[mkCoin 100_000] #[pay1] p2tr (0.0 / 0.0)) "invalidFeeRate"
+  refused "select: Inf rate" (CoinSelection.select #[mkCoin 100_000] #[pay1] p2tr (1.0 / 0.0)) "invalidFeeRate"
+  refused "select: negative rate" (CoinSelection.select #[mkCoin 100_000] #[pay1] p2tr (-1.0)) "invalidFeeRate"
+  refused "select: invalid payment amount <=0" (CoinSelection.select #[mkCoin 100_000] #[{ amount := 0, scriptPubKey := p2tr }] p2tr 1) "invalidAmount"
+  refused "select: payment empty script" (CoinSelection.select #[mkCoin 100_000] #[{ amount := 1_000, scriptPubKey := .empty }] p2tr 1) "emptyScript"
+  refused "select: payment sum overflow"
+    (CoinSelection.select #[mkCoin bitcoinAmountMaximum] #[{ amount := bitcoinAmountMaximum, scriptPubKey := p2tr }, { amount := 1_000, scriptPubKey := p2tr }] p2tr 1)
+    "amountOverflow"
+  -- checkSpendableSet & checkStandardSize
+  let badTxidCoin := { mkCoin 100_000 with txid := ByteArray.mk (Array.replicate 31 0x11) }
+  refused "select: invalid outpoint txid len" (CoinSelection.select #[badTxidCoin] #[pay1] p2tr 1) "invalidOutpoint"
+  refused "select: zero amount utxo" (CoinSelection.select #[mkCoin 0] #[pay1] p2tr 1) "invalidAmount"
+  refused "select: empty spk utxo" (CoinSelection.select #[mkCoin 100_000 (spk := .empty)] #[pay1] p2tr 1) "emptyScript"
+  refused "select: duplicate utxo" (CoinSelection.select #[mkCoin 100_000 0x11, mkCoin 50_000 0x11] #[pay1] p2tr 1) "duplicateUTXO"
+  let manySmall := (Array.range 1_800).map fun i => mkCoin 10_000 ((i % 256).toUInt8) i.toUInt32
+  refused "select: transactionTooLarge > 100k vbytes"
+    (CoinSelection.select manySmall #[{ amount := 17_800_000, scriptPubKey := p2tr }] p2tr 1 66)
+    "transactionTooLarge"
+  -- Kill survivors in CoinSelection.lean: exact dust (330 ok), exact 100k vsize ok, satPerKvB 1.13==1130, take exact 1-coin boundary
+  check "select: exact dust threshold (330 sats) accepted"
+    ((CoinSelection.select #[mkCoin 100_000] #[{ amount := 330, scriptPubKey := p2tr }] p2tr 1).isOk)
+  check "checkStandardSize: exact 100,000 vB accepted"
+    ((CoinSelection.checkStandardSize 4 #[{ value := 1_000, scriptPubKey := p2tr }] 99_782).isOk)
+  check "satPerKvB: 1.13 rounds to nearest 1130, not ceil 1131"
+    (CoinSelection.satPerKvB 1.13 == 1130)
+  check "select: exact single-coin match stops without taking second coin"
+    (((CoinSelection.select #[mkCoin 50_154 0x11, mkCoin 5_000 0x22] #[pay1] p2tr 1).map (·.selected.size)).toOption == some 1)
+  -- Kill survivors in SpendReview.lean: exact unknown-coin error text, resolvedSpan boundary (receive[64] != change[0]), nested m=0
+  let (acctSR, _) ← accountWith
+  let utxoSR ← funding acctSR 100_000
+  let p0SR ← need "p0SR" (spend acctSR utxoSR)
+  let change0Addr ← need "change0" (acctSR.address 0 1)
+  let recv64Addr ← need "recv64" (acctSR.address MultisigAccount.resolvedSpan.toUInt32 0)
+  check "SpendReview: receive[resolvedSpan] differs from change[0]" (recv64Addr != change0Addr)
+  refusedWith "review: exact unknown coin input 1 message"
+    (acctSR.reviewSpend p0SR #[] owned testChainTip)
+    (.invalidSpend "input 1 is not an available coin of this account")
+  let pairExprs ← (#[0x10, 0x11, 0x12, 0x13] : Array UInt8).mapM fun b => do keyExpression (← master b)
+  refusedWith "nested: fewerSigners threshold 0 refused"
+    (MultisigAccount.makeNestedDescriptor #[.all (pairExprs.extract 0 2), .all (pairExprs.extract 2 4)] 2 (some (.fewerSigners 0 10)) .signet)
+    (.invalidDescriptor "the recovery threshold must be between one and the number of members")
+  -- TransactionBuilder negative & boundary cases
+  check "txBuilder.draw: NaN, negative, and >=1 clamped"
+    (TransactionBuilder.draw (0.0 / 0.0) == 0 && TransactionBuilder.draw (-0.5) == 0 &&
+     TransactionBuilder.draw 2.0 < 1.0)
+  check "txBuilder.antiFeeSnipingLocktime: tip < lookback clamps to 0"
+    (TransactionBuilder.antiFeeSnipingLocktime 10 0.05 0.5 == 0 &&
+     TransactionBuilder.antiFeeSnipingLocktime 200 0.05 0.5 == 150)
+  check "txBuilder.compactSizeLength all 4 tiers"
+    (TransactionBuilder.compactSizeLength 0xFC == 1 &&
+     TransactionBuilder.compactSizeLength 0xFD == 3 &&
+     TransactionBuilder.compactSizeLength 0x1_0000 == 5 &&
+     TransactionBuilder.compactSizeLength 0x1_0000_0000 == 9)
+  let outp : Transaction.Outpoint := ⟨ByteArray.mk (Array.replicate 32 0x22), 0⟩
+  let badOutp : Transaction.Outpoint := ⟨ByteArray.mk (Array.replicate 10 0x22), 0⟩
+  check "txBuilder.build: noInputs, invalidOutpoint, duplicateInput"
+    ((TransactionBuilder.build #[] #[pay1] matches .error .noInputs) &&
+     (TransactionBuilder.build #[badOutp] #[pay1] matches .error .invalidOutpoint) &&
+     (TransactionBuilder.build #[outp, outp] #[pay1] matches .error .duplicateInput))
+  check "txBuilder.build: noOutputs, invalidAmount, emptyScript, amountOverflow, invalidChangePosition"
+    ((TransactionBuilder.build #[outp] #[] matches .error .noOutputs) &&
+     (TransactionBuilder.build #[outp] #[{ amount := 0, scriptPubKey := p2tr }] matches .error (.invalidAmount 0)) &&
+     (TransactionBuilder.build #[outp] #[{ amount := 1000, scriptPubKey := .empty }] matches .error .emptyScript) &&
+     (TransactionBuilder.build #[outp] #[{ amount := bitcoinAmountMaximum, scriptPubKey := p2tr }, pay1] matches .error .amountOverflow) &&
+     (TransactionBuilder.build #[outp] #[pay1] (some pay1) (some (-1)) matches .error (.invalidChangePosition (-1))) &&
+     (TransactionBuilder.build #[outp] #[pay1] (some pay1) (some 2) matches .error (.invalidChangePosition 2)))
+
+def walletValidationEdgeCases : TM Unit := do
+  -- forgetCardSearchKey never throws even if missing
+  let ks ← newKeyStore
+  let w ← fundedWallet ks
+  w.forgetCardSearchKey
+  -- commitFeeBump refusal when original is already replaced / not pending
+  let prep ← need "prep" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  let tx := prep.built.transaction
+  let fakePrep : PreparedFeeBump :=
+    { originalTxid := ByteArray.mk (Array.replicate 32 0xEE), built := prep.built,
+      selected := #[], originalChangeOutputIndex := 0, change := none, changeIndex := 0, changeOutputIndex := none }
+  check "wallet.commitFeeBump: unknown original refused"
+    (match ← (w.commitFeeBump fakePrep).run with | .error (.feeBump .transactionNotPending) => true | _ => false)
+  need "commit orig" (w.commit prep)
+  let rate ← need "rate" (w.pendingFeeRate tx.txid)
+  let bump ← need "bump" (w.buildFeeBump tx.txid (rate + 1))
+  let badChangeBump := { bump with changeOutputIndex := some 99 }
+  check "wallet.commitFeeBump: bad changeOutputIndex refused"
+    (match ← (w.commitFeeBump badChangeBump).run with | .error (.wallet .changeOutputMissing) => true | _ => false)
+  -- validatedHistory & validatedPendingSends rejection branches via ImportBundle
+  let bundle ← need "export" w.exportBundle
+  let expectImportErr (label : String) (b : ImportBundle) : TM Unit := do
+    check s!"importing: {label}" (match ← (Wallet.importing b (← newKeyStore) none pinned).run with | .error _ => true | _ => false)
+  expectImportErr "unsupported version" { bundle with version := 999 }
+  expectImportErr "unknown network" { bundle with network := "mars" }
+  expectImportErr "neither descriptor nor mnemonic" { bundle with descriptor := none, mnemonic := none }
+  expectImportErr "height out of range" { bundle with lastKnownHeight := 0xFFFF_FFFF }
+  expectImportErr "cursor overflow" { bundle with nextReceiveIndex := some HDKey.hardenedOffset }
+  -- invalid history txid / replacedBy / negative amount / unconfirmed blockHash
+  let badHistEntry : ImportBundle.KnownTransaction :=
+    { txid := "not-hex", height := 10, received := 0, spent := 0, fee := none, replacedBy := none, rawTransaction := none, blockHash := none }
+  expectImportErr "bad history txid" { bundle with transactions := #[badHistEntry] }
+  let goodHex := hex (ByteArray.mk (Array.replicate 32 0x42))
+  let badReplEntry : ImportBundle.KnownTransaction :=
+    { txid := goodHex, height := 10, received := 0, spent := 0, fee := none, replacedBy := some "abcd", rawTransaction := none, blockHash := none }
+  expectImportErr "bad replacement txid" { bundle with transactions := #[badReplEntry] }
+  let negAmtEntry : ImportBundle.KnownTransaction :=
+    { txid := goodHex, height := 10, received := -5, spent := 0, fee := none, replacedBy := none, rawTransaction := none, blockHash := none }
+  expectImportErr "negative history amount" { bundle with transactions := #[negAmtEntry] }
+  let unconfHashEntry : ImportBundle.KnownTransaction :=
+    { txid := goodHex, height := 0, received := 0, spent := 0, fee := none, replacedBy := none, rawTransaction := none, blockHash := some goodHex }
+  expectImportErr "unconfirmed history entry with blockHash" { bundle with transactions := #[unconfHashEntry] }
+  -- pending send with corrupt tx, bad fee, missing change out, duplicate coin
+  let pBadTx : PendingSend := { rawTransaction := ByteArray.mk #[0x01, 0x02], selected := #[], changeIndex := none, changeOutputIndex := none, fee := 0 }
+  expectImportErr "corrupt pending tx" { bundle with pendingSends := #[pBadTx] }
+  let some validP := bundle.pendingSends[0]? | throw "expected pending send"
+  expectImportErr "pending bad changeOutputIndex"
+    { bundle with pendingSends := #[{ validP with changeOutputIndex := some 42 }] }
+  expectImportErr "pending duplicate coin across sends"
+    { bundle with pendingSends := #[validP, validP] }
+  -- signingKeysFrom accountKey branch (mismatch vs match)
+  let xprv ← needE "seed key" (·.name) (HDKey.ofSeed (BIP39.seed "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"))
+  let xprv86 ← needE "acct" (·.name) (xprv.derivedPath #[86 ||| HDKey.hardenedOffset, 1 ||| HDKey.hardenedOffset, 0 ||| HDKey.hardenedOffset])
+  check "signingKeysFrom: mismatched account key refused"
+    (match ← (w.signingKeysFrom (.accountKey (xprv86.serialized .testnet) 0xDEAD_BEEF)).run with
+     | .error (.wallet .accountKeyMismatch) => true | _ => false)
+
 def main : IO UInt32 := runMain "multisig-test" do
   runTest "feeResolution" feeResolution
   runTest "sendAuthorization" sendAuthorization
   runTest "coinSelection" coinSelection
+  runTest "spendReviewBoundaries" spendReviewBoundaries
+  runTest "multisigPolicyEdgeCases" multisigPolicyEdgeCases
+  runTest "psbtRolesEdgeCases" psbtRolesEdgeCases
+  runTest "coinSelectionAndBuilderBoundaries" coinSelectionAndBuilderBoundaries
+  runTest "walletValidationEdgeCases" walletValidationEdgeCases
   runTest "twoOfThree" twoOfThree
   runTest "everyPairCanSpend" everyPairCanSpend
   runTest "threeOfThree" threeOfThree
@@ -2491,6 +2995,7 @@ def main : IO UInt32 := runMain "multisig-test" do
   runTest "historyRecord" historyRecord
   runTest "historyClassifyOutputs" historyClassifyOutputs
   runTest "historyRewind" historyRewind
+  runTest "aReorgKeepsASendsChange" aReorgKeepsASendsChange
   runTest "recordWithoutSpendsEncodesAsBefore" recordWithoutSpendsEncodesAsBefore
   runTest "spendRecordsRoundTrip" spendRecordsRoundTrip
   runTest "bundleSigners" bundleSigners

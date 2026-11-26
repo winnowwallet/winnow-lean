@@ -27,7 +27,13 @@ CI is LeanNative's reusable `ios-app` workflow (`.github/workflows/ci.yml` calls
 - [ui-fixture](ui-fixture) starts the UI journeys' regtest node and config, and afterwards collects the app's
   journals and stops the node: the hooks of LeanNative's `ui-tests` and `wire-journeys`.
 - [journeys](journeys) runs the journeys locally as CI does: in the simulator, or `--wire` headless against the
-  app itself (no simulator, no XCTest). Without names it runs all ten.
+  app itself (no simulator, no XCTest). Without names it runs all of them.
+- [leancov](leancov) runs source-level Lean 4 coverage, McCabe CRAP, and Cognitive Complexity via `leancov`:
+  stages out-of-tree instrumented copies of `Lean/Winnow` and `LeanApp/WinnowApp` under `build/leancov/`, builds
+  and runs the selected suites in parallel (including regtest suites and headless wire journeys), and writes
+  `build/leancov/coverage.json` and `build/leancov/lcov.info`. Supports `--fast` (the 13 non-regtest, non-journey
+  suites), `--report [suite ...]` (re-report from existing `.cov` profiles), `--list`, and resolves `leancov` from
+  `--leancov-dir`, `$LEANCOV_DIR`, `../leancov`, or `PATH`.
 - [ios-simulator](ios-simulator) prints one available iPhone (default) or iPad on the newest iOS runtime.
 - [signet-fixture](signet-fixture) provisions a disposable custom-signet bitcoind (`up`, `down`, `status`,
   `snapshot DIR`, `destroy`). For a regtest node with a funded wallet, use `LeanApp`'s `backend-test --fixture <dir>`.

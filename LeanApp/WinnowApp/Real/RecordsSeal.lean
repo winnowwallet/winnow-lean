@@ -1,6 +1,7 @@
 import Std.Data.HashMap
 import Winnow.Wallet
 import WinnowApp.Types
+import WinnowApp.Faults
 
 /-! # Sealed store files and their keys (port of `Sources/WinnowApp/StoreAuthentication.swift`)
 
@@ -37,11 +38,6 @@ inductive SealFailure where
   | verificationFailed
   deriving Repr, BEq, Inhabited
 
-/-- Swift's case name, as `RecordsError.name` reports a refused seal (records-test `sealFailures`). -/
-def SealFailure.name : SealFailure → String
-  | .unsealed => "unsealed" | .keyMissing => "keyMissing" | .malformed => "malformed"
-  | .verificationFailed => "verificationFailed"
-
 /-- `StoreKeyVaultError`. -/
 inductive StoreKeyVaultError where
   | alreadyEstablished (account : String)
@@ -74,6 +70,22 @@ inductive LabelStorageError where
   | unavailable | damaged | invalidLabel | full
   deriving Repr, BEq, Inhabited
 
+/-- `SignerStorageError`. -/
+inductive SignerStorageError where
+  | invalidState (reason : String)
+  | damaged
+  | duplicate (existingName : String)
+  | unknownSigner
+  | tooMany
+  deriving Repr, BEq, Inhabited
+
+def SignerStorageError.description : SignerStorageError → String
+  | .invalidState r => s!"Invalid signer storage: {r}"
+  | .damaged => "Winnow could not safely read its signers, so they cannot be changed until the file is readable again."
+  | .duplicate n => s!"That key is already saved as {n}."
+  | .unknownSigner => "That signer is no longer on this phone."
+  | .tooMany => s!"Winnow keeps at most {SignerRecord.maximumSigners} signers."
+
 /-- The `AppModel.AppError` cases the records operations throw. -/
 inductive AppError where
   | noWallet
@@ -88,37 +100,26 @@ inductive RecordsError where
   | people (e : PeopleStorageError)
   | labels (e : LabelStorageError)
   | multisig (e : MultisigStorageError)
+  | signers (e : SignerStorageError)
   | app (e : AppError)
   /-- `SenderLookupError.unavailable`. -/
   | lookup (message : String)
-  /-- Another module's error: its Swift case name and its description. -/
+  /-- Another module's error: its case name and its description. -/
   | named (name : String) (description : String)
   | io (e : IO.Error)
   deriving Inhabited
 
 namespace RecordsError
 
-/-- Swift's `kind(error)`: the enum case without its payload. -/
-def name : RecordsError → String
-  | .seal f => f.name
-  | .keyVault (.alreadyEstablished _) => "alreadyEstablished" | .keyVault .malformedKey => "malformedKey"
-  | .keyVault (.keychain _) => "keychain"
-  | .people (.invalidState _) => "invalidState" | .people .damaged => "damaged"
-  | .people (.duplicate _) => "duplicate" | .people .unknownPerson => "unknownPerson" | .people .tooMany => "tooMany"
-  | .labels .unavailable => "unavailable" | .labels .damaged => "damaged" | .labels .invalidLabel => "invalidLabel"
-  | .labels .full => "full"
-  | .multisig (.invalidState _) => "invalidState" | .multisig .damaged => "damaged"
-  | .multisig .duplicate => "duplicate" | .multisig .tooMany => "tooMany" | .multisig .unavailable => "unavailable"
-  | .app .noWallet => "noWallet"
-  | .app .sendReviewChanged => "sendReviewChanged" | .app .personCannotBePaid => "personCannotBePaid"
-  | .lookup _ => "unavailable"
-  | .named n _ => n
-  | .io _ => "ioError"
+/-- Whether this failure reports a damaged local store file. -/
+def isDamaged : RecordsError → Bool
+  | .people .damaged | .labels .damaged | .multisig .damaged | .signers .damaged => true
+  | _ => false
 
 def maximumPeople : Nat := 1_000
 def maximumMultisigAccounts : Nat := 100
 
-/-- `localizedDescription`. -/
+/-- User-facing description. -/
 def description : RecordsError → String
   | .seal _ => "The store file could not be verified."
   | .keyVault (.alreadyEstablished a) => s!"This device already holds a protected key for the {a} file."
@@ -141,6 +142,7 @@ def description : RecordsError → String
   | .multisig .duplicate => "This multisig account is already on this phone."
   | .multisig .tooMany => s!"Winnow keeps at most {maximumMultisigAccounts} multisig accounts."
   | .multisig .unavailable => multisigUnavailableText
+  | .signers e => e.description
   | .app .noWallet => "No wallet is open."
   | .app .sendReviewChanged => "The available coins, fee, or change changed. Review the payment again before signing."
   | .app .personCannotBePaid => "This person has no pay-to key or address yet. Ask them for their Winnow card."
@@ -190,7 +192,7 @@ def describe (name : String) (network : Tx.BitcoinNetwork) : String :=
   else if name == "cardAddressAlone" then Wallet.cardAddressAloneText
   else if name == "invalidEncoding" || name == "invalidDataLength" || name == "invalidPublicKey" || name == "unsupportedVersion" then
     "That card's code is not valid. Ask for the card again."
-  else s!"The operation could not be completed ({name})."
+  else "The operation couldn’t be completed."
 
 def namedError (name : String) (network : Tx.BitcoinNetwork) : RecordsError := .named name (describe name network)
 
@@ -427,6 +429,7 @@ end StoreSeal
 /-- `Data.write(to:options: .atomic)`: a temporary file beside the target, then a rename over it. -/
 def writeAtomically (data : ByteArray) (path : System.FilePath) : IO Unit := do
   let name := path.fileName.getD "store.json"
+  Faults.check s!"store.write.{name}"
   let tmp := path.withFileName s!".{name}.{hex (← IO.getRandomBytes 6)}.tmp"
   try
     IO.FS.writeBinFile tmp data

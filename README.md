@@ -154,7 +154,16 @@ lake build backend-test records-test        # Lean toolchain leanprover/lean4:v4
 cd ..
 scripts/build-ios Debug                      # the app for the simulator, from a clean checkout
 scripts/journeys                             # the UI journeys (Lean) against a regtest fixture (--wire: headless)
+scripts/leancov                              # source-level Lean coverage, McCabe CRAP, and Cognitive Complexity
 ```
+
+`scripts/leancov` stages out-of-tree instrumented copies of `Lean/Winnow` and `LeanApp/WinnowApp` under
+`build/leancov/`, builds and runs CI's test suites and headless wire journeys in parallel, and prints a strict
+source-level branch coverage, McCabe CRAP, and Cognitive Complexity report alongside `build/leancov/coverage.json`
+and `build/leancov/lcov.info`. It resolves the `leancov` tool from `--leancov-dir`, `$LEANCOV_DIR`, `../leancov`,
+or `PATH`. Use `scripts/leancov --fast` for the 13 non-regtest, non-journey suites, `scripts/leancov <suite ...>`
+to re-run specific suites, `scripts/leancov --report [suite ...]` to regenerate reports from existing `.cov`
+profiles, and `scripts/leancov --list` to list all available suites.
 
 LeanApp pins the LeanNative framework by git (`LeanApp/lakefile.toml`); `lake` fetches it into
 `LeanApp/.lake/packages/leannative`.
@@ -167,7 +176,7 @@ PATH; CI sets the first two to the pinned release `scripts/install-bitcoin` down
 
 ### UI tests
 
-The UI journeys are Lean, run on the Mac: `LeanApp/Journeys.lean` holds the twelve as named steps of what a
+The UI journeys are Lean, run on the Mac: `LeanApp/Journeys.lean` holds them as named steps of what a
 person does on each screen, `LeanApp/Journeys/Screens.lean` those screens (create the wallet, fill the Send
 form, build an account, set the recovery delay: the controls and the driver mechanics), and
 `LeanApp/Journeys/Host.lean` the other side (the fixture's node through `bitcoin-cli`, Bitcoin Core wallets as
@@ -205,13 +214,48 @@ what was on screen, and the log shows each step's time:
   with the balance its own scan confirms;
 - `twoWalletsOneDevice`: Settings → Profiles adds a second profile beside the first; the second builds a 2-of-2
   of the two, the node pays it, its payment is signed by the open profile, handed to the other with "Switch to
-  … and sign", signed there, and broadcast.
+  … and sign", signed there, and broadcast;
+- `torOnly`: Settings → Peers and routing puts the wallet on Tor alone (the node's onion name as its peer,
+  Manual routing, the fixture's SOCKS5 gateway), and a payment from the node is found through the gateway;
+- `peerFailures`: the wallet's one peer is the fixture's proxy in front of the node, which drops every
+  connection and then stalls on an open one; Home says so each time, and the wallet finds the next payment once
+  the peer serves again;
+- `reorgBackToPending`: a confirmed payment's block is replaced by a longer chain without it; the payment is
+  pending again with its change still counted, and confirms again in the new chain;
+- `protectionBackupAndRestore`: balance protection cards, 2-of-3 Ledger setup with a recovery key, automatic
+  iCloud backup toggle and Home link, backup file export with recovery phrase, wallet deletion, and seeded
+  backup file restore;
+- `savedPeopleAndSenderLookup`: revealed local funding-address selection with unverified-funding and reuse
+  warnings, Taproot sender-lookup consent UI, saved-sender selection, destinationless saved recipients, and
+  saving/renaming recipients;
+- `crossDeviceMultisigChanges`: two devices sharing stand-in iCloud (`WINNOW_E2E_CLOUD`) synchronizing account
+  rename, receive-index advance, Ledger registration, partial PSBT draft adoption and signature combination,
+  draft discard, account removal, and signer rename/removal;
+- `multisigSpendAndWatchOnlyControls`: watch-only Taproot 2-of-2 join, watch-only PSBT review/combination and
+  broadcast, plus in-flight multisig spend Rebroadcast and Give up (`abandonSpend`) with post-mining confirmation.
 
-They run two ways, both LeanNative's runners with `scripts/ui-fixture` as their hooks. `scripts/journeys --wire`
+And three that fail on purpose, each where a failure happens on a phone, then try again
+(`LeanApp/Journeys/Failures.lean`):
+
+- `capabilityFailures` (headless only: LeanNative's `failNext` has the fake shell fail a capability): the person
+  cancels the authentication before creating, before the recovery phrase and before a backup file with it; the
+  Keychain refuses the new wallet's key, the read of the phrase and the delete;
+- `backendFailures`: a fresh address, a label's save, the backup file and resetting the peers fail;
+- `paymentFailures`: a payment's broadcast and its fee bump's fail, and the node is given nothing.
+
+Winnow's own failures are test mode's (`LeanApp/WinnowApp/Faults.lean`): the control file the Paste buttons read
+names them (`Run.fail point`: `store.write.<file>`, `broadcast`, `feeRate`, `receive.fresh`, `export`,
+`peers.reset`, `payment.details`), and `Faults.check` throws one where the operation would fail, before it changes
+anything. Outside test mode, which only a Debug build resolves, none is named. Headless, `coverage.json` beside
+`journeys.json` says which of the app's messages and commands the journeys never sent or ran, and which failure
+screens (`host.failed.<context>`) they never showed.
+
+They run two ways, both LeanNative's runners with `scripts/ui-fixture` as their hooks (a regtest node; a SOCKS5 gateway in front of it for .onion and .i2p names,
+`scripts/socks-gateway`; and a proxy in front of it a journey tells to pass, drop or stall, `scripts/peer-proxy`). `scripts/journeys --wire`
 (LeanNative's `wire-journeys`) runs them against the app itself, headless: the journeys executable
 runs the app as a child of itself with a fake shell (LeanNative's `LEANNATIVE_DRIVER=wire`: a Keychain in a file,
 paths under the evidence directory, no network, no Bluetooth) and finds each element in the app's view tree, so
-the twelve run against the fixture's node with no simulator; CI runs this in the `lean` job. What
+they run against the fixture's node with no simulator; CI runs this in the `lean` job. What
 it does not test is the renderer and real touches, which the simulator run does.
 `scripts/journeys` runs them as CI does in the `app` job: LeanNative's `ui-tests` on a throwaway simulator (or `UI_SIMULATOR`)
 with the journeys as `UI_JOURNEY`, and `scripts/ui-fixture` starting the node before and collecting the app's
@@ -228,8 +272,8 @@ goes. Every run is the same, full run:
 
 | job | what |
 |---|---|
-| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: `scripts/check-core`, `scripts/secp-vectors --check`, census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test, segwit-test, secpct-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, device-sync-test, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested), card-regtest and segwit-regtest; and the twelve journeys headless (LeanNative's `wire-journey`) |
-| `app` (two at once) | the same build and census import; Debug for the simulator, checked for Swift; the twelve UI journeys split across the two, six each (`ui-journey-shards`; `scripts/ui-fixture` as the hooks) |
+| `lean` | builds `Lean/` and `LeanApp/` (every proof) and the test executables, imports the census list, then runs at the same time: `scripts/check-core`, `scripts/secp-vectors --check`, census-check on that list, the scripts' tests, multisig-test, ledger-test, silent-payment-test, card-keys-test, crypto-test, segwit-test, secpct-test, fuzz, records-test, multisig-app-test, ledger-transport-test, cloud-backup-test, device-sync-test, and `scripts/ci-regtest`'s five suites as five lines, each against its own disposable regtest bitcoind: io-test, backend-test, multisig-differential (9 cases, six of them nested), card-regtest and segwit-regtest; and every journey headless, the twenty (LeanNative's `wire-journey`), with `coverage.json` among the evidence |
+| `app` (three at once) | the same build and census import; Debug for the simulator, checked for Swift; eighteen of the journeys split across the three, six each (`ui-journey-shards`; `scripts/ui-fixture` as the hooks); the three that fail on purpose, `torOnly`, `peerFailures`, `reorgBackToPending` and the three control journeys run headless only |
 | `media` | once both parts pass, the website's media from their evidence (LeanNative's `journey-media`: one video, the journeys in order) |
 | `release` | the same build and census import; Debug and Release for the simulator and Release for devices, each checked for Swift, and that Release ignores test mode (LeanNative's `test-mode-env`) |
 

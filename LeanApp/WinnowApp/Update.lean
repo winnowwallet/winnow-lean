@@ -16,8 +16,8 @@ namespace WinnowApp
 /-- Records changed. -/
 def Model.onRecords (m : Model) (r : Records) : Model × List Cmd := ({ m with records := r }, [])
 
-/-- Background: networking stops, answers in flight are dropped, sensitive presentations close and
-forget (the receive window closes; Receive itself stays). -/
+/-- Background: networking stops (unless an iOS 26 continued sync is keeping a manual sync alive), answers in
+flight are dropped, sensitive presentations close and forget (the receive window closes; Receive itself stays). -/
 def Model.background (m : Model) : Model × List Cmd :=
   let m0 := m.nextGeneration
   let m1 := { m0 with
@@ -30,8 +30,9 @@ def Model.background (m : Model) : Model × List Cmd :=
   let (m2, cs) := match m1.sheets.findIdx? Sheet.isSensitive with
     | some i => m1.closeFrom i
     | none => (m1, [])
+  let stopNet : List Cmd := if m.continuedSync.isSome then [] else [.stopNetworking]
   -- `BackgroundSyncScheduler.shared.schedule()` on every trip to the background
-  (m2, [.stopNetworking, .stopWatchingAddress, .scheduleBackgroundTasks, .cloudScene false] ++ m.discardExport ++ cs)
+  (m2, stopNet ++ [.stopWatchingAddress, .scheduleBackgroundTasks, .cloudScene false] ++ m.discardExport ++ cs)
 
 /-- An answer for the current generation of the wallet's tasks. -/
 def Model.current (m : Model) (g : Nat) : Bool := g == m.generation
@@ -106,20 +107,21 @@ def Model.onWalletHost (m : Model) (h : Host) : Model × List Cmd :=
   | .deleted g =>
     -- the wallet is gone whether or not the scene left the front meanwhile
     if !m.sameWallet g then (m, []) else
+    let (m, endCont) := m.endContinuedSync false
     let m' := m.nextWallet
     let m' := { m' with stage := Stage.loading, walletID := none, status := ({} : Status), records := ({} : Records),
                         multisig := ({} : MultisigOverview), collect := m'.collect.cleared }
     let m' := { m' with phase := SyncPhase.idle, confirm := none, sheets := [], routes := [], nearbyLedger := none, ledgerSetup := none }
     -- what is kept now is asked of the backend: another of this network's wallets opens, or with none left
     -- the empty place onboarding begins in
-    (m', [.stopNetworking, .openWallet m'.generation m'.settings.network false])
+    (m', endCont ++ [.stopNetworking, .openWallet m'.generation m'.settings.network false])
   | _ => (m, [])
 
 /-- What the sync and the records report: a snapshot, records, the receive window, a failure. -/
 def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
-  | .snapshot g s p =>
-    if !m.current g then (m, []) else
+  | .snapshot g s p settled =>
+    if !(m.current g || m.continuedSyncGen == some g) then (m, []) else
     let wasSyncing := m.status.syncing
     let s := { s with history := historyForDisplay s.history }
     -- in a wallet that has made someone a card, the sync names a payment to that card as the person's as it
@@ -141,8 +143,10 @@ def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
           | none => m
         else m
       | none => m
+    let (m, cont) := m.advanceContinuedSync s p settled
+    if !m.active then (m, cont) else
     let (m, cs) := if wasSyncing && !s.syncing then m.loadPayment else (m, [])
-    (m, cs ++ named)
+    (m, cs ++ named ++ cont)
   | .records g r => if m.current g then m.onRecords r else (m, [])
   | .updated g d r =>
     if !m.sameWallet g then (m, []) else
@@ -158,7 +162,9 @@ def Model.onSyncHost (m : Model) (h : Host) : Model × List Cmd :=
     if m.current g && m.receive.address == address && !(m.receive.unconfirmed.any (·.1 == txid)) then
       ({ m with receive := { m.receive with unconfirmed := m.receive.unconfirmed ++ [(txid, amount)] } }, [])
     else (m, [])
-  | .failed g ctx msg => if m.sameWallet g then (m.fail ctx msg, []) else (m, [])
+  | .failed g target cancelled msg =>
+    if !m.sameWallet g then (m, []) else
+    (m.fail target cancelled msg).onContinuedSyncFailure target
   | _ => (m, [])
 
 /-- The Send sheet, its payment and a fee bump. -/
@@ -205,7 +211,7 @@ def Model.onSettingsHost (m : Model) (h : Host) : Model × List Cmd :=
   match h with
   | .catalogStored g stored =>
     if m.current g then ({ m with settingsDraft := { m.settingsDraft with catalog := some stored } }, []) else (m, [])
-  | .peers g ps => if m.current g then ({ m with settingsDraft := { m.settingsDraft with peers := ps } }, []) else (m, [])
+  | .peers g ps issues => if m.current g then ({ m with settingsDraft := { m.settingsDraft with peers := ps, peerIssues := issues } }, []) else (m, [])
   | .peersReset g =>
     if !m.sameWallet g then (m, []) else
     let g := m.generation
@@ -248,13 +254,15 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
   | .captured on => ({ m with captured := on }, [])
   | .backgroundRefresh available => ({ m with backgroundRefreshAvailable := available }, [])
   | .bgtask id kind tag =>
+    if kind == "continued" then m.onContinuedTaskLaunched id tag else
     -- `handle(_:)`: ask for the next checks first; a task launched before the wallet opened waits for boot
     -- each identifier waits, and a second launch of one replaces it: the shell has ended the first
     if m.stage == .loading then
       ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) ++ [(id, kind, tag)] },
         [.scheduleBackgroundTasks])
     else (m, [.scheduleBackgroundTasks, .runBackgroundTask id kind tag m.settings])
-  | .bgtaskExpired id _ tag =>
+  | .bgtaskExpired id kind tag =>
+    if kind == "continued" || m.continuedSync.any (·.id == id) then m.onContinuedTaskExpired id tag else
     -- expired before boot ran it: no run exists, so the task is answered here, once, unsuccessfully, with
     -- its launch's tag; otherwise its run is expired, and an expiry after the run completed, or one naming an
     -- older launch than the one waiting or running, changes nothing (records-test's `backgroundTaskCommands`)
@@ -262,11 +270,23 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
       ({ m with pendingBackgroundTasks := m.pendingBackgroundTasks.filter (·.1 != id) },
         [.completeBackgroundTask id false t])
     else (m, [.expireBackgroundTask id tag])
+  | .continuedSyncRefused id err detail =>
+    match m.continuedSync with
+    | some (.requested id' _ _ _) =>
+      if id' == id then
+        let m' := { m with continuedSync := none, continuedSyncOutcome := .refused err detail, continuedSyncAutoSuppressed := true }
+        (m', if m'.active then [] else [.stopNetworking])
+      else (m, [])
+    | none =>
+      if err == "unavailable" then
+        ({ m with continuedSyncOutcome := .refused err detail, continuedSyncAutoSuppressed := true }, [])
+      else (m, [])
+    | _ => (m, [])
   | .scene active =>
     -- `scenePhaseChanged` journals the phase before acting on it
     let phase : Cmd := .journal "app.scenePhase" [("phase", if active then "active" else "background")]
     if active then
-      let m := { m with active := true }
+      let m := { m with active := true, continuedSync := m.continuedSync.map (·.withSyncGen m.generation) }
       -- the Send sheet's rate in flight was dropped with the old generation
       let rate := if m.hasSheet .send then [.resolveRate m.generation m.sendInputs m.status.feeFloorMilli] else []
       let (m, scan) := if m.stage == .ready then m.startLedgerScan else (m, [])
@@ -338,8 +358,8 @@ where onArea (h : Host) (m : Model) : Model × List Cmd :=
     m.onSettingsHost h
   | .pasteParsed .. | .senderLookup .. =>
     m.onPeopleHost h
-  | .copiedExpired .. | .captured .. | .backgroundRefresh .. | .bgtask .. | .bgtaskExpired .. | .scene ..
-  | .sceneInactive | .ledgerScanDue .. | .ledgersNearby .. =>
+  | .copiedExpired .. | .captured .. | .backgroundRefresh .. | .bgtask .. | .bgtaskExpired ..
+  | .continuedSyncRefused .. | .scene .. | .sceneInactive | .ledgerScanDue .. | .ledgersNearby .. =>
     m.onSystemHost h
   | .pasted target text => m.onPasted target text
   | .multisig .. | .multisigChecked .. | .multisigAdded .. | .multisigCreated .. | .multisigRemoved ..
@@ -353,13 +373,14 @@ def Model.switchNetwork (m : Model) (net : Network) : Model × List Cmd :=
   if net == m.settings.network then (m, []) else
   -- a test session locked to one network stays there
   if m.forcedNetwork.any (· != net) then (m, []) else
+  let (m, endCont) := m.endContinuedSync false
   let s := { m.settings with network := net }
   let m0 := m.nextWallet
   let m' := { m0 with settings := s, stage := Stage.loading, status := ({} : Status), records := ({} : Records),
                       multisig := ({} : MultisigOverview), collect := m0.collect.cleared,
                       phase := SyncPhase.idle, walletID := none, routes := [], sheets := [], confirm := none,
                       send := ({} : SendState), nearbyLedger := none, ledgerSetup := none }
-  (m', [.stopNetworking, .stopWatchingAddress, .saveSettings s, .openWallet m'.generation net false])
+  (m', endCont ++ [.stopNetworking, .stopWatchingAddress, .saveSettings s, .openWallet m'.generation net false])
 
 def step (msg : Msg) (m : Model) : Model × List Cmd :=
   let g := m.generation
@@ -371,12 +392,15 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
   | .setImportText s => ({ m with onboarding := { m.onboarding with importText := s } }, [])
   | .pasteImport => (m, [.paste .importBundle])
   | .importWallet =>
-    ({ m with onboarding := { m.onboarding with busy := true, error := none } },
-     [.importWallet g m.settings.network m.onboarding.importText])
+    let (m', cont) := ({ m with onboarding := { m.onboarding with busy := true, error := none } }).requestContinuedSync
+    (m', [.importWallet g m.settings.network m.onboarding.importText] ++ cont)
   | .finishOnboarding =>
     if m.walletID.isNone then (m, []) else
     let (m, intro) := { m with stage := .ready, sheets := [], onboarding := ({} : Onboarding) }.endOnboarding
-    (m, [.finishOnboarding g, .refresh g, .startNetworking g m.settings] ++ intro)
+    let (m, cont) := match m.continuedSync with
+      | some cs => ({ m with continuedSync := some (cs.withSyncGen g) }, [])
+      | none => if m.phase != SyncPhase.synced || m.status.syncing then m.requestContinuedSync else (m, [])
+    (m, [Cmd.finishOnboarding g, Cmd.refresh g, Cmd.startNetworking g m.settings] ++ intro ++ cont)
   | .closeSheet => m.closeTop
   | .setNetwork i =>
     match networks[i]? with
@@ -393,8 +417,12 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
   | .openURL url => ({ m with confirm := none }, [.openURL url])
   | .setExpanded key b =>
     ({ m with expanded := if b then (if m.expanded.contains key then m.expanded else m.expanded ++ [key]) else m.expanded.erase key }, [])
-  | .syncNow => (m, [.syncNow g])
-  | .retryPeers => (m, [.retryPeers g])
+  | .syncNow =>
+    let (m', cont) := m.requestContinuedSync
+    (m', [.syncNow g] ++ cont)
+  | .retryPeers =>
+    let (m', cont) := m.requestContinuedSync
+    (m', [.retryPeers g] ++ cont)
   | .retryOpen => ({ m with stage := .loading }, [.openWallet g m.settings.network true])
   | .send s => stepSend s m
   | .receive r => stepReceive r m

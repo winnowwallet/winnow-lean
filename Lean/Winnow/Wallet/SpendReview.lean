@@ -44,8 +44,6 @@ inductive MultisigFailure where
   | named (name : String)
   deriving Inhabited, BEq, Repr
 
-def MultisigFailure.name : MultisigFailure → String | .account e => e.name | .named n => n
-
 abbrev MAM := Except MultisigFailure
 
 namespace MultisigAccount

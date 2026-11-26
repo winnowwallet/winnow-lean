@@ -54,12 +54,13 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
   let g := m.generation
   match msg with
   | .openPayment txid => { m with routes := m.routes ++ [Route.payment txid], payment := {}, expanded := [] }.loadPayment
-  | .openBackup => ({ m with routes := m.routes ++ [Route.backup] }, [])
   | .openSettings => ({ m with routes := m.routes ++ [Route.settings] }, [])
   | .openNetwork page =>
-    -- the peers screen loads the connected peers and the census line, and its staged routing edits
+    -- the peers screen loads connected peers, census, and staged routing edits; Sync loads peers & issues for diagnostics
     let m := { m with routes := m.routes ++ [Route.network page] }
-    if page == .peers then (m.loadGatewayDraft, m.settingsAppear) else (m, [])
+    if page == .peers then (m.loadGatewayDraft, m.settingsAppear)
+    else if page == .sync && m.stage == .ready then (m, [.connectedPeers g])
+    else (m, [])
   | .openMultisigAccounts => ({ m with routes := m.routes ++ [Route.multisigAccounts] }, [.multisigOverview g])
   | .openWallets => (m.present .wallets, [])
   | .explainWarning kind => ({ m with confirm := some (.homeWarning kind) }, [])
@@ -67,7 +68,9 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
     -- Settings, then the page (as `openNetwork` opens it): Back leads through Settings to the home
     let page : NetworkPage := if kind == .network then .sync else .peers
     let m := { m with confirm := none, routes := m.routes ++ [Route.settings, Route.network page] }
-    if page == .peers then (m.loadGatewayDraft, m.settingsAppear) else (m, [])
+    if page == .peers then (m.loadGatewayDraft, m.settingsAppear)
+    else if page == .sync && m.stage == .ready then (m, [.connectedPeers g])
+    else (m, [])
   | .dismissCard hardware =>
     let s := if hardware then { m.settings with hardwareCardDismissed := true } else { m.settings with multipartyCardDismissed := true }
     ({ m with settings := s }, [.saveSettings s, .journal "card.dismissed" [("card", if hardware then "hardwareWallet" else "multiparty")]])
@@ -78,7 +81,7 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
   | .pop => ({ m with routes := m.routes.dropLast, payment := {}, expanded := [] }, [])
   | .loadPayment => m.loadPayment
   | .editRecipient address pid => m.openPerson { personID := pid } address
-  | .removeRecipient pid => (m, [.updateRecipient g pid none false "payment"])
+  | .removeRecipient pid => (m, [.updateRecipient g pid none false true])
   | .editPaymentLabel address =>
     let draft := (lookup m.records.receiveLabels address).getD ""
     ({ m with labelEditor := { address, draft } }.present .labelEditor, [])
@@ -109,7 +112,7 @@ def stepHome (msg : HomeMsg) (m : Model) : Model × List Cmd :=
     | some (_, p) =>
       if m.feeBump.bumping then (m, [])
       else if m.spendingInFlight then
-        (m.fail "feeBump" "Another payment is already being signed and broadcast. Wait for it to finish.", [])
+        (m.fail (.payment .feeBump) false "Another payment is already being signed and broadcast. Wait for it to finish.", [])
       else ({ m with feeBump := { m.feeBump with bumping := true, error := none }, spendingInFlight := true },
             [.bumpFee g m.feeBump.txid p])
     | none => (m, [])
@@ -285,6 +288,64 @@ def chainCheckStatus (m : Model) : List H :=
       "iOS may also check while Winnow is closed, through the same routing. It cannot while the phone is off or after you force-quit Winnow."
     else "Background App Refresh is off, so Winnow checks the chain only while open.") ]
 
+/-- One-line continued background sync status for Settings → Network → Sync. -/
+def continuedSyncStatusText (m : Model) : String :=
+  match m.continuedSync with
+  | some (.running ..) => "Active"
+  | some (.requested ..) => "Starting…"
+  | none =>
+    match m.continuedSyncOutcome with
+    | .none => "Idle"
+    | .completed => "Last run finished"
+    | .expired => "Stopped or cancelled"
+    | .refused "unavailable" _ => "Unavailable"
+    | .refused err "" => s!"Refused ({err})"
+    | .refused err detail => s!"Refused ({err}: {detail})"
+
+/-- One-line header tip display for Settings → Network → Sync. -/
+def headerTipText (m : Model) : String :=
+  match m.phase with
+  | .headers synced estimate =>
+    if estimate > synced then s!"{groupDigits synced} / {groupDigits estimate}"
+    else if synced > 0 then groupDigits synced else "—"
+  | _ => if m.status.tipHeight > 0 then groupDigits m.status.tipHeight else "—"
+
+/-- Privacy-safe plain-text sync and peer telemetry for copying from Settings → Network → Sync
+(no wallet names, balances, addresses, or transactions). -/
+def syncDiagnosticsText (m : Model) : String :=
+  let ver := m.appVersion.getD "unknown"
+  let net := m.settings.network.label
+  let mode := m.settings.peerGatewaySettings.mode
+  let nets := ", ".intercalate (m.status.activeGateways.networks.map (·.rawValue))
+  let phase := (syncStatusText m.phase).getD (if m.phase == .synced then "Up to date" else "Idle")
+  let filt := (filterScanText m.phase m.status.nextScanHeight m.status.tipHeight).getD "—"
+  let checked := m.status.lastCheckedAgo.map (· ++ " ago") |>.getD "not yet"
+  let lastErr := m.status.lastSyncError.getD "None"
+  let transient := match m.status.transientSyncError with
+    | some e => s!"{e} ({m.status.transientSyncFailures}×)"
+    | none => "None"
+  let bar := if m.backgroundRefreshAvailable then "available" else "off"
+  let headerLines : List String :=
+    [ s!"Winnow {ver} ({net})"
+    , s!"Routing: {mode} [{nets}]"
+    , s!"Phase: {phase} (syncing={m.status.syncing})"
+    , s!"Header tip: {headerTipText m}"
+    , s!"Filter scan: {filt} (next={m.status.nextScanHeight}, tip={m.status.tipHeight})"
+    , s!"Peers: {m.status.peerCount}"
+    , s!"Last complete check: {checked}"
+    , s!"Last error: {lastErr}"
+    , s!"Transient error: {transient}"
+    , s!"Background refresh: {bar} · Background sync: {continuedSyncStatusText m}" ]
+  let peerLines : List String :=
+    if m.settingsDraft.peers.isEmpty then [] else
+    "Connected peers:" :: m.settingsDraft.peers.map fun p =>
+      let floor := match p.feeFilter with | some f => s!" floor={f}" | none => ""
+      s!"  - [{p.network.rawValue}] {p.endpoint} {p.userAgent} height={p.startHeight}{floor}"
+  let issueLines : List String :=
+    if m.settingsDraft.peerIssues.isEmpty then [] else
+    "Recent peer issues:" :: m.settingsDraft.peerIssues.map fun (e, r) => s!"  - {e}: {r}"
+  "\n".intercalate (headerLines ++ peerLines ++ issueLines)
+
 /-- Settings → Network → Sync. Its rows stay the same from pass to pass (a pass that starts or ends, an
 error that comes and goes, changes them in place): the section sits above Transactions, and a row added or
 removed every few seconds moved the list under the person's finger. -/
@@ -299,12 +360,17 @@ def syncSection (m : Model) : H :=
       | none => .labeled "Status" (if m.phase == .synced then "Up to date" else "Waiting to sync")
   .section "Sync" ""
     ([ .identified Ids.syncStatus status
+     , .identified Ids.syncHeaderTip (.labeled "Header tip" (headerTipText m))
      , .labeled "Filter scan" ((filterScanText m.phase m.status.nextScanHeight m.status.tipHeight).getD "—")
      , .labeled "Peers" s!"{m.status.peerCount}"
-     , .identified Ids.syncLastError (.labeled "Last error" (m.status.lastSyncError.getD "None")) ] ++ chainCheckStatus m ++
+     , .identified Ids.syncLastError (.labeled "Last error" (m.status.lastSyncError.getD "None"))
+     , .identified Ids.continuedSyncStatus (.labeled "Background sync" (continuedSyncStatusText m)) ] ++ chainCheckStatus m ++
      (match m.status.relayStoreQuarantined with | some q => [body q] | none => []) ++
      [if failed then .identified Ids.retryPeersButton (.button "Retry" .plain (some .retryPeers))
-      else .button "Sync now" .plain (if m.status.syncing then none else some .syncNow)])
+      else .button "Sync now" .plain (if m.status.syncing then none else some .syncNow)
+     , .identified Ids.copySyncDiagnosticsButton
+         (.button (if m.copied == some "sync.diag" then "Diagnostics copied" else "Copy sync diagnostics") .plain
+           (some (.copy "sync.diag" (syncDiagnosticsText m))))])
 
 /-- Settings → Network → Sync: the confirmed balance and its coins, then the Sync section (records-test's
 `syncBookkeeping`). -/

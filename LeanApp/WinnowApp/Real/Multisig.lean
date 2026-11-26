@@ -56,7 +56,7 @@ def psbtErrorText : PSBTError → String
   | .malformed r => s!"The PSBT is malformed ({r})."
   | .inconsistentCounts => "The PSBT's input or output count does not match its transaction."
   | .conflict _ => "The PSBTs disagree about a field and cannot be combined safely."
-  | .wire e => s!"The operation couldn’t be completed. (WalletCore.WireError.{e.name})"
+  | .wire _ => "The PSBT contains invalid transaction data."
 
 /-- A `MultisigAccount` failure as the screens show it (another module's error is known by its case name
 only, so it reads as `namedText` does). -/
@@ -137,13 +137,21 @@ def mergeSigners (a : MultisigApp) (restored : Array SignerRecord) : IO Unit := 
     return (← s.restore a.signers.keys a.signers.writeData merged, ())).run
   match r with
   | .ok () => pure ()
-  | .error e => if e.name == "damaged" then pure () else throw (IO.userError e.description)
+  | .error e => if e.isDamaged then pure () else throw (IO.userError e.description)
 
-def watchScripts (a : MultisigApp) (network : Tx.BitcoinNetwork) : IO (Array ByteArray) := do
+def watchScripts (a : MultisigApp) (network : Tx.BitcoinNetwork) : IO (Except WatchScriptsError (Array ByteArray)) := do
   a.host.readAgainIfUnavailable
-  a.withStore fun s => do
-    let (scripts, s') ← s.watchScripts network
-    return (s', scripts)
+  match ← (a.host.modify fun s => do
+      let (scripts, s') ← s.watchScripts network
+      return (s', scripts)).run with
+  | .ok scripts => return .ok scripts
+  | .error (.multisig .unavailable) => return .error (.locked multisigUnavailableText)
+  | .error e => return .error (.failed e.description)
+
+def watchScriptsIO (a : MultisigApp) (network : Tx.BitcoinNetwork) : IO (Array ByteArray) := do
+  match ← a.watchScripts network with
+  | .ok scripts => pure scripts
+  | .error e => throw (IO.userError e.message)
 
 def applyMatch (a : MultisigApp) (m : Net.BlockMatch) (network : Tx.BitcoinNetwork) : IO (Array ByteArray) :=
   a.withStore fun s => s.apply a.host.keys a.host.writeData m network
@@ -171,6 +179,81 @@ def restore (a : MultisigApp) (records : Array MultisigAccountRecord) : IO Unit 
 
 def backup (a : MultisigApp) : IO (Array MultisigAccountRecord) := do RM.toIO (← a.host.read).backupRecords
 
+/-- Updates the arriving account `id` in place if it is still present. -/
+private def updateArriving (a : MultisigApp) (id : String) (f : ArrivingAccount → RM ArrivingAccount) : IO Unit :=
+  RM.toIO (a.host.modifyArriving fun all => do
+    let some i := all.findIdx? (·.record.id == id) | return (all, ())
+    return (all.set! i (← f all[i]!), ()))
+
+/-- Checks an arriving account's block anchor against this chain: rolls back on a mismatch, clears the anchor
+when this chain agrees (returning `true` to continue), or pauses when this chain has no hash there yet
+(returning `false`). -/
+private def resolveCatchUpAnchor (a : MultisigApp) (id : String) (entry : ArrivingAccount) (anchor : ByteArray)
+    (blockHash : ChainHashes) : IO Bool := do
+  match ← anchorFork blockHash entry.scannedThrough anchor entry.record.history with
+  | some fork =>
+    a.updateArriving id fun e => pure (if e.scannedThrough == entry.scannedThrough then { e.rollBack fork with anchor := none } else e)
+    if let some env ← a.env.get then
+      env.journal "multisig.anchorMismatch" [("id", id), ("from", toString entry.scannedThrough), ("fork", toString fork)]
+    return true
+  | none =>
+    -- agreed, or this chain does not reach that block yet (it does: `scannedThrough ≤ target`)
+    if (← blockHash entry.scannedThrough).isNone then return false
+    a.updateArriving id fun e => pure (if e.scannedThrough == entry.scannedThrough then { e with anchor := none } else e)
+    return true
+
+/-- When a pass reaches `target`: rewinds to `passFrom - 1` if the watch frontier grew during the pass
+(returning `true` to scan again), or admits the account and clears its arriving entry (returning `false`). -/
+private def finishOrRewindCatchUp (a : MultisigApp) (id : String) (target : UInt32) (entry : ArrivingAccount) : IO Bool := do
+  let watch := MultisigStore.watchCount entry.record
+  if watch > entry.passWatch && entry.passFrom ≤ target then
+    a.updateArriving id fun e => pure { e with scannedThrough := e.passFrom - 1, passWatch := watch }
+    return true
+  -- (one already among the kept accounts only leaves the arriving ones)
+  unless (← a.host.read).records.any (·.id == id) do
+    a.withStore fun s => do return (← s.admit a.host.keys a.host.writeData entry.record, ())
+  RM.toIO (a.host.modifyArriving fun all => pure (all.filter (·.record.id != id), ()))
+  if let some env ← a.env.get then
+    env.journal "multisig.accountArrived" [("id", id), ("height", toString target)]
+  return false
+
+/-- Runs one range-scan pass for `entry` through `target` and advances `scannedThrough` only if the entry was
+not replaced mid-scan. Returns `true` when the pass completed on the same entry. -/
+private def scanCatchUpStep (a : MultisigApp) (id : String) (target : UInt32) (entry : ArrivingAccount)
+    (caches : IO.Ref MultisigStore) (scan : RangeScanner) : IO Bool := do
+  let (scripts, next) ← RM.toIO (entry.scripts (← caches.get))
+  caches.set next
+  let (through, complete) ← scan (entry.scannedThrough + 1) target scripts fun m => do
+    let (applied, next) ← RM.toIO do
+      let some e := (← a.host.arrivingAccounts).find? (·.record.id == id)
+        | throw (.multisig (.invalidState "the arriving account is gone"))
+      e.applyBlock m (← caches.get)
+    caches.set next
+    a.updateArriving id fun _ => pure applied
+  -- only the copy this run began with is current to where the run got: one replaced meanwhile (a later copy
+  -- from the other device, a reorg) starts from its own block
+  let same ← IO.mkRef false
+  a.updateArriving id fun e => do
+    if e.scannedThrough == entry.scannedThrough && e.passFrom == entry.passFrom then
+      same.set true
+      pure { e with scannedThrough := max e.scannedThrough (through.getD e.scannedThrough), note := none }
+    else pure e
+  return complete && (← same.get)
+
+/-- One iteration of `catchUpOne`: returns `true` to continue looping or `false` when done or paused. -/
+private def catchUpIteration (a : MultisigApp) (id : String) (target : UInt32) (caches : IO.Ref MultisigStore)
+    (scan : RangeScanner) (blockHash : ChainHashes) : IO Bool := do
+  let some entry := (← a.host.arrivingAccounts).find? (·.record.id == id) | return false
+  -- this phone's own scan has not reached the block the account is current to
+  if entry.scannedThrough > target then return false
+  -- the block the other device had it current to must be this chain's: one that is not is a reorg that
+  -- device saw, and the account goes back far enough for this chain's blocks to be scanned for it
+  if let some anchor := entry.anchor then
+    return ← a.resolveCatchUpAnchor id entry anchor blockHash
+  if entry.scannedThrough == target then
+    return ← a.finishOrRewindCatchUp id target entry
+  a.scanCatchUpStep id target entry caches scan
+
 /-- One arriving account brought toward block `target`, the last one this phone's forward scan has done: the
 blocks after the one the account is current to are scanned for its scripts and applied to it; a pass that
 moved its frontier is followed by another from where the first began; and once a pass ends at `target` having
@@ -178,58 +261,8 @@ found no new address, the account joins the kept ones. A run that stops early (i
 leaves the account current to where it got. -/
 def catchUpOne (a : MultisigApp) (id : String) (target : UInt32) (scan : RangeScanner) (blockHash : ChainHashes) : IO Unit := do
   let caches ← IO.mkRef ({ network := (← a.host.read).network } : MultisigStore)
-  let current : IO (Option ArrivingAccount) := do return (← a.host.arrivingAccounts).find? (·.record.id == id)
-  let update (f : ArrivingAccount → RM ArrivingAccount) : IO Unit :=
-    RM.toIO (a.host.modifyArriving fun all => do
-      let some i := all.findIdx? (·.record.id == id) | return (all, ())
-      return (all.set! i (← f all[i]!), ()))
   for _ in [0:8] do
-    let some entry ← current | return
-    -- this phone's own scan has not reached the block the account is current to
-    if entry.scannedThrough > target then return
-    -- the block the other device had it current to must be this chain's: one that is not is a reorg that
-    -- device saw, and the account goes back far enough for this chain's blocks to be scanned for it
-    if let some anchor := entry.anchor then
-      match ← anchorFork blockHash entry.scannedThrough anchor entry.record.history with
-      | some fork =>
-        update fun e => pure (if e.scannedThrough == entry.scannedThrough then { e.rollBack fork with anchor := none } else e)
-        if let some env ← a.env.get then
-          env.journal "multisig.anchorMismatch" [("id", id), ("from", toString entry.scannedThrough), ("fork", toString fork)]
-      | none =>
-        -- agreed, or this chain does not reach that block yet (it does: `scannedThrough ≤ target`)
-        if (← blockHash entry.scannedThrough).isNone then return
-        update fun e => pure (if e.scannedThrough == entry.scannedThrough then { e with anchor := none } else e)
-      continue
-    if entry.scannedThrough == target then
-      let watch := MultisigStore.watchCount entry.record
-      if watch > entry.passWatch && entry.passFrom ≤ target then
-        update fun e => pure { e with scannedThrough := e.passFrom - 1, passWatch := watch }
-        continue
-      -- (one already among the kept accounts only leaves the arriving ones)
-      unless (← a.host.read).records.any (·.id == id) do
-        a.withStore fun s => do return (← s.admit a.host.keys a.host.writeData entry.record, ())
-      RM.toIO (a.host.modifyArriving fun all => pure (all.filter (·.record.id != id), ()))
-      if let some env ← a.env.get then
-        env.journal "multisig.accountArrived" [("id", id), ("height", toString target)]
-      return
-    let (scripts, next) ← RM.toIO (entry.scripts (← caches.get))
-    caches.set next
-    let (through, complete) ← scan (entry.scannedThrough + 1) target scripts fun m => do
-      let (applied, next) ← RM.toIO do
-        let some e := (← a.host.arrivingAccounts).find? (·.record.id == id)
-          | throw (.multisig (.invalidState "the arriving account is gone"))
-        e.applyBlock m (← caches.get)
-      caches.set next
-      update fun _ => pure applied
-    -- only the copy this run began with is current to where the run got: one replaced meanwhile (a later copy
-    -- from the other device, a reorg) starts from its own block
-    let same ← IO.mkRef false
-    update fun e => do
-      if e.scannedThrough == entry.scannedThrough && e.passFrom == entry.passFrom then
-        same.set true
-        pure { e with scannedThrough := max e.scannedThrough (through.getD e.scannedThrough), note := none }
-      else pure e
-    unless complete && (← same.get) do return
+    unless ← a.catchUpIteration id target caches scan blockHash do return
 
 /-- The `multisigCatchUp` hook: every arriving account, one after another; one that cannot go on says why in
 its note and waits for the next pass. -/
@@ -245,7 +278,7 @@ def catchUp (a : MultisigApp) (_network : Tx.BitcoinNetwork) (frontier : UInt32)
 
 /-- `ownedMultisigScripts`: the scripts the accounts watch, on the store's network. -/
 def ownedScripts (a : MultisigApp) : IO (Array ByteArray) := do
-  a.watchScripts (← a.host.read).network
+  a.watchScriptsIO (← a.host.read).network
 
 /-- `ProfileMultisig.headStart`: each account takes the coins, history and address counters another device
 had for it, which its backup names the block of; its name, draft and Ledger stay this device's. Nothing changes
@@ -275,7 +308,9 @@ def at' (a : MultisigApp) (n : WinnowApp.Network) (dir : String) : IO ProfileMul
     if (← a.host.read).path == some file then throw (IO.userError "this wallet is the open one now")
     x
   return {
-    watchScripts := fun network => guard (other.watchScripts network)
+    watchScripts := fun network => do
+      if (← a.host.read).path == some file then return .error (.failed "this wallet is the open one now")
+      other.watchScripts network
     -- a person's payment index is the open wallet's records'; another wallet's people are told when it is opened
     apply := fun m network => guard (other.applyMatchPaying (fun _ _ => pure ()) m network)
     rollBack := fun fork => guard (other.rollBack fork)
@@ -591,6 +626,7 @@ def feeRateOf (tx : Transaction) (coins : Array WalletUTXO) : Option Float := do
 /-- `broadcastMultisigSpend(_:record:)`: finalize once enough signatures verify, broadcast, then move the
 spent coins in flight and the change to pending, under the spending gate. The txid (display hex). -/
 def broadcastMultisigSpend (env : Env) (a : MultisigApp) (id text : String) : IO String := exclusively env do
+  Faults.check "broadcast"
   let r ← record a id
   let network ← currentNetwork env
   let account ← accountOf r network

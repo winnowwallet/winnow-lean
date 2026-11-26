@@ -32,60 +32,188 @@ def literal (s : String) : H := Html.mono (caption s)
 
 /-! ## Failures -/
 
-/-- Route a backend failure to the state of the screen that asked (`context`), clearing that screen's busy
-flags (records-test's `failuresReachTheirScreens`, one case per context; the journey `spentElsewhere` signs a
-review whose coin has gone). -/
-def Model.fail (m : Model) (context message : String) : Model :=
-  -- a cancelled authentication prompt: revealing the phrase treats it as a decision (no error)
-  if context == "create.cancelled" || context == "import.cancelled" then { m with onboarding := { m.onboarding with busy := false, error := none } } else
-  -- a declined prompt or a cancelled restore says nothing (`catch is CancellationError { }`)
-  if context == "cloudRestore.cancelled" then { m with onboarding := { m.onboarding with restoring := false } } else
-  if context == "cloudRestore" then
-    let shown := if message == "Winnow.CancellationError" then none else some message
-    { m with onboarding := { m.onboarding with restoring := false, restoreError := shown } } else
-  if context == "reveal.cancelled" then { m with reveal := { m.reveal with revealing := false, error := none } } else
-  -- and so does an export that would have carried it: the sheet is as it was before the button
-  if context == "export.cancelled" then { m with exportState := { m.exportState with busy := false, error := none } } else
-  -- nor does a card for one person the device's owner declined to make
-  if context == "personCard.cancelled" then { m with shareCard := { m.shareCard with making := false } } else
-  let cancelled := context.endsWith ".cancelled"
-  let context := if cancelled then (context.dropEnd 10).copy else context
-  if context.startsWith "collect." then
+/-- Failures for wallet lifecycle and sync operations. -/
+def Model.failWallet (m : Model) (target : WalletFail) (cancelled : Bool) (message : String) : Model :=
+  match target with
+  | .create | .importWallet =>
+    { m with onboarding := { m.onboarding with busy := false, error := if cancelled then none else some message } }
+  | .cloudRestore =>
+    if cancelled then { m with onboarding := { m.onboarding with restoring := false } }
+    else { m with onboarding := { m.onboarding with restoring := false, restoreError := some message } }
+  | .openWallet =>
+    -- the wallet could not be opened at all: the screen that says so has Retry, where "Opening wallet…" has none
+    if m.stage == .loading then { m with stage := .storageDamaged message }
+    else { m with status := { m.status with lastSyncError := some message } }
+  | .delete => { m with confirm := some (.deleteFailed message) }
+  | .unlock => if cancelled then m else { m with status := { m.status with lastSyncError := some message } }
+  | .sync => { m with status := { m.status with lastSyncError := some message } }
+
+/-- Failures for receiving, sending, payment details, and fee bumps. -/
+def Model.failPayment (m : Model) (target : PaymentFail) (message : String) : Model :=
+  match target with
+  | .receive => { m with receive := { m.receive with error := some message, changing := false } }
+  | .label => { m with labelEditor := { m.labelEditor with saving := false, error := some message } }
+  | .send => { m with send := { m.send with error := some message, reviewing := false, sending := false }, spendingInFlight := false }
+  | .rate => { m with send := { m.send with resolvedRateMilli := none } }
+  | .payment => { m with payment := { loading := false, error := some message } }
+  | .feeBump => { m with feeBump := { m.feeBump with error := some message, bumping := false }, spendingInFlight := false }
+
+/-- Failures for Settings and manual backup screens. -/
+def Model.failSettings (m : Model) (target : SettingsFail) (cancelled : Bool) (message : String) : Model :=
+  match target with
+  | .peers => { m with settingsDraft := { m.settingsDraft with error := some message, resettingPeers := false } }
+  -- the census line is read from the shipped list; a failure leaves it unset
+  | .catalog => m
+  | .exportBundle =>
+    if cancelled then { m with exportState := { m.exportState with busy := false, error := none } }
+    else { m with exportState := { m.exportState with busy := false, error := some message, file := none } }
+  | .reveal => { m with reveal := { m.reveal with revealing := false, error := if cancelled then none else some message } }
+
+/-- Failures for people and person cards. -/
+def Model.failPeople (m : Model) (target : PeopleFail) (cancelled : Bool) (message : String) : Model :=
+  match target with
+  | .personCard =>
+    if cancelled then { m with shareCard := { m.shareCard with making := false } }
+    else { m with shareCard := { m.shareCard with making := false, error := some message } }
+  | .person => { m with person := { m.person with saving := false, inferring := false, error := some message } }
+  | .recipients => { m with recipientsError := some message }
+
+/-- Failures for multisig accounts, signers, Ledger pairing, and signature collection. -/
+def Model.failMultisig (m : Model) (target : MultisigFail) (cancelled : Bool) (message : String) : Model :=
+  match target with
+  -- the overview keeps what it last showed
+  | .overview => m
+  | .add => { m with multisigAdd := { m.multisigAdd with saving := false, error := some message } }
+  | .build => { m with multisigBuild := { m.multisigBuild with creating := false, error := some message } }
+  | .account => { m with multisigAccountError := some message }
+  | .spend => { m with payment := { m.payment with error := some message } }
+  | .ledgerPair => { m with ledgerPair := { m.ledgerPair with pairing := false, error := some message } }
+  | .signerKeys => { m with signerKeys := { m.signerKeys with saving := false, error := some message } }
+  | .signer => { m with signerDetail := { m.signerDetail with error := some message } }
+  | .collect epoch =>
     -- the collection step's `run`: only the current operation's failure shows (`accepts(token)`)
     let m := { m with spendingInFlight := false }
-    if (context.drop 8).toString.toNat? != some m.collect.epoch || !m.active then m else
-    { m with collect := { m.collect with busy := false, error := if cancelled then none else some message } }
-  else
-  match context with
-  | "onboarding" | "create" | "import" => { m with onboarding := { m.onboarding with busy := false, error := some message } }
-  | "receive" => { m with receive := { m.receive with error := some message, changing := false } }
-  | "label" => { m with labelEditor := { m.labelEditor with saving := false, error := some message } }
-  | "send" => { m with send := { m.send with error := some message, reviewing := false, sending := false }, spendingInFlight := false }
-  | "rate" => { m with send := { m.send with resolvedRateMilli := none } }
-  | "settings" | "peers" => { m with settingsDraft := { m.settingsDraft with error := some message, resettingPeers := false } }
-  | "delete" => { m with confirm := some (.deleteFailed message) }
-  -- the wallet could not be opened at all: the screen that says so has Retry, where "Opening wallet…" has none
-  | "open" => if m.stage == .loading then { m with stage := .storageDamaged message }
-              else { m with status := { m.status with lastSyncError := some message } }
-  -- the census line is read from the shipped list; a failure leaves it unset
-  | "catalog" => m
-  | "payment" => { m with payment := { loading := false, error := some message } }
-  | "feeBump" => { m with feeBump := { m.feeBump with error := some message, bumping := false }, spendingInFlight := false }
-  | "export" => { m with exportState := { m.exportState with busy := false, error := some message, file := none } }
-  | "reveal" => { m with reveal := { m.reveal with revealing := false, error := some message } }
-  | "personCard" => { m with shareCard := { m.shareCard with making := false, error := some message } }
-  | "person" => { m with person := { m.person with saving := false, inferring := false, error := some message } }
-  | "recipients" => { m with recipientsError := some message }
-  | "multisigAdd" => { m with multisigAdd := { m.multisigAdd with saving := false, error := some message } }
-  | "multisigBuild" => { m with multisigBuild := { m.multisigBuild with creating := false, error := some message } }
-  | "multisigAccount" => { m with multisigAccountError := some message }
-  | "accountSpend" => { m with payment := { m.payment with error := some message } }
-  | "ledgerPair" => { m with ledgerPair := { m.ledgerPair with pairing := false, error := some message } }
-  | "signerKeys" => { m with signerKeys := { m.signerKeys with saving := false, error := some message } }
-  | "signer" => { m with signerDetail := { m.signerDetail with error := some message } }
-  -- the overview keeps what it last showed
-  | "multisigOverview" => m
-  | _ => { m with status := { m.status with lastSyncError := some message } }
+    if epoch != m.collect.epoch || !m.active then m
+    else { m with collect := { m.collect with busy := false, error := if cancelled then none else some message } }
+
+/-- Route a backend failure to the state of the screen that asked (`target`), clearing that screen's busy
+flags (records-test's `failuresReachTheirScreens`, one case per target; the journey `spentElsewhere` signs a
+review whose coin has gone). -/
+def Model.fail (m : Model) (target : FailTarget) (cancelled : Bool := false) (message : String) : Model :=
+  match target with
+  | .wallet t => m.failWallet t cancelled message
+  | .payment t => m.failPayment t message
+  | .settings t => m.failSettings t cancelled message
+  | .people t => m.failPeople t cancelled message
+  | .multisig t => m.failMultisig t cancelled message
+
+/-! ## Continued background sync (iOS 26 `BGContinuedProcessingTask`) -/
+
+/-- The networking generation still feeding a continued sync across a trip to the background. -/
+def Model.continuedSyncGen (m : Model) : Option Nat := m.continuedSync.map (·.syncGen)
+
+/-- End any active continued sync, answering `bgtask.complete` when iOS had launched it. -/
+def Model.endContinuedSync (m : Model) (success : Bool)
+    (outcome : ContinuedSyncOutcome := if success then .completed else .none) : Model × List Cmd :=
+  let base := { m with continuedSync := none, continuedSyncOutcome := outcome }
+  match m.continuedSync with
+  | some (.running id _ _ tag _) => (base, [.completeBackgroundTask id success tag])
+  | some (.requested ..) => (base, [])
+  | none => (m, [])
+
+/-- Ask iOS (while foreground-active) to keep this sync running if the person leaves the app. Each fresh
+submission gets a unique single-label identifier under `com.btcswift.app.chain-sync.*`. -/
+def Model.requestContinuedSync (m : Model) (seenSyncing : Bool := false) : Model × List Cmd :=
+  if !m.active then (m, []) else
+  let net := m.settings.network
+  let title := continuedSyncTitle net
+  let (completed, total, subtitle) := continuedSyncProgress m.phase
+  let submit (extra : List Cmd) : Model × List Cmd :=
+    let serial := m.continuedSyncSerial + 1
+    let id := continuedSyncID net serial
+    ({ m with continuedSync := some (.requested id net m.generation seenSyncing),
+              continuedSyncSerial := serial, continuedSyncOutcome := .none, continuedSyncAutoSuppressed := false },
+     extra ++ [.continueBackgroundSync id title subtitle])
+  match m.continuedSync with
+  | some (.requested id' net' _ _) =>
+    if net' == net then
+      ({ m with continuedSync := some (.requested id' net m.generation seenSyncing), continuedSyncAutoSuppressed := false }, [])
+    else submit []
+  | some (.running id' net' _ tag _) =>
+    if net' == net then
+      ({ m with continuedSync := some (.running id' net m.generation tag seenSyncing), continuedSyncAutoSuppressed := false },
+       [.progressBackgroundSync id' tag completed total title subtitle])
+    else submit [.completeBackgroundTask id' false tag]
+  | none => submit []
+
+/-- Advance a requested or running continued sync on a new snapshot: report progress while syncing, auto-request
+continuation for an active foreground catch-up sync, or complete it (and tear down networking when backgrounded)
+once synced or failed. -/
+def Model.advanceContinuedSync (m : Model) (s : Status) (p : SyncPhase) (settled : Bool) : Model × List Cmd :=
+  match m.continuedSync with
+  | none =>
+    if !s.syncing && p == .synced then
+      let unavailable := match m.continuedSyncOutcome with | .refused "unavailable" _ => true | _ => false
+      ({ m with continuedSyncAutoSuppressed := unavailable }, [])
+    else if m.active && m.stage == .ready && !settled && !m.continuedSyncAutoSuppressed && shouldAutoContinueSync s p then
+      m.requestContinuedSync (seenSyncing := true)
+    else (m, [])
+  | some cs =>
+    let syncingNow := s.syncing || (p != .synced && p != .peerDiscoveryFailed)
+    let seen := cs.seenSyncing || syncingNow
+    let stop := if m.active then [] else [.stopNetworking]
+    let failed := !s.syncing && (seen || settled) &&
+      (p == .peerDiscoveryFailed || (simpleSyncError s.lastSyncError s.transientSyncError s.transientSyncFailures).isSome)
+    let done := !s.syncing && p == .synced && s.lastSyncError.isNone && (seen || settled)
+    if done then
+      let (m', endCs) := m.endContinuedSync true .completed
+      ({ m' with continuedSyncAutoSuppressed := false }, endCs ++ stop)
+    else if failed then
+      let (m', endCs) := m.endContinuedSync false .none
+      (m', endCs ++ stop)
+    else
+      let m' := { m with continuedSync := some (cs.withSeen seen) }
+      match cs with
+      | .running id net _ tag _ =>
+        let (completed, total, subtitle) := continuedSyncProgress p
+        (m', [.progressBackgroundSync id tag completed total (continuedSyncTitle net) subtitle])
+      | .requested .. => (m', [])
+
+/-- End a continued sync if its manual sync, import, or cloud restore threw a failure. -/
+def Model.onContinuedSyncFailure (m : Model) (target : FailTarget) : Model × List Cmd :=
+  match target with
+  | .wallet .sync | .wallet .importWallet | .wallet .cloudRestore =>
+    if m.continuedSync.isNone then (m, []) else
+    let (m', endCs) := m.endContinuedSync false .none
+    (m', endCs ++ (if m'.active then [] else [.stopNetworking]))
+  | _ => (m, [])
+
+/-- iOS launched a continued task (`{"bgtask":{"id","kind":"continued","tag"}}`). -/
+def Model.onContinuedTaskLaunched (m : Model) (id : String) (tag : Option Nat) : Model × List Cmd :=
+  match m.continuedSync with
+  | some cs =>
+    if cs.id == id then
+      let (completed, total, subtitle) := continuedSyncProgress m.phase
+      ({ m with continuedSync := some (.running id cs.network cs.syncGen tag cs.seenSyncing) },
+       [.progressBackgroundSync id tag completed total (continuedSyncTitle cs.network) subtitle])
+    else (m, [.completeBackgroundTask id false tag])
+  | none => (m, [.completeBackgroundTask id false tag])
+
+/-- iOS expired or the person cancelled a continued task (`{"bgtaskExpired":…}`). -/
+def Model.onContinuedTaskExpired (m : Model) (id : String) (tag : Option Nat) : Model × List Cmd :=
+  let stop := if m.active then [] else [.stopNetworking]
+  match m.continuedSync with
+  | some (.running id' _ _ launchTag _) =>
+    if id' == id && sameLaunch tag launchTag then
+      ({ m with continuedSync := none, continuedSyncOutcome := .expired, continuedSyncAutoSuppressed := true },
+       [.completeBackgroundTask id false launchTag] ++ stop)
+    else (m, [])
+  | some (.requested id' _ _ _) =>
+    if id' == id then
+      ({ m with continuedSync := none, continuedSyncOutcome := .expired, continuedSyncAutoSuppressed := true },
+       [.completeBackgroundTask id false tag] ++ stop)
+    else (m, [])
+  | none => (m, [])
 
 /-! ## Sheets -/
 

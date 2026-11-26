@@ -124,3 +124,56 @@ def main : IO UInt32 := runMain "ledger-transport-test" do
   check "scan: each Ledger seen, a nameless one as Nano" (seen.map (fun l => (l.id, l.name, l.rssi)) ==
     [("a1", "Nano X 1A2B", some (-61)), ("b2", "Nano", none)])
   check "scan: Bluetooth off sees nothing" ((← scanLedgers (scanAsk (Json.mkObj [("ok", .bool false), ("error", .str "poweredOff")]))).isEmpty)
+  -- bleFailure covers all error codes and Bluetooth readiness states
+  check "bleFailure error codes"
+    (bleFailure "timeout" == "the Ledger did not answer in time" &&
+     bleFailure "refused" == "the Ledger refused the connection" &&
+     bleFailure "disconnected" == "the Ledger disconnected" &&
+     bleFailure "no-service" == "the device offers no Ledger service" &&
+     bleFailure "busy" == "another Ledger request is still running" &&
+     bleFailure "poweredOff" == "Bluetooth is off. Turn it on in Control Center" &&
+     bleFailure "unauthorized" == "Bluetooth access is off for Winnow. Turn it on in Settings" &&
+     bleFailure "unsupported" == "this device has no Bluetooth Low Energy" &&
+     bleFailure "unknown-code" == "a write to the Ledger failed")
+  -- askBluetooth triggers ble.state cleanly
+  let btAsked ← IO.mkRef false
+  askBluetooth fun name _ => do
+    if name == "ble.state" then btAsked.set true
+    pure (Task.pure (Json.mkObj [("state", .str "poweredOn")]))
+  check "askBluetooth queries ble.state" (← btAsked.get)
+  -- scanLedgers also handles ok=true with non-array or empty devices, and error responses
+  check "scan: ok without devices returns empty"
+    ((← scanLedgers (scanAsk (Json.mkObj [("ok", .bool true)]))).isEmpty)
+  -- readFrameSize skips spurious non-MTU notifications before a valid MTU reply, and times out after >8 spurious frames
+  let service := Bluetooth.serviceIdentifiers[0]!
+  let notify := Bluetooth.notifyCharacteristic service
+  let write := Bluetooth.writeCharacteristic service
+  let spuriousState ← IO.mkRef (0 : Nat)
+  let spuriousAsk (maxSpurious : Nat) : Ask := fun name _ => do
+    let answer : Json ← match name with
+      | "ble.state" => pure (Json.mkObj [("state", .str "poweredOn")])
+      | "ble.connect" => pure (Json.mkObj [("ok", .bool true), ("id", .str "p1"), ("service", .str service),
+          ("characteristics", toJson #[notify, write])])
+      | "ble.subscribe" | "ble.write" | "ble.close" => pure (Json.mkObj [("ok", .bool true)])
+      | "ble.read" =>
+        let k ← spuriousState.modifyGet fun n => (n, n + 1)
+        if k < maxSpurious then
+          pure (Json.mkObj [("hex", .str (hex (ByteArray.mk #[0x01, 0x02])))])
+        else
+          pure (Json.mkObj [("hex", .str (hex (ByteArray.mk #[0x08, 0, 0, 0, 0, 64])))])
+      | _ => pure (Json.mkObj [("ok", .bool true)])
+    pure (Task.pure answer)
+  let sessOk ← (do
+    let s ← openLedger (spuriousAsk 2)
+    s.close
+    pure true).toBaseIO
+  check "openLedger: readFrameSize skips 2 non-MTU notifications then succeeds" (sessOk matches .ok true)
+  spuriousState.set 0
+  let sessTimeout ← (do
+    let _ ← openLedger (spuriousAsk 20)
+    pure ()).toBaseIO
+  check "openLedger: >8 non-MTU notifications time out" (sessTimeout matches .error _)
+  -- unauthorized state fails immediately without polling
+  let unauthAsk : Ask := fun _ _ => pure (Task.pure (Json.mkObj [("state", .str "unauthorized")]))
+  let unauthRes ← (do let _ ← openLedger unauthAsk; pure ()).toBaseIO
+  check "openLedger: unauthorized state fails" (unauthRes matches .error _)

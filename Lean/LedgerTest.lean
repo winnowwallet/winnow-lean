@@ -3,6 +3,11 @@ import TestKit.Check
 import TestKit.Fixtures
 open Winnow Winnow.Ledger Winnow.Keys Winnow.SwiftJSON TestKit
 
+private def Winnow.LedgerError.name : Winnow.LedgerError → String
+  | .transport _ => "transport" | .deviceLocked => "deviceLocked" | .appNotOpen => "appNotOpen"
+  | .rejectedOnDevice => "rejectedOnDevice" | .status _ => "status"
+  | .protocolViolation _ => "protocolViolation" | .mismatch _ => "mismatch"
+
 /-! `ledger-test`: the Ledger signer's tests (Phase C).
 
 Ports `Tests/WalletCoreTests/LedgerTests.swift` (upstream 1cf93fb), all of it (pairAndSpend,

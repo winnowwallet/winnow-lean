@@ -481,7 +481,9 @@ def importDecoded (env : Env) (n : WinnowApp.Network) (dir : String) (bundle : I
     let some filters := stack.filters | waiting "sync stack unavailable"
     stack.pool.start
     if !(← waitForPeer env stack.pool env.deps.importPeerWaitMs c.generation) then return ← waiting "public peers unavailable"
-    let additional ← env.hooks.multisigWatchScripts (Network.tx n)
+    let additional ← match ← env.hooks.multisigWatchScripts (Network.tx n) with
+      | .ok xs => pure xs
+      | .error e => throw (IO.userError e.message)
     let report ← runWM (w.verifyImport bundle (scanSource filters) additional fun m => do
       discard <| WM.io (env.hooks.multisigApply m (Network.tx n)))
     -- `await refresh()`, then the journal reads the refreshed status
@@ -510,6 +512,7 @@ def importBundle (env : Env) (n : WinnowApp.Network) (dir : String) (json : Stri
 
 /-- `exportWalletBundle(includeMnemonic:)`. -/
 def exportBundle (env : Env) (includeMnemonic : Bool) : IO String := do
+  Faults.check "export"
   let c ← env.get
   let some w := c.wallet | failWith .noWallet
   if let some f := c.stack.bind (·.filters) then
@@ -586,7 +589,9 @@ def deleteWallet (env : Env) (expected : Option String := none) : IO Unit := do
 def receiveAddress (env : Env) (fresh : Bool) : IO String := do
   let c ← env.get
   let some w := c.wallet | failWith .noWallet
-  if fresh then discard <| env.walletWrite c.walletSerial "receive.fresh" w.freshReceiveAddress
+  if fresh then
+    Faults.check "receive.fresh"
+    discard <| env.walletWrite c.walletSerial "receive.fresh" w.freshReceiveAddress
   let address ← runWM (w.address .receive (← w.nextReceiveIndex))
   -- `currentReceiveAddress()` journals what it shows; `freshReceiveAddress()` does not
   unless fresh do env.journal "address.receive" [("address", address)]

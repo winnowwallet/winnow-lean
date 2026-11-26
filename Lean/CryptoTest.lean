@@ -465,6 +465,40 @@ def walletErrorIndex : WalletError → Nat
   | .invalidTransactionAmounts => 8 | .unsupportedWalletData => 9 | .storageTooLarge _ => 10
   | .paymentDetailsMismatch => 11
 
+def txBuildIndex : TxBuildError → Nat
+  | .noInputs => 0 | .noOutputs => 1 | .invalidAmount _ => 2 | .amountOverflow => 3
+  | .emptyScript => 4 | .invalidOutpoint => 5 | .duplicateInput => 6 | .invalidChangePosition _ => 7
+
+def psbtErrorIndex : PSBTError → Nat
+  | .invalidMagic => 0 | .truncated => 1 | .duplicateKey _ => 2 | .unsupportedVersion _ => 3
+  | .missingField _ => 4 | .malformed _ => 5 | .inconsistentCounts => 6 | .conflict _ => 7 | .wire _ => 8
+
+def pairingErrorIndex : SilentPaymentPairing.Error → Nat
+  | .invalidAddress => 0 | .invalidTweak => 1 | .invalidPrivateKey => 2
+  | .keyMismatch => 3 | .derivation => 4 | .invalidIndex => 5
+
+def descriptorErrorIndex : DescriptorError → Nat
+  | .invalidChecksum => 0 | .invalidCharacter => 1 | .unexpectedEnd => 2 | .unexpectedCharacter _ => 3
+  | .unknownExpression _ => 4 | .invalidOrigin => 5 | .originTooDeep => 6 | .keyDepthExhausted => 7
+  | .invalidKey => 8 | .invalidPath => 9 | .invalidThreshold => 10 | .invalidContext => 11
+  | .derivationFailed => 12 | .treeTooDeep => 13 | .invalidTimelock => 14
+
+def bip39ErrorIndex : BIP39Error → Nat
+  | .invalidEntropyLength => 0 | .invalidWordCount => 1 | .wordNotInWordlist _ => 2 | .invalidChecksum => 3
+
+def spSendErrorIndex : SilentPaymentSending.Error → Nat
+  | .noEligibleInputs => 0 | .inputKeysSumToZero => 1 | .invalidInputHash => 2 | .invalidTweak => 3
+  | .tooManyRecipientsPerGroup => 4 | .invalidPrivateKey => 5 | .invalidRecipientKey => 6
+
+def spAddressErrorIndex : SilentPaymentAddressError → Nat
+  | .invalidEncoding => 0 | .wrongHRP .. => 1 | .unsupportedVersion _ => 2
+  | .invalidDataLength _ => 3 | .invalidPublicKey => 4 | .encoding _ => 5
+
+def coinSelectionIndex : CoinSelectionError → Nat
+  | .noUTXOs => 0 | .insufficientFunds .. => 1 | .invalidFeeRate _ => 2 | .dustOutput .. => 3
+  | .transactionTooLarge .. => 4 | .invalidAmount _ => 5 | .duplicateUTXO => 6
+  | .invalidOutpoint => 7 | .emptyScript => 8 | .invalidWitnessSize _ => 9 | .amountOverflow => 10
+
 def errorNames : IO Unit := do
   checkNames "Bech32Error" bech32Index 11 (·.name) [
     (.invalidCharacter, "invalidCharacter"), (.mixedCase, "mixedCase"), (.missingSeparator, "missingSeparator"),
@@ -524,6 +558,105 @@ def errorNames : IO Unit := do
     (.mnemonicUnavailable, "mnemonicUnavailable"), (.invalidTransactionAmounts, "invalidTransactionAmounts"),
     (.unsupportedWalletData, "unsupportedWalletData"), (.storageTooLarge 16_777_216, "storageTooLarge"),
     (.paymentDetailsMismatch, "paymentDetailsMismatch")]
+  check "WalletError.description: every variant has non-empty user text"
+    ([WalletError.invalidDescriptor "tr(x)", .descriptorMismatch, .accountKeyMismatch, .invalidBundle "bad",
+      .noPayments, .changeOutputMissing, .transactionTooLarge 100_001 100_000, .mnemonicUnavailable,
+      .invalidTransactionAmounts, .unsupportedWalletData, .storageTooLarge 16_777_216, .paymentDetailsMismatch].all
+      fun e => !e.description.isEmpty)
+  checkNames "TxBuildError" txBuildIndex 8 (·.name) [
+    (.noInputs, "noInputs"), (.noOutputs, "noOutputs"), (.invalidAmount (-1), "invalidAmount"),
+    (.amountOverflow, "amountOverflow"), (.emptyScript, "emptyScript"), (.invalidOutpoint, "invalidOutpoint"),
+    (.duplicateInput, "duplicateInput"), (.invalidChangePosition 9, "invalidChangePosition")]
+  checkNames "PSBTError" psbtErrorIndex 9 (·.name) [
+    (.invalidMagic, "invalidMagic"), (.truncated, "truncated"), (.duplicateKey .empty, "duplicateKey"),
+    (.unsupportedVersion 2, "unsupportedVersion"), (.missingField "utxo", "missingField"),
+    (.malformed "bad", "malformed"), (.inconsistentCounts, "inconsistentCounts"),
+    (.conflict .empty, "conflict"), (.wire .invalidVarInt, "invalidVarInt")]
+  checkNames "SilentPaymentPairing.Error" pairingErrorIndex 6 (·.name) [
+    (.invalidAddress, "invalidAddress"), (.invalidTweak, "invalidTweak"), (.invalidPrivateKey, "invalidPrivateKey"),
+    (.keyMismatch, "keyMismatch"), (.derivation, "derivation"), (.invalidIndex, "invalidIndex")]
+  checkNames "DescriptorError" descriptorErrorIndex 15 (·.name) [
+    (.invalidChecksum, "invalidChecksum"), (.invalidCharacter, "invalidCharacter"), (.unexpectedEnd, "unexpectedEnd"),
+    (.unexpectedCharacter '?', "unexpectedCharacter"), (.unknownExpression "foo", "unknownExpression"),
+    (.invalidOrigin, "invalidOrigin"), (.originTooDeep, "originTooDeep"), (.keyDepthExhausted, "keyDepthExhausted"),
+    (.invalidKey, "invalidKey"), (.invalidPath, "invalidPath"), (.invalidThreshold, "invalidThreshold"),
+    (.invalidContext, "invalidContext"), (.derivationFailed, "derivationFailed"), (.treeTooDeep, "treeTooDeep"),
+    (.invalidTimelock, "invalidTimelock")]
+  checkNames "BIP39Error" bip39ErrorIndex 4 (·.name) [
+    (.invalidEntropyLength, "invalidEntropyLength"), (.invalidWordCount, "invalidWordCount"),
+    (.wordNotInWordlist "nope", "wordNotInWordlist"), (.invalidChecksum, "invalidChecksum")]
+  checkNames "SilentPaymentSending.Error" spSendErrorIndex 7 (·.name) [
+    (.noEligibleInputs, "noEligibleInputs"), (.inputKeysSumToZero, "inputKeysSumToZero"),
+    (.invalidInputHash, "invalidInputHash"), (.invalidTweak, "invalidTweak"),
+    (.tooManyRecipientsPerGroup, "tooManyRecipientsPerGroup"), (.invalidPrivateKey, "invalidPrivateKey"),
+    (.invalidRecipientKey, "invalidRecipientKey")]
+  checkNames "SilentPaymentAddressError" spAddressErrorIndex 6 (·.name) [
+    (.invalidEncoding, "invalidEncoding"), (.wrongHRP "sp" "tsp", "wrongHRP"), (.unsupportedVersion 1, "unsupportedVersion"),
+    (.invalidDataLength 32, "invalidDataLength"), (.invalidPublicKey, "invalidPublicKey"),
+    (.encoding .invalidChecksum, "invalidChecksum")]
+  checkNames "CoinSelectionError" coinSelectionIndex 11 (·.name) [
+    (.noUTXOs, "noUTXOs"), (.insufficientFunds 10 20, "insufficientFunds"), (.invalidFeeRate 0.0, "invalidFeeRate"),
+    (.dustOutput 100 330, "dustOutput"), (.transactionTooLarge 200_000 100_000, "transactionTooLarge"),
+    (.invalidAmount (-1), "invalidAmount"), (.duplicateUTXO, "duplicateUTXO"), (.invalidOutpoint, "invalidOutpoint"),
+    (.emptyScript, "emptyScript"), (.invalidWitnessSize 0, "invalidWitnessSize"), (.amountOverflow, "amountOverflow")]
+
+/-- UAX #29 extended grapheme cluster boundary rules (GB3–GB999) in `Winnow.Characters.boundary`. -/
+def graphemeBoundaries : IO Unit := do
+  let mk (cps : List Nat) : String := String.ofList (cps.map Char.ofNat)
+  let count (cps : List Nat) : Nat := (Winnow.Characters.characters (mk cps)).size
+  -- GB3: CR × LF; GB4/GB5: CR / LF / Control split
+  check "UAX29 GB3: CR+LF is one cluster" (count [0x0D, 0x0A] == 1)
+  check "UAX29 GB4/5: LF+CR and control split" (count [0x0A, 0x0D] == 2 && count [0x61, 0x00, 0x62] == 3)
+  -- GB6/GB7/GB8: Hangul syllable sequences (L, V, T, LV, LVT)
+  check "UAX29 GB6: L×L, L×V, L×LV, L×LVT"
+    (count [0x1100, 0x1100] == 1 && count [0x1100, 0x1161] == 1 &&
+     count [0x1100, 0xAC00] == 1 && count [0x1100, 0xAC01] == 1)
+  check "UAX29 GB7: LV×V, LV×T, V×V, V×T"
+    (count [0xAC00, 0x1161] == 1 && count [0xAC00, 0x11A8] == 1 &&
+     count [0x1161, 0x1161] == 1 && count [0x1161, 0x11A8] == 1)
+  check "UAX29 GB8: LVT×T, T×T"
+    (count [0xAC01, 0x11A8] == 1 && count [0x11A8, 0x11A8] == 1)
+  -- GB9 / GB9a / GB9b: Extend, ZWJ, SpacingMark, Prepend
+  check "UAX29 GB9/9a/9b: Extend, ZWJ, SpacingMark, Prepend"
+    (count [0x65, 0x0301] == 1 && count [0x61, 0x200D] == 1 &&
+     count [0x0915, 0x093E] == 1 && count [0x0600, 0x61] == 1)
+  -- GB9c: Indic conjunct (Consonant [Extend]* Linker [Extend]* × Consonant)
+  check "UAX29 GB9c: Indic conjunct joins across virama"
+    (count [0x0915, 0x094D, 0x0937] == 1 && count [0x0915, 0x093C, 0x094D, 0x0916] == 1)
+  -- GB11: Extended_Pictographic Extend* ZWJ × Extended_Pictographic
+  check "UAX29 GB11: Emoji ZWJ sequence stays one cluster"
+    (count [0x1F468, 0x200D, 0x1F469] == 1 && count [0x1F468, 0xFE0F, 0x200D, 0x1F469] == 1)
+  -- GB12/13: Regional Indicators pair two by two
+  check "UAX29 GB12/13: Regional indicators pair into flags"
+    (count [0x1F1FA, 0x1F1F8] == 1 && count [0x1F1FA, 0x1F1F8, 0x1F1EB, 0x1F1F7] == 2)
+  -- GB999: default break
+  check "UAX29 GB999: ordinary ASCII splits" (count [0x61, 0x62, 0x63] == 3)
+
+/-- Foundation's `Data(base64Encoded:)` rules (`Winnow.Base64.decode?`). -/
+def base64EdgeCases : IO Unit := do
+  check "base64: empty string gives empty bytes; 1–3 chars refused"
+    (Base64.decode? "" == some .empty && Base64.decode? "A" == none &&
+     Base64.decode? "AB" == none && Base64.decode? "ABC" == none)
+  check "base64: 1, 2, 3 byte round trips"
+    (Base64.decode? (Base64.encode (ByteArray.mk #[0x41])) == some (ByteArray.mk #[0x41]) &&
+     Base64.decode? (Base64.encode (ByteArray.mk #[0x41, 0x42])) == some (ByteArray.mk #[0x41, 0x42]) &&
+     Base64.decode? (Base64.encode (ByteArray.mk #[0x41, 0x42, 0x43])) == some (ByteArray.mk #[0x41, 0x42, 0x43]))
+  check "base64: ==== first group yields 0x00, second group yields nothing"
+    (Base64.decode? "====" == some (ByteArray.mk #[0]) &&
+     Base64.decode? "AAAA====" == some (ByteArray.mk #[0, 0, 0]))
+  check "base64: xx==, xxx=, xx=x, and trailing = padding"
+    (Base64.decode? "QQ==" == some (ByteArray.mk #[0x41]) &&
+     Base64.decode? "QUI=" == some (ByteArray.mk #[0x41, 0x42]) &&
+     Base64.decode? "QQ=B" == some (ByteArray.mk #[0x41, 0x01]) &&
+     Base64.decode? "QUJD=" == some (ByteArray.mk #[0x41, 0x42, 0x43]) &&
+     Base64.decode? "QQ======" == some (ByteArray.mk #[0x41]))
+  check "base64: invalid chars, bad padding positions, non-pad tail refused"
+    (Base64.decode? "QQ=*" == none && Base64.decode? "Q*==" == none &&
+     Base64.decode? "QQ*=" == none && Base64.decode? "QQ*Q" == none &&
+     Base64.decode? "=AAA" == none && Base64.decode? "QQ==A" == none &&
+     Base64.decode? "QUJDA" == none && Base64.decode? "A+/" == none)
+  check "base64: + and / alphabet chars decode"
+    (Base64.decode? "+/9+" == some (ByteArray.mk #[0xfb, 0xff, 0x7e]))
 
 /-- `SwiftDouble.formatted2`, `formatted(.number.precision(.fractionLength(2)))` in en_US, which a refused fee
 bump shows (backend-test `refusalsFlow` reaches it with the wallet's rates): the shortest decimal of the double
@@ -822,6 +955,38 @@ def headerBranches : IO Unit := do
 
 end HeaderBranches
 
+def unicodeNormalization : IO Unit := do
+  -- Hangul algorithmic decomposition: without trailing consonant (t = 0) and with one (t != 0)
+  check "unicode: Hangul t=0 (U+AC00 가 -> U+1100 U+1161)"
+    (Unicode.nfd "가" == "\u1100\u1161" && Unicode.nfkd "가" == "\u1100\u1161")
+  check "unicode: Hangul t!=0 (U+D55C 한 -> U+1112 U+1161 U+11AB)"
+    (Unicode.nfd "한" == "\u1112\u1161\u11AB" && Unicode.nfkd "한" == "\u1112\u1161\u11AB")
+  -- Compatibility vs canonical decomposition
+  check "unicode: compat preserves ligature in NFD, splits in NFKD (U+FB01 ﬁ)"
+    (Unicode.nfd "\uFB01" == "\uFB01" && Unicode.nfkd "\uFB01" == "fi")
+  check "unicode: compat preserves superscript/fullwidth in NFD, splits in NFKD"
+    (Unicode.nfd "\u00B2\uFF21" == "\u00B2\uFF21" && Unicode.nfkd "\u00B2\uFF21" == "2A")
+  -- Multi-level decomposition + canonical ordering (ccc=230 acute before ccc=220 dot below)
+  check "unicode: canonicalOrder reorders combining marks by class"
+    (Unicode.nfd "e\u0301\u0323" == "e\u0323\u0301" &&
+     Unicode.nfd "\u1EC7" == "e\u0323\u0302" &&
+     Unicode.nfkd "\u1E69" == "s\u0323\u0307")
+  -- Non-starter boundary rule matches Foundation (U+0F73 has ccc=0 yet decomposes into marks)
+  check "unicode: Foundation combining run boundary"
+    (Unicode.nfd "\u0F73\u0323" == "\u0F71\u0F72\u0323")
+  -- Whitespace classification
+  check "unicode: isWhitespaceOrNewline covers ASCII, NBSP, U+200B, U+3000"
+    (Unicode.isWhitespaceOrNewline ' ' && Unicode.isWhitespaceOrNewline '\n' &&
+     Unicode.isWhitespaceOrNewline '\u00A0' && Unicode.isWhitespaceOrNewline '\u200B' &&
+     Unicode.isWhitespaceOrNewline '\u3000' && !Unicode.isWhitespaceOrNewline 'a')
+  -- BIP39 seed matches across NFC, NFD, and NFKD passphrase spellings
+  let words := "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+  let seedNFC := BIP39.seed words "caf\u00E9 \uFB01 \uD55C"
+  let seedNFD := BIP39.seed words "cafe\u0301 \uFB01 \u1112\u1161\u11AB"
+  let seedNFKD := BIP39.seed words "cafe\u0301 fi \u1112\u1161\u11AB"
+  check "unicode: BIP39.seed agrees across NFC and NFD" (seedNFC == seedNFD)
+  check "unicode: BIP39.seed agrees across NFC/NFKD compat forms" (seedNFC == seedNFKD)
+
 def main : IO UInt32 := runMain "crypto-test" do
   fips197
   wycheproof
@@ -830,10 +995,13 @@ def main : IO UInt32 := runMain "crypto-test" do
   roundTrips
   bip32
   utf8
+  unicodeNormalization
   jsonExponents
   retargetRules
   mainnetRetargets
   headerBranches
   errorNames
+  graphemeBoundaries
+  base64EdgeCases
   formattedTwoPlaces
   fundingSources

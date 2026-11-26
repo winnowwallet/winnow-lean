@@ -47,10 +47,12 @@ def manifest : Manifest where
     -- Automatic routing asks Tailscale's MagicDNS and probes the gateways it names (upstream's text)
     ("NSLocalNetworkUsageDescription",
      "Winnow checks your Tailscale gateways and connects to Bitcoin nodes you configure.")]
-  -- background chain checks (WinnowApp/Real/BackgroundSync.lean): iOS decides when they run; each is one
-  -- bounded scan with the foreground's routing. The shell registers a handler for each identifier.
+  -- background chain checks (WinnowApp/Real/BackgroundSync.lean): iOS decides when refresh and processing
+  -- run; each is one bounded scan with the foreground's routing. The wildcard identifier is iOS 26's
+  -- BGContinuedProcessingTask (`bgtask.continue`), letting a user-started sync finish after leaving the app.
   backgroundTasks := [("com.btcswift.winnow.chain-refresh", .refresh),
-                      ("com.btcswift.winnow.chain-processing", .processing)]
+                      ("com.btcswift.winnow.chain-processing", .processing),
+                      ("com.btcswift.app.chain-sync.*", .continued)]
   -- automatic iCloud backup (WinnowApp/Real/CloudBackup.lean): the private database of upstream's container
   -- (CloudKit/schema.ckdb's WalletBackup records)
   iCloudContainers := ["iCloud.com.btcswift.app"]

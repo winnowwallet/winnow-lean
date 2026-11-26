@@ -8,6 +8,7 @@ import LeanNative.Erase
 import LeanNative.Json
 import TestKit.Check
 import TestKit.Fixtures
+import AppTestNames
 
 /-! `multisig-app-test`: upstream 1cf93fb's app-side multisig tests, ported.
 
@@ -529,6 +530,10 @@ def testAnAccountFileWhoseKeyIsLockedIsReadAgainAndNeverScannedWithout : IO Unit
   host.configure signet (some url.parent.get!)
   check "the host's store is unavailable while locked, with no damage notice"
     ((← host.read).unavailable && (← host.notice.get).isNone)
+  let appLocked ← Real.MultisigApp.new keys
+  appLocked.host.configure signet (some url.parent.get!)
+  check "MultisigApp.watchScripts reports locked (not failed) while the key is locked"
+    ((← appLocked.watchScripts signet) matches .error (.locked _))
   host.readAgainIfUnavailable
   check "read again while still locked: still unavailable" (← host.read).unavailable
   locked.set false
@@ -559,6 +564,10 @@ def testADamagedAccountFileStopsTheScanUntilItIsSetAside : IO Unit := do
   host.configure signet (some dir)
   check "damaged: the host says so" ((← host.read).isDamaged && (← host.notice.get).isSome)
   refused "damaged: no scripts for a scan while the file is in place" ((← host.read).watchScripts signet |>.map (·.1)) "damaged"
+  let appDamaged ← Real.MultisigApp.new keys
+  appDamaged.host.configure signet (some dir)
+  check "MultisigApp.watchScripts reports failed (not locked) when the file is damaged"
+    ((← appDamaged.watchScripts signet) matches .error (.failed _))
   -- the model: the notice has the button, the button asks, and only the confirmation sets aside
   let noticed : Model := { stage := .ready, active := true, walletID := some "w",
                            multisig := { notice := ← host.notice.get } }
@@ -1883,7 +1892,7 @@ def testAnswersFinishAcrossTheBackground : IO Unit := do
   check "the overview is asked for in the new generation" (cs.any fun | .multisigOverview g' => g' == back.generation | _ => false)
   check "and the screen says so" (contains (rendered (stepMultisig .openBuild done).1) "Create an account" &&
     !contains (rendered done) "Creating…")
-  let (failed, _) := onHost (.failed g "multisigBuild" "the Ledger did not answer in time") back
+  let (failed, _) := onHost (.failed g (.multisig .build) false "the Ledger did not answer in time") back
   check "a failure from before the background shows too" (!failed.multisigBuild.creating &&
     failed.multisigBuild.error == some "the Ledger did not answer in time")
   -- pairing: the same
@@ -1905,6 +1914,194 @@ def testAnswersFinishAcrossTheBackground : IO Unit := do
   let (other, _) := building.switchNetwork .mainnet
   let (other, _) := onHost (.multisigCreated g "id1" "tr(…)" none) { other with multisigBuild := building.multisigBuild }
   check "another network's wallet drops it" other.multisigBuild.created.isNone
+
+/-- Every stale-generation, wrong-epoch, backgrounded, registration-error, and route edge guard in
+`Model.onMultisigHost`, plus the non-multisig wildcard arm. -/
+def testOnMultisigHostGuards : IO Unit := do
+  let base := { modelWithAccounts with active := true }
+  let g := base.generation
+  let stale := g + 99
+  let (switched, _) := base.switchNetwork .mainnet
+  -- .multisig: stale dropped, current updates and clears loadingDraft
+  let loading := { base with collect := { base.collect with loadingDraft := true } }
+  check "onMultisigHost.multisig: stale dropped" (onHost (.multisig stale {}) loading).1.collect.loadingDraft
+  check "onMultisigHost.multisig: current clears loadingDraft" (!(onHost (.multisig g base.multisig) loading).1.collect.loadingDraft)
+  -- .multisigChecked: stale or mismatched trimmed text dropped, matching sets check
+  let adding := { base with multisigAdd := { descriptor := "  tr(x)  " }, routes := [.multisigAdd] }
+  check "onMultisigHost.multisigChecked: stale dropped" (onHost (.multisigChecked stale "tr(x)" (.error "bad")) adding).1.multisigAdd.check.isNone
+  check "onMultisigHost.multisigChecked: text mismatch dropped" (onHost (.multisigChecked g "tr(other)" (.error "bad")) adding).1.multisigAdd.check.isNone
+  let chk : MultisigCheck := { policy := "2 of 2", firstAddress := some "tb1p..." }
+  check "onMultisigHost.multisigChecked: matching sets check"
+    (match (onHost (.multisigChecked g "tr(x)" (.ok chk)) adding).1.multisigAdd.check with
+     | some ("tr(x)", .ok c) => c == chk | _ => false)
+  -- .multisigAdded: other wallet dropped; registration error stays on screen with saved=true; ok pops .multisigAdd and leaves other routes alone
+  let savingAdd := { adding with multisigAdd := { adding.multisigAdd with saving := true } }
+  check "onMultisigHost.multisigAdded: other wallet dropped" (onHost (.multisigAdded g "id1" none) { switched with multisigAdd := savingAdd.multisigAdd }).1.multisigAdd.saving
+  let (regErr, regErrCs) := onHost (.multisigAdded g "id1" (some (.error "denied"))) savingAdd
+  check "onMultisigHost.multisigAdded: registration error stays on screen with Done"
+    (!regErr.multisigAdd.saving && regErr.multisigAdd.saved && regErr.multisigAdd.error.isSome &&
+     regErr.routes == [.multisigAdd] && (regErrCs matches [.multisigOverview _]))
+  let (popped, poppedCs) := onHost (.multisigAdded g "id1" (some (.ok "Nano X"))) savingAdd
+  check "onMultisigHost.multisigAdded: ok pops .multisigAdd"
+    (!popped.multisigAdd.saving && popped.routes.isEmpty && (poppedCs matches [.multisigOverview _]))
+  let (keptRoute, _) := onHost (.multisigAdded g "id1" none) { savingAdd with routes := [.settings] }
+  check "onMultisigHost.multisigAdded: other route stays" (keptRoute.routes == [.settings])
+  -- .ledgerRegistered: other wallet dropped; ok updates matching created build (with and without paired Ledger), leaves unrelated created alone; error records ledgerRegisterError
+  let regM := { base with ledgerRegistering := some "a1", multisigBuild := { created := some ("a1", "tr(…)"), members := [] } }
+  check "onMultisigHost.ledgerRegistered: other wallet dropped" (onHost (.ledgerRegistered g "a1" (.ok ())) { switched with ledgerRegistering := some "a1" }).1.ledgerRegistering.isSome
+  let (regOkDefault, _) := onHost (.ledgerRegistered g "a1" (.ok ())) regM
+  check "onMultisigHost.ledgerRegistered: ok without paired Ledger falls back to 'the Ledger'"
+    (regOkDefault.ledgerRegistering.isNone && (regOkDefault.multisigBuild.registration matches some (.ok "the Ledger")) && regOkDefault.ledgerRegisterError.isNone)
+  let (regOkUnrelated, _) := onHost (.ledgerRegistered g "other" (.ok ())) regM
+  check "onMultisigHost.ledgerRegistered: ok for other id leaves build registration alone"
+    (regOkUnrelated.ledgerRegistering.isNone && regOkUnrelated.multisigBuild.registration.isNone)
+  let (regFail, _) := onHost (.ledgerRegistered g "a1" (.error "rejected")) regM
+  check "onMultisigHost.ledgerRegistered: error records ledgerRegisterError"
+    (regFail.ledgerRegistering.isNone && regFail.ledgerRegisterError == some ("a1", "rejected"))
+  -- .multisigRemoved: other wallet dropped; pops matching account route; leaves other route
+  let onAcct := { base with routes := [.multisigAccount "acct"] }
+  check "onMultisigHost.multisigRemoved: other wallet dropped" ((onHost (.multisigRemoved g "acct") { switched with routes := [.multisigAccount "acct"] }).1.routes == [.multisigAccount "acct"])
+  check "onMultisigHost.multisigRemoved: pops matching account" (onHost (.multisigRemoved g "acct") onAcct).1.routes.isEmpty
+  check "onMultisigHost.multisigRemoved: keeps different route" ((onHost (.multisigRemoved g "other") onAcct).1.routes == [.multisigAccount "acct"])
+  -- .drafted: other wallet clears spendingInFlight only; same wallet advances collect epoch and sets collecting
+  let inFlight := { switched with spendingInFlight := true, send := { sending := true } }
+  let (drOther, drOtherCs) := onHost (.drafted g "acct") inFlight
+  check "onMultisigHost.drafted: other wallet clears spendingInFlight and drops" (!drOther.spendingInFlight && drOther.send.collecting.isNone && drOtherCs.isEmpty)
+  let (drOk, drOkCs) := onHost (.drafted g "acct") { base with spendingInFlight := true, send := { sending := true } }
+  check "onMultisigHost.drafted: same wallet opens collection"
+    (!drOk.spendingInFlight && !drOk.send.sending && drOk.send.collecting == some "acct" && drOk.collect.loadingDraft && drOkCs.length == 2)
+  -- .handedOver: rejected on wrong gen / epoch / account / inactive
+  let collecting := { base with routes := [.multisigPSBT "acct"], collect := { epoch := 3, busy := true, pasted := "abc" } }
+  check "onMultisigHost.handedOver: wrong epoch dropped" (onHost (.handedOver g 2 "acct" "1") collecting).2.isEmpty
+  check "onMultisigHost.handedOver: inactive dropped" (onHost (.handedOver g 3 "acct" "1") { collecting with active := false }).2.isEmpty
+  check "onMultisigHost.handedOver: wrong account dropped" (onHost (.handedOver g 3 "other" "1") collecting).2.isEmpty
+  -- .collected: rejected still refreshes overview; accepted clears pasted only when fromPaste=true and pushes .multisigPSBT from .multisigAccount
+  let (colRej, colRejCs) := onHost (.collected stale 3 "acct" true) collecting
+  check "onMultisigHost.collected: stale asks overview and keeps busy" (colRej.collect.busy && (colRejCs matches [.multisigOverview _]))
+  let (colKeep, _) := onHost (.collected g 3 "acct" false) collecting
+  check "onMultisigHost.collected: non-paste keeps pasted text" (!colKeep.collect.busy && colKeep.collect.pasted == "abc" && colKeep.routes == [.multisigPSBT "acct"])
+  let (colClear, _) := onHost (.collected g 3 "acct" true) { collecting with routes := [.multisigAccount "acct"] }
+  check "onMultisigHost.collected: paste from account clears pasted and pushes PSBT"
+    (!colClear.collect.busy && colClear.collect.pasted == "" && colClear.routes == [.multisigAccount "acct", .multisigPSBT "acct"])
+  -- .spendHandled: current refreshes, stale drops
+  check "onMultisigHost.spendHandled: current refreshes" ((onHost (.spendHandled g "acct" "tx") base).2 matches [.multisigOverview _, .refresh _])
+  check "onMultisigHost.spendHandled: stale drops" ((onHost (.spendHandled stale "acct" "tx") base).2.isEmpty)
+  -- .ledgerPaired: other wallet dropped; same wallet pops .ledgerPair and leaves other routes
+  let pairing := { base with ledgerPair := { pairing := true }, routes := [.ledgerPair] }
+  check "onMultisigHost.ledgerPaired: other wallet dropped" (onHost (.ledgerPaired g "s1") { switched with ledgerPair := { pairing := true } }).1.ledgerPair.pairing
+  check "onMultisigHost.ledgerPaired: pops .ledgerPair" (onHost (.ledgerPaired g "s1") pairing).1.routes.isEmpty
+  check "onMultisigHost.ledgerPaired: keeps other route" ((onHost (.ledgerPaired g "s1") { pairing with routes := [.settings] }).1.routes == [.settings])
+  -- .ledgerAddressShown: dropped on wrong wallet/id/index; ok and error both update result
+  let verifying := { base with ledgerVerify := { id := "acct", index := 2, checking := true } }
+  check "onMultisigHost.ledgerAddressShown: wrong wallet dropped" (onHost (.ledgerAddressShown g "acct" 2 (.ok "addr")) { switched with ledgerVerify := verifying.ledgerVerify }).1.ledgerVerify.checking
+  check "onMultisigHost.ledgerAddressShown: wrong id dropped" (onHost (.ledgerAddressShown g "other" 2 (.ok "addr")) verifying).1.ledgerVerify.checking
+  check "onMultisigHost.ledgerAddressShown: wrong index dropped" (onHost (.ledgerAddressShown g "acct" 3 (.ok "addr")) verifying).1.ledgerVerify.checking
+  let (vOk, _) := onHost (.ledgerAddressShown g "acct" 2 (.ok "addr")) verifying
+  check "onMultisigHost.ledgerAddressShown: ok sets non-error result" (!vOk.ledgerVerify.checking && vOk.ledgerVerify.result.map (·.2) == some false)
+  let (vErr, _) := onHost (.ledgerAddressShown g "acct" 2 (.error "denied")) verifying
+  check "onMultisigHost.ledgerAddressShown: error sets error result" (!vErr.ledgerVerify.checking && vErr.ledgerVerify.result == some ("denied", true))
+  -- .draftBroadcast: rejected clears spendingInFlight and refreshes; accepted updates Send sheet vs account page
+  let (bcRej, bcRejCs) := onHost (.draftBroadcast g 99 "acct" "tx1") { collecting with spendingInFlight := true }
+  check "onMultisigHost.draftBroadcast: rejected clears spendingInFlight and refreshes"
+    (!bcRej.spendingInFlight && (bcRejCs matches [.refresh _, .multisigOverview _]))
+  let (bcSend, bcSendCs) := onHost (.draftBroadcast g 3 "acct" "tx1") { collecting with spendingInFlight := true, send := { collecting := some "acct" } }
+  check "onMultisigHost.draftBroadcast: from Send sets sentTxid and requests rawTransaction"
+    (!bcSend.spendingInFlight && bcSend.send.sentTxid == some "tx1" && bcSend.send.collecting.isNone && bcSendCs.length == 4)
+  let (bcAcct, bcAcctCs) := onHost (.draftBroadcast g 3 "acct" "tx2") { collecting with spendingInFlight := true }
+  check "onMultisigHost.draftBroadcast: from account sets broadcastTxid"
+    (!bcAcct.spendingInFlight && bcAcct.collect.broadcastTxid == some "tx2" && bcAcctCs.length == 3)
+  -- wildcard arm on non-multisig Host event
+  check "onMultisigHost: non-multisig event is a no-op" ((base.onMultisigHost .sceneInactive).2.isEmpty)
+
+/-- Every branch of `Model.onSyncHost` and `Model.onSendHost` including stale generations, mismatched inputs,
+card-payment re-read triggers, receipt confirmations, and fee-bump error/mismatch paths. -/
+def testOnSyncAndSendHostGuards : IO Unit := do
+  let base := { modelWithAccounts with active := true, walletID := some "w1" }
+  let g := base.generation
+  let stale := g + 99
+  let (switched, _) := base.switchNetwork .mainnet
+  -- onSyncHost.snapshot: stale dropped; continuedSyncGen accepted; card payment triggers .records; confirmed receipt & unconfirmed filter; inactive skips loadPayment
+  check "onSyncHost.snapshot: stale dropped" ((base.onSyncHost (.snapshot stale { balance := 5 } .idle false)).1.status.balance == base.status.balance)
+  let cardPerson : Person := { id := "p1", name := "Ada", hasCard := true }
+  let histIn : HistoryItem := { txid := "txIn", height := 10, received := 5000, spent := 0, fee := none }
+  let mSnap := { base with
+    status := { syncing := true },
+    records := { people := [cardPerson] },
+    receive := { address := "tb1p1", unconfirmed := [("txIn", 5000), ("txStay", 1000)] },
+    send := { sentTxid := some "txIn" } }
+  let (afterSnap, snapCs) := mSnap.onSyncHost (.snapshot g { syncing := false, history := [histIn] } .synced true)
+  check "onSyncHost.snapshot: confirms sentTxid, drops confirmed unconfirmed, reloads records for card"
+    (afterSnap.send.confirmedHeight == some 10 && afterSnap.receive.unconfirmed == [("txStay", 1000)] &&
+     snapCs.any (· matches .records _))
+  let (_, inactiveCs) := { mSnap with active := false, continuedSync := some (.running "bg" .signet g none) }.onSyncHost
+    (.snapshot g { syncing := false, history := [histIn] } .synced true)
+  check "onSyncHost.snapshot: inactive skips loadPayment and records" (!inactiveCs.any (· matches .records _))
+  -- onSyncHost.records / updated / receiveAddress / unconfirmed / failed / wildcard
+  check "onSyncHost.records: stale dropped" ((base.onSyncHost (.records stale { people := [cardPerson] })).1.records.people.isEmpty)
+  check "onSyncHost.records: current applied" ((base.onSyncHost (.records g { people := [cardPerson] })).1.records.people.length == 1)
+  check "onSyncHost.updated: other wallet dropped" ((switched.onSyncHost (.updated g .none { people := [cardPerson] })).1.records.people.isEmpty)
+  check "onSyncHost.updated: none keeps sheets" ((base.onSyncHost (.updated g .none {})).2.isEmpty)
+  let withAddPerson := { base with sheets := [.addPerson] }
+  check "onSyncHost.updated: senderLabeled closes addPerson" ((withAddPerson.onSyncHost (.updated g .senderLabeled {})).1.sheets.isEmpty)
+  let withLabel := { base with receive := { editingLabel := true } }
+  check "onSyncHost.updated: labelSaved finishes label" (!(withLabel.onSyncHost (.updated g .labelSaved {})).1.receive.editingLabel)
+  check "onSyncHost.receiveAddress: without sheet dropped" ((base.onSyncHost (.receiveAddress g "tb1pNew")).1.receive.address == "")
+  check "onSyncHost.receiveAddress: with sheet applied" (({ base with sheets := [.receive] }.onSyncHost (.receiveAddress g "tb1pNew")).1.receive.address == "tb1pNew")
+  let recvM := { base with receive := { address := "tb1pA" } }
+  let (recv1, _) := recvM.onSyncHost (.unconfirmed g "tb1pA" "txU" 2500)
+  check "onSyncHost.unconfirmed: matching address appends once" (recv1.receive.unconfirmed == [("txU", 2500)])
+  check "onSyncHost.unconfirmed: duplicate ignored" ((recv1.onSyncHost (.unconfirmed g "tb1pA" "txU" 2500)).1.receive.unconfirmed == [("txU", 2500)])
+  check "onSyncHost.unconfirmed: wrong address or stale ignored"
+    ((recvM.onSyncHost (.unconfirmed stale "tb1pA" "txU" 2500)).1.receive.unconfirmed.isEmpty &&
+     (recvM.onSyncHost (.unconfirmed g "tb1pOther" "txU" 2500)).1.receive.unconfirmed.isEmpty)
+  check "onSyncHost.failed: other wallet dropped" ((switched.onSyncHost (.failed g (.payment .send) false "boom")).1.send.error.isNone)
+  check "onSyncHost.failed: same wallet records error" ((base.onSyncHost (.failed g (.payment .send) false "boom")).1.send.error == some "boom")
+  check "onSyncHost: wildcard no-op" ((base.onSyncHost .sceneInactive).2.isEmpty)
+  -- onSendHost: resolvedRate, previewed, sent, rawTransaction, relay, paymentLoaded, pendingRate, bumpPreviewed, bumped, wildcard
+  let inputs := base.sendInputs
+  check "onSendHost.resolvedRate: stale or mismatched dropped"
+    ((base.onSendHost (.resolvedRate stale inputs 2000)).1.send.resolvedRateMilli.isNone &&
+     (base.onSendHost (.resolvedRate g { inputs with override := "9" } 2000)).1.send.resolvedRateMilli.isNone)
+  check "onSendHost.resolvedRate: matching sets rate" ((base.onSendHost (.resolvedRate g inputs 2000)).1.send.resolvedRateMilli == some 2000)
+  let prev : Preview := { destination := "tb1p...", amount := 1000, fee := 200, feeRateMilli := 1000, inputCount := 1, change := none, locktimeLagsTip := false }
+  let reviewingM := { base with send := { reviewing := true } }
+  let (prevMiss, _) := reviewingM.onSendHost (.previewed g { inputs with amount := "999" } prev)
+  check "onSendHost.previewed: mismatched inputs clears reviewing without storing preview" (!prevMiss.send.reviewing && prevMiss.send.preview.isNone)
+  let (prevHit, _) := reviewingM.onSendHost (.previewed g inputs prev)
+  check "onSendHost.previewed: matching stores preview" (!prevHit.send.reviewing && prevHit.send.preview.isSome)
+  check "onSendHost.sent: other wallet dropped" ((switched.onSendHost (.sent g "tx1" [])).1.send.sentTxid.isNone)
+  let (sentM, sentCs) := ({ base with send := { sending := true }, spendingInFlight := true }).onSendHost (.sent g "tx1" ["addr1"])
+  check "onSendHost.sent: same wallet sets receipt and 3 follow-ups"
+    (!sentM.send.sending && !sentM.spendingInFlight && sentM.send.sentTxid == some "tx1" && sentCs.length == 3)
+  check "onSendHost.rawTransaction: mismatched txid or stale dropped"
+    ((sentM.onSendHost (.rawTransaction stale "tx1" (some "02"))).1.send.rawTransaction.isNone &&
+     (sentM.onSendHost (.rawTransaction g "txOther" (some "02"))).1.send.rawTransaction.isNone)
+  check "onSendHost.rawTransaction: matching stores hex" ((sentM.onSendHost (.rawTransaction g "tx1" (some "02"))).1.send.rawTransaction == some "02")
+  check "onSendHost.relay: stale dropped, current recorded"
+    ((sentM.onSendHost (.relay stale "tx1" (.announced 1))).1.send.relayLog.isEmpty &&
+     !(sentM.onSendHost (.relay g "tx1" (.announced 1))).1.send.relayLog.isEmpty)
+  let payLoadM := { base with payment := { loading := true } }
+  check "onSendHost.paymentLoaded: other wallet dropped" ((switched.onSendHost (.paymentLoaded g "tx1")).2.isEmpty)
+  let (payDone, payCs) := payLoadM.onSendHost (.paymentLoaded g "tx1")
+  check "onSendHost.paymentLoaded: same wallet clears loading and refreshes" (!payDone.payment.loading && (payCs matches [.refresh _]))
+  let bumpM := { base with feeBump := { txid := "txB", targetText := "5" }, spendingInFlight := true }
+  check "onSendHost.pendingRate: stale or wrong txid dropped"
+    ((bumpM.onSendHost (.pendingRate stale "txB" 2000 "4")).2.isEmpty &&
+     (bumpM.onSendHost (.pendingRate g "other" 2000 "4")).2.isEmpty)
+  let (prOk, prOkCs) := bumpM.onSendHost (.pendingRate g "txB" 2000 "4")
+  check "onSendHost.pendingRate: parseable text previews bump" (prOk.feeBump.targetText == "4" && prOkCs.length == 1)
+  let (prBad, prBadCs) := bumpM.onSendHost (.pendingRate g "txB" 2000 "not-a-rate")
+  check "onSendHost.pendingRate: unparseable text skips preview" (prBad.feeBump.targetText == "not-a-rate" && prBadCs.isEmpty)
+  let bp : WinnowApp.FeeBumpPreview := { feeRateMilli := 5000, fee := 700, change := none }
+  check "onSendHost.bumpPreviewed: mismatched text dropped" ((bumpM.onSendHost (.bumpPreviewed g "txB" "9" bp)).1.feeBump.reviewed.isNone)
+  check "onSendHost.bumpPreviewed: matching stores review" ((bumpM.onSendHost (.bumpPreviewed g "txB" "5" bp)).1.feeBump.reviewed == some ("5", bp))
+  let (bOther, bOtherCs) := ({ switched with spendingInFlight := true }).onSendHost (.bumped g "txB" "txB2")
+  check "onSendHost.bumped: other wallet clears spendingInFlight only" (!bOther.spendingInFlight && bOtherCs.isEmpty)
+  let (bWrong, bWrongCs) := bumpM.onSendHost (.bumped g "other" "txB2")
+  check "onSendHost.bumped: wrong txid clears spendingInFlight and refreshes" (!bWrong.spendingInFlight && bWrong.feeBump.replacement.isNone && (bWrongCs matches [.refresh _]))
+  let (bOk, bOkCs) := bumpM.onSendHost (.bumped g "txB" "txB2")
+  check "onSendHost.bumped: matching records replacement" (!bOk.spendingInFlight && bOk.feeBump.replacement == some "txB2" && (bOkCs matches [.refresh _]))
+  check "onSendHost: wildcard no-op" ((base.onSendHost .sceneInactive).2.isEmpty)
 
 /-! ## Settings → Security → Hardware wallets and keys, as a person uses it (#46)
 
@@ -2239,7 +2436,7 @@ def testASegwitAccountWithNoAddressAtOneIndexGoesOnWorking : IO Unit := do
   check "New address goes on from the one shown"
     ((← phone.record id).nextReceiveIndex == 10 && ((← shown).bind (·.receiveAddress)) == (account.address 10).toOption)
   check "the phone's scan has every script but that place's: 59 for 30 indices"
-    ((← phone.multisig.watchScripts signet).size == 59)
+    ((← phone.multisig.watchScriptsIO signet).size == 59)
 
 /-- New address: the account's next address, the one every co-signer derives, kept across a restart. -/
 def testNewAddressMovesTheAccountOn : IO Unit := do
@@ -2520,7 +2717,7 @@ def testRefusedAddressesAndPSBTsFromAnAccount : IO Unit := do
   let paste (text : String) := Real.addPastedPSBT phone.env phone.multisig id (some mine.psbt) text
   failsWith "pasted text that is no PSBT" (paste "hello") "That text is not a valid PSBT."
   failsWith "a PSBT cut short after its magic" (paste "cHNidP8=")
-    "The operation couldn’t be completed. (WalletCore.WireError.truncated)"
+    "The PSBT contains invalid transaction data."
   let savings ← Real.createMultisigSpend phone.env phone.multisig savingsID destination 25_000 2.0 false
   failsWith "a PSBT from another account is not combined" (paste savings.psbt)
     "The PSBT's input or output count does not match its transaction."
@@ -2678,7 +2875,9 @@ def pureTests : List (String × IO Unit) :=
   , ("testOneSendForAccounts", testOneSendForAccounts)
   , ("testPlainCreateAndJoinWording", testPlainCreateAndJoinWording)
   , ("testTheBuilderStartsAtAnyTwoMembers", testTheBuilderStartsAtAnyTwoMembers)
-  , ("testAnswersFinishAcrossTheBackground", testAnswersFinishAcrossTheBackground) ]
+  , ("testAnswersFinishAcrossTheBackground", testAnswersFinishAcrossTheBackground)
+  , ("testOnMultisigHostGuards", testOnMultisigHostGuards)
+  , ("testOnSyncAndSendHostGuards", testOnSyncAndSendHostGuards) ]
 
 /-! ## More protection as the balance grows, and a Ledger nearby (#97) -/
 
@@ -2850,11 +3049,89 @@ def testLedgerCardSetsUpAVerifiedTwoOfTwo : IO Unit := do
   check "a Ledger paired: no more scanning" (!{ m with routes := [] }.wantsLedgerScan)
   backendRef.set Backend.pending
 
+/-- Every branch of `Model.advanceSetup` and `stepLedgerCard`: stale generations, missing/keyless signers,
+in-flight creating guard, registration error/none/ok/fail, address verification ok/fail, `.failed` per step,
+recovery-key validation, and Bluetooth skip/notNow edge paths. -/
+def testAdvanceSetupGuards : IO Unit := do
+  let base := { protectModel 0 with
+    multisig := { keyExpression := some "phoneKey", signers := [pairedNano] } }
+  let g := base.generation
+  let (switched, _) := base.switchNetwork .mainnet
+  let stepOf (m : Model) : Option LedgerSetupStep := m.ledgerSetup.map (·.step)
+  -- advanceSetup with ledgerSetup = none is a no-op
+  check "advanceSetup: none is a no-op" ((base.advanceSetup (.ledgerPaired g "ledger-1")).2.isEmpty)
+  -- .pairing: stale dropped; current advances to .creating; .failed (.multisig .ledgerPair) sets error; unrelated failure ignored
+  let pairing := { base with ledgerSetup := some { step := .pairing } }
+  check "advanceSetup.pairing: other wallet dropped" (stepOf (({ switched with ledgerSetup := pairing.ledgerSetup }).advanceSetup (.ledgerPaired g "ledger-1")).1 == some .pairing)
+  check "advanceSetup.pairing: paired advances to creating" (stepOf (pairing.advanceSetup (.ledgerPaired g "ledger-1")).1 == some (.creating "ledger-1"))
+  check "advanceSetup.pairing: ledgerPair failure records error" ((pairing.advanceSetup (.failed g (.multisig .ledgerPair) false "bt off")).1.ledgerSetup.bind (·.error) == some "bt off")
+  check "advanceSetup.pairing: unrelated failure ignored" ((pairing.advanceSetup (.failed g (.multisig .build) false "other")).1.ledgerSetup.bind (·.error)).isNone
+  check "advanceSetup.pairing: other wallet failure ignored" ((({ switched with ledgerSetup := pairing.ledgerSetup }).advanceSetup (.failed g (.multisig .ledgerPair) false "bt off")).1.ledgerSetup.bind (·.error)).isNone
+  -- .creating: stale/error/missing signer/empty keys/already creating all guard; ready signer emits .createMultisigAccount; build failure clears creating and sets error
+  let creating := { base with ledgerSetup := some { step := .creating "ledger-1" } }
+  check "advanceSetup.creating: other wallet dropped" (({ switched with ledgerSetup := creating.ledgerSetup }).advanceSetup (.multisig g base.multisig)).2.isEmpty
+  check "advanceSetup.creating: existing error blocks" (({ creating with ledgerSetup := some { step := .creating "ledger-1", error := some "err" } }).advanceSetup (.multisig g base.multisig)).2.isEmpty
+  check "advanceSetup.creating: missing signer waits" (({ creating with multisig := { base.multisig with signers := [] } }).advanceSetup (.multisig g {})).2.isEmpty
+  check "advanceSetup.creating: signer with no keys waits" (({ creating with multisig := { base.multisig with signers := [{ pairedNano with keys := [] }] } }).advanceSetup (.multisig g {})).2.isEmpty
+  check "advanceSetup.creating: already creating does not duplicate" (({ creating with multisigBuild := { creating := true } }).advanceSetup (.multisig g base.multisig)).2.isEmpty
+  let (creatingStarted, creatingCs) := creating.advanceSetup (.multisig g base.multisig)
+  check "advanceSetup.creating: starts createMultisigAccount" (creatingStarted.multisigBuild.creating && creatingCs.any (· matches .createMultisigAccount ..))
+  let (creatingFail, _) := ({ creating with multisigBuild := { creating := true } }).advanceSetup (.failed g (.multisig .build) false "build failed")
+  check "advanceSetup.creating: build failure clears creating and sets error"
+    (!creatingFail.multisigBuild.creating && creatingFail.ledgerSetup.bind (·.error) == some "build failed")
+  -- .multisigCreated during .creating: other wallet dropped; ok -> verifying; error -> registering with error; none -> registering
+  check "advanceSetup.multisigCreated: other wallet dropped"
+    (stepOf (({ switched with ledgerSetup := creating.ledgerSetup }).advanceSetup (.multisigCreated g "a1" "tr(…)" none)).1 == some (.creating "ledger-1"))
+  let (crOk, crOkCs) := creatingStarted.advanceSetup (.multisigCreated g "a1" "tr(…)" (some (.ok "Nano X")))
+  check "advanceSetup.multisigCreated: ok registration goes to verifying"
+    (!crOk.multisigBuild.creating && stepOf crOk == some (.verifying "a1") && crOkCs.any (· matches .verifyLedgerAddress ..))
+  let (crErr, crErrCs) := creatingStarted.advanceSetup (.multisigCreated g "a1" "tr(…)" (some (.error "denied")))
+  check "advanceSetup.multisigCreated: error registration stops at registering with error"
+    (stepOf crErr == some (.registering "a1") && crErr.ledgerSetup.bind (·.error) == some "denied" && crErrCs.isEmpty)
+  let (crNone, crNoneCs) := creatingStarted.advanceSetup (.multisigCreated g "a1" "tr(…)" none)
+  check "advanceSetup.multisigCreated: none registration runs registerLedger"
+    (stepOf crNone == some (.registering "a1") && crNoneCs.any (· matches .registerLedger ..))
+  -- .registering: wrong wallet/id dropped; ok -> verifying; error -> failWith
+  let registering := { base with ledgerSetup := some { step := .registering "a1" } }
+  check "advanceSetup.registering: wrong wallet or id dropped"
+    ((({ switched with ledgerSetup := registering.ledgerSetup }).advanceSetup (.ledgerRegistered g "a1" (.ok ()))).2.isEmpty &&
+     (registering.advanceSetup (.ledgerRegistered g "other" (.ok ()))).2.isEmpty)
+  let (rgOk, rgOkCs) := registering.advanceSetup (.ledgerRegistered g "a1" (.ok ()))
+  check "advanceSetup.registering: ok advances to verifying" (stepOf rgOk == some (.verifying "a1") && rgOkCs.any (· matches .verifyLedgerAddress ..))
+  let (rgErr, _) := registering.advanceSetup (.ledgerRegistered g "a1" (.error "user rejected"))
+  check "advanceSetup.registering: error records message" (rgErr.ledgerSetup.bind (·.error) == some "user rejected")
+  -- .verifying: wrong wallet/id dropped; ok -> done; error -> failWith
+  let verifying := { base with ledgerSetup := some { step := .verifying "a1" } }
+  check "advanceSetup.verifying: wrong wallet or id dropped"
+    (stepOf (({ switched with ledgerSetup := verifying.ledgerSetup }).advanceSetup (.ledgerAddressShown g "a1" 0 (.ok "tb1p"))).1 == some (.verifying "a1") &&
+     stepOf (verifying.advanceSetup (.ledgerAddressShown g "other" 0 (.ok "tb1p"))).1 == some (.verifying "a1"))
+  let (vrOk, _) := verifying.advanceSetup (.ledgerAddressShown g "a1" 0 (.ok "tb1pVerify"))
+  check "advanceSetup.verifying: ok advances to done with address"
+    (stepOf vrOk == some (.done "a1") && vrOk.ledgerSetup.bind (·.address) == some "tb1pVerify")
+  let (vrErr, _) := verifying.advanceSetup (.ledgerAddressShown g "a1" 0 (.error "cancelled"))
+  check "advanceSetup.verifying: error records message" (vrErr.ledgerSetup.bind (·.error) == some "cancelled")
+  -- wildcard event in advanceSetup
+  check "advanceSetup: unrelated event no-op" ((verifying.advanceSetup .sceneInactive).2.isEmpty)
+  -- stepLedgerCard edge branches: recovery key toggle/paste/empty/invalid, busy start, addressesMatch when not done, notNow with no nearbyLedger, skipBluetooth
+  let (withSetup, _) := step (.ledgerCard .setUp) base
+  let (recOn, _) := step (.ledgerCard (.setWithRecoveryKey true)) withSetup
+  let (recEmpty, _) := step (.ledgerCard .start) recOn
+  check "stepLedgerCard: empty recovery key prompts to paste" (recEmpty.ledgerSetup.bind (·.error) == some "Paste the recovery key first.")
+  let (recBad, _) := step (.ledgerCard .start) { recOn with ledgerSetup := some { step := .choose, withRecoveryKey := true, recoveryKey := "not-a-key" } }
+  check "stepLedgerCard: invalid recovery key sets error" (recBad.ledgerSetup.bind (·.error)).isSome
+  check "stepLedgerCard: pasteRecoveryKey asks clipboard" ((step (.ledgerCard .pasteRecoveryKey) recOn).2 matches [.paste .setupRecoveryKey])
+  check "stepLedgerCard: start while busy is ignored" ((step (.ledgerCard .start) pairing).2.isEmpty)
+  check "stepLedgerCard: start without setup is ignored" ((step (.ledgerCard .start) base).2.isEmpty)
+  check "stepLedgerCard: addressesMatch before done is ignored" ((step (.ledgerCard .addressesMatch) verifying).2.isEmpty)
+  check "stepLedgerCard: notNow without nearbyLedger clears setup" ((step (.ledgerCard .notNow) withSetup).1.ledgerSetup.isNone)
+  check "stepLedgerCard: skipBluetooth closes intro sheet" ((step (.ledgerCard .skipBluetooth) { base with sheets := [.bluetoothIntro] }).1.sheets.isEmpty)
+
 def protectTests : List (String × IO Unit) :=
   [ ("testBalanceCardsAtAndBelowTheirThresholds", testBalanceCardsAtAndBelowTheirThresholds)
   , ("testLedgerCardScansPresentsAndRemembersNotNow", testLedgerCardScansPresentsAndRemembersNotNow)
   , ("testOnboardingEndsWithTheBluetoothCard", testOnboardingEndsWithTheBluetoothCard)
-  , ("testLedgerCardSetsUpAVerifiedTwoOfTwo", testLedgerCardSetsUpAVerifiedTwoOfTwo) ]
+  , ("testLedgerCardSetsUpAVerifiedTwoOfTwo", testLedgerCardSetsUpAVerifiedTwoOfTwo)
+  , ("testAdvanceSetupGuards", testAdvanceSetupGuards) ]
 
 /-! ## Stores the Swift app left (`StoreSeal.setAsideSwiftEra`) -/
 
@@ -2960,12 +3237,48 @@ def testATamperedFileUnderThisAppsKeyIsStillDamage : IO Unit := do
   check "tampered: the key stays" ((← ref.get)["store-key.multisig.signet"]? == before["store-key.multisig.signet"]? &&
     !(← ref.get).contains "store-key.swift-era.multisig.signet")
 
+def testMultisigDraftAndPreviewEdgeCases : IO Unit := do
+  -- draftError & draftPSBT on missing draft
+  let rWallet ← (Real.draftError (.inl WalletError.accountKeyMismatch) : IO Unit).toBaseIO
+  let rPsbt ← (Real.draftError (.inr PSBTError.invalidMagic) : IO Unit).toBaseIO
+  check "draftError surfaces WalletError and PSBTError descriptions"
+    (rWallet matches .error _ && rPsbt matches .error _)
+  let a ← twoOfTwo
+  let rec0 := recordOf a #[← coin a 80_000]
+  check "draftPSBT refuses record without draft"
+    (match ← (Real.draftPSBT rec0).toBaseIO with
+     | .error e => toString e == Real.noDraftText
+     | _ => false)
+  let phone ← phoneWith 0xA1
+  check "draftDetails returns none without draft" ((← Real.draftDetails phone.env phone.multisig rec0).isNone)
+  -- draftDetails returns reviewError for corrupt base64 draft and caches the result
+  let badDraft : MultisigSpendDraft := { psbtBase64 := "not-valid-base64!!!", createdAtHeight := 1 }
+  let recBad := { rec0 with draft := some badDraft }
+  let d1 ← Real.draftDetails phone.env phone.multisig recBad
+  let d2 ← Real.draftDetails phone.env phone.multisig recBad
+  check "draftDetails returns reviewError on corrupt base64 and hits cache"
+    ((d1.bind (·.info.reviewError)).isSome && (d2.bind (·.info.reviewError)) == (d1.bind (·.info.reviewError)))
+  -- previewAccountSend & signAndDraft & broadcastMultisigSpend refusal paths
+  let (pairId, _) ← phone.buildWith "Pair" 2 [← keyExpression (← master 0xD4)]
+  let noAcct ← (Real.previewAccountSend phone.env phone.multisig { destination := "tb1q", amount := "1000" }).toBaseIO
+  let badRate ← (Real.previewAccountSend phone.env phone.multisig { accountID := some pairId, destination := "tb1q", amount := "1000", override := "0" }).toBaseIO
+  let spSend ← (Real.previewAccountSend phone.env phone.multisig { accountID := some pairId, destination := "tsp1qqqq", amount := "1000", priority := 1 }).toBaseIO
+  check "previewAccountSend refuses missing accountID, zero override rate, and silent payment code"
+    (noAcct matches .error _ && badRate matches .error _ && spSend matches .error _)
+  let emptyPreview : Preview :=
+    { destination := "", amount := 0, fee := 0, feeRateMilli := 0, inputCount := 0, change := none, locktimeLagsTip := false }
+  let noRev ← (Real.signAndDraft phone.env phone.multisig { accountID := some pairId } emptyPreview).toBaseIO
+  let badBcast ← (Real.broadcastMultisigSpend phone.env phone.multisig pairId "not-psbt").toBaseIO
+  check "signAndDraft and broadcastMultisigSpend refuse invalid/missing preview or PSBT"
+    (noRev matches .error _ && badBcast matches .error _)
+
 /-! ## main -/
 
 def storeTests : List (String × IO Unit) :=
   [ ("testSwiftEraStoresAreSetAsideAndStartEmpty", testSwiftEraStoresAreSetAsideAndStartEmpty)
   , ("testAnInterruptedSetAsideFinishes", testAnInterruptedSetAsideFinishes)
   , ("testATamperedFileUnderThisAppsKeyIsStillDamage", testATamperedFileUnderThisAppsKeyIsStillDamage)
+  , ("testMultisigDraftAndPreviewEdgeCases", testMultisigDraftAndPreviewEdgeCases)
   , ("testBackupPreservesAccountsAndRejectsChangedOwnership", testBackupPreservesAccountsAndRejectsChangedOwnership)
   , ("testBackupCarriesPendingAccountPayments", testBackupCarriesPendingAccountPayments)
   , ("testPaymentsSpendsAndRollbacks", testPaymentsSpendsAndRollbacks)

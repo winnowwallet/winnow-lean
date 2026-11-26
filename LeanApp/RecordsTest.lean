@@ -9,6 +9,7 @@ import LeanNative.Json
 import TestKit.Check
 import TestKit.Regtest
 import FoundationVectors
+import AppTestNames
 
 /-! `records-test`: a scripted run of every records operation against a temporary directory, with the
 in-memory key store and two wallets made by `Wallet.create` (two phones: A and B).
@@ -718,6 +719,33 @@ def syncBookkeepingScreens : IO Unit := do
   let checked := (LeanNative.Html.toWire (.list (syncSections mm) : H)).toJson.compress
   check "Sync screen: last checked" (contains checked "Chain last checked 5 min ago")
   check "Sync screen: Background App Refresh off" (contains checked "Background App Refresh is off, so Winnow checks the chain only while open.")
+  -- Header tip, always-visible Filter scan, Copy sync diagnostics, and Recent peer issues
+  let diagModel : Model :=
+    { stage := .ready, appVersion := some "0.9.31 (38)",
+      phase := .headers 945100 945102,
+      status := { syncing := true, tipHeight := 945100, nextScanHeight := 944000, peerCount := 3,
+                  lastCheckedAgo := some "5 min", lastSyncError := some "timeout" },
+      settingsDraft :=
+        { peers := [{ endpoint := "1.2.3.4:8333", userAgent := "/Satoshi:28.0.0/", startHeight := 945102, feeFilter := some 1000, network := .clearnet }],
+          peerIssues := [("5.6.7.8:8333", "claimed height 945102 at handshake but delivered no headers past 945100 on 2 passes")] } }
+  let diagWire := (LeanNative.Html.toWire (.list (syncSections diagModel) : H)).toJson.compress
+  check "Sync screen: shows Header tip and Filter scan even while checking headers"
+    (contains diagWire Ids.syncHeaderTip && contains diagWire "945,100 / 945,102" &&
+     contains diagWire "block 944,000 of 945,100" && contains diagWire Ids.copySyncDiagnosticsButton)
+  let diagText := syncDiagnosticsText diagModel
+  check "Sync diagnostics: includes telemetry, peers, and peer issues without wallet secrets"
+    (contains diagText "Winnow 0.9.31 (38) (Mainnet)" &&
+     contains diagText "Header tip: 945,100 / 945,102" &&
+     contains diagText "Filter scan: block 944,000 of 945,100" &&
+     contains diagText "1.2.3.4:8333" &&
+     contains diagText "5.6.7.8:8333" &&
+     !contains diagText "walletID")
+  let (_, openSyncCmds) := stepHome (.openNetwork .sync) { stage := .ready }
+  check "Sync screen: opening Sync loads connected peers and recent issues for diagnostics"
+    (openSyncCmds.any (· matches .connectedPeers _))
+  let peersWire := (LeanNative.Html.toWire (.list (peersSections diagModel) : H)).toJson.compress
+  check "Peers screen: shows Recent peer issues section when issues exist"
+    (contains peersWire Ids.peerIssuesSection && contains peersWire "5.6.7.8:8333" && contains peersWire "on 2 passes")
   check "relative: under a minute" (relativeAgo 59 == "under a minute")
   check "relative: hours and minutes" (relativeAgo (2 * 3600 + 3 * 60) == "2 hr, 3 min")
   check "relative: days" (relativeAgo (3 * 86400 + 4 * 3600) == "3 days, 4 hr" && relativeAgo 86400 == "1 day")
@@ -798,7 +826,63 @@ def backgroundRuns : IO Unit := do
     | .ok a => a.toList
     | .error _ => []
   check "background: the identifiers are permitted in Info.plist"
-    (strs "BGTaskSchedulerPermittedIdentifiers" == [Real.backgroundRefreshID, Real.backgroundProcessingID])
+    (strs "BGTaskSchedulerPermittedIdentifiers" ==
+      [Real.backgroundRefreshID, Real.backgroundProcessingID, Real.backgroundContinuedWildcard])
+  -- Apple requires BGContinuedProcessingTask wildcard identifiers to start with `<CFBundleIdentifier>.`
+  let wildcards := (strs "BGTaskSchedulerPermittedIdentifiers").filter (·.endsWith ".*")
+  check "background: continued wildcards start with the app's bundleId"
+    (!wildcards.isEmpty && wildcards.all (·.startsWith (WinnowApp.manifest.bundleId ++ ".")))
+  check "backgroundContinuedID formats per network and serial"
+    (Real.backgroundContinuedID .mainnet 1 == Real.backgroundContinuedPrefix ++ "mainnet-1" &&
+     Real.backgroundContinuedID .signet 2 == Real.backgroundContinuedPrefix ++ "signet-2" &&
+     Real.backgroundContinuedID .regtest 3 == Real.backgroundContinuedPrefix ++ "regtest-3")
+  -- BackgroundSyncRun.wait on completed and expired runs, plus scanInBackground/runBackgroundSync guards
+  let doneRun ← Real.BackgroundSyncRun.new 5_000 (pure true) (pure ()) (fun _ => pure ())
+  doneRun.start
+  doneRun.wait
+  let expRun ← Real.BackgroundSyncRun.new 10_000 (cancellableSleep 5_000 *> pure true) (pure ()) (fun _ => pure ())
+  expRun.start
+  expRun.expire
+  expRun.wait
+  let envIdle ← gatewayEnv none
+  check "scanInBackground returns false without wallet/dir" (!(← Real.scanInBackground envIdle))
+  envIdle.modify fun c => { c with backgroundRunning := true }
+  check "runBackgroundSync refuses when another background check is running" (!(← Real.runBackgroundSync envIdle {}))
+  -- RecordsError.isDamaged & writeAtomically direct tests
+  check "RecordsError.isDamaged classifies store damage vs other errors"
+    ((RecordsError.people .damaged).isDamaged &&
+     (RecordsError.labels .damaged).isDamaged &&
+     (RecordsError.multisig .damaged).isDamaged &&
+     (RecordsError.signers .damaged).isDamaged &&
+     !(RecordsError.seal .malformed).isDamaged &&
+     !(RecordsError.app .noWallet).isDamaged)
+  let atomDir ← IO.FS.createTempDir
+  let atomPath := atomDir / "atomic-test.bin"
+  let payload := ByteArray.mk #[1, 2, 3, 4]
+  RecordsReal.writeAtomically payload atomPath
+  RecordsReal.writeAtomically (ByteArray.mk #[5, 6]) atomPath
+  check "writeAtomically creates and overwrites target cleanly"
+    ((← IO.FS.readBinFile atomPath) == ByteArray.mk #[5, 6])
+  IO.FS.removeDirAll atomDir
+  -- Phase 3: Real.sameSummary, Real.bumpFee, Real.watchAddress, Real.watchRelay early/offline paths
+  let pBase : Preview :=
+    { destination := "tb1qbase", amount := 10_000, fee := 200, feeRateMilli := 1_500,
+      inputCount := 1, change := some 5_000, locktimeLagsTip := false }
+  check "Real.sameSummary detects equality and each differing field"
+    (Real.sameSummary pBase pBase &&
+     !Real.sameSummary pBase { pBase with destination := "tb1qother" } &&
+     !Real.sameSummary pBase { pBase with amount := 10_001 } &&
+     !Real.sameSummary pBase { pBase with fee := 201 } &&
+     !Real.sameSummary pBase { pBase with feeRateMilli := 2_000 } &&
+     !Real.sameSummary pBase { pBase with inputCount := 2 } &&
+     !Real.sameSummary pBase { pBase with change := none } &&
+     Real.sameSummary pBase { pBase with locktimeLagsTip := true })
+  let fakeBump : WinnowApp.FeeBumpPreview := { feeRateMilli := 2_000, fee := 300, change := some 4_900 }
+  let envNoStack ← gatewayEnv none
+  let bumpNoWallet ← (Real.bumpFee envNoStack "00" fakeBump).toBaseIO
+  check "Real.bumpFee fails without open wallet" (bumpNoWallet matches .error _)
+  Real.watchAddress envNoStack "tb1qbase" (fun _ _ => pure ())
+  Real.watchRelay envNoStack "00" (fun _ => pure ())
   check "background: fetch and processing modes" (strs "UIBackgroundModes" == ["fetch", "processing"])
   check "background: the manifest passes LeanNative's capability checks" WinnowApp.manifest.problems.isEmpty
   -- the Model: a cold launch's task waits for boot, boot without a scene starts no networking
@@ -824,7 +908,7 @@ def backgroundRuns : IO Unit := do
   let (switched, _) := (away.switchNetwork (if away.settings.network == .mainnet then .signet else .mainnet))
   let (stale, _) := onHost (.booted 0 (.opened "w")) switched
   check "Model: another network's wallet opening is still dropped" (stale.stage == .loading && stale.walletID.isNone)
-  let (failed, _) := onHost (.failed 0 "open" "The wallet's folder could not be made.") away
+  let (failed, _) := onHost (.failed 0 (.wallet .openWallet) false "The wallet's folder could not be made.") away
   check "Model: a wallet that could not be opened says so, with Retry"
     (failed.stage == .storageDamaged "The wallet's folder could not be made." && contains (LeanNative.Html.toWire (view failed)).toJson.compress "Retry")
   let ready : Model := { stage := .ready, active := true, walletID := some "w" }
@@ -977,84 +1061,82 @@ def busyModel : Model :=
     signerKeys := { saving := true }
     collect := { busy := true, epoch := 4 } }
 
-/-- `Model.fail` for each context it handles: where the message lands, and the busy flags it clears; every
+/-- `Model.fail` for each target it handles: where the message lands, and the busy flags it clears; every
 other flag stays set (a failure touches only the screen that asked). -/
-def failTable : List (String × (Model → Bool) × List String) :=
+def failTable : List (FailTarget × Bool × (Model → Bool) × List String) :=
   let boom := some "boom"
-  [ ("create", (·.onboarding.error == boom), ["onboarding.busy"])
-  , ("import", (·.onboarding.error == boom), ["onboarding.busy"])
-  , ("onboarding", (·.onboarding.error == boom), ["onboarding.busy"])
-  , ("create.cancelled", (·.onboarding.error.isNone), ["onboarding.busy"])
-  , ("import.cancelled", (·.onboarding.error.isNone), ["onboarding.busy"])
-  , ("cloudRestore", (·.onboarding.restoreError == boom), ["onboarding.restoring"])
-  , ("cloudRestore.cancelled", (·.onboarding.restoreError.isNone), ["onboarding.restoring"])
-  , ("reveal.cancelled", (·.reveal.error.isNone), ["reveal.revealing"])
-  , ("receive", (·.receive.error == boom), ["receive.changing"])
-  , ("label", (·.labelEditor.error == boom), ["labelEditor.saving"])
-  , ("send", (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
+  [ (.wallet .create, false, (·.onboarding.error == boom), ["onboarding.busy"])
+  , (.wallet .importWallet, false, (·.onboarding.error == boom), ["onboarding.busy"])
+  , (.wallet .create, true, (·.onboarding.error.isNone), ["onboarding.busy"])
+  , (.wallet .importWallet, true, (·.onboarding.error.isNone), ["onboarding.busy"])
+  , (.wallet .cloudRestore, false, (·.onboarding.restoreError == boom), ["onboarding.restoring"])
+  , (.wallet .cloudRestore, true, (·.onboarding.restoreError.isNone), ["onboarding.restoring"])
+  , (.wallet .delete, false, (·.confirm == some (.deleteFailed "boom")), [])
+  , (.wallet .openWallet, false, (·.status.lastSyncError == boom), [])
+  , (.wallet .unlock, false, (·.status.lastSyncError == boom), [])
+  , (.wallet .unlock, true, (·.status.lastSyncError.isNone), [])
+  , (.wallet .sync, false, (·.status.lastSyncError == boom), [])
+  , (.payment .receive, false, (·.receive.error == boom), ["receive.changing"])
+  , (.payment .label, false, (·.labelEditor.error == boom), ["labelEditor.saving"])
+  , (.payment .send, false, (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
   -- a declined Face ID before a payment: the prompt's text shows, and Send is free again
-  , ("send.cancelled", (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
-  , ("rate", (·.send.resolvedRateMilli.isNone), [])
-  , ("settings", (·.settingsDraft.error == boom), ["settingsDraft.resettingPeers"])
-  , ("peers", (·.settingsDraft.error == boom), ["settingsDraft.resettingPeers"])
-  , ("delete", (·.confirm == some (.deleteFailed "boom")), [])
-  , ("catalog", (·.settingsDraft.catalog.isNone), [])
-  , ("payment", (·.payment.error == boom), ["payment.loading"])
-  , ("feeBump", (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
-  , ("feeBump.cancelled", (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
-  , ("export", fun m => m.exportState.error == boom && m.exportState.file.isNone, ["exportState.busy"])
-  , ("reveal", (·.reveal.error == boom), ["reveal.revealing"])
-  , ("personCard", (·.shareCard.error == boom), ["shareCard.making"])
+  , (.payment .send, true, (·.send.error == boom), ["send.reviewing", "send.sending", "spendingInFlight"])
+  , (.payment .rate, false, (·.send.resolvedRateMilli.isNone), [])
+  , (.payment .payment, false, (·.payment.error == boom), ["payment.loading"])
+  , (.payment .feeBump, false, (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
+  , (.payment .feeBump, true, (·.feeBump.error == boom), ["feeBump.bumping", "spendingInFlight"])
+  , (.settings .peers, false, (·.settingsDraft.error == boom), ["settingsDraft.resettingPeers"])
+  , (.settings .catalog, false, (·.settingsDraft.catalog.isNone), [])
+  , (.settings .exportBundle, false, fun m => m.exportState.error == boom && m.exportState.file.isNone, ["exportState.busy"])
+  , (.settings .exportBundle, true, (·.exportState.error.isNone), ["exportState.busy"])
+  , (.settings .reveal, false, (·.reveal.error == boom), ["reveal.revealing"])
+  , (.settings .reveal, true, (·.reveal.error.isNone), ["reveal.revealing"])
+  , (.people .personCard, false, (·.shareCard.error == boom), ["shareCard.making"])
   -- a declined Face ID before a card is made: nothing is said, and the button is free again
-  , ("personCard.cancelled", (·.shareCard.error.isNone), ["shareCard.making"])
-  , ("person", (·.person.error == boom), ["person.saving", "person.inferring"])
-  , ("recipients", (·.recipientsError == boom), [])
-  , ("multisigAdd", (·.multisigAdd.error == boom), ["multisigAdd.saving"])
-  , ("multisigBuild", (·.multisigBuild.error == boom), ["multisigBuild.creating"])
-  , ("multisigAccount", (·.multisigAccountError == boom), [])
-  , ("accountSpend", (·.payment.error == boom), [])
-  , ("ledgerPair", (·.ledgerPair.error == boom), ["ledgerPair.pairing"])
-  , ("signerKeys", (·.signerKeys.error == boom), ["signerKeys.saving"])
-  , ("signer", (·.signerDetail.error == boom), [])
-  , ("multisigOverview", (·.status.lastSyncError.isNone), [])
-  , ("collect.4", (·.collect.error == boom), ["collect.busy", "spendingInFlight"])
-  , ("collect.4.cancelled", (·.collect.error.isNone), ["collect.busy", "spendingInFlight"])
+  , (.people .personCard, true, (·.shareCard.error.isNone), ["shareCard.making"])
+  , (.people .person, false, (·.person.error == boom), ["person.saving", "person.inferring"])
+  , (.people .recipients, false, (·.recipientsError == boom), [])
+  , (.multisig .overview, false, (·.status.lastSyncError.isNone), [])
+  , (.multisig .add, false, (·.multisigAdd.error == boom), ["multisigAdd.saving"])
+  , (.multisig .build, false, (·.multisigBuild.error == boom), ["multisigBuild.creating"])
+  , (.multisig .account, false, (·.multisigAccountError == boom), [])
+  , (.multisig .spend, false, (·.payment.error == boom), [])
+  , (.multisig .ledgerPair, false, (·.ledgerPair.error == boom), ["ledgerPair.pairing"])
+  , (.multisig .signerKeys, false, (·.signerKeys.error == boom), ["signerKeys.saving"])
+  , (.multisig .signer, false, (·.signerDetail.error == boom), [])
+  , (.multisig (.collect 4), false, (·.collect.error == boom), ["collect.busy", "spendingInFlight"])
+  , (.multisig (.collect 4), true, (·.collect.error.isNone), ["collect.busy", "spendingInFlight"])
   -- an earlier collection run's failure: dropped, though the spend it held is free again
-  , ("collect.3", (·.collect.error.isNone), ["spendingInFlight"])
-  -- what no screen asked for falls through to the sync error line
-  , ("refresh", (·.status.lastSyncError == boom), [])
-  , ("sync", (·.status.lastSyncError == boom), [])
-  , ("open", (·.status.lastSyncError == boom), [])
-  , ("somethingNew", (·.status.lastSyncError == boom), []) ]
+  , (.multisig (.collect 3), false, (·.collect.error.isNone), ["spendingInFlight"]) ]
 
 /-- #48: each failure reaches the screen that asked and clears that screen's busy flags, through `onHost`
 as `perform` posts it; the screens then show it. -/
 def failuresReachTheirScreens : IO Unit := do
   for (name, flag) in busyFlags do
     check s!"fail: the busy model has {name} set" (flag busyModel)
-  for (ctx, landed, clears) in failTable do
-    let (m, cs) := onHost (.failed busyModel.generation ctx "boom") busyModel
-    check s!"fail {ctx}: the message lands on its screen" (landed m && cs.isEmpty)
+  for (target, cancelled, landed, clears) in failTable do
+    let label := s!"{reprStr target}{if cancelled then ".cancelled" else ""}"
+    let (m, cs) := onHost (.failed busyModel.generation target cancelled "boom") busyModel
+    check s!"fail {label}: the message lands on its screen" (landed m && cs.isEmpty)
     for (name, flag) in busyFlags do
-      if clears.contains name then check s!"fail {ctx}: clears {name}" (!flag m)
-      else check s!"fail {ctx}: leaves {name}" (flag m)
-  -- a cancelled restore leaves an earlier message alone; a cancelled iCloud prompt says nothing
+      if clears.contains name then check s!"fail {label}: clears {name}" (!flag m)
+      else check s!"fail {label}: leaves {name}" (flag m)
+  -- a cancelled restore leaves an earlier message alone
   let restoring := { busyModel with onboarding := { busyModel.onboarding with restoreError := some "earlier" } }
-  check "fail cloudRestore.cancelled: keeps what the restore said" ((restoring.fail "cloudRestore.cancelled" "x").onboarding.restoreError == some "earlier")
-  check "fail cloudRestore: a CancellationError says nothing" ((busyModel.fail "cloudRestore" "Winnow.CancellationError").onboarding.restoreError.isNone)
+  check "fail cloudRestore.cancelled: keeps what the restore said"
+    ((restoring.fail (.wallet .cloudRestore) true "x").onboarding.restoreError == some "earlier")
   -- the collection step only while the scene is active
-  let away := (busyModel.fail "collect.4" "boom")
+  let away := (busyModel.fail (.multisig (.collect 4)) false "boom")
   check "fail collect: the active scene's run shows" (away.collect.error == some "boom")
-  let background := { busyModel with active := false }.fail "collect.4" "boom"
+  let background := { busyModel with active := false }.fail (.multisig (.collect 4)) false "boom"
   check "fail collect: not while in the background" (background.collect.busy && background.collect.error.isNone && !background.spendingInFlight)
-  check "fail collect: a context that is not a number is an earlier run's" ((busyModel.fail "collect.x" "boom").collect.busy)
   -- another wallet's failure is dropped (a network switch since)
   let (switched, _) := busyModel.switchNetwork .mainnet
-  let (other, _) := onHost (.failed busyModel.generation "send" "boom") { switched with send := { sending := true } }
+  let (other, _) := onHost (.failed busyModel.generation (.payment .send) false "boom") { switched with send := { sending := true } }
   check "fail: another wallet's failure is dropped" (other.send.sending && other.send.error.isNone)
   -- the screens show it: Send's review, the fee bump, Pair a Ledger, the label editor
   let sending := { readyModel "w" with send := { sending := true, preview := none }, spendingInFlight := true }.present .send
-  let (m, _) := onHost (.failed 0 "send" Real.AppError.sendReviewChanged.text) sending
+  let (m, _) := onHost (.failed 0 (.payment .send) false Real.AppError.sendReviewChanged.text) sending
   check "fail send: Send shows why, and can be used again" (contains (rendered m) Real.AppError.sendReviewChanged.text && !m.send.sending)
   let replacedRow : HistoryItem := { txid := "tt", height := 0, received := 0, spent := 1000, fee := some 100, replacedBy := some "rr" }
   let sent := { (readyModel "w") with send := { sentTxid := some "tt" } }.present .send
@@ -1068,15 +1150,15 @@ def failuresReachTheirScreens : IO Unit := do
   let bump : FeeBump := { txid := "tt", bumping := true, targetText := "5", reviewed := some ("5", review) }
   let bumping := { readyModel "w" with feeBump := bump }.present .feeBump
   check "fail feeBump: the sheet says Signing while it runs" (contains (rendered bumping) "Signing & broadcasting")
-  let (m, _) := onHost (.failed 0 "feeBump" "The replacement was refused") bumping
+  let (m, _) := onHost (.failed 0 (.payment .feeBump) false "The replacement was refused") bumping
   check "fail feeBump: the sheet shows it and offers Sign & replace again"
     (contains (rendered m) "The replacement was refused" && contains (rendered m) "Sign & replace" && !m.spendingInFlight)
   let pairing := { readyModel "w" with routes := [.ledgerPair], ledgerPair := { name := "Nano X", pairing := true } }
-  let (m, _) := onHost (.failed 0 "ledgerPair" "No Ledger answered") pairing
+  let (m, _) := onHost (.failed 0 (.multisig .ledgerPair) false "No Ledger answered") pairing
   check "fail ledgerPair: Pair a Ledger shows it, Pair again" (contains (rendered m) "No Ledger answered" && contains (rendered m) "\"Pair\"")
-  let unknown := (onHost (.failed 0 "somethingNew" "the sync line") (readyModel "w")).1
-  check "fail: an unknown context is a sync problem on the home" (contains (rendered unknown) "Sync problem")
-  check "fail: and shows on the Sync screen" (contains (LeanNative.Html.toWire (.list (syncSections unknown) : H)).toJson.compress "the sync line")
+  let syncErr := (onHost (.failed 0 (.wallet .sync) false "the sync line") (readyModel "w")).1
+  check "fail: a sync failure is a sync problem on the home" (contains (rendered syncErr) "Sync problem")
+  check "fail: and shows on the Sync screen" (contains (LeanNative.Html.toWire (.list (syncSections syncErr) : H)).toJson.compress "the sync line")
 
 /-! ### Settings (#44) -/
 
@@ -1540,7 +1622,7 @@ def homeScreens (sh : Shell) (backend : Backend) (walletID robertID bobAddress o
   check "unstored: Loading… meanwhile" (contains (rendered m) "Loading payment details")
   let (m, cs) := onHost (.paymentLoaded m.generation t3) m
   check "unstored: loaded, the wallet read again" (!m.payment.loading && cs.any (· matches .refresh _))
-  let (failed, _) := onHost (.failed m.generation "payment" "The peer did not send it.") { m with payment := { loading := true } }
+  let (failed, _) := onHost (.failed m.generation (.payment .payment) false "The peer did not send it.") { m with payment := { loading := true } }
   check "unstored: a failure shows, with Load payment details again"
     (contains (rendered failed) "The peer did not send it." && contains (rendered failed) "Load payment details")
   check "unstored: not while syncing" (stepHome .loadPayment { failed with status := { failed.status with syncing := true } }).2.isEmpty
@@ -1553,11 +1635,9 @@ def homeScreens (sh : Shell) (backend : Backend) (walletID robertID bobAddress o
   check "payment: unfolded, the txid in full and View transaction" (contains (rendered adv) t1 && contains (rendered adv) "View transaction")
   let (adv2, _) := stepHome (.openPayment t2) (stepHome .pop adv).1
   check "payment: no Bump fee for a payment received" (!contains (rendered adv2) "Bump fee")
-  -- a payment gone from the history, and the Back up page
+  -- a payment gone from the history
   let (gone, _) := stepHome (.openPayment (hex (ByteArray.mk (Array.replicate 32 0x44)))) m
   check "gone: says so" (contains (rendered gone) "This payment is no longer in the wallet")
-  let (backup, _) := stepHome .openBackup m
-  check "Back up: the page" (backup.routes == [.backup])
 
 /-! ### The People store: payment indexes and pay-to checks (#35) -/
 
@@ -1801,32 +1881,32 @@ def backupScreens (sh : Shell) (root : System.FilePath) (backend : Backend) (wal
   check "background: Restore from a file closes and forgets the text"
     (impGone.sheets.isEmpty && impGone.onboarding.importText.isEmpty && !contains (rendered impGone) "Import wallet")
 
-  -- Home's Save a backup file, the Back up page
+  -- Home stays focused on iCloud backup; manual backup files live in Settings → Backup
   let simple := readyModel walletID
-  check "Back up: Home offers it while nothing is backed up" (contains (rendered simple) "Save a backup file")
-  let (page, _) ← sh.tap (.home .openBackup) simple
+  check "Home: does not nudge a manual backup file while not backed up"
+    (!contains (rendered simple) "Save a backup file" && contains (rendered simple) Ids.homeCloudBackupButton)
+  let (page, _) ← sh.tap (.home .openSettings) simple
   let shown := rendered page
-  check "Back up: the page" (page.routes == [.backup] && contains shown "\"Back up\"" &&
-    contains shown "A backup file is a copy you keep yourself." && contains shown "Save a backup file")
-  check "Back up: Show recovery phrase and the iCloud control, the words themselves hidden"
-    (contains shown "Show recovery phrase" && contains shown "iCloud" && !showsWords shown)
+  check "Settings → Backup: offers backup file and recovery phrase, words hidden"
+    (page.routes == [.settings] && contains shown "A backup file is a copy you keep yourself." &&
+     contains shown "Save a backup file" && contains shown "Show recovery phrase" && contains shown "iCloud" && !showsWords shown)
   let (page, _) ← sh.tap (.backup .openExport) page
-  check "Back up: Save a backup file opens the file sheet over the page"
-    (page.topSheet == some .exportBundle && contains (rendered page) "Create backup file" && contains (rendered page) "\"Back up\"")
+  check "Backup file: opens the file sheet over Settings"
+    (page.topSheet == some .exportBundle && contains (rendered page) "Create backup file")
   let (page, _) ← sh.tap (.backup (.setIncludeMnemonic true)) page
-  check "Back up: including the phrase says what that means" (contains (rendered page) "This file includes your phone’s signing key.")
+  check "Backup file: including the phrase says what that means" (contains (rendered page) "This file includes your phone’s signing key.")
   let (page, _) ← sh.tap (.backup .createExport) page
-  check "Back up: and asks first" (contains (rendered page) "Include the recovery phrase?" && page.exportState.file.isNone)
+  check "Backup file: and asks first" (contains (rendered page) "Include the recovery phrase?" && page.exportState.file.isNone)
   let (page, _) ← sh.tap (.backup .confirmExport) page
-  let some file := page.exportState.file | check "Back up: the file is ready" false; return
-  check "Back up: the file is ready to share" (contains (rendered page) "Backup ready" &&
+  let some file := page.exportState.file | check "Backup file: the file is ready" false; return
+  check "Backup file: the file is ready to share" (contains (rendered page) "Backup ready" &&
     contains (rendered page) "Includes your recovery words. Keep this file private.")
   let bundle ← IO.FS.readFile file
   let (page, cs) := step .closeSheet page
   let (page, _) ← sh.run page cs
   let (home, _) ← sh.tap (.home .pop) page
-  check "Back up: closing the sheet, then Back, is Home" (page.sheets.isEmpty && home.routes.isEmpty &&
-    contains (rendered home) "Save a backup file")
+  check "Backup file: closing the sheet, then Back, is Home" (page.sheets.isEmpty && home.routes.isEmpty &&
+    !contains (rendered home) "Save a backup file")
 
   -- a new phone restores it: the import sheet through to the verification report
   let restoreRoot := root / "screens-restore"
@@ -2430,10 +2510,1084 @@ def recordsLockedRow : IO Unit := do
     contains (rendered locked) "Unlock with Face ID")
   check "locked records: the tap asks for the authentication" ((step .unlockRecords locked).2.any (· matches .unlockRecords _))
 
+/-- Continued background sync (iOS 26 `BGContinuedProcessingTask`): every manual sync requests one while
+foreground-active, keeps networking alive across backgrounding, streams privacy-safe progress, and tears
+down cleanly on completion, failure, expiry/cancel, refusal, or wallet/network switch. -/
+def continuedBackgroundSync : IO Unit := do
+  -- privacy-safe Live Activity copy & progress
+  check "continued copy: titles per network"
+    (continuedSyncTitle .mainnet == "Syncing Bitcoin" &&
+     continuedSyncTitle .signet == "Syncing Signet" &&
+     continuedSyncTitle .regtest == "Syncing Regtest")
+  check "continued copy: idle/connecting/headers/filters/synced/failed progress"
+    (continuedSyncProgress .idle == (0, 100, "Starting sync…") &&
+     continuedSyncProgress (.connecting 2 3) == (2, 3, "Connecting to peers… (2/3)") &&
+     continuedSyncProgress (.connecting 0 0) == (0, 1, "Connecting to peers…") &&
+     continuedSyncProgress (.headers 840000 900000) == (840000, 900000, "Checking headers… 840,000 / 900,000") &&
+     continuedSyncProgress (.headers 12 0) == (0, 100, "Checking headers… 12") &&
+     continuedSyncProgress (.headers 0 0) == (0, 100, "Checking headers…") &&
+     continuedSyncProgress (.filters 12400 15000) == (12400, 15000, "Scanning blocks… 12,400 / 15,000") &&
+     continuedSyncProgress (.filters 0 0) == (0, 100, "Scanning blocks…") &&
+     continuedSyncProgress .synced == (99, 100, "Finishing sync…") &&
+     continuedSyncProgress .peerDiscoveryFailed == (0, 100, "No peers reachable"))
+  let idMain := continuedSyncID .mainnet 1
+  let idMain2 := continuedSyncID .mainnet 2
+  let idSignet := continuedSyncID .signet 1
+  check "continued id: bundle-prefixed, single-label suffix under the wildcard"
+    (idMain == "com.btcswift.app.chain-sync.mainnet-1" &&
+     idMain2 == "com.btcswift.app.chain-sync.mainnet-2" &&
+     idMain.startsWith Real.backgroundContinuedPrefix &&
+     idMain.startsWith (WinnowApp.manifest.bundleId ++ ".") &&
+     !(idMain.drop Real.backgroundContinuedPrefix.length).contains '.')
+  -- plain foreground activation does NOT request a continued task
+  let readyMain : Model := { stage := .ready, active := true, walletID := some "w", settings := { network := .mainnet } }
+  let (activated, cs) := onHost (.scene true) { readyMain with active := false }
+  check "continued: plain scene active does not request a continued task"
+    (activated.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  -- automatic foreground catch-up sync requests continuation once, and stays quiet on already-synced polls
+  let (mPoll, cs) := onHost (.snapshot 0 { readyMain.status with syncing := true } .synced) readyMain
+  check "continued: routine synced poll does not auto-request bgtask.continue"
+    (mPoll.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let (mAuto, cs) := onHost (.snapshot 0 { readyMain.status with syncing := true } (.filters 100 5000)) readyMain
+  check "continued: automatic foreground catch-up sync requests bgtask.continue"
+    (mAuto.continuedSync == some (.requested idMain .mainnet 0 true) &&
+     mAuto.continuedSyncSerial == 1 &&
+     cs.any (· matches .continueBackgroundSync _ "Syncing Bitcoin" "Scanning blocks… 100 / 5,000"))
+  -- refusal suppresses repeated auto-requests on subsequent ticks, records error/detail for Sync screen,
+  -- and re-enables auto-requests once synced (except `unavailable`, which stays suppressed)
+  let (mAutoRef, _) := onHost (.continuedSyncRefused idMain "tooManyPending" "queue full") mAuto
+  check "continued: refusal records error/detail and suppresses auto-retry while still syncing"
+    (mAutoRef.continuedSync.isNone && mAutoRef.continuedSyncAutoSuppressed &&
+     mAutoRef.continuedSyncOutcome == .refused "tooManyPending" "queue full" &&
+     continuedSyncStatusText mAutoRef == "Refused (tooManyPending: queue full)")
+  let (mAutoStill, cs) := onHost (.snapshot 0 { mAutoRef.status with syncing := true } (.filters 200 5000)) mAutoRef
+  check "continued: suppressed auto-sync does not spam bgtask.continue"
+    (mAutoStill.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let (mAutoCleared, _) := onHost (.snapshot 0 { mAutoStill.status with syncing := false } .synced) mAutoStill
+  check "continued: reaching synced clears non-unavailable suppression for the next pass"
+    (!mAutoCleared.continuedSyncAutoSuppressed)
+  let (mAutoNext, cs) := onHost (.snapshot 0 { mAutoCleared.status with syncing := true } (.headers 10 20)) mAutoCleared
+  check "continued: next catch-up pass gets a fresh unique task id"
+    (mAutoNext.continuedSync == some (.requested idMain2 .mainnet 0 true) &&
+     cs.any (fun c => match c with | .continueBackgroundSync id .. => id == idMain2 | _ => false))
+  let (mUnavail, _) := onHost (.continuedSyncRefused idMain2 "unavailable" "needs iOS 26") mAutoNext
+  let (mUnavailSynced, _) := onHost (.snapshot 0 { mUnavail.status with syncing := false } .synced) mUnavail
+  check "continued: unavailable stays suppressed even after sync finishes"
+    (mUnavailSynced.continuedSyncAutoSuppressed && continuedSyncStatusText mUnavailSynced == "Unavailable")
+  -- manual trigger after refusal always tries again with a fresh id
+  let (mManualAfterRef, cs) := step .syncNow mAutoRef
+  check "continued: manual Sync now overrides auto suppression with fresh id"
+    (mManualAfterRef.continuedSync == some (.requested idMain2 .mainnet 0 false) &&
+     !mManualAfterRef.continuedSyncAutoSuppressed &&
+     cs.any (fun c => match c with | .continueBackgroundSync id .. => id == idMain2 | _ => false))
+  -- manual sync triggers: Sync now, Retry, Verify from genesis (ON only), iCloud restore, file import, finishOnboarding
+  let (m1, cs) := step .syncNow readyMain
+  check "continued: Sync now while active requests bgtask.continue"
+    (m1.continuedSync == some (.requested idMain .mainnet 0 false) &&
+     cs.any (· matches .syncNow 0) &&
+     cs.any (· matches .continueBackgroundSync _ "Syncing Bitcoin" _))
+  let (mInactive, cs) := step .syncNow { readyMain with active := false }
+  check "continued: Sync now while inactive does not request bgtask.continue"
+    (mInactive.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let (mRetry, cs) := step .retryPeers readyMain
+  check "continued: Retry requests bgtask.continue"
+    (mRetry.continuedSync.isSome && cs.any (· matches .retryPeers 0) && cs.any (· matches .continueBackgroundSync ..))
+  let (mGenOn, cs) := step (.settings (.setVerifyFromGenesis true)) readyMain
+  check "continued: turning Verify from genesis on requests bgtask.continue"
+    (mGenOn.continuedSync.isSome && cs.any (· matches .reconnect ..) && cs.any (· matches .continueBackgroundSync ..))
+  let (mGenOff, cs) := step (.settings (.setVerifyFromGenesis false)) { readyMain with settings := { readyMain.settings with verifyFromGenesis := true } }
+  check "continued: turning Verify from genesis off does not request bgtask.continue"
+    (mGenOff.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let onboarding : Model := { stage := .onboarding, active := true, settings := { network := .signet } }
+  let (mCloud, cs) := step (.cloud (.restore "backup-1")) onboarding
+  check "continued: iCloud restore requests bgtask.continue"
+    (mCloud.continuedSync == some (.requested idSignet .signet 0 false) &&
+     cs.any (· matches .restoreCloud ..) && cs.any (· matches .continueBackgroundSync _ "Syncing Signet" _))
+  let (mImport, cs) := step .importWallet { onboarding with onboarding := { importText := "{}" } }
+  check "continued: file import requests bgtask.continue"
+    (mImport.continuedSync == some (.requested idSignet .signet 0 false) &&
+     cs.any (· matches .importWallet ..) && cs.any (· matches .continueBackgroundSync ..))
+  let (mFinSync, cs) := step .finishOnboarding { onboarding with walletID := some "w", phase := .filters 10 20 }
+  check "continued: finishOnboarding requests bgtask.continue when still syncing"
+    (mFinSync.continuedSync.isSome && cs.any (· matches .continueBackgroundSync ..))
+  let (mFinDone, cs) := step .finishOnboarding { onboarding with walletID := some "w", phase := .synced }
+  check "continued: finishOnboarding skips bgtask.continue when already synced"
+    (mFinDone.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  -- full background continuation flow: request -> iOS launches -> background -> progress -> synced -> complete + stopNetworking
+  let (m, _) := step .syncNow { readyMain with phase := .connecting 1 3 }
+  check "continued Sync row: shows Starting… while requested"
+    (continuedSyncStatusText m == "Starting…" &&
+     contains (LeanNative.Html.toWire (.list (syncSections m) : H)).toJson.compress Ids.continuedSyncStatus)
+  let (m, cs) := onHost (.bgtask idMain "continued" (some 7)) m
+  check "continued: launch transitions to running, sends initial progress, does not run periodic check"
+    (m.continuedSync == some (.running idMain .mainnet 0 (some 7) false) &&
+     continuedSyncStatusText m == "Active" &&
+     (match cs with
+      | [.progressBackgroundSync id (some 7) 1 3 "Syncing Bitcoin" "Connecting to peers… (1/3)"] => id == idMain
+      | _ => false))
+  -- duplicate manual sync while already running reuses the task instead of submitting a second one
+  let (mDup, cs) := step .syncNow m
+  check "continued: second manual sync reuses running task"
+    (mDup.continuedSync == some (.running idMain .mainnet 0 (some 7) false) &&
+     !cs.any (· matches .continueBackgroundSync ..) &&
+     cs.any (· matches .progressBackgroundSync ..))
+  -- swipe away to background while syncing: sensitive sheets close, periodic tasks schedule, networking stays alive!
+  let mWithSecret := (m.present .revealPhrase)
+  let (bg, cs) := onHost (.scene false) mWithSecret
+  check "continued: leaving app keeps networking alive while closing sensitive sheets and scheduling periodic tasks"
+    (!bg.active && bg.sheets.isEmpty && bg.generation == 1 &&
+     bg.continuedSync == some (.running idMain .mainnet 0 (some 7) false) &&
+     !cs.any (· matches .stopNetworking) &&
+     cs.any (· matches .scheduleBackgroundTasks) &&
+     cs.any (· matches .cloudScene false))
+  -- snapshot from the kept watcher (syncGen = 0) is accepted across the generation bump and reports progress
+  let (bg2, cs) := onHost (.snapshot 0 { bg.status with syncing := true } (.filters 12000 15000)) bg
+  check "continued: background snapshot advances progress with tag"
+    (bg2.phase == .filters 12000 15000 &&
+     bg2.continuedSync == some (.running idMain .mainnet 0 (some 7) true) &&
+     (match cs with
+      | [.progressBackgroundSync id (some 7) 12000 15000 "Syncing Bitcoin" "Scanning blocks… 12,000 / 15,000"] => id == idMain
+      | _ => false))
+  -- a single transient sync error keeps going; 3 transient errors or peerDiscoveryFailed stops cleanly
+  let (bgTrans, cs) := onHost (.snapshot 0
+    { bg2.status with syncing := false, lastSyncError := some "peer dropped", transientSyncError := some "peer dropped", transientSyncFailures := 1 }
+    (.filters 12000 15000)) bg2
+  check "continued: one transient error keeps continued sync alive"
+    (bgTrans.continuedSync.isSome && !cs.any (· matches .completeBackgroundTask ..) && !cs.any (· matches .stopNetworking))
+  -- reaching synced while backgrounded completes with success=true AND stops networking
+  let (bgDone, cs) := onHost (.snapshot 0 { bg2.status with syncing := false } .synced) bg2
+  check "continued: reaching tip in background completes successfully and stops networking"
+    (bgDone.continuedSync.isNone && continuedSyncStatusText bgDone == "Last run finished" &&
+     (match cs with
+      | [.completeBackgroundTask id true (some 7), .stopNetworking] => id == idMain
+      | _ => false))
+  -- returning to foreground mid-sync rebinds syncGen to the new generation and finishes without stopping networking
+  let (fg, _) := onHost (.scene true) bg2
+  check "continued: returning to foreground rebinds syncGen to current generation"
+    (fg.active && fg.continuedSync == some (.running idMain .mainnet fg.generation (some 7) true))
+  let (fgDone, cs) := onHost (.snapshot fg.generation { fg.status with syncing := false } .synced) fg
+  check "continued: finishing in foreground completes successfully and keeps networking running"
+    (fgDone.continuedSync.isNone &&
+     cs.any (· matches .completeBackgroundTask _ true (some 7)) &&
+     !cs.any (· matches .stopNetworking))
+  -- fast already-synced Sync now (settled := true) completes immediately
+  let (mFast, _) := step .syncNow { readyMain with phase := .synced }
+  let (mFast, _) := onHost (.bgtask idMain "continued" (some 9)) mFast
+  let (mFastPre, cs) := onHost (.snapshot 0 { mFast.status with syncing := false } .synced false) mFast
+  check "continued: pre-pass settled=false synced snapshot does not prematurely complete"
+    (mFastPre.continuedSync.isSome && !cs.any (· matches .completeBackgroundTask ..))
+  let (mFastEnd, cs) := onHost (.snapshot 0 { mFast.status with syncing := false } .synced true) mFastPre
+  check "continued: settled=true synced snapshot completes immediately"
+    (mFastEnd.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id true (some 9)] => id == idMain | _ => false))
+  -- peer discovery failure / backend throw while backgrounded completes false and stops networking
+  let (bgFail, cs) := onHost (.snapshot 0 { bg2.status with syncing := false } .peerDiscoveryFailed) bg2
+  check "continued: peerDiscoveryFailed in background completes false and stops networking"
+    (bgFail.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id false (some 7), .stopNetworking] => id == idMain | _ => false))
+  let (bgThrow, cs) := onHost (.failed 0 (.wallet .sync) false "disk full") bg2
+  check "continued: sync failure in background completes false and stops networking"
+    (bgThrow.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id false (some 7), .stopNetworking] => id == idMain | _ => false))
+  -- expiry / user cancellation from Live Activity: stale tag ignored, matching tag completes false + stops networking
+  let (bgStaleExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 6)) bg2
+  check "continued: expiry naming an older tag leaves running task alone"
+    (bgStaleExp.continuedSync.isSome && cs.isEmpty)
+  let (bgExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 7)) bg2
+  check "continued: expiry in background completes false and stops networking"
+    (bgExp.continuedSync.isNone && continuedSyncStatusText bgExp == "Stopped or cancelled" &&
+     bgExp.continuedSyncAutoSuppressed &&
+     (match cs with | [.completeBackgroundTask id false (some 7), .stopNetworking] => id == idMain | _ => false))
+  let (fgExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 7)) fg
+  check "continued: expiry in foreground completes false without stopping foreground networking"
+    (fgExp.continuedSync.isNone &&
+     (match cs with | [.completeBackgroundTask id false (some 7)] => id == idMain | _ => false))
+  -- orphan continued launch (sync already gone) is completed immediately
+  let (_, cs) := onHost (.bgtask idMain "continued" (some 11)) readyMain
+  check "continued: orphan launch completes immediately with its tag"
+    (match cs with | [.completeBackgroundTask id false (some 11)] => id == idMain | _ => false)
+  -- refusal on iOS < 26 / Mac: clears requested state and stops networking if already backgrounded
+  let (mReq, _) := step .syncNow readyMain
+  let (bgReq, _) := onHost (.scene false) mReq
+  let (bgRefused, cs) := onHost (.continuedSyncRefused idMain "notPermitted" "bad prefix") bgReq
+  check "continued: refusal after backgrounding stops networking and shows reason"
+    (bgRefused.continuedSync.isNone &&
+     continuedSyncStatusText bgRefused == "Refused (notPermitted: bad prefix)" &&
+     (cs matches [.stopNetworking]))
+  -- switching network, switching wallet, or deleting wallet cancels a running continued task
+  let (swNet, cs) := fg.switchNetwork .signet
+  check "continued: switching network completes running task unsuccessfully"
+    (swNet.continuedSync.isNone && cs.any (· matches .completeBackgroundTask _ false (some 7)))
+  let (swWal, cs) := fg.switchWallet (fun g => .openSlot g .mainnet none)
+  check "continued: switching wallet completes running task unsuccessfully"
+    (swWal.continuedSync.isNone && cs.any (· matches .completeBackgroundTask _ false (some 7)))
+  let (delWal, cs) := onHost (.deleted fg.generation) fg
+  check "continued: deleting wallet completes running task unsuccessfully"
+    (delWal.continuedSync.isNone && cs.any (· matches .completeBackgroundTask _ false (some 7)))
+  -- shell capability wiring via Main.perform (ok + unavailable refusal + progress + complete)
+  let sh ← Shell.new
+  WinnowApp.perform (.continueBackgroundSync idMain "Syncing Bitcoin" "Starting sync…") sh.fx
+  WinnowApp.perform (.progressBackgroundSync idMain (some 7) 10 20 "Syncing Bitcoin" "Scanning blocks… 10 / 20") sh.fx
+  WinnowApp.perform (.completeBackgroundTask idMain true (some 7)) sh.fx
+  discard <| waitUntil 2_000 (every := 5) do return (← sh.asks.get).size ≥ 3
+  let asks ← sh.asks.get
+  check "continued perform: sends bgtask.continue, bgtask.progress, and bgtask.complete"
+    (asks.any (fun (n, a) => n == "bgtask.continue" && (a.getObjValAs? String "id").toOption == some idMain) &&
+     asks.any (fun (n, a) => n == "bgtask.progress" && (a.getObjValAs? Nat "completed").toOption == some 10 &&
+       (a.getObjValAs? Nat "tag").toOption == some 7) &&
+     asks.any (fun (n, a) => n == "bgtask.complete" && (a.getObjValAs? Bool "success").toOption == some true &&
+       (a.getObjValAs? Nat "tag").toOption == some 7)) (reprStr (asks.map fun (n, a) => (n, a.compress)))
+  -- refusal from shell posts continuedSyncRefused with error and detail
+  let refusedPosted ← IO.mkRef (#[] : Array Host)
+  let refuseFx : LeanNative.Native.Effects Host :=
+    { post := fun h => refusedPosted.modify (·.push h),
+      cap := fun _ _ _ => pure (),
+      ask := fun _ _ => pure (Task.pure (Lean.Json.mkObj [("ok", false), ("error", "notPermitted"), ("detail", "prefix mismatch")])) }
+  WinnowApp.perform (.continueBackgroundSync idMain "Syncing Bitcoin" "Starting sync…") refuseFx
+  let gotRefused ← waitUntil 2_000 (every := 5) do
+    return (← refusedPosted.get).any fun h => match h with
+      | .continuedSyncRefused id "notPermitted" "prefix mismatch" => id == idMain
+      | _ => false
+  check "continued perform: refused bgtask.continue posts continuedSyncRefused with error and detail" gotRefused
+
+/-- `Pure.parseDouble` (Swift `Double(_:)`): decimal, scientific, hex floats, inf/nan/snan payloads,
+overflow/underflow, and malformed forms. -/
+def parseDoubleCases : IO Unit := do
+  let isInf (o : Option Float) (neg : Bool) : Bool := match o with
+    | some f => f.isInf && (if neg then f < 0 else f > 0) | none => false
+  let isNaN (o : Option Float) : Bool := match o with | some f => f.isNaN | none => false
+  check "parseDouble: decimal, signs, leading/trailing dot, zero"
+    (parseDouble "12.5" == some 12.5 && parseDouble "+3.25" == some 3.25 && parseDouble "-0.5" == some (-0.5) &&
+     parseDouble ".5" == some 0.5 && parseDouble "5." == some 5.0 &&
+     parseDouble "0" == some 0.0 && parseDouble "-0.0" == some (-0.0))
+  check "parseDouble: decimal scientific, overflow, underflow"
+    (parseDouble "1.5e2" == some 150.0 && parseDouble "15E-1" == some 1.5 && parseDouble "2e+3" == some 2000.0 &&
+     isInf (parseDouble "1e500") false && isInf (parseDouble "-1e500") true &&
+     parseDouble "1e-500" == some 0.0)
+  check "parseDouble: hex floats (lower/upper 0x/0X, p/P, fraction, zero, overflow, underflow)"
+    (parseDouble "0x1.8p1" == some 3.0 && parseDouble "0X1.8P-1" == some 0.75 &&
+     parseDouble "0x.8p4" == some 8.0 && parseDouble "-0x10p+2" == some (-64.0) &&
+     parseDouble "0x10" == some 16.0 && parseDouble "0x0p0" == some 0.0 &&
+     isInf (parseDouble "0x1p3000") false && parseDouble "0x1p-3000" == some 0.0)
+  check "parseDouble: inf, infinity, nan, snan with decimal and hex payloads"
+    (isInf (parseDouble "inf") false && isInf (parseDouble "-INF") true && isInf (parseDouble "+Infinity") false &&
+     isNaN (parseDouble "nan") && isNaN (parseDouble "-sNaN") &&
+     isNaN (parseDouble "nan(123)") && isNaN (parseDouble "sNaN(0x1f)"))
+  check "parseDouble: malformed inputs return none"
+    (parseDouble "" == none && parseDouble "." == none && parseDouble "1e" == none &&
+     parseDouble "1e+a" == none && parseDouble "1q2" == none && parseDouble "0x" == none &&
+     parseDouble "0x." == none && parseDouble "0x1p" == none && parseDouble "0x1q2" == none &&
+     parseDouble "nan(bad)" == none && parseDouble "abc" == none)
+  check "parseRateMilli: trims, clamps non-positive/NaN to 0"
+    (parseRateMilli " 2.5 " == some 2500 && parseRateMilli "\n1.25\n" (trimNewlines := true) == some 1250 &&
+     parseRateMilli "nan" == some 0 && parseRateMilli "-3" == some 0 && parseRateMilli "bad" == none)
+
+/-- `Real.AppError.text` and `RecordsReal.StoreKeyVault.ofKeyStore` edge and failure paths. -/
+def appErrorsAndVault : IO Unit := do
+  let errs : List Real.AppError :=
+    [.noWallet, .walletReplaced, .walletAlreadyHere, .walletAlreadyHeld, .paymentDetailsUnavailable,
+     .feeDecisionRequired 1.5 5.0, .noStack, .noPeers, .mnemonicUnavailable, .invalidPeer "bad:port",
+     .wrongNetwork "mainnet", .sendReviewChanged, .storageDamaged "corrupt", .spendAlreadyInFlight, .noStorage]
+  check "AppError.text: every variant produces non-empty message" (errs.all fun e => !e.text.isEmpty)
+  -- StoreKeyVault.ofKeyStore against custom KeyStore responses
+  let goodHex := Winnow.hex (ByteArray.mk (Array.replicate 32 0xAB))
+  let liftE {α} (r : Except Keys.KeyStoreError α) : ExceptT Keys.KeyStoreError IO α := ExceptT.mk (pure r)
+  let makeKs (loadR : Except Keys.KeyStoreError Keys.WalletSecret)
+      (storeR : Except Keys.KeyStoreError Unit := .ok ())
+      (delR : Except Keys.KeyStoreError Unit := .ok ())
+      (loadBytesR : Except Keys.KeyStoreError (Option ByteArray) := .ok none)
+      (storeBytesR : Except Keys.KeyStoreError Unit := .ok ()) : Keys.KeyStore IO :=
+    { store := fun _ _ => liftE storeR, load := fun _ => liftE loadR, delete := fun _ => liftE delR,
+      loadBytes := fun _ => liftE loadBytesR, storeBytes := fun _ _ => liftE storeBytesR }
+  let v1 := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.ok (.masterKey goodHex)))
+  check "vault: valid 32-byte masterKey hex loads" ((← (v1.key "a").run) matches .ok (some _))
+  let vBadLen := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.ok (.masterKey "0011")))
+  check "vault: wrong-length key is malformedKey" ((← (vBadLen.key "a").run) matches .error (.keyVault .malformedKey))
+  let vBadHex := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.ok (.masterKey "zzzz")))
+  check "vault: non-hex key is malformedKey" ((← (vBadHex.key "a").run) matches .error (.keyVault .malformedKey))
+  let vWrongKind := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.ok (.mnemonic "words")))
+  check "vault: mnemonic secret is malformedKey" ((← (vWrongKind.key "a").run) matches .error (.keyVault .malformedKey))
+  let vErr := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error .malformedSecret))
+  check "vault: other keystore error is malformedKey" ((← (vErr.key "a").run) matches .error (.keyVault .malformedKey))
+  let vLocked := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error (.keychain RecordsReal.interactionNotAllowed)))
+  let beforeRefused ← RecordsReal.refusedStoreKeys.get
+  check "vault: interactionNotAllowed records refused account"
+    ((← (vLocked.key "locked.test").run) matches .error (.keyVault (.keychain _)) &&
+     (← RecordsReal.refusedStoreKeys.get).contains "locked.test")
+  RecordsReal.refusedStoreKeys.set beforeRefused
+  -- moving recovery path: main notFound, moving present -> restored & deleted
+  let deleted ← IO.mkRef (#[] : Array String)
+  let movingKs : Keys.KeyStore IO :=
+    { load := fun id => liftE (if id.endsWith ".moving" then .ok (.masterKey goodHex) else .error (.notFound id)),
+      store := fun _ _ => liftE (.ok ()),
+      delete := fun id => ExceptT.mk do deleted.modify (·.push id); pure (.ok ()),
+      loadBytes := fun _ => liftE (.ok (some (ByteArray.mk #[1, 2]))),
+      storeBytes := fun _ _ => liftE (.error (.alreadyExists "x")) }
+  let vm := RecordsReal.StoreKeyVault.ofKeyStore movingKs
+  check "vault: recovers key from .moving copy and cleans it up"
+    ((← (vm.key "m").run) matches .ok (some _) && (← deleted.get).any (·.endsWith ".moving"))
+  check "vault: rawKey & keepRaw handle ok and alreadyExists"
+    ((← (vm.rawKey "m").run) matches .ok (some _) && (← (vm.keepRaw "m" .empty).run) matches .ok ())
+  -- establishKey / discardKey / rawKey / keepRaw error mappings
+  let vAlready := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error (.notFound "")) (storeR := .error (.alreadyExists "a"))
+    (delR := .error (.notFound "")) (loadBytesR := .error (.keychain (-50))) (storeBytesR := .error (.keychain (-50))))
+  check "vault: establishKey alreadyExists, discardKey notFound, rawKey/keepRaw keychain error"
+    ((← (vAlready.establishKey "a").run) matches .error (.keyVault (.alreadyEstablished "a")) &&
+     (← (vAlready.discardKey "a").run) matches .ok () &&
+     (← (vAlready.rawKey "a").run) matches .error (.keyVault (.keychain (-50))) &&
+     (← (vAlready.keepRaw "a" .empty).run) matches .error (.keyVault (.keychain (-50))))
+  let vKc := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error (.notFound "")) (storeR := .error (.keychain (-1)))
+    (delR := .error (.keychain (-2))) (loadBytesR := .error .malformedSecret) (storeBytesR := .error .malformedSecret))
+  check "vault: establishKey/discardKey keychain and rawKey/keepRaw malformedKey"
+    ((← (vKc.establishKey "a").run) matches .error (.keyVault (.keychain (-1))) &&
+     (← (vKc.discardKey "a").run) matches .error (.keyVault (.keychain (-2))) &&
+     (← (vKc.rawKey "a").run) matches .error (.keyVault .malformedKey) &&
+     (← (vKc.keepRaw "a" .empty).run) matches .error (.keyVault .malformedKey))
+  let vMal := RecordsReal.StoreKeyVault.ofKeyStore (makeKs (.error (.notFound "")) (storeR := .error .malformedSecret)
+    (delR := .error .malformedSecret))
+  check "vault: establishKey/discardKey other error -> malformedKey"
+    ((← (vMal.establishKey "a").run) matches .error (.keyVault .malformedKey) &&
+     (← (vMal.discardKey "a").run) matches .error (.keyVault .malformedKey))
+
+/-- Exhaustive pure unit tests for every message arm and guard of `WinnowApp.stepPeople`. -/
+def stepPeopleCases : IO Unit := do
+  let alice : Person := { id := "p1", name := "Alice", payTo := some true, savedRecipient := some true }
+  let dave : Person := { id := "p2", name := "Dave", payTo := none, savedRecipient := none }
+  let base : Model :=
+    { stage := .ready, active := true, generation := 7,
+      settings := { network := .signet, ownDisplayName := "  Owner  " },
+      records := { people := [alice, dave] } }
+  let tx := String.ofList (List.replicate 64 'a')
+  let addr := "tb1qexampleaddress"
+  let parsedPay : PastePreview := { name := some "ParsedName", payTo := some false }
+  let parsedNoPay : PastePreview := { name := some "CardOnly", payTo := none }
+
+  -- .openAdd (empty address vs pre-filled address, new vs existing person)
+  let (mOpenEmpty, csOpenEmpty) := stepPeople (.openAdd {} "") base
+  check "stepPeople.openAdd: empty address opens sheet with no parsePaste"
+    (mOpenEmpty.topSheet == some .addPerson && mOpenEmpty.person.name == "" && csOpenEmpty.isEmpty)
+  let (mOpenAddr, csOpenAddr) := stepPeople (.openAdd { personID := some "p1" } addr) base
+  check "stepPeople.openAdd: pre-filled address fills existing name and emits parsePaste"
+    (mOpenAddr.topSheet == some .addPerson && mOpenAddr.person.name == "Alice" && mOpenAddr.person.pasted == addr &&
+     (csOpenAddr matches [.parsePaste 7 _]))
+
+  -- .setName, .setPasted (empty/whitespace vs non-empty), .paste
+  let (mName, csName) := stepPeople (.setName "Bob") mOpenEmpty
+  check "stepPeople.setName: updates name with no commands" (mName.person.name == "Bob" && csName.isEmpty)
+  let mWithParsed := { mName with person := { mName.person with parsed := some parsedPay, error := some "old" } }
+  let (mBlank, csBlank) := stepPeople (.setPasted "   ") mWithParsed
+  check "stepPeople.setPasted: whitespace clears parsed/error with no parsePaste"
+    (mBlank.person.pasted == "   " && mBlank.person.parsed.isNone && mBlank.person.error.isNone && csBlank.isEmpty)
+  let (mPasted, csPasted) := stepPeople (.setPasted addr) mWithParsed
+  check "stepPeople.setPasted: non-empty resets parsed/error and emits parsePaste"
+    (mPasted.person.pasted == addr && mPasted.person.parsed.isNone && mPasted.person.error.isNone &&
+     (csPasted matches [.parsePaste 7 _]))
+  let (_, csPaste) := stepPeople .paste base
+  check "stepPeople.paste: requests person clipboard paste" (csPaste matches [.paste .person])
+
+  -- .chooseSaved (with and without txid)
+  let (mSavedNoTx, csSavedNoTx) := stepPeople (.chooseSaved "p1") base
+  check "stepPeople.chooseSaved: without txid is a no-op" (!mSavedNoTx.person.saving && csSavedNoTx.isEmpty)
+  let mLabelMode := { base with person := { mode := { txid := some tx } } }
+  let (mSavedTx, csSavedTx) := stepPeople (.chooseSaved "p1") mLabelMode
+  check "stepPeople.chooseSaved: with txid marks saving and emits labelSender"
+    (mSavedTx.person.saving &&
+     (match csSavedTx with | [.labelSender 7 t "p1"] => t == tx | _ => false))
+
+  -- .chooseFunding
+  let (mFund, csFund) := stepPeople (.chooseFunding addr .localFunding) mLabelMode
+  check "stepPeople.chooseFunding: sets pasted, records selectedFunding, and emits parsePaste"
+    (mFund.person.pasted == addr && mFund.person.selectedFunding == some (addr, .localFunding) &&
+     (csFund matches [.parsePaste 7 _]))
+
+  -- .askInfer and .infer (missing consent, missing txid, stale gen, changed esplora, !active, valid)
+  let (mAsked, csAsked) := stepPeople .askInfer mLabelMode
+  check "stepPeople.askInfer: records consent tuple and opens inferSender confirm"
+    (mAsked.person.lookupConsent == some (base.settings.esploraBaseURL, 7) &&
+     mAsked.confirm == some .inferSender && csAsked.isEmpty)
+  let (mNoConsent, csNoConsent) := stepPeople .infer { mLabelMode with confirm := some .inferSender }
+  check "stepPeople.infer: missing consent clears confirm and does nothing"
+    (mNoConsent.confirm.isNone && !mNoConsent.person.inferring && csNoConsent.isEmpty)
+  let (mNoTx, csNoTx) := stepPeople .infer { mAsked with person := { mAsked.person with mode := {} } }
+  check "stepPeople.infer: missing txid clears confirm and does nothing"
+    (mNoTx.confirm.isNone && !mNoTx.person.inferring && csNoTx.isEmpty)
+  let (mStaleGen, csStaleGen) := stepPeople .infer { mAsked with generation := 8 }
+  check "stepPeople.infer: stale generation sets connection-changed error"
+    (mStaleGen.confirm.isNone && !mStaleGen.person.inferring && mStaleGen.person.error.isSome && csStaleGen.isEmpty)
+  let changedSettings : Settings := { base.settings with signet := { explorer := .custom, esploraURL := "https://other.example" } }
+  let (mChangedUrl, csChangedUrl) := stepPeople .infer { mAsked with settings := changedSettings }
+  check "stepPeople.infer: changed esploraBaseURL sets connection-changed error"
+    (mChangedUrl.confirm.isNone && !mChangedUrl.person.inferring && mChangedUrl.person.error.isSome && csChangedUrl.isEmpty)
+  let (mInactive, csInactive) := stepPeople .infer { mAsked with active := false }
+  check "stepPeople.infer: inactive scene sets connection-changed error"
+    (mInactive.confirm.isNone && !mInactive.person.inferring && mInactive.person.error.isSome && csInactive.isEmpty)
+  let (mInferOk, csInferOk) := stepPeople .infer mAsked
+  check "stepPeople.infer: valid consent starts inferring and emits lookupSender"
+    (mInferOk.confirm.isNone && mInferOk.person.inferring && mInferOk.person.error.isNone &&
+     (match csInferOk with | [.lookupSender 7 t u] => t == tx && u == base.settings.esploraBaseURL | _ => false))
+
+  -- .save: !canSave guards (saving, empty effectiveName, unparsed paste, regular add without payTo)
+  let cannotSaving := { base with person := { name := "Bob", saving := true, parsed := some parsedPay } }
+  let cannotEmptyName := { base with person := { name := "  ", parsed := some { payTo := some false } } }
+  let cannotUnparsed := { base with person := { name := "Bob", pasted := addr, parsed := none } }
+  let cannotNoPay := { base with person := { name := "Bob", pasted := "", parsed := none } }
+  check "stepPeople.save: refuses when !canSave (saving, blank name, unparsed paste, regular non-payable)"
+    ((stepPeople .save cannotSaving).2.isEmpty &&
+     (stepPeople .save cannotEmptyName).2.isEmpty &&
+     (stepPeople .save cannotUnparsed).2.isEmpty &&
+     (stepPeople .save cannotNoPay).2.isEmpty)
+
+  -- .save: edit existing person (without payTo + payable -> attach with supplied/localFunding/explorerFunding/mismatch;
+  --        without payTo + non-payable -> no attach; with payTo + payable -> no attach)
+  let editDaveSupplied := { base with person := { mode := { personID := some "p2" }, name := "David", pasted := addr, parsed := some parsedPay } }
+  let (mEditSup, csEditSup) := stepPeople .save editDaveSupplied
+  check "stepPeople.save: edit existing without payTo attaches supplied destination"
+    (mEditSup.person.saving &&
+     (match csEditSup with | [.editPerson 7 "p2" "David" (some (a, .supplied, none))] => a == addr | _ => false))
+  let editDaveLocal := { base with person := { mode := { personID := some "p2", txid := some tx }, name := "David", pasted := addr,
+                                               parsed := some parsedPay, selectedFunding := some (addr, .localFunding) } }
+  let (_, csEditLoc) := stepPeople .save editDaveLocal
+  check "stepPeople.save: edit existing attaches localFunding with txid source"
+    (match csEditLoc with | [.editPerson 7 "p2" "David" (some (a, .localFunding, some s))] => a == addr && s == tx | _ => false)
+  let editDaveExp := { base with person := { mode := { personID := some "p2", txid := some tx }, name := "David", pasted := addr,
+                                             parsed := some parsedPay, selectedFunding := some (addr, .explorerFunding),
+                                             inferredSource := some "mempool.space" } }
+  let (_, csEditExp) := stepPeople .save editDaveExp
+  check "stepPeople.save: edit existing attaches explorerFunding with inferredSource"
+    (match csEditExp with | [.editPerson 7 "p2" "David" (some (a, .explorerFunding, some "mempool.space"))] => a == addr | _ => false)
+  let editDaveEdited := { editDaveLocal with person := { editDaveLocal.person with selectedFunding := some ("other", .localFunding) } }
+  let (_, csEditOther) := stepPeople .save editDaveEdited
+  check "stepPeople.save: editing pasted text away from selectedFunding reverts provenance to supplied"
+    (match csEditOther with | [.editPerson 7 "p2" "David" (some (a, .supplied, none))] => a == addr | _ => false)
+  let editDaveNoPay := { base with person := { mode := { personID := some "p2" }, name := "David", pasted := "", parsed := none } }
+  let (_, csEditNoPay) := stepPeople .save editDaveNoPay
+  check "stepPeople.save: edit existing without payTo and no destination passes attach=none"
+    (match csEditNoPay with | [.editPerson 7 "p2" "David" none] => true | _ => false)
+  let editAlice := { base with person := { mode := { personID := some "p1" }, name := "Alicia", pasted := addr, parsed := some parsedPay } }
+  let (_, csEditAlice) := stepPeople .save editAlice
+  check "stepPeople.save: edit existing who already has payTo passes attach=none"
+    (match csEditAlice with | [.editPerson 7 "p1" "Alicia" none] => true | _ => false)
+
+  -- .save: add new person in labelingSender mode (payable vs non-payable with paste vs empty paste)
+  let addSenderPay := { base with person := { mode := { txid := some tx }, name := "Sender", pasted := addr,
+                                              parsed := some parsedPay, selectedFunding := some (addr, .localFunding) } }
+  let (_, csSenderPay) := stepPeople .save addSenderPay
+  check "stepPeople.save: labelingSender payable forwards paste, provenance, source, and txid"
+    (match csSenderPay with
+     | [.addPerson 7 "Sender" (some a) (some .localFunding) (some s) (some t)] => a == addr && s == tx && t == tx
+     | _ => false)
+  let addSenderNonPay := { base with person := { mode := { txid := some tx }, name := "", pasted := "card", parsed := some parsedNoPay } }
+  let (_, csSenderNonPay) := stepPeople .save addSenderNonPay
+  check "stepPeople.save: labelingSender non-payable drops paste and falls back to parsed name"
+    (match csSenderNonPay with
+     | [.addPerson 7 "CardOnly" none none none (some t)] => t == tx
+     | _ => false)
+  let addSenderEmpty := { base with person := { mode := { txid := some tx }, name := "NameOnly", pasted := "  ", parsed := none } }
+  let (_, csSenderEmpty) := stepPeople .save addSenderEmpty
+  check "stepPeople.save: labelingSender empty paste saves name-only with txid"
+    (match csSenderEmpty with
+     | [.addPerson 7 "NameOnly" none none none (some t)] => t == tx
+     | _ => false)
+
+  -- .save: add new regular person (non-empty paste vs whitespace-only paste with parsed payTo)
+  let addReg := { base with person := { name := "Carol", pasted := addr, parsed := some parsedPay } }
+  let (_, csReg) := stepPeople .save addReg
+  check "stepPeople.save: regular add with non-empty paste emits addPerson"
+    (match csReg with | [.addPerson 7 "Carol" (some a) none none none] => a == addr | _ => false)
+  let addRegBlank := { base with person := { name := "Carol", pasted := "  ", parsed := some parsedPay } }
+  let (_, csRegBlank) := stepPeople .save addRegBlank
+  check "stepPeople.save: regular add with blank paste sends paste=none"
+    (match csRegBlank with | [.addPerson 7 "Carol" none none none none] => true | _ => false)
+
+  -- .choose (missing, no payTo, with payTo)
+  let (mChooseMiss, csChooseMiss) := stepPeople (.choose "missing") base
+  check "stepPeople.choose: missing person is a no-op" (mChooseMiss.sheets.isEmpty && csChooseMiss.isEmpty)
+  let (mChooseNoPay, csChooseNoPay) := stepPeople (.choose "p2") base
+  check "stepPeople.choose: person without payTo opens addPerson to attach destination"
+    (mChooseNoPay.topSheet == some .addPerson && mChooseNoPay.person.mode == { personID := some "p2" } &&
+     mChooseNoPay.person.name == "Dave" && csChooseNoPay.isEmpty)
+  let mWithSheet := { base with sheets := [.send, .savedRecipients],
+                                send := { inputs := { destination := "old" }, error := some "err" } }
+  let (mChoosePay, csChoosePay) := stepPeople (.choose "p1") mWithSheet
+  check "stepPeople.choose: person with payTo closes savedRecipients and selects recipient on Send"
+    (mChoosePay.sheets == [.send] && mChoosePay.send.inputs.personID == some "p1" &&
+     mChoosePay.send.inputs.destination == "" && mChoosePay.send.preview.isNone &&
+     mChoosePay.send.error.isNone && csChoosePay.isEmpty)
+
+  -- .rename
+  let (mRen, csRen) := stepPeople (.rename "p1") base
+  check "stepPeople.rename: opens addPerson for that person"
+    (mRen.topSheet == some .addPerson && mRen.person.mode == { personID := some "p1" } &&
+     mRen.person.name == "Alice" && csRen.isEmpty)
+
+  -- .card (missing vs present)
+  let (mCardMiss, csCardMiss) := stepPeople (.card "missing") base
+  check "stepPeople.card: missing person is a no-op" (mCardMiss.sheets.isEmpty && csCardMiss.isEmpty)
+  let (mCardOk, csCardOk) := stepPeople (.card "p1") base
+  check "stepPeople.card: present person opens shareCard and emits trimmed ownDisplayName"
+    (mCardOk.topSheet == some .shareCard && mCardOk.shareCard.forName == "Alice" &&
+     mCardOk.shareCard.forPerson == some "p1" && mCardOk.shareCard.making &&
+     (match csCardOk with | [.personCard 7 (some "p1") "Alice" "Owner"] => true | _ => false))
+
+  -- .remove
+  let (mRem, csRem) := stepPeople (.remove "p1") { base with recipientsError := some "stale" }
+  check "stepPeople.remove: clears recipientsError and emits updateRecipient"
+    (mRem.recipientsError.isNone && (csRem matches [.updateRecipient 7 "p1" none false false]))
+
+/-- Exhaustive pure unit tests for every arm and guard of `stepMultisigAccount` and `stepMultisigCollect`. -/
+def stepMultisigAccountAndCollectCases : IO Unit := do
+  let screenOf (prog : MultisigProgress) (held : List HeldKey := []) : MultisigScreen :=
+    { outputs := [], inputTotal := 50_000, fee := 500, signatures := [(false, 1, 2)], progress := prog, heldKeys := held }
+  let draftOfScreen (s : Option MultisigScreen) : MultisigDraftInfo :=
+    { psbt := "cHNidP8=", txid := "tx1", screen := s }
+  let acctWith (id : String) (builds : Bool := true) (nextRecv : Nat := 3) (draft : Option MultisigDraftInfo := none) : MultisigInfo :=
+    { id, name := s!"Acct {id}", descriptor := "tr(x)", balance := 100_000,
+      buildsPayments := builds, nextReceiveIndex := nextRecv, draft }
+  let acctMain := acctWith "a1" (builds := true) (nextRecv := 4)
+    (draft := some (draftOfScreen (some (screenOf { phoneHolds := true, phoneUnsigned := true, ledgerHolds := true, ledgerUnsigned := true }
+      [{ walletID := "w2", unsigned := true, slot := "1", name := "Second" },
+       { walletID := "w3", unsigned := false, slot := "2", name := "Signed" }]))))
+  let acctComplete := acctWith "aDone" (builds := true) (nextRecv := 1)
+    (draft := some (draftOfScreen (some (screenOf { complete := true, phoneHolds := true, phoneUnsigned := true, ledgerUnsigned := true }
+      [{ walletID := "w2", unsigned := true, slot := "1", name := "Second" }]))))
+  let acctSigned := acctWith "aSigned" (builds := true) (nextRecv := 1)
+    (draft := some (draftOfScreen (some (screenOf { complete := false, phoneHolds := true, phoneUnsigned := false, ledgerHolds := true, ledgerUnsigned := false }))))
+  let acctWatch := acctWith "aWatch" (builds := false) (nextRecv := 0) (draft := none)
+  let base : Model :=
+    { stage := .ready, active := true, generation := 5,
+      settings := { network := .signet },
+      status := { feeFloorMilli := some 1200 },
+      multisig := { accounts := [acctMain, acctComplete, acctSigned, acctWatch], notice := some "damaged" } }
+  let onAcct : Model := { base with routes := [.multisigAccount "a1"], multisigAccountError := some "old" }
+
+  -- stepMultisigAccount: .newAddress (on account route vs other route)
+  let (mAddrOk, csAddrOk) := stepMultisig .newAddress onAcct
+  check "stepMultisigAccount.newAddress: clears error and emits newMultisigAddress on account route"
+    (mAddrOk.multisigAccountError.isNone && (csAddrOk matches [.newMultisigAddress 5 "a1"]))
+  check "stepMultisigAccount.newAddress: no-op off account route"
+    ((stepMultisig .newAddress base).2.isEmpty)
+
+  -- .askRemove and .remove
+  let (mAskRem, csAskRem) := stepMultisig .askRemove onAcct
+  check "stepMultisigAccount.askRemove: sets removeMultisig confirm on account route"
+    (mAskRem.confirm == some (.removeMultisig "a1") && csAskRem.isEmpty)
+  check "stepMultisigAccount.askRemove: no-op off account route"
+    ((stepMultisig .askRemove base).1.confirm.isNone)
+  let (mRemOk, csRemOk) := stepMultisig .remove mAskRem
+  check "stepMultisigAccount.remove: clears confirm/error and emits removeMultisigAccount"
+    (mRemOk.confirm.isNone && mRemOk.multisigAccountError.isNone && (csRemOk matches [.removeMultisigAccount 5 "a1"]))
+  check "stepMultisigAccount.remove: no-op without matching confirm"
+    ((stepMultisig .remove { onAcct with confirm := some .setAsideMultisig }).2.isEmpty)
+
+  -- .askSetAside and .setAside
+  let (mAskSA, csAskSA) := stepMultisig .askSetAside base
+  check "stepMultisigAccount.askSetAside: sets confirm when notice is present"
+    (mAskSA.confirm == some .setAsideMultisig && csAskSA.isEmpty)
+  check "stepMultisigAccount.askSetAside: no-op when notice is none"
+    ((stepMultisig .askSetAside { base with multisig := { base.multisig with notice := none } }).1.confirm.isNone)
+  let (mSAOk, csSAOk) := stepMultisig .setAside mAskSA
+  check "stepMultisigAccount.setAside: clears confirm and emits setAsideMultisig"
+    (mSAOk.confirm.isNone && (csSAOk matches [.setAsideMultisig 5]))
+  check "stepMultisigAccount.setAside: no-op without matching confirm"
+    ((stepMultisig .setAside base).2.isEmpty)
+
+  -- .sendFrom (buildsPayments=false, fresh sheet, already-open sheet, sending in progress)
+  let (mSendWatch, csSendWatch) := stepMultisig (.sendFrom "aWatch") base
+  check "stepMultisigAccount.sendFrom: refused for watch-only / non-building account"
+    (mSendWatch.sheets.isEmpty && csSendWatch.isEmpty)
+  let (mSendFresh, csSendFresh) := stepMultisig (.sendFrom "a1") base
+  check "stepMultisigAccount.sendFrom: opens Send sheet with accountID and resolves fee rate"
+    (mSendFresh.sheets == [.send] && mSendFresh.send.inputs == { network := .signet, accountID := some "a1" } &&
+     (match csSendFresh with | [.resolveRate 5 inp (some 1200)] => inp.accountID == some "a1" | _ => false))
+  let (mSendOpen, csSendOpen) := stepMultisig (.sendFrom "a1") { base with sheets := [.send] }
+  check "stepMultisigAccount.sendFrom: reuses open Send sheet without duplicating"
+    (mSendOpen.sheets == [.send] && csSendOpen.length == 1)
+  let mSending := { base with send := { sending := true, inputs := { destination := "keep" } } }
+  let (mSendBusy, csSendBusy) := stepMultisig (.sendFrom "a1") mSending
+  check "stepMultisigAccount.sendFrom: while sending, presents sheet without clobbering SendState"
+    (mSendBusy.sheets == [.send] && mSendBusy.send.sending && mSendBusy.send.inputs.destination == "keep" && csSendBusy.isEmpty)
+
+  -- .pasteForAccount (busy vs idle)
+  let mBusyCollect := { base with collect := { busy := true, error := some "e" } }
+  check "stepMultisigAccount.pasteForAccount: no-op when collect is busy"
+    ((stepMultisig (.pasteForAccount "a1") mBusyCollect).2.isEmpty)
+  let (mPasteAcc, csPasteAcc) := stepMultisig (.pasteForAccount "a1") { base with collect := { error := some "old" } }
+  check "stepMultisigAccount.pasteForAccount: clears collect error and pastes accountPSBT"
+    (mPasteAcc.collect.error.isNone && (csPasteAcc matches [.paste (.accountPSBT "a1")]))
+
+  -- .verifyAddress (off route, missing account, already checking, ok)
+  check "stepMultisigAccount.verifyAddress: no-op off account route"
+    ((stepMultisig .verifyAddress base).2.isEmpty)
+  check "stepMultisigAccount.verifyAddress: no-op when account id is missing from overview"
+    ((stepMultisig .verifyAddress { base with routes := [.multisigAccount "missing"] }).2.isEmpty)
+  check "stepMultisigAccount.verifyAddress: no-op when already checking"
+    ((stepMultisig .verifyAddress { onAcct with ledgerVerify := { checking := true } }).2.isEmpty)
+  let (mVerOk, csVerOk) := stepMultisig .verifyAddress onAcct
+  check "stepMultisigAccount.verifyAddress: starts checking at nextReceiveIndex and emits verifyLedgerAddress"
+    (mVerOk.ledgerVerify.id == "a1" && mVerOk.ledgerVerify.index == 4 && mVerOk.ledgerVerify.checking &&
+     (csVerOk matches [.verifyLedgerAddress 5 "a1" 4]))
+
+  -- .rebroadcast, .askAbandon, .abandon, and fallback arm
+  let (mReb, csReb) := stepMultisig (.rebroadcast "a1" "tx99") { base with payment := { error := some "err" } }
+  check "stepMultisigAccount.rebroadcast: clears payment error and emits rebroadcastSpend"
+    (mReb.payment.error.isNone && (csReb matches [.rebroadcastSpend 5 "a1" "tx99"]))
+  let (mAskAb, csAskAb) := stepMultisig (.askAbandon "a1" "tx99") base
+  check "stepMultisigAccount.askAbandon: sets abandonSpend confirm"
+    (mAskAb.confirm == some (.abandonSpend "a1" "tx99") && csAskAb.isEmpty)
+  let (mAbOk, csAbOk) := stepMultisig .abandon mAskAb
+  check "stepMultisigAccount.abandon: clears confirm and emits abandonSpend"
+    (mAbOk.confirm.isNone && (csAbOk matches [.abandonSpend 5 "a1" "tx99"]))
+  check "stepMultisigAccount.abandon: no-op without matching confirm"
+    ((stepMultisig .abandon base).2.isEmpty)
+  check "stepMultisigAccount: non-account message hits fallback no-op"
+    ((stepMultisigAccount .openAdd base).2.isEmpty)
+
+  -- stepMultisigCollect: .setPasted, .pastePSBT, .addPasted
+  let (mSetP, csSetP) := stepMultisig (.setPasted "psbt-data") base
+  check "stepMultisigCollect.setPasted: sets pasted text" (mSetP.collect.pasted == "psbt-data" && csSetP.isEmpty)
+  check "stepMultisigCollect.pastePSBT: emits paste multisigPSBT"
+    ((stepMultisig .pastePSBT base).2 matches [.paste .multisigPSBT])
+  check "stepMultisigCollect.addPasted: no-op when busy or blank"
+    ((stepMultisig (.addPasted "a1") { mSetP with collect := { mSetP.collect with busy := true } }).2.isEmpty &&
+     (stepMultisig (.addPasted "a1") { base with collect := { pasted := "   " } }).2.isEmpty)
+  let (mAddP, csAddP) := stepMultisig (.addPasted "a1") { mSetP with collect := { mSetP.collect with epoch := 3, error := some "old" } }
+  check "stepMultisigCollect.addPasted: bumps epoch, marks busy, clears error, emits adoptDraft"
+    (mAddP.collect.epoch == 4 && mAddP.collect.busy && mAddP.collect.error.isNone &&
+     (csAddP matches [.adoptDraft 5 4 "a1" "psbt-data"]))
+
+  -- .sign (busy, missing/no-draft, already signed, already complete, ok)
+  check "stepMultisigCollect.sign: guarded by busy, missing draft, already signed, and complete"
+    ((stepMultisig (.sign "a1") mBusyCollect).2.isEmpty &&
+     (stepMultisig (.sign "aWatch") base).2.isEmpty &&
+     (stepMultisig (.sign "aSigned") base).2.isEmpty &&
+     (stepMultisig (.sign "aDone") base).2.isEmpty)
+  let (mSignOk, csSignOk) := stepMultisig (.sign "a1") base
+  check "stepMultisigCollect.sign: runs collect and emits signDraft when phoneUnsigned && !complete"
+    (mSignOk.collect.busy && mSignOk.collect.epoch == 1 && !mSignOk.collect.ledgerSigning &&
+     (csSignOk matches [.signDraft 5 1 "a1"]))
+
+  -- .switchToSign (busy, complete, wrong slot, signed slot, ok)
+  check "stepMultisigCollect.switchToSign: guarded by busy, complete, wrong slot, and already-signed slot"
+    ((stepMultisig (.switchToSign "a1" "1") mBusyCollect).2.isEmpty &&
+     (stepMultisig (.switchToSign "aDone" "1") base).2.isEmpty &&
+     (stepMultisig (.switchToSign "a1" "9") base).2.isEmpty &&
+     (stepMultisig (.switchToSign "a1" "2") base).2.isEmpty)
+  let (mSwitchOk, csSwitchOk) := stepMultisig (.switchToSign "a1" "1") base
+  check "stepMultisigCollect.switchToSign: emits handOverDraft for unsigned held slot"
+    (mSwitchOk.collect.busy && (csSwitchOk matches [.handOverDraft 5 1 "a1" "1"]))
+
+  -- .signWithLedger (busy, complete, already signed, missing draft, ok)
+  check "stepMultisigCollect.signWithLedger: guarded by busy, complete, already signed, and missing draft"
+    ((stepMultisig (.signWithLedger "a1") mBusyCollect).2.isEmpty &&
+     (stepMultisig (.signWithLedger "aDone") base).2.isEmpty &&
+     (stepMultisig (.signWithLedger "aSigned") base).2.isEmpty &&
+     (stepMultisig (.signWithLedger "aWatch") base).2.isEmpty)
+  let (mLedOk, csLedOk) := stepMultisig (.signWithLedger "a1") base
+  check "stepMultisigCollect.signWithLedger: sets ledgerSigning and emits signDraftWithLedger"
+    (mLedOk.collect.busy && mLedOk.collect.ledgerSigning && (csLedOk matches [.signDraftWithLedger 5 1 "a1"]))
+
+  -- .broadcast (busy, incomplete, spendingInFlight, ok)
+  check "stepMultisigCollect.broadcast: guarded by busy and incomplete progress"
+    ((stepMultisig (.broadcast "aDone") mBusyCollect).2.isEmpty &&
+     (stepMultisig (.broadcast "a1") base).2.isEmpty)
+  let (mBcastFlight, csBcastFlight) := stepMultisig (.broadcast "aDone") { base with spendingInFlight := true }
+  check "stepMultisigCollect.broadcast: sets error when spendingInFlight is true"
+    (mBcastFlight.collect.error == some "Another payment is already being signed and broadcast. Wait for it to finish." &&
+     !mBcastFlight.collect.busy && csBcastFlight.isEmpty)
+  let (mBcastOk, csBcastOk) := stepMultisig (.broadcast "aDone") base
+  check "stepMultisigCollect.broadcast: sets spendingInFlight and emits broadcastDraft when complete"
+    (mBcastOk.collect.busy && mBcastOk.spendingInFlight && (csBcastOk matches [.broadcastDraft 5 1 "aDone"]))
+
+  -- .askDiscard, .discard, and fallback arm
+  let (mAskDisc, csAskDisc) := stepMultisig (.askDiscard "a1") base
+  check "stepMultisigCollect.askDiscard: sets discardDraft confirm"
+    (mAskDisc.confirm == some (.discardDraft "a1") && csAskDisc.isEmpty)
+  let (mDiscOk, csDiscOk) := stepMultisig .discard mAskDisc
+  check "stepMultisigCollect.discard: clears confirm, runs collect, emits discardDraft"
+    (mDiscOk.confirm.isNone && mDiscOk.collect.busy && (csDiscOk matches [.discardDraft 5 1 "a1"]))
+  check "stepMultisigCollect.discard: no-op without matching confirm"
+    ((stepMultisig .discard base).2.isEmpty)
+  check "stepMultisigCollect: non-collect message hits fallback no-op"
+    ((stepMultisigCollect .openAdd base).2.isEmpty)
+
+/-- Targeted pure unit tests for `WinnowApp.E2E.looksSecret` covering valid/invalid BIP39 windows,
+Unicode whitespace separators, the 512-word cutoff, all extended private key prefixes, and clean text. -/
+def looksSecretCases : IO Unit := do
+  let m12 := match Winnow.Keys.BIP39.mnemonic (ByteArray.mk (Array.replicate 16 0x00)) with
+    | .ok s => s
+    | .error _ => ""
+  let m24 := match Winnow.Keys.BIP39.mnemonic (ByteArray.mk (Array.replicate 32 0x00)) with
+    | .ok s => s
+    | .error _ => ""
+  let nbsp := String.singleton (Char.ofNat 0x00A0)
+  let ideo := String.singleton (Char.ofNat 0x3000)
+  check "looksSecret: valid 12-word and 24-word mnemonics are detected"
+    (!m12.isEmpty && !m24.isEmpty &&
+     WinnowApp.E2E.looksSecret m12 && WinnowApp.E2E.looksSecret m24)
+  check "looksSecret: valid 12-word and 24-word mnemonics embedded in prose are detected"
+    (WinnowApp.E2E.looksSecret s!"notes before {m12} and after" &&
+     WinnowApp.E2E.looksSecret s!"prefix words {m24} suffix")
+  let m12Unicode := nbsp.intercalate (m12.splitOn " ")
+  let m24Unicode := ideo.intercalate (m24.splitOn " ")
+  check "looksSecret: mnemonics separated by Unicode whitespace (\\u00A0, \\u3000) are detected"
+    (WinnowApp.E2E.looksSecret s!"  before{nbsp}{nbsp}{m12Unicode}{nbsp}after  " &&
+     WinnowApp.E2E.looksSecret m24Unicode)
+  let invalid12 := " ".intercalate (List.replicate 12 "abandon")
+  let invalid24 := " ".intercalate (List.replicate 24 "abandon")
+  check "looksSecret: invalid 12-word and 24-word BIP39 checksums return false"
+    (!WinnowApp.E2E.looksSecret invalid12 && !WinnowApp.E2E.looksSecret invalid24)
+  let filler500 := " ".intercalate (List.replicate 500 "hello")
+  let filler501 := " ".intercalate (List.replicate 501 "hello")
+  check "looksSecret: exact 512-word window scans BIP39 while >512 words skips it"
+    (WinnowApp.E2E.looksSecret s!"{filler500} {m12}" &&
+     !WinnowApp.E2E.looksSecret s!"{filler501} {m12}")
+  check "looksSecret: >512 words still detects extended private key prefixes"
+    (WinnowApp.E2E.looksSecret s!"{filler501} XPRV9s21ZrQH143K")
+  let prefixes := ["xprv", "tprv", "yprv", "zprv", "vprv", "uprv",
+                   "XPRV", "TpRv", "YPRV", "zPrV", "VPRV", "UPRV"]
+  check "looksSecret: detects all extended private key prefixes case-insensitively"
+    (prefixes.all fun p => WinnowApp.E2E.looksSecret s!"key={p}9s21ZrQH")
+  check "looksSecret: clean text, empty string, whitespace-only, and xpub/tpub return false"
+    (!WinnowApp.E2E.looksSecret "" &&
+     !WinnowApp.E2E.looksSecret s!"  {nbsp}  " &&
+     !WinnowApp.E2E.looksSecret "Sent 12,345 sats to Alice" &&
+     !WinnowApp.E2E.looksSecret "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8" &&
+     !WinnowApp.E2E.looksSecret "tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7wf1vwgmpnY6k")
+
+  -- E2E.Mode.carriesThisRunsSeed and E2E.refusesFieldName
+  let ent16 := ByteArray.mk (Array.replicate 16 0xAB)
+  let words16 := match Winnow.Keys.BIP39.mnemonic ent16 with | .ok w => w | .error _ => ""
+  let baseMode : WinnowApp.E2E.Mode :=
+    { runID := "unit", peer := none, challenge := none, entropy := some ent16, reset := false,
+      clipboard := none, forcedNetwork := none, requireDeviceAuthentication := false,
+      controlFile := none, peerCount := none, syncIntervalSeconds := none }
+  let noSeedMode := { baseMode with entropy := none }
+  let emptySeedMode := { baseMode with entropy := some ByteArray.empty }
+  let nonBip39SeedMode := { baseMode with entropy := some (ByteArray.mk #[0xDE, 0xAD, 0xBE, 0xEF]) }
+  check "carriesThisRunsSeed: none and empty entropy return false"
+    (!noSeedMode.carriesThisRunsSeed "clean" &&
+     !noSeedMode.carriesThisRunsSeed "" &&
+     !emptySeedMode.carriesThisRunsSeed "clean" &&
+     !emptySeedMode.carriesThisRunsSeed "")
+  check "carriesThisRunsSeed: detects run entropy hex and derived mnemonic case-insensitively, allows clean text"
+    (!words16.isEmpty &&
+     baseMode.carriesThisRunsSeed s!"seed={(Winnow.hex ent16).toUpper}" &&
+     baseMode.carriesThisRunsSeed s!"backup: {words16.toUpper}" &&
+     !baseMode.carriesThisRunsSeed "Sent 5,000 sats to Bob")
+  check "carriesThisRunsSeed: non-BIP39 entropy length still detects hex and returns false on clean text"
+    (nonBip39SeedMode.carriesThisRunsSeed "leak=DEADBEEF!" &&
+     !nonBip39SeedMode.carriesThisRunsSeed "Sent 5,000 sats to Bob")
+
+  let forbiddenKeys := ["entropy", "user_entropy_hex", "Mnemonic", "recovery-mnemonic",
+                        "privateKey", "wallet_private_key", "secretNonce", "SECRET_NONCE_2",
+                        "seedHex", "my-seed-hex"]
+  let allowedKeys := ["", "12345", "txid", "amount", "phase", "id", "public_key", "address"]
+  check "refusesFieldName: blocks all forbidden secret field substrings and allows normal keys"
+    (forbiddenKeys.all WinnowApp.E2E.refusesFieldName &&
+     allowedKeys.all (!WinnowApp.E2E.refusesFieldName ·))
+
+/-- Pure unit tests covering every remaining branch of `stepHome`, `stepSend`, and `Model.onRelay`. -/
+def stepHomeAndSendCases : IO Unit := do
+  let ready : Model := { stage := .ready, active := true, generation := 4, settings := { network := .signet } }
+  let loading : Model := { ready with stage := .loading }
+  let onPay : Model := { ready with routes := [.payment "tx1"] }
+
+  -- stepHome.openNetwork (.peers, .sync ready vs non-ready, .explorer, .verification)
+  let (mSyncReady, csSyncReady) := stepHome (.openNetwork .sync) ready
+  check "stepHome.openNetwork(.sync) while ready loads connected peers"
+    (mSyncReady.routes == [.network .sync] && (csSyncReady matches [.connectedPeers 4]))
+  let (mSyncLoad, csSyncLoad) := stepHome (.openNetwork .sync) loading
+  check "stepHome.openNetwork(.sync) while not ready emits no connectedPeers"
+    (mSyncLoad.routes == [.network .sync] && csSyncLoad.isEmpty)
+  let (mExp, csExp) := stepHome (.openNetwork .explorer) ready
+  check "stepHome.openNetwork(.explorer) pushes route with no commands"
+    (mExp.routes == [.network .explorer] && csExp.isEmpty)
+
+  -- stepHome.warningSettings (.routing, .network ready vs non-ready)
+  let (mWarnNetReady, csWarnNetReady) := stepHome (.warningSettings .network) { ready with confirm := some (.homeWarning .network) }
+  check "stepHome.warningSettings(.network) while ready opens Sync and loads peers"
+    (mWarnNetReady.confirm.isNone && mWarnNetReady.routes == [.settings, .network .sync] &&
+     (csWarnNetReady matches [.connectedPeers 4]))
+  let (mWarnNetLoad, csWarnNetLoad) := stepHome (.warningSettings .network) loading
+  check "stepHome.warningSettings(.network) while not ready emits no connectedPeers"
+    (mWarnNetLoad.routes == [.settings, .network .sync] && csWarnNetLoad.isEmpty)
+  let (mWarnRoute, csWarnRoute) := stepHome (.warningSettings .routing) ready
+  check "stepHome.warningSettings(.routing) opens Peers and loads gateway draft"
+    (mWarnRoute.routes == [.settings, .network .peers] && !csWarnRoute.isEmpty)
+
+  -- stepHome payment-route guards (present vs absent)
+  check "stepHome payment actions no-op when not on a payment route"
+    ((stepHome .labelSender ready).2.isEmpty && (stepHome .labelSender ready).1.sheets.isEmpty &&
+     (stepHome (.attachSenderDestination "p1") ready).1.sheets.isEmpty &&
+     (stepHome .removeSenderLabel ready).2.isEmpty &&
+     (stepHome .openFeeBump ready).2.isEmpty && (stepHome .openFeeBump ready).1.sheets.isEmpty)
+  let (mLbl, _) := stepHome .labelSender onPay
+  let (mAtt, _) := stepHome (.attachSenderDestination "p1") onPay
+  let (_, csRemLbl) := stepHome .removeSenderLabel onPay
+  let (mOpenBump, csOpenBump) := stepHome .openFeeBump onPay
+  check "stepHome payment actions act when on a payment route"
+    (mLbl.topSheet == some .addPerson && mLbl.person.mode == { txid := some "tx1" } &&
+     mAtt.topSheet == some .addPerson && mAtt.person.mode == { personID := some "p1", txid := some "tx1" } &&
+     (csRemLbl matches [.removeSenderLabel 4 "tx1"]) &&
+     mOpenBump.topSheet == some .feeBump && (csOpenBump matches [.pendingFeeRate 4 "tx1"]))
+
+  -- stepHome fee-bump guards (.setBumpRate, .reviewBump, .bump)
+  let bumpPreview : WinnowApp.FeeBumpPreview := { feeRateMilli := 5000, fee := 700, change := some 1000 }
+  let mReplaced := { ready with feeBump := { txid := "tx1", targetText := "3", replacement := some "tx2" } }
+  check "stepHome.setBumpRate ignores edits after replacement broadcast"
+    ((stepHome (.setBumpRate "9") mReplaced).1.feeBump.targetText == "3")
+  check "stepHome.setBumpRate updates targetText when no replacement yet"
+    ((stepHome (.setBumpRate "9") { ready with feeBump := { txid := "tx1" } }).1.feeBump.targetText == "9")
+  check "stepHome.reviewBump no-ops on unparseable rate and previews valid rate"
+    ((stepHome .reviewBump { ready with feeBump := { txid := "tx1", targetText := "bad" } }).2.isEmpty &&
+     ((stepHome .reviewBump { ready with feeBump := { txid := "tx1", targetText := "5.5" } }).2 matches [.previewFeeBump 4 "tx1" "5.5" 5500]))
+  let mReviewed := { ready with feeBump := { txid := "tx1", reviewed := some ("5.5", bumpPreview) } }
+  check "stepHome.bump guards: no preview, already bumping, spendingInFlight, and ok"
+    ((stepHome .bump ready).2.isEmpty &&
+     (stepHome .bump { mReviewed with feeBump := { mReviewed.feeBump with bumping := true } }).2.isEmpty &&
+     (let (mf, cf) := stepHome .bump { mReviewed with spendingInFlight := true }
+      mf.feeBump.error.isSome && cf.isEmpty) &&
+     (let (mb, cb) := stepHome .bump mReviewed
+      mb.feeBump.bumping && mb.spendingInFlight && (cb matches [.bumpFee 4 "tx1" _])))
+
+  -- stepSend guards (.choosePerson, .review, .sendPayment, .editPayment, .newPayment)
+  let (mChosen, csChosen) := stepSend (.choosePerson "p1") { ready with send := { inputs := { destination := "tb1qold" } } }
+  check "stepSend.choosePerson sets personID and clears destination"
+    (mChosen.send.inputs.personID == some "p1" && mChosen.send.inputs.destination == "" && csChosen.isEmpty)
+  let validSend : Model := { ready with send := { inputs := { destination := "tb1qdest", amount := "10000" } } }
+  check "stepSend.review guards: reviewing, sending, !canReview, and valid previewSend"
+    ((stepSend .review { validSend with send := { validSend.send with reviewing := true } }).2.isEmpty &&
+     (stepSend .review { validSend with send := { validSend.send with sending := true } }).2.isEmpty &&
+     (stepSend .review { ready with send := { inputs := { destination := "tb1qdest", amount := "0" } } }).2.isEmpty &&
+     ((stepSend .review validSend).2 matches [.previewSend 4 _]))
+  let prevWallet : Preview :=
+    { destination := "tb1qdest", amount := 10_000, fee := 200, feeRateMilli := 2000,
+      inputCount := 1, change := some 500, locktimeLagsTip := false }
+  let acctSrc : AccountSource := { id := "a1", name := "Shared", threshold := 2, signerCount := 2, psbt := "cHNidP8=" }
+  let mPrev := { validSend with send := { validSend.send with preview := some prevWallet } }
+  let mPrevAcct := { validSend with send := { validSend.send with preview := some { prevWallet with account := some acctSrc } } }
+  check "stepSend.sendPayment guards: no preview, sending, spendingInFlight, wallet send, and multisig signAndDraft"
+    ((stepSend .sendPayment validSend).2.isEmpty &&
+     (stepSend .sendPayment { mPrev with send := { mPrev.send with sending := true } }).2.isEmpty &&
+     (let (mf, cf) := stepSend .sendPayment { mPrev with spendingInFlight := true }
+      mf.send.error.isSome && cf.isEmpty) &&
+     (let (mw, cw) := stepSend .sendPayment mPrev
+      mw.send.sending && mw.spendingInFlight && (cw matches [.sendPayment 4 _ _])) &&
+     (let (ma, ca) := stepSend .sendPayment mPrevAcct
+      ma.send.sending && ma.spendingInFlight && (ca matches [.signAndDraft 4 _ _])))
+  check "stepSend.editPayment ignores while sending and clears preview otherwise"
+    ((stepSend .editPayment { mPrev with send := { mPrev.send with sending := true } }).1.send.preview.isSome &&
+     (stepSend .editPayment mPrev).1.send.preview.isNone)
+  let (mNew, csNew) := stepSend .newPayment { mPrev with expanded := ["send.details", "send.fee", "send.review", "other"] }
+  check "stepSend.newPayment resets send state, collapses send disclosures, and resolves rate"
+    (mNew.send.preview.isNone && mNew.expanded == ["other"] && (csNew matches [.resolveRate 4 _ _]))
+
+  -- Model.onRelay (wrong txid, announced, requested new & dup, echoed new & dup, feeFloorExceeded, confirmed missing/unconfirmed/confirmed)
+  let sent : Model := { ready with send := { sentTxid := some "tx1" } }
+  check "Model.onRelay ignores events for another txid"
+    ((sent.onRelay "other" (.announced 2)).send.relayLog.isEmpty)
+  let r1 := sent.onRelay "tx1" (.announced 3)
+  let r2 := (r1.onRelay "tx1" (.requested "p1")).onRelay "tx1" (.requested "p1")
+  let r3 := (r2.onRelay "tx1" (.echoed "p2")).onRelay "tx1" (.echoed "p2")
+  let r4 := r3.onRelay "tx1" .feeFloorExceeded
+  check "Model.onRelay records announced, deduplicated requested/echoed peers, and feeFloorExceeded"
+    (r4.send.relayLog == ["Announced to 3 peer(s)", "Relayed to p1"] &&
+     r4.send.relayedPeers == ["p1", "p2"] && r4.send.feeFloorNotice)
+  let hUnconf : HistoryItem := { txid := "tx1", height := 0, received := 0, spent := 10_000, fee := some 200 }
+  let hConf : HistoryItem := { hUnconf with height := 420 }
+  check "Model.onRelay(.confirmed) handles missing, height 0, and confirmed height"
+    ((r4.onRelay "tx1" .confirmed).send.confirmedHeight.isNone &&
+     (({ r4 with status := { history := [hUnconf] } }).onRelay "tx1" .confirmed).send.confirmedHeight.isNone &&
+     (({ r4 with status := { history := [hConf] } }).onRelay "tx1" .confirmed).send.confirmedHeight == some 420)
+
+/-- Pure unit tests covering missed branches in `stepMultisigBuild`, `Model.onPeopleHost`, and `Model.onSystemHost`. -/
+def stepMultisigBuildAndHostCases : IO Unit := do
+  let kPhone := "kPhone"
+  let kBob := "kBob"
+  let kCarol := "kCarol"
+  let sBob : SignerInfo := { id := "sBob", isLedger := false, name := "Bob", keys := [kBob], keysText := "11111111" }
+  let acctEligible : MultisigInfo :=
+    { id := "mElig", name := "Pair", descriptor := "tr(x)", balance := 0, policy := some "2 of 2",
+      signerExpressions := [kPhone, kCarol], threshold := 2, signerCount := 2 }
+  let acctThreshold : MultisigInfo :=
+    { id := "mThresh", name := "Trio", descriptor := "tr(y)", balance := 0, policy := some "2 of 3",
+      signerExpressions := [kPhone, kCarol, "kDave"], threshold := 2, signerCount := 3 }
+  let acctNested : MultisigInfo := { acctEligible with id := "mNest", isNested := true }
+  let base : Model :=
+    { stage := .ready, active := true, generation := 9, settings := { network := .signet },
+      sheets := [.signerPicker],
+      multisig := { keyExpression := some kPhone, signers := [sBob], accounts := [acctEligible, acctThreshold, acctNested] },
+      multisigBuild := { members := [{ keys := [{ key := kPhone, label := phoneLabel }] }] } }
+
+  -- stepMultisigBuild: .pickSigner (missing, duplicate key, ok)
+  check "stepMultisigBuild.pickSigner: missing signer and already-used key are no-ops"
+    ((stepMultisig (.pickSigner "missing") base).1.multisigBuild.members.length == 1 &&
+     (let mDup := { base with multisigBuild := { base.multisigBuild with
+        members := [{ keys := [{ key := kBob, label := "Bob" }] }] } }
+      (stepMultisig (.pickSigner "sBob") mDup).1.multisigBuild.members.length == 1))
+  let (mPickedS, _) := stepMultisig (.pickSigner "sBob") base
+  check "stepMultisigBuild.pickSigner: adds fresh signer and closes signerPicker"
+    (mPickedS.multisigBuild.members.length == 2 && !mPickedS.hasSheet .signerPicker)
+
+  -- stepMultisigBuild: .pickAccount (missing, ineligible nested, duplicate non-phone key, ok whole & threshold)
+  check "stepMultisigBuild.pickAccount: missing, nested, and duplicate non-phone key are no-ops"
+    ((stepMultisig (.pickAccount "missing") base).1.multisigBuild.members.length == 1 &&
+     (stepMultisig (.pickAccount "mNest") base).1.multisigBuild.members.length == 1 &&
+     (let mDupKey := { base with multisigBuild := { base.multisigBuild with
+        members := [{ keys := [{ key := kPhone, label := phoneLabel }] },
+                    { keys := [{ key := kCarol, label := "Carol" }] }] } }
+      (stepMultisig (.pickAccount "mElig") mDupKey).1.multisigBuild.members.length == 2))
+  let (mPickA1, _) := stepMultisig (.pickAccount "mElig") base
+  let (mPickA2, _) := stepMultisig (.pickAccount "mThresh") base
+  check "stepMultisigBuild.pickAccount: adds eligible account (equal and lower threshold) and closes picker"
+    (mPickA1.multisigBuild.members.length == 1 && mPickA1.multisigBuild.members[0]!.threshold.isNone && !mPickA1.hasSheet .signerPicker &&
+     mPickA2.multisigBuild.members.length == 1 && mPickA2.multisigBuild.members[0]!.threshold == some 2)
+
+  -- stepMultisigBuild: .setRecoveryMode (0 and 1), .create (!canCreate vs canCreate), .registerLedger (busy vs idle), fallback
+  check "stepMultisigBuild.setRecoveryMode clamps to 0 or 1"
+    ((stepMultisig (.setRecoveryMode 1) base).1.multisigBuild.recoveryMode == 1 &&
+     (stepMultisig (.setRecoveryMode 0) base).1.multisigBuild.recoveryMode == 0 &&
+     (stepMultisig (.setRecoveryMode 5) base).1.multisigBuild.recoveryMode == 0)
+  check "stepMultisigBuild.create guards !canCreate and emits createMultisigAccount when ready"
+    ((stepMultisig .create base).2.isEmpty &&
+     (let mReady := { base with multisigBuild := { base.multisigBuild with name := "Vault", preview := some (.ok "2 of 2") } }
+      let (mc, cc) := stepMultisig .create mReady
+      mc.multisigBuild.creating && (cc matches [.createMultisigAccount 9 "Vault" ..])))
+  check "stepMultisigBuild.registerLedger guards busy and emits registerLedger when idle"
+    ((stepMultisig (.registerLedger "mElig") { base with ledgerRegistering := some "other" }).2.isEmpty &&
+     (let (mr, cr) := stepMultisig (.registerLedger "mElig") { base with ledgerRegisterError := some ("mElig", "old") }
+      mr.ledgerRegistering == some "mElig" && mr.ledgerRegisterError.isNone && (cr matches [.registerLedger 9 "mElig"])))
+  check "stepMultisigBuild fallback arm returns unchanged"
+    ((stepMultisigBuild .openAdd base).2.isEmpty)
+
+  -- Model.onPeopleHost (.pasteParsed stale/mismatched/ok/err, .senderLookup ok/stale/wrong-txid, fallback)
+  let mPeople : Model := { base with person := { mode := { txid := some "tx1" }, pasted := "addr1", inferring := true } }
+  let prev : PastePreview := { name := some "Alice", payTo := some true }
+  check "Model.onPeopleHost.pasteParsed drops stale gen and mismatched text, applies ok and error"
+    ((mPeople.onPeopleHost (.pasteParsed 8 "addr1" (.ok prev))).1.person.parsed.isNone &&
+     (mPeople.onPeopleHost (.pasteParsed 9 "other" (.ok prev))).1.person.parsed.isNone &&
+     (mPeople.onPeopleHost (.pasteParsed 9 "addr1" (.ok prev))).1.person.parsed == some prev &&
+     (mPeople.onPeopleHost (.pasteParsed 9 "addr1" (.error "bad"))).1.person.error == some "bad")
+  let (mLookOk, _) := mPeople.onPeopleHost (.senderLookup 9 "tx1" "mempool.space" ["tb1q1"])
+  check "Model.onPeopleHost.senderLookup applies matching lookup and drops stale/wrong txid"
+    (!mLookOk.person.inferring && mLookOk.person.inferredAddresses == ["tb1q1"] &&
+     mLookOk.person.inferredSource == some "mempool.space" &&
+     (mPeople.onPeopleHost (.senderLookup 8 "tx1" "src" ["tb1q1"])).1.person.inferring &&
+     (mPeople.onPeopleHost (.senderLookup 9 "tx2" "src" ["tb1q1"])).1.person.inferring)
+  check "Model.onPeopleHost fallback arm returns unchanged"
+    ((mPeople.onPeopleHost (.launched none)).2.isEmpty)
+
+  -- Model.onSystemHost (.copiedExpired, .bgtaskExpired via continuedSync id, pending mismatch,
+  -- .continuedSyncRefused wrong-id/none-unavailable/none-other/running, .scene true with send/receive/onboarding/loading, .sceneInactive, fallback)
+  let (mCopClr, _) := ({ base with copied := some "k1" }).onSystemHost (.copiedExpired "k1")
+  let (mCopKeep, _) := ({ base with copied := some "k1" }).onSystemHost (.copiedExpired "k2")
+  check "Model.onSystemHost.copiedExpired clears matching key only"
+    (mCopClr.copied.isNone && mCopKeep.copied == some "k1")
+  let cid := continuedSyncID .signet 1
+  let mContReq := { base with continuedSync := some (.requested cid .signet 9 false) }
+  let mContRun := { base with continuedSync := some (.running cid .signet 9 (some 3) false) }
+  let (mExpById, csExpById) := mContReq.onSystemHost (.bgtaskExpired cid "processing" (some 3))
+  check "Model.onSystemHost.bgtaskExpired routes by continuedSync id even when kind != continued"
+    (mExpById.continuedSync.isNone && (csExpById matches [.completeBackgroundTask _ false (some 3)]))
+  let mPend := { base with pendingBackgroundTasks := [("t1", "refresh", some 1)] }
+  let (_, csPendMiss) := mPend.onSystemHost (.bgtaskExpired "t2" "refresh" (some 1))
+  let (_, csPendTagMiss) := mPend.onSystemHost (.bgtaskExpired "t1" "refresh" (some 2))
+  check "Model.onSystemHost.bgtaskExpired emits expireBackgroundTask when pending id or tag differs"
+    ((csPendMiss matches [.expireBackgroundTask "t2" (some 1)]) &&
+     (csPendTagMiss matches [.expireBackgroundTask "t1" (some 2)]))
+  check "Model.onSystemHost.continuedSyncRefused handles wrong id, none+unavailable, none+other, and running"
+    ((mContReq.onSystemHost (.continuedSyncRefused "other-id" "err" "")).1.continuedSync.isSome &&
+     (let (mu, _) := base.onSystemHost (.continuedSyncRefused cid "unavailable" "ios<26")
+      mu.continuedSyncOutcome == .refused "unavailable" "ios<26" && mu.continuedSyncAutoSuppressed) &&
+     (base.onSystemHost (.continuedSyncRefused cid "tooManyPending" "")).1.continuedSyncOutcome == .none &&
+     (mContRun.onSystemHost (.continuedSyncRefused cid "err" "")).1.continuedSync.isSome)
+  let mSendRecv := { base with active := false, sheets := [.send, .receive], receive := { address := "tb1qaddr" } }
+  let (_, csSceneReady) := mSendRecv.onSystemHost (.scene true)
+  let (_, csSceneEmptyAddr) := ({ mSendRecv with receive := { address := "" } }).onSystemHost (.scene true)
+  let (_, csSceneOnbNoW) := ({ base with active := false, stage := .onboarding, walletID := none }).onSystemHost (.scene true)
+  let (_, csSceneOnbW) := ({ base with active := false, stage := .onboarding, walletID := some "w1" }).onSystemHost (.scene true)
+  let (_, csSceneLoad) := ({ base with active := false, stage := .loading }).onSystemHost (.scene true)
+  check "Model.onSystemHost.scene(true) covers send rate, receive watchAddress, onboarding with/without wallet, and loading"
+    (csSceneReady.any (· matches .resolveRate ..) &&
+     csSceneReady.any (· matches .watchAddress 9 "tb1qaddr") &&
+     !csSceneEmptyAddr.any (· matches .watchAddress ..) &&
+     csSceneOnbNoW.any (· matches .discoverCloud) &&
+     csSceneOnbW.any (· matches .startNetworking ..) && !csSceneOnbW.any (· matches .discoverCloud) &&
+     !csSceneLoad.any (· matches .startNetworking ..))
+  check "Model.onSystemHost.sceneInactive and fallback arm"
+    (((base.onSystemHost .sceneInactive).2 matches [.journal "app.scenePhase" [("phase", "inactive")]]) &&
+     (base.onSystemHost (.launched none)).2.isEmpty)
+
+/-- Pure unit tests covering edge branches in `URLText.validScheme`, `URLText.ipLiteral`,
+`PeerRoutingState`, `E2E.isWhitespaceCluster`, and `E2E.swiftInt?`. -/
+def pureHelperEdgeCases : IO Unit := do
+  -- URLText.validScheme
+  check "URLText.validScheme covers empty, non-alpha start, upper/lower/digits/+/-/. and invalid tail"
+    (!URLText.validScheme "" && !URLText.validScheme "1http" &&
+     URLText.validScheme "a" && URLText.validScheme "Z" &&
+     URLText.validScheme "Http+v2-a.0" && !URLText.validScheme "http_s")
+
+  -- URLText.ipLiteral
+  check "URLText.ipLiteral covers plain, sub-delim, invalid/non-ASCII addr, valid/re-encoded zones"
+    (URLText.ipLiteral "::1" == some "::1" &&
+     URLText.ipLiteral "v1.a!b" == some "v1.a!b" &&
+     URLText.ipLiteral "fe80::1/2" == none &&
+     URLText.ipLiteral s!"fe80::{String.singleton (Char.ofNat 0x00E9)}" == none &&
+     URLText.ipLiteral "fe80::1%25en0" == some "fe80::1%25en0" &&
+     URLText.ipLiteral "fe80::1%25en 0" == some "fe80::1%2525en%200" &&
+     URLText.ipLiteral "fe80::1%en0" == some "fe80::1%25en0" &&
+     URLText.ipLiteral "fe80::1%en 0" == some "fe80::1%25en%200" &&
+     URLText.ipLiteral s!"fe80::1%{String.singleton (Char.ofNat 0x00E9)}" == some "fe80::1%25%C3%A9")
+
+  -- PeerRoutingState helpers across all 8 states
+  let states : List PeerRoutingState :=
+    [.checking, .overlay true true, .overlay true false, .overlay false true,
+     .mixed, .direct true, .direct false, .offline]
+  check "PeerRoutingState.message/warns/shortLabel/alertTitle/symbol cover all states"
+    (states.all (fun s => !s.message.isEmpty && !s.symbol.isEmpty && !s.alertTitle.isEmpty) &&
+     (PeerRoutingState.overlay false true).message == "Private: peers reached through I2P" &&
+     (PeerRoutingState.overlay true false).message == "Private: peers reached through Tor" &&
+     (PeerRoutingState.direct false).message == "Direct: peers can see your IP address" &&
+     PeerRoutingState.offline.warns && PeerRoutingState.offline.shortLabel == "Routing settings invalid" &&
+     PeerRoutingState.offline.alertTitle == "Peer routing is offline" &&
+     !PeerRoutingState.checking.warns && PeerRoutingState.checking.shortLabel == "")
+
+  -- E2E.isWhitespaceCluster across every Unicode White_Space scalar range plus empty and non-whitespace
+  let wsScalars : List Nat :=
+    [0x09, 0x0A, 0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
+  let nonWsScalars : List Nat := [0x08, 0x0E, 0x41, 0x200B, 0x2060]
+  check "E2E.isWhitespaceCluster covers empty, all Unicode White_Space codepoints, and non-whitespace"
+    (!WinnowApp.E2E.isWhitespaceCluster "" &&
+     wsScalars.all (fun n => WinnowApp.E2E.isWhitespaceCluster (String.singleton (Char.ofNat n))) &&
+     nonWsScalars.all (fun n => !WinnowApp.E2E.isWhitespaceCluster (String.singleton (Char.ofNat n))))
+
+  -- E2E.swiftInt?
+  check "E2E.swiftInt? covers empty, lone signs, non-digits, signed/unsigned values, and int64 bounds"
+    (WinnowApp.E2E.swiftInt? "" == none &&
+     WinnowApp.E2E.swiftInt? "+" == none &&
+     WinnowApp.E2E.swiftInt? "-" == none &&
+     WinnowApp.E2E.swiftInt? "12a" == none &&
+     WinnowApp.E2E.swiftInt? "0" == some 0 &&
+     WinnowApp.E2E.swiftInt? "42" == some 42 &&
+     WinnowApp.E2E.swiftInt? "+42" == some 42 &&
+     WinnowApp.E2E.swiftInt? "-42" == some (-42) &&
+     WinnowApp.E2E.swiftInt? "9223372036854775807" == some 9223372036854775807 &&
+     WinnowApp.E2E.swiftInt? "9223372036854775808" == none &&
+     WinnowApp.E2E.swiftInt? "-9223372036854775808" == some (-9223372036854775808) &&
+     WinnowApp.E2E.swiftInt? "-9223372036854775809" == none)
+
 def main : IO UInt32 := runMain "records-test" do
   let root ← IO.FS.createTempDir
   IO.println s!"records-test in {root}"
   syncErrorBookkeeping
+  parseDoubleCases
+  appErrorsAndVault
+  stepPeopleCases
+  stepMultisigAccountAndCollectCases
+  looksSecretCases
+  stepHomeAndSendCases
+  stepMultisigBuildAndHostCases
+  pureHelperEdgeCases
   foundationURLRules
   bundleVersion
   peerGatewayModel
@@ -2441,6 +3595,7 @@ def main : IO UInt32 := runMain "records-test" do
   syncBookkeepingScreens
   backgroundRuns
   backgroundTaskCommands
+  continuedBackgroundSync
   testModeSeed
   walletSlots root
   walletSwitcher root

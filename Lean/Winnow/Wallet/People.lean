@@ -364,9 +364,6 @@ inductive PasteFailure where
   | named (name : String)
   deriving Inhabited
 
-def PasteFailure.name : PasteFailure → String
-  | .card e => e.name | .named n => n
-
 namespace PersonPaste
 
 abbrev PasteM := Except PasteFailure

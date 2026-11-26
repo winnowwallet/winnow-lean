@@ -176,8 +176,6 @@ inductive Failure where
   | decoding (name : String)
   deriving Inhabited
 
-def Failure.name : Failure → String | .wallet e => e.name | .decoding n => n
-
 /-- `checkAccountsAndSigners(of:)`: the multisig accounts and the signer list, bounded and parsed on the
 bundle's network before anything of them is kept. -/
 def checkAccountsAndSigners (b : ImportBundle) : Except Failure Unit := do

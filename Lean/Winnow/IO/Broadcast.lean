@@ -461,6 +461,32 @@ private def checkFeeFloors (b : TxBroadcaster) : IO Unit := do
       | _, _ => acc) (#[], st)
   for t in fired do b.emit (.feeFloorExceeded t minimum)
 
+private def setPeerRelay (b : TxBroadcaster) (txid : ByteArray) (key : String) (relay : PeerRelay) : IO Unit :=
+  b.state.modify fun st => match st.pending[txid]? with
+    | some e => { st with pending := st.pending.insert txid { e with peers := e.peers.insert key relay } }
+    | none => st
+
+private def serveOne (b : TxBroadcaster) (txid : ByteArray) (peer : PeerConnection) (key : String) : IO Unit := do
+  let some e := (← b.state.get).pending[txid]? | return
+  if e.confirmedAtHeight.isSome then return
+  let some relay := e.peers[key]? | return
+  if relay.state == .served then return
+  let relay := { relay with state := .requested }
+  b.setPeerRelay txid key relay
+  b.emit (.requested txid peer.endpoint)
+  let some tx := (← b.state.get).pending[txid]?.map (·.transaction) | return
+  match ← (peer.send (.tx tx)).attempt with
+  | .ok () =>
+    let firstServe ← b.state.modifyGet fun st => match st.pending[txid]? with
+      | some e => (!e.served, { st with pending := st.pending.insert txid { e with served := true } })
+      | none => (false, st)
+    if firstServe then discard <| b.saveLive.attempt
+    b.setPeerRelay txid key { relay with state := .served }
+    b.emit (.served txid peer.endpoint)
+  | .error _ =>
+    b.setPeerRelay txid key { relay with state := .failed }
+    b.emit (.failed txid peer.endpoint "serve failed")
+
 /-- Answers a `getdata` with the transaction, for a peer this broadcaster announced it to and while it is
 unconfirmed. Any other request is passed over in silence, as for a transaction never heard of: answering one
 told whoever connected which txids this wallet holds, confirmed ones too. -/
@@ -472,31 +498,7 @@ private def serve (b : TxBroadcaster) (payload : InventoryPayload) (peer : PeerC
     let txid := v.hash
     if !(← b.state.get).pending.contains txid || seen.contains txid then continue
     seen := seen.insert txid
-    let some e := (← b.state.get).pending[txid]? | continue
-    if e.confirmedAtHeight.isSome then continue
-    let some relay := e.peers[key]? | continue
-    if relay.state == .served then continue
-    let relay := { relay with state := .requested }
-    b.state.modify fun st => match st.pending[txid]? with
-      | some e => { st with pending := st.pending.insert txid { e with peers := e.peers.insert key relay } }
-      | none => st
-    b.emit (.requested txid peer.endpoint)
-    let some tx := (← b.state.get).pending[txid]?.map (·.transaction) | continue
-    match ← (peer.send (.tx tx)).attempt with
-    | .ok () =>
-      let firstServe ← b.state.modifyGet fun st => match st.pending[txid]? with
-        | some e => (!e.served, { st with pending := st.pending.insert txid { e with served := true } })
-        | none => (false, st)
-      if firstServe then discard <| b.saveLive.attempt
-      b.state.modify fun st => match st.pending[txid]? with
-        | some e => { st with pending := st.pending.insert txid { e with peers := e.peers.insert key { relay with state := .served } } }
-        | none => st
-      b.emit (.served txid peer.endpoint)
-    | .error _ =>
-      b.state.modify fun st => match st.pending[txid]? with
-        | some e => { st with pending := st.pending.insert txid { e with peers := e.peers.insert key { relay with state := .failed } } }
-        | none => st
-      b.emit (.failed txid peer.endpoint "serve failed")
+    b.serveOne txid peer key
 
 private partial def listen (b : TxBroadcaster) (peer : PeerConnection) (stream : PeerStream) : IO Unit := do
   let key := peer.endpoint.description

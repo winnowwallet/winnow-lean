@@ -30,12 +30,6 @@ inductive LedgerError where
 
 namespace LedgerError
 
-/-- The case name, as the lockstep convention prints errors. -/
-def name : LedgerError → String
-  | .transport _ => "transport" | .deviceLocked => "deviceLocked" | .appNotOpen => "appNotOpen"
-  | .rejectedOnDevice => "rejectedOnDevice" | .status _ => "status"
-  | .protocolViolation _ => "protocolViolation" | .mismatch _ => "mismatch"
-
 /-- Four uppercase hex digits (`String(format: "%04X", word)`). -/
 def hex4Upper (w : UInt16) : String :=
   let h := (String.ofList (Nat.toDigits 16 w.toNat)).toUpper

@@ -58,7 +58,7 @@ def stepSend (msg : SendMsg) (m : Model) : Model × List Cmd :=
     | some p =>
       if m.send.sending then (m, []) else
       if m.spendingInFlight then
-        (m.fail "send" "Another payment is already being signed and broadcast. Wait for it to finish.", [])
+        (m.fail (.payment .send) false "Another payment is already being signed and broadcast. Wait for it to finish.", [])
       else
         -- an account's payment is signed here and goes out from the collection step
         let cmd := if p.account.isSome then Cmd.signAndDraft g m.sendInputs p

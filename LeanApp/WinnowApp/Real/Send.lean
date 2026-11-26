@@ -35,6 +35,7 @@ def resolveFee (env : Env) (priority : Nat) (overrideMilli : Option Nat) : IO Fe
 
 /-- `resolvedFeeRate(priority:override:)`. -/
 def resolveRate (env : Env) (priority : Nat) (overrideMilli : Option Nat) : IO Float := do
+  Faults.check "feeRate"
   return (← resolveFee env priority overrideMilli).rate
 
 /-- `requireRelayFee(rate:floor:)`. -/
@@ -135,6 +136,7 @@ def broadcastTx (env : Env) (tx : Transaction) (rate : Option Float) : IO ByteAr
   -- the final gate: the live floors again, as the review saw them may have moved
   if let some r := rate then requireRelayFloors env r
   let raw := tx.serialized true
+  Faults.check "broadcast"
   let txid ← runNet (s.broadcaster.broadcast raw rate)
   env.journal "transaction.broadcast" [("txid", Winnow.displayHex txid), ("raw", hex raw)]
   return txid
@@ -218,6 +220,7 @@ backend-test's `paymentRaceFlow` changes the wallet as it arrives (the backgroun
 same wallet's backup, an erase), and between the check and the write (the background, the same backup), where
 the change waits. -/
 def loadPaymentDetails (env : Env) (txid : String) : IO Unit := do
+  Faults.check "payment.details"
   let c ← env.get
   let some w := c.wallet | return
   let some s := c.stack | return

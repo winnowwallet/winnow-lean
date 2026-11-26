@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""A SOCKS5 gateway for the journeys, standing in for the Tor or I2P gateway a person runs (scripts/ui-fixture
+starts one beside the regtest node). A CONNECT to any `.onion` or `.i2p` name reaches the node (`--node`); any
+other destination is refused, as an overlay gateway gives no clearnet. Each CONNECT is a line of `--log`:
+`<name>:<port> ok` or `<host>:<port> refused`, so a journey can check that the app went through it.
+
+    scripts/socks-gateway --node 127.0.0.1:18444 --port-file <file> --log <file>
+
+It listens on 127.0.0.1 on a port of its own, written to --port-file once it listens. No authentication (the
+gateways Winnow is pointed at take none), CONNECT only (no BIND, no UDP)."""
+import argparse
+import asyncio
+import ipaddress
+import os
+import struct
+
+
+async def pipe(reader, writer):
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, asyncio.CancelledError):
+        pass
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+async def serve(node, log, reader, writer):
+    try:
+        ver, n = await reader.readexactly(2)
+        methods = await reader.readexactly(n)
+        if ver != 5 or 0 not in methods:
+            writer.write(b"\x05\xff")
+            return
+        writer.write(b"\x05\x00")
+        ver, cmd, _, atyp = await reader.readexactly(4)
+        if atyp == 1:
+            host = str(ipaddress.IPv4Address(await reader.readexactly(4)))
+        elif atyp == 4:
+            host = str(ipaddress.IPv6Address(await reader.readexactly(16)))
+        elif atyp == 3:
+            host = (await reader.readexactly((await reader.readexactly(1))[0])).decode("ascii", "replace")
+        else:
+            writer.write(b"\x05\x08\x00\x01" + bytes(6))
+            return
+        (port,) = struct.unpack(">H", await reader.readexactly(2))
+        overlay = host.lower().endswith((".onion", ".i2p"))
+        with open(log, "a") as f:
+            f.write(f"{host}:{port} {'ok' if overlay and cmd == 1 else 'refused'}\n")
+        if cmd != 1 or not overlay:
+            # 0x02: not allowed by the ruleset (a clearnet destination); 0x07: a command other than CONNECT
+            writer.write(b"\x05" + (b"\x07" if cmd != 1 else b"\x02") + b"\x00\x01" + bytes(6))
+            return
+        try:
+            up_reader, up_writer = await asyncio.open_connection(*node)
+        except OSError:
+            writer.write(b"\x05\x05\x00\x01" + bytes(6))  # connection refused
+            return
+        writer.write(b"\x05\x00\x00\x01" + bytes(6))
+        await writer.drain()
+        await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
+    except (asyncio.IncompleteReadError, ConnectionError):
+        pass
+    finally:
+        try:
+            await writer.drain()
+            writer.close()
+        except Exception:
+            pass
+
+
+async def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--node", required=True, help="host:port of the node every overlay name reaches")
+    p.add_argument("--port-file", required=True)
+    p.add_argument("--log", required=True)
+    a = p.parse_args()
+    host, _, port = a.node.rpartition(":")
+    node = (host, int(port))
+    server = await asyncio.start_server(lambda r, w: serve(node, a.log, r, w), "127.0.0.1", 0)
+    listening = server.sockets[0].getsockname()[1]
+    tmp = a.port_file + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(f"{listening}\n")
+    os.replace(tmp, a.port_file)
+    async with server:
+        await server.serve_forever()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

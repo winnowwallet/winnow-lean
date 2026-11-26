@@ -1,5 +1,6 @@
 import Winnow.Keys
 import Winnow.Wallet.Descriptor
+import Winnow.Wallet.ImportBundle
 import Winnow.Wallet.MultisigAccount
 import Winnow.Wallet.Wallet
 import TestKit.Check
@@ -43,6 +44,12 @@ def aux0 : ByteArray := ByteArray.mk (Array.replicate 32 0)
 
 /-- A P2TR output to a key no test holds. -/
 def destination : ByteArray := ByteArray.mk (#[0x51, 0x20] ++ Array.replicate 32 0x77)
+
+def _root_.Winnow.ImportBundle.Failure.name : Winnow.ImportBundle.Failure → String
+  | .wallet e => e.name | .decoding n => n
+
+def _root_.Winnow.MultisigFailure.name : Winnow.MultisigFailure → String
+  | .account e => e.name | .named n => n
 
 instance : Describe MultisigFailure where
   name e := e.name

@@ -32,39 +32,53 @@ structure CloudBackupSummary where
   savedAt : Float
   deriving Inhabited, Repr, BEq
 
-/-- `ICloudBackupError`. -/
-inductive CloudBackupError where
-  | unavailable | keyUnavailable | accountChanged | invalidBackup | unsupportedWallet
-  /-- A build without the iCloud entitlement (the shell's `missingEntitlement`): the user may well be signed in. -/
-  | missingEntitlement
+/-- Typed failure of an iCloud backup store, key store, or controller operation. -/
+inductive CloudError where
+  | issue (kind : CloudIssue)
+  | cancelled
+  | failed (message : String)
   deriving BEq, Repr
 
-def CloudBackupError.description : CloudBackupError → String
-  | .unavailable => "Sign in to iCloud and enable iCloud Drive and Passwords & Keychain in Settings."
-  | .keyUnavailable => "The backup key hasn’t arrived from iCloud Keychain. Check Passwords & Keychain in Settings and try again. Keep your recovery words and a backup file."
-  | .accountChanged => "Your Apple Account changed. Sign back into the original account, or turn automatic backup off and on in Settings → Backup → iCloud backup to use this account."
-  | .unsupportedWallet => "Automatic iCloud recovery requires this wallet’s recovery words. This wallet needs a backup file instead."
-  | .invalidBackup => "This iCloud backup could not be read safely. Your existing wallet was not replaced."
-  | .missingEntitlement => cloudMissingEntitlementText
+def CloudError.description : CloudError → String
+  | .issue i => i.message
+  | .cancelled => "Cancelled."
+  | .failed m => m
 
-def CloudBackupError.throw {α} (e : CloudBackupError) : IO α := failText e.description
+def CloudError.toIssue? : CloudError → Option CloudIssue
+  | .issue i => some i
+  | .cancelled => none
+  | .failed _ => some .backupFailed
 
-/-- What a cancelled operation fails with (`CancellationError`); callers drop it quietly. -/
-def cancelledText : String := "Winnow.CancellationError"
-def throwCancelled {α} : IO α := failText cancelledText
-def isCancellation (e : IO.Error) : Bool := toString e == cancelledText
+abbrev CloudM := ExceptT CloudError IO
+
+def CloudM.io {α} (x : IO α) : CloudM α := ExceptT.mk do
+  try return .ok (← x) catch e => return .error (.failed (toString e))
+
+instance : MonadLift IO CloudM := ⟨CloudM.io⟩
+
+def CloudM.liftWM {α} (x : WM α) : CloudM α := ExceptT.mk do
+  match ← x.run with
+  | .ok a => return .ok a
+  | .error e => return .error (.failed e.text)
+
+def CloudM.throwIssue {α} (i : CloudIssue) : CloudM α := throw (.issue i)
+
+def CloudM.toIO {α} (x : CloudM α) : IO α := do
+  match ← x.run with
+  | .ok a => pure a
+  | .error e => throw (IO.userError e.description)
 
 /-- `ICloudBackupStoring`. -/
 structure CloudBackupStore where
-  account : IO String
-  list : (network : String) → IO (Array CloudBackupSummary)
-  save : CloudWalletBackup → (account : String) → IO Unit
-  load : (id account : String) → IO CloudWalletBackup
+  account : CloudM String
+  list : (network : String) → CloudM (Array CloudBackupSummary)
+  save : CloudWalletBackup → (account : String) → CloudM Unit
+  load : (id account : String) → CloudM CloudWalletBackup
 
 /-- `ICloudBackupKeyStoring`: a random 256-bit wrapping key per backup id. -/
 structure CloudBackupKeys where
-  load : (id : String) → IO ByteArray
-  create : (id : String) → IO ByteArray
+  load : (id : String) → CloudM ByteArray
+  create : (id : String) → CloudM ByteArray
 
 /-- `Configuration`: the encrypted copy being kept current, and what was uploaded last. -/
 structure CloudConfiguration where
@@ -80,16 +94,16 @@ def toJV (c : CloudConfiguration) : JV :=
   obj [("walletID", some (.str c.walletID)), ("account", c.account.map .str), ("backup", some c.backup.toJV),
        ("digest", some (ofData c.digest)), ("pendingUpload", c.pendingUpload.map .bool)]
 
-def decode (data : ByteArray) : IO CloudConfiguration := do
-  let some text := String.fromUTF8? data | CloudBackupError.invalidBackup.throw
+def decode (data : ByteArray) : CloudM CloudConfiguration := do
+  let some text := String.fromUTF8? data | CloudM.throwIssue .unreadableBackup
   let fields := decodeText text fun v => do
     let kvs ← asObject v
     return (← key kvs "walletID" asString, ← keyIfPresent kvs "account" asString, ← key kvs "backup" pure,
             ← key kvs "digest" asData, ← keyIfPresent kvs "pendingUpload" asBool)
   let (walletID, account, backupJV, digest, pendingUpload) ← match fields with
     | .ok f => pure f
-    | .error _ => CloudBackupError.invalidBackup.throw
-  let backup ← runWM (CloudWalletBackup.decode (write backupJV).toUTF8)
+    | .error _ => CloudM.throwIssue .unreadableBackup
+  let backup ← CloudM.liftWM (CloudWalletBackup.decode (write backupJV).toUTF8)
   return { walletID, account, backup, digest, pendingUpload }
 
 end CloudConfiguration
@@ -108,7 +122,7 @@ structure CloudControllerState where
   scheduled : Bool := false
   generation : Nat := 0
   busy : Bool := false
-  message : Option String := none
+  issue : Option CloudIssue := none
   available : Array CloudBackupSummary := #[]
 
 namespace CloudControllerState
@@ -123,9 +137,15 @@ def lastSaved (s : CloudControllerState) : Option Float :=
   | none => none
 
 def statusTitle (s : CloudControllerState) : String :=
-  if !s.automaticEnabled || s.message.isSome then "Not backed up"
-  else if s.busy || (s.configuration.bind (·.pendingUpload)) == some true then "Backing up"
-  else if s.lastSaved.isNone then "Not backed up" else "Backed up"
+  if s.issue == some .unavailableInBuild then "Not available"
+  else if !s.automaticEnabled then "Off"
+  else if s.issue.any (!·.isTransient) then "Not backed up"
+  else if s.busy then "Backing up"
+  else if s.issue == some .offline then
+    if s.lastSaved.isSome then "Backed up" else "Waiting for connection"
+  else if (s.configuration.bind (·.pendingUpload)) == some true then "Backing up"
+  else if s.lastSaved.isNone then "Not backed up"
+  else "Backed up"
 
 end CloudControllerState
 
@@ -168,8 +188,8 @@ def suspend (c : CloudBackupController) : IO Unit :=
   c.modify fun s => { s with generation := s.generation + 1, scheduled := false, busy := false }
 
 /-- `check(token)`. -/
-def check (c : CloudBackupController) (token : Nat) : IO Unit := do
-  if (← c.get).generation != token then throwCancelled
+def check (c : CloudBackupController) (token : Nat) : CloudM Unit := do
+  if (← c.get).generation != token then throw .cancelled
 
 /-- `persist(_:to:)`: only encrypted wallet material; the folder is excluded from backup. -/
 def persist (saved : CloudConfiguration) (path : System.FilePath) : IO Unit :=
@@ -185,7 +205,7 @@ def configure (c : CloudBackupController) (directory : Option System.FilePath) (
   -- id, and outlives the wallet's directory
   let preferencePath := directory.map fun d => System.FilePath.mk (networkDirOf d.toString) / "cloud-backup-preferences.json"
   let reset (s : CloudControllerState) : CloudControllerState :=
-    { s with configurationPath := path, configuredWalletID := walletID, configuration := none, message := none,
+    { s with configurationPath := path, configuredWalletID := walletID, configuration := none, issue := none,
              failureCount := 0, retryAfter := 0, preferencePath, disabledWallets := [], automaticEnabled := true }
   c.modify reset
   let mut disabled : List String := []
@@ -199,80 +219,74 @@ def configure (c : CloudBackupController) (directory : Option System.FilePath) (
       match ← read.toBaseIO with
       | .ok ids => disabled := ids
       | .error _ =>
-        let unreadable := "Backup preferences couldn’t be read. Review automatic backup in Settings → Backup."
-        c.modify fun s => { s with automaticEnabled := false, message := some unreadable }
+        c.modify fun s => { s with automaticEnabled := false, issue := some .settingsUnreadable }
         return
   let automatic := !disabled.contains (walletID.getD "")
   c.modify fun s => { s with disabledWallets := disabled, automaticEnabled := automatic }
   let (true, some p, some w) := (automatic, path, walletID) | return
   if !(← p.pathExists) then return
-  let loaded : IO CloudConfiguration := do
+  let loaded : CloudM CloudConfiguration := do
     let data ← IO.FS.readBinFile p
-    unless data.size ≤ CloudWalletBackup.maximumBytes + 4096 do CloudBackupError.invalidBackup.throw
+    unless data.size ≤ CloudWalletBackup.maximumBytes + 4096 do CloudM.throwIssue .unreadableBackup
     CloudConfiguration.decode data
-  match ← loaded.toBaseIO with
+  match ← loaded.run with
   | .ok saved => if saved.walletID == w then c.modify fun s => { s with configuration := some saved }
   | .error _ =>
-    let unreadable := "Automatic backup settings couldn’t be read. Your previous iCloud backup is unchanged."
-    c.modify fun s => { s with message := some unreadable }
+    c.modify fun s => { s with issue := some .settingsUnreadable }
 
 /-- `setAutomatic(_:)`: the preference for the configured wallet; turning it off keeps the iCloud copies. -/
-def setAutomatic (c : CloudBackupController) (enabled : Bool) : IO Unit := do
+def setAutomatic (c : CloudBackupController) (enabled : Bool) : CloudM Unit := do
   let s ← c.get
-  let (some walletID, some prefs) := (s.configuredWalletID, s.preferencePath) | CloudBackupError.unavailable.throw
+  let (some walletID, some prefs) := (s.configuredWalletID, s.preferencePath) | CloudM.throwIssue .settingsUnreadable
   let updated := if enabled then s.disabledWallets.erase walletID
     else if s.disabledWallets.contains walletID then s.disabledWallets else s.disabledWallets ++ [walletID]
   let sorted := (updated.toArray.qsort (· < ·)).toList
   Winnow.IO.writeAtomic prefs (write (.arr (sorted.toArray.map JV.str))).toUTF8
   c.modify fun s => { s with disabledWallets := updated, automaticEnabled := enabled }
   c.suspend
-  let message := if enabled then none else some "Automatic backup is off. Existing iCloud copies remain available."
   c.modify fun s =>
-    { s with retryAfter := 0, failureCount := 0, message, configuration := if enabled then s.configuration else none }
+    { s with retryAfter := 0, failureCount := 0, issue := none, configuration := if enabled then s.configuration else none }
   if !enabled then
     if let some p := s.configurationPath then
       if ← p.pathExists then IO.FS.removeFile p
 
-def accountForPreparation (c : CloudBackupController) : IO String := c.store.account
+def accountForPreparation (c : CloudBackupController) : CloudM String := c.store.account
 
-def reportPreparationFailure (c : CloudBackupController) (e : IO.Error) : IO Unit :=
-  -- the status already says "Not backed up": the message is the reason alone
-  c.modify fun s => { s with message := some (toString e) }
-
-def reportResumeFailure (c : CloudBackupController) (e : IO.Error) : IO Unit :=
-  c.modify fun s => { s with message := some s!"Wallet restored. Automatic backup needs attention: {e}" }
+def reportFailure (c : CloudBackupController) (e : CloudError) : IO Unit := do
+  if let some i := e.toIssue? then
+    c.modify fun s => { s with issue := some i }
 
 /-- `prepare(contents:walletID:account:)`: a new backup id and wrapping key, the encrypted copy written
 locally before any upload (so an outage does not silently turn backups off). -/
 def prepare (c : CloudBackupController) (contents : CloudBackupContents) (walletID : String) (account : Option String := none) :
-    IO Unit := do
+    CloudM Unit := do
   let s ← c.get
   if !s.automaticEnabled then return
-  let some path := s.configurationPath | CloudBackupError.unavailable.throw
-  if s.busy || s.configuredWalletID != some walletID then CloudBackupError.unavailable.throw
+  let some path := s.configurationPath | CloudM.throwIssue .settingsUnreadable
+  if s.busy || s.configuredWalletID != some walletID then CloudM.throwIssue .backupFailed
   let id ← UUIDText.random
   let key ← c.keys.create id
-  let backup ← runWM (CloudWalletBackup.create contents.bundle key contents.appState (some id))
+  let backup ← CloudM.liftWM (CloudWalletBackup.create contents.bundle key contents.appState (some id))
   let saved : CloudConfiguration := { walletID, account, backup, digest := contents.digest, pendingUpload := some true }
   persist saved path
-  c.modify fun s => { s with configuration := some saved, message := none }
+  c.modify fun s => { s with configuration := some saved, issue := none }
 
 /-- `update(token:export:)`: when the contents changed (or the first upload is pending), re-seal the wallet
 box under the copy's key and save it to the account the copy is bound to (the first available account is
 pinned before the first upload). -/
-def updateWith (c : CloudBackupController) (token : Nat) (export_ : IO CloudBackupContents) : IO Unit := do
+def updateWith (c : CloudBackupController) (token : Nat) (export_ : CloudM CloudBackupContents) : CloudM Unit := do
   let s ← c.get
   let (true, some saved, some path) := (s.automaticEnabled, s.configuration, s.configurationPath) | return
   let contents ← export_
   c.check token
   let digest := contents.digest
   if digest == saved.digest && saved.pendingUpload != some true then
-    c.modify fun s => { s with message := none }
+    c.modify fun s => { s with issue := none }
     return
   c.modify fun s => { s with busy := true }
   try
     let key ← c.keys.load saved.backup.id
-    let backup ← runWM (saved.backup.updating contents.bundle key contents.appState)
+    let backup ← CloudM.liftWM (saved.backup.updating contents.bundle key contents.appState)
     let mut saved := saved
     if saved.account.isNone then
       saved := { saved with account := some (← c.store.account) }
@@ -280,20 +294,20 @@ def updateWith (c : CloudBackupController) (token : Nat) (export_ : IO CloudBack
       persist saved path
       let pinned := saved
       c.modify fun s => { s with configuration := some pinned }
-    let some account := saved.account | CloudBackupError.unavailable.throw
+    let some account := saved.account | CloudM.throwIssue .signedOut
     c.store.save backup account
     c.check token
     let done := { saved with backup, digest, pendingUpload := some false }
     persist done path
-    c.modify fun s => { s with configuration := some done, failureCount := 0, retryAfter := 0, message := none }
+    c.modify fun s => { s with configuration := some done, failureCount := 0, retryAfter := 0, issue := none }
   finally
     c.modify fun s => if s.generation == token then { s with busy := false } else s
 
-def update (c : CloudBackupController) (export_ : IO CloudBackupContents) : IO Unit := do
+def update (c : CloudBackupController) (export_ : CloudM CloudBackupContents) : CloudM Unit := do
   c.updateWith (← c.get).generation export_
 
 /-- `enable(bundle:appState:walletID:)`: the explicit retry in Settings → Backup. -/
-def enable (c : CloudBackupController) (bundle : ImportBundle) (appState : Option ByteArray := none) (walletID : String) : IO Unit := do
+def enable (c : CloudBackupController) (bundle : ImportBundle) (appState : Option ByteArray := none) (walletID : String) : CloudM Unit := do
   c.setAutomatic true
   let contents : CloudBackupContents := { bundle, appState }
   c.prepare contents walletID
@@ -301,40 +315,46 @@ def enable (c : CloudBackupController) (bundle : ImportBundle) (appState : Optio
 
 /-- `schedule(export:)`: unless turned off, after 5 s, one update; a failure backs off from 60 s up to five
 minutes. No secret is read and no authentication asked: the first encrypted phrase is carried forward. -/
-def schedule (c : CloudBackupController) (export_ : IO CloudBackupContents) : IO Unit := do
+def schedule (c : CloudBackupController) (export_ : CloudM CloudBackupContents) : IO Unit := do
   let now ← c.now
   let claim ← c.modifyGet fun s =>
     if !s.automaticEnabled || s.configuration.isNone || s.scheduled || s.busy || now < s.retryAfter then (none, s)
     else (some s.generation, { s with scheduled := true })
   let some token := claim | return
   discard <| IO.asTask (prio := .dedicated) do
-    try
+    let run : CloudM Unit := do
       -- `Task.sleep(for: .seconds(5))`, cancelled by a suspend
       let deadline := (← IO.monoMsNow) + c.scheduleDelayMs
       while (← IO.monoMsNow) < deadline do
-        if (← c.get).generation != token then throwCancelled
+        if (← c.get).generation != token then throw .cancelled
         IO.sleep 50
       c.updateWith token export_
-    catch e =>
-      if !isCancellation e && (← c.get).generation == token then
+    match ← run.run with
+    | .ok () | .error .cancelled => pure ()
+    | .error e =>
+      if (← c.get).generation == token then
         let now ← c.now
         c.modify fun s =>
           let failures := s.failureCount + 1
           let delay := min 300 (30 * (2 : Float) ^ (min failures 4).toFloat)
-          { s with message := some s!"Backup needs attention: {e}", failureCount := failures, retryAfter := now + delay }
+          { s with issue := e.toIssue?, failureCount := failures, retryAfter := now + delay }
     c.modify fun s => if s.generation == token then { s with scheduled := false } else s
 
 /-- `discover(network:)`: the saved backups for this network, newest first. -/
 def discover (c : CloudBackupController) (network : String) : IO Unit := do
   let claim ← c.modifyGet fun s =>
-    if s.busy then (none, s) else (some s.generation, { s with busy := true, message := none, available := #[] })
+    if s.busy then (none, s) else (some s.generation, { s with busy := true, issue := none, available := #[] })
   let some token := claim | return
   try
-    let found ← c.store.list network
-    c.check token
-    c.modify fun s => { s with available := found }
-  catch e =>
-    if !isCancellation e && (← c.get).generation == token then c.modify fun s => { s with message := some (toString e) }
+    let run : CloudM (Array CloudBackupSummary) := do
+      let found ← c.store.list network
+      c.check token
+      return found
+    match ← run.run with
+    | .ok found => c.modify fun s => { s with available := found }
+    | .error .cancelled => pure ()
+    | .error e =>
+      if (← c.get).generation == token then c.modify fun s => { s with issue := e.toIssue? }
   finally
     c.modify fun s => if s.generation == token then { s with busy := false } else s
 
@@ -344,25 +364,25 @@ structure Restoration where
   account : String
 
 /-- `restoreContents(_:)` (the caller has authenticated): the backup downloaded and opened with its key. -/
-def restoreContents (c : CloudBackupController) (id : String) : IO Restoration := do
+def restoreContents (c : CloudBackupController) (id : String) : CloudM Restoration := do
   let token := (← c.get).generation
   let account ← c.store.account
   let backup ← c.store.load id account
   c.check token
   let key ← c.keys.load id
-  let bundle ← runWM (backup.restoredBundle key)
-  let appState ← runWM (backup.restoredAppState key)
+  let bundle ← CloudM.liftWM (backup.restoredBundle key)
+  let appState ← CloudM.liftWM (backup.restoredAppState key)
   return { contents := { bundle, appState }, account }
 
-def restore (c : CloudBackupController) (id : String) : IO ImportBundle := do
+def restore (c : CloudBackupController) (id : String) : CloudM ImportBundle := do
   return (← c.restoreContents id).contents.bundle
 
 /-- `resume(contents:walletID:account:)`: a replacement device gets its own record, bound to the account
 it restored from. -/
-def resume (c : CloudBackupController) (contents : CloudBackupContents) (walletID account : String) : IO Unit :=
+def resume (c : CloudBackupController) (contents : CloudBackupContents) (walletID account : String) : CloudM Unit :=
   c.prepare contents walletID (some account)
 
-def stop (c : CloudBackupController) : IO Unit := c.setAutomatic false
+def stop (c : CloudBackupController) : CloudM Unit := c.setAutomatic false
 
 end CloudBackupController
 
@@ -387,26 +407,30 @@ def cloudBackupKeyService : String := "com.btcswift.app.cloud-backup-key.v1"
 def cloudRecordType : String := "WalletBackup"
 
 open LeanNative.Native in
-/-- A CloudKit failure as the text the screens show (`missingEntitlement` and `notAuthenticated` as Swift's
-errors, anything else as the shell's detail or name). -/
-def cloudErrorText (e : Client.Error) : String :=
-  match e.name with
-  | "missingEntitlement" => CloudBackupError.missingEntitlement.description
-  | "notAuthenticated" => CloudBackupError.unavailable.description
-  | name => if e.detail.isEmpty then name else e.detail
+/-- Classify a CloudKit shell error into a typed `CloudError` (never leaks raw CloudKit details to the UI). -/
+def cloudClientError (e : Client.Error) : CloudError :=
+  if e.kind == .cancelled then .cancelled
+  else if e.kind == .unsupported || e.name == "missingEntitlement" || e.name == "badContainer" then
+    .issue .unavailableInBuild
+  else if e.kind == .denied || e.name == "notAuthenticated" || e.name == "permissionFailure" || e.name == "managedAccountRestricted" then
+    .issue .signedOut
+  else if e.name == "quotaExceeded" then .issue .storageFull
+  else if e.kind == .malformed || e.name == "tooLarge" then .issue .unreadableBackup
+  else .issue .offline
 
 open LeanNative.Native in
 /-- One record per device's backup, in the private database; never the public one. Through
 `Client.CloudKit`, with this app's container, record type and fields. -/
 def shellCloudStore (ask : Ask) : CloudBackupStore :=
   let container := some cloudContainer
-  let call {α} (r : Client.Request α) : IO (Client.Result α) := callAsk ask r
-  let account : IO String := do
+  let call {α} (r : Client.Request α) : CloudM (Client.Result α) := CloudM.io (callAsk ask r)
+  let account : CloudM String := do
     match ← call (Client.CloudKit.account container) with
     -- a build without the entitlement answers an error, not a status: say which
-    | .error e => failText (cloudErrorText e)
+    | .error e => throw (cloudClientError e)
     | .ok { status := .available, user := some user } => pure user
-    | .ok _ => CloudBackupError.unavailable.throw
+    | .ok { status := .noAccount, .. } | .ok { status := .restricted, .. } => CloudM.throwIssue .signedOut
+    | .ok _ => CloudM.throwIssue .offline
   { account
     list := fun network => do
       discard account
@@ -421,7 +445,7 @@ def shellCloudStore (ask : Ask) : CloudBackupStore :=
       let q ← call (Client.CloudKit.query query)
       let records ← match q with
         | .ok r => pure r.records
-        | .error e => failText (cloudErrorText e)
+        | .error e => throw (cloudClientError e)
       let found := records.filterMap fun record => do
         let sameNetwork : Bool := match record.field? "network" with | some (.str n) => n == network | _ => false
         guard sameNetwork
@@ -430,8 +454,8 @@ def shellCloudStore (ask : Ask) : CloudBackupStore :=
         return ({ id, network, savedAt := date - 978_307_200 } : CloudBackupSummary)
       return found.qsort (·.savedAt > ·.savedAt)
     save := fun backup expected => do
-      unless (← account) == expected do CloudBackupError.accountChanged.throw
-      let data ← runWM backup.encoded
+      unless (← account) == expected do CloudM.throwIssue .accountChanged
+      let data ← CloudM.liftWM backup.encoded
       let record : Client.CloudKit.Save :=
         { type := cloudRecordType
           name := backup.id
@@ -441,25 +465,23 @@ def shellCloudStore (ask : Ask) : CloudBackupStore :=
           container := container }
       match ← call (Client.CloudKit.save record) with
       | .ok _ => pure ()
-      | .error e => if e.kind == .malformed then CloudBackupError.invalidBackup.throw else failText (cloudErrorText e)
-      unless (← account) == expected do CloudBackupError.accountChanged.throw
+      | .error e => throw (cloudClientError e)
+      unless (← account) == expected do CloudM.throwIssue .accountChanged
     load := fun id expected => do
-      unless (← account) == expected do CloudBackupError.accountChanged.throw
+      unless (← account) == expected do CloudM.throwIssue .accountChanged
       let loaded ← call (Client.CloudKit.load id (maxBytes := some CloudWalletBackup.maximumBytes)
         (assetField := some "payload") (container := container))
       let data ← match loaded with
         | .ok (_, some data) => pure data
-        | .ok (_, none) => CloudBackupError.invalidBackup.throw
-        | .error e =>
-          if e.name == "tooLarge" || e.kind == .malformed then CloudBackupError.invalidBackup.throw
-          else failText (cloudErrorText e)
-      unless data.size ≤ CloudWalletBackup.maximumBytes do CloudBackupError.invalidBackup.throw
+        | .ok (_, none) => CloudM.throwIssue .unreadableBackup
+        | .error e => throw (cloudClientError e)
+      unless data.size ≤ CloudWalletBackup.maximumBytes do CloudM.throwIssue .unreadableBackup
       -- a record that does not decode is said as its other unreadable shapes are, so a caller can tell a
       -- backup that will never read from one iCloud did not hand over
       let backup ← match ← (CloudWalletBackup.decode data).run with
         | .ok b => pure b
-        | .error _ => CloudBackupError.invalidBackup.throw
-      unless backup.id == id && (← account) == expected do CloudBackupError.accountChanged.throw
+        | .error _ => CloudM.throwIssue .unreadableBackup
+      unless backup.id == id && (← account) == expected do CloudM.throwIssue .accountChanged
       return backup }
 
 open LeanNative.Native in
@@ -468,15 +490,15 @@ the wallet's device-only key so automatic recovery never changes its protection.
 def shellCloudKeys (ask : Ask) : CloudBackupKeys :=
   let item (id : String) : Client.Keychain.Item := { key := id, service := some cloudBackupKeyService, synchronizable := true }
   { load := fun id => do
-      match ← (callAsk ask (Client.Keychain.get (item id)) : IO _) with
-      | .ok (some k) => if k.size == 32 then pure k else CloudBackupError.invalidBackup.throw
-      | .ok none => CloudBackupError.keyUnavailable.throw
-      | .error e => if e.kind == .malformed then CloudBackupError.invalidBackup.throw else CloudBackupError.keyUnavailable.throw
+      match ← CloudM.io (callAsk ask (Client.Keychain.get (item id))) with
+      | .ok (some k) => if k.size == 32 then pure k else CloudM.throwIssue .unreadableBackup
+      | .ok none => CloudM.throwIssue .keychainUnavailable
+      | .error e => if e.kind == .malformed then CloudM.throwIssue .unreadableBackup else CloudM.throwIssue .keychainUnavailable
     create := fun id => do
       let key ← IO.getRandomBytes 32
-      match ← (callAsk ask (Client.Keychain.set (item id) key) : IO _) with
+      match ← CloudM.io (callAsk ask (Client.Keychain.set (item id) key)) with
       | .ok () => return key
-      | .error e => failText (keychainError e).errorDescription }
+      | .error _ => CloudM.throwIssue .keychainUnavailable }
 
 /-! ## Test mode's iCloud: a directory (`WINNOW_E2E_CLOUD`)
 
@@ -504,17 +526,19 @@ def directoryCloudStore (dir : System.FilePath) : CloudBackupStore :=
       return found.qsort (·.savedAt > ·.savedAt)
     save := fun backup _ => do
       IO.FS.createDirAll dir
-      Winnow.IO.writeAtomic (path backup.id) (← runWM backup.encoded)
+      Winnow.IO.writeAtomic (path backup.id) (← CloudM.liftWM backup.encoded)
     load := fun id _ => do
       match ← read (path id) with
       | some b => pure b
-      | none => CloudBackupError.invalidBackup.throw }
+      | none => CloudM.throwIssue .unreadableBackup }
 
 def directoryCloudKeys (dir : System.FilePath) : CloudBackupKeys :=
   let path (id : String) : System.FilePath := dir / s!"{id}.key"
   { load := fun id => do
-      let key ← try IO.FS.readBinFile (path id) catch _ => CloudBackupError.keyUnavailable.throw
-      if key.size == 32 then pure key else CloudBackupError.invalidBackup.throw
+      let key ← match ← (IO.FS.readBinFile (path id)).toBaseIO with
+        | .ok k => pure k
+        | .error _ => CloudM.throwIssue .keychainUnavailable
+      if key.size == 32 then pure key else CloudM.throwIssue .unreadableBackup
     create := fun id => do
       let key ← IO.getRandomBytes 32
       IO.FS.createDirAll dir
@@ -542,14 +566,14 @@ def new : IO MemoryCloud := do
 
 def store (m : MemoryCloud) : CloudBackupStore where
   account := do
-    if ← m.accountUnavailable.get then CloudBackupError.unavailable.throw
+    if ← m.accountUnavailable.get then CloudM.throwIssue .signedOut
     m.accountName.get
   list := fun network => do
     return (← m.records.get).filter (·.network == network) |>.map fun b => { id := b.id, network := b.network, savedAt := b.savedAt }
   save := fun backup account => do
     m.saveAttempts.modify (· + 1)
-    unless account == (← m.accountName.get) do CloudBackupError.accountChanged.throw
-    if ← m.failing.get then CloudBackupError.unavailable.throw
+    unless account == (← m.accountName.get) do CloudM.throwIssue .accountChanged
+    if ← m.failing.get then CloudM.throwIssue .offline
     m.records.modify fun rs => (rs.filter (·.id != backup.id)).push backup
     m.saves.modify (· + 1)
     if let some gate ← m.hold.get then
@@ -559,7 +583,7 @@ def store (m : MemoryCloud) : CloudBackupStore where
   load := fun id _ => do
     match (← m.records.get).find? (·.id == id) with
     | some b => pure b
-    | none => CloudBackupError.invalidBackup.throw
+    | none => CloudM.throwIssue .unreadableBackup
 
 def count (m : MemoryCloud) : IO Nat := return (← m.records.get).size
 
@@ -575,6 +599,6 @@ def memoryCloudKeys : IO CloudBackupKeys := do
     load := fun id => do
       match (← keys.get).find? (·.1 == id) with
       | some (_, k) => pure k
-      | none => CloudBackupError.keyUnavailable.throw }
+      | none => CloudM.throwIssue .keychainUnavailable }
 
 end WinnowApp.Real

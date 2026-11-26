@@ -105,15 +105,13 @@ def syncStatusText : SyncPhase → Option String
   | .filters s t => some s!"Filters {groupDigits (min s t)} of {groupDigits t}"
   | .peerDiscoveryFailed => some "Couldn't find filter-serving peers — check your connection."
 
-/-- `SyncPhase.filterScanText` (AppModel.swift:193): never renders a zero as progress (#99). -/
+/-- `SyncPhase.filterScanText` (AppModel.swift:193): never renders a zero as progress (#99), and keeps showing
+filter progress whenever the chain tip is known (even while headers are being checked). -/
 def filterScanText (p : SyncPhase) (fallbackScanned fallbackTip : Nat) : Option String :=
-  let progress : Option (Nat × Nat) := match p with
-    | .filters s t => some (s, t)
-    | .synced => some (fallbackScanned, fallbackTip)
-    | _ => none
-  match progress with
-  | some (s, t) => if t == 0 then none else some s!"block {groupDigits (min s t)} of {groupDigits t}"
-  | none => none
+  let (s, t) := match p with
+    | .filters s t => (s, t)
+    | _ => (fallbackScanned, fallbackTip)
+  if t == 0 then none else some s!"block {groupDigits (min s t)} of {groupDigits t}"
 
 /-- `AppModel.simpleSyncError` (upstream d2ca878, AppModel.swift:234): what the home shows under the
 balance. A peer dropping mid-scan is routine and the next pass recovers on another peer, so one or two in
@@ -612,6 +610,53 @@ def feeProportionWarning (amount fee : Nat) : Option String :=
       then s!"This costs more to send than it delivers: sending {satsText amount} costs {satsText fee} in fees — {pct}% of the amount."
       else s!"The fee is {pct}% of the amount: sending {satsText amount} costs {satsText fee} in fees.")
 
+private def parseDoubleDigits (p : Char → Bool) (cs : List Char) : List Char × List Char :=
+  (cs.takeWhile p, cs.dropWhile p)
+
+private def parseDoubleNat (base : Nat) (cs : List Char) : Nat :=
+  cs.foldl (fun a c => a * base + URLText.hexVal c) 0
+
+/-- An exponent after `e`/`E` or `p`/`P`: optional sign and at least one decimal digit. -/
+private def parseDoubleExp (cs : List Char) : Option Int :=
+  let (eneg, ds) := match cs with | '+' :: r => (false, r) | '-' :: r => (true, r) | r => (false, r)
+  if ds.isEmpty || !ds.all URLText.isDigit then none
+  else let v : Int := min (parseDoubleNat 10 ds) 100000; some (if eneg then -v else v)
+
+/-- Hexadecimal float body after `0x` / `0X`, with optional `.` fraction and `p`/`P` binary exponent. -/
+private def parseHexDouble (sign : Float → Float) (hexBody : List Char) : Option Float := do
+  let (whole, rest) := parseDoubleDigits URLText.isHex hexBody
+  let (frac, rest) := match rest with
+    | '.' :: r => parseDoubleDigits URLText.isHex r
+    | r => ([], r)
+  if whole.isEmpty && frac.isEmpty then none
+  let e2 : Int ← match rest with
+    | [] => some 0
+    | c :: r => if c == 'p' || c == 'P' then parseDoubleExp r else none
+  let m := parseDoubleNat 16 (whole ++ frac)
+  let e := e2 - 4 * frac.length
+  if m == 0 then return sign 0.0
+  if e > 2000 then return sign (1.0 / 0.0)
+  if e < -2000 then return sign 0.0
+  return sign (if e ≥ 0 then (m * 2 ^ e.toNat).toFloat else Float.ofScientific (m * 5 ^ e.natAbs) true e.natAbs)
+
+/-- Decimal float body, with optional `.` fraction and `e`/`E` exponent. -/
+private def parseDecDouble (sign : Float → Float) (body : List Char) : Option Float := do
+  let (whole, rest) := parseDoubleDigits URLText.isDigit body
+  let (frac, rest) := match rest with
+    | '.' :: r => parseDoubleDigits URLText.isDigit r
+    | r => ([], r)
+  if whole.isEmpty && frac.isEmpty then none
+  let e10 : Int ← match rest with
+    | [] => some 0
+    | c :: r => if c == 'e' || c == 'E' then parseDoubleExp r else none
+  let m := parseDoubleNat 10 (whole ++ frac)
+  let e := e10 - frac.length
+  if m == 0 then return sign 0.0
+  let magnitude := (toString m).length + e
+  if magnitude > 400 then return sign (1.0 / 0.0)
+  if magnitude < -400 then return sign 0.0
+  return sign (if e ≥ 0 then Float.ofScientific m false e.toNat else Float.ofScientific m true e.natAbs)
+
 /-- Swift's `Double(_:)` on a whole string: an optional sign, then decimal digits with an optional `.` and
 exponent, `0x` hex digits with an optional `.` and `p` exponent, `inf` / `infinity`, or `nan` / `snan` with
 an optional `(digits)` or `(0x hex)` payload (letters case-insensitive); none otherwise. Correctly rounded. -/
@@ -629,45 +674,9 @@ def parseDouble (text : String) : Option Float := do
   let isNaN := ["nan", "snan"].any fun p => lower == p ||
     (lower.startsWith (p ++ "(") && lower.endsWith ")" && payload ((lower.drop (p.length + 1)).dropEnd 1).copy)
   if isNaN then return (0.0 / 0.0)
-  let digitsOf (p : Char → Bool) (cs : List Char) : List Char × List Char := (cs.takeWhile p, cs.dropWhile p)
-  let natOf (base : Nat) (cs : List Char) : Nat := cs.foldl (fun a c => a * base + URLText.hexVal c) 0
-  -- an exponent: sign and decimal digits, at least one
-  let expOf (cs : List Char) : Option Int :=
-    let (eneg, ds) := match cs with | '+' :: r => (false, r) | '-' :: r => (true, r) | r => (false, r)
-    if ds.isEmpty || !ds.all URLText.isDigit then none
-    else let v : Int := min (natOf 10 ds) 100000; some (if eneg then -v else v)
   match body with
-  | '0' :: 'x' :: hexBody =>
-    let (whole, rest) := digitsOf URLText.isHex hexBody
-    let (frac, rest) := match rest with
-      | '.' :: r => digitsOf URLText.isHex r
-      | r => ([], r)
-    if whole.isEmpty && frac.isEmpty then none
-    let e2 : Int ← match rest with
-      | [] => some 0
-      | c :: r => if c == 'p' || c == 'P' then expOf r else none
-    let m := natOf 16 (whole ++ frac)
-    let e := e2 - 4 * frac.length
-    if m == 0 then return sign 0.0
-    if e > 2000 then return sign (1.0 / 0.0)
-    if e < -2000 then return sign 0.0
-    return sign (if e ≥ 0 then (m * 2 ^ e.toNat).toFloat else Float.ofScientific (m * 5 ^ e.natAbs) true e.natAbs)
-  | _ =>
-    let (whole, rest) := digitsOf URLText.isDigit body
-    let (frac, rest) := match rest with
-      | '.' :: r => digitsOf URLText.isDigit r
-      | r => ([], r)
-    if whole.isEmpty && frac.isEmpty then none
-    let e10 : Int ← match rest with
-      | [] => some 0
-      | c :: r => if c == 'e' || c == 'E' then expOf r else none
-    let m := natOf 10 (whole ++ frac)
-    let e := e10 - frac.length
-    if m == 0 then return sign 0.0
-    let magnitude := (toString m).length + e
-    if magnitude > 400 then return sign (1.0 / 0.0)
-    if magnitude < -400 then return sign 0.0
-    return sign (if e ≥ 0 then Float.ofScientific m false e.toNat else Float.ofScientific m true e.natAbs)
+  | '0' :: 'x' :: hexBody | '0' :: 'X' :: hexBody => parseHexDouble sign hexBody
+  | _ => parseDecDouble sign body
 
 /-- A typed sat/vB rate in thousandths, as the app carries it on: the text trimmed as the field trims it
 (the send override `.whitespaces`, SendView.swift:150; the bump sheet `.whitespacesAndNewlines`,

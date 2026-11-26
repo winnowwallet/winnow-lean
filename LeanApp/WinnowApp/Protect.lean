@@ -165,11 +165,11 @@ def Model.advanceSetup (m : Model) (h : Host) : Model × List Cmd :=
       match r with
       | .ok address => ({ m with ledgerSetup := some { s with step := .done id, address := some address, error := none } }, [])
       | .error e => failWith e
-    | .failed g' ctx e, step =>
+    | .failed g' target _ e, step =>
       if !m.sameWallet g' then (m, []) else
-      match ctx, step with
-      | "ledgerPair", .pairing => failWith e
-      | "multisigBuild", .creating _ =>
+      match target, step with
+      | .multisig .ledgerPair, .pairing => failWith e
+      | .multisig .build, .creating _ =>
         ({ m with ledgerSetup := some { s with error := some e }, multisigBuild := { m.multisigBuild with creating := false } }, [])
       | _, _ => (m, [])
     | _, _ => (m, [])

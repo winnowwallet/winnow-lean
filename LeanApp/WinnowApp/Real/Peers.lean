@@ -91,12 +91,19 @@ def connectedPeers (env : Env) : IO (List PeerInfo) := do
                       network := PeerNetwork.ofHost p.endpoint.host }
   return out.toList
 
+/-- Recently rejected, cooled-down, or evicted peers (up to 5, sorted by endpoint) for on-device debugging. -/
+def peerIssues (env : Env) : IO (List (String × String)) := do
+  let some s := (← env.get).stack | return []
+  let rs := ((← s.pool.rejectionReasons).toArray.map fun (e, reason) => (e.description, reason)).qsort (·.1 < ·.1)
+  return (rs.extract 0 5).toList
+
 /-- `resetPeers()`: forget learned peers (manual peers and the shipped list stay), avoid the current ones
 first next time, and come back up. When `peers.json` cannot be removed nothing was forgotten: networking still
 comes back up, on the peers it had, and the failure is thrown for Settings to show (upstream recorded it as a sync
 error and left the stack down until the app next came to the foreground). backend-test's `resetPeersFlow` resets
 on a running stack and on a stopped one, and `resetPeersFailureFlow` with a directory where `peers.json` goes. -/
 def resetPeers (env : Env) : IO Unit := do
+  Faults.check "peers.reset"
   let c ← env.get
   let avoid ← match c.stack with
     | some s => (·.map (·.endpoint)) <$> s.pool.connectedPeers

@@ -84,7 +84,9 @@ def stepSettings (msg : SettingsMsg) (m : Model) : Model × List Cmd :=
   | .setVerifyFromGenesis b =>
     if b == m.settings.verifyFromGenesis then (m, []) else
     let s := { m.settings with verifyFromGenesis := b }
-    ({ m with settings := s }, [.saveSettings s, .journal "setting.verifyFromGenesis" [("enabled", toString b)], .reconnect g s])
+    let m' := { m with settings := s }
+    let (m', cont) := if b then m'.requestContinuedSync else (m', [])
+    (m', [.saveSettings s, .journal "setting.verifyFromGenesis" [("enabled", toString b)], .reconnect g s] ++ cont)
   | .setExplorer i => match explorers[i]? with
     | some e => save (m.settings.withScoped fun n => { n with explorer := e })
     | none => (m, [])
@@ -180,7 +182,7 @@ def peersSections (m : Model) : List H :=
       (match d.catalog with | some line => [.identified Ids.censusCatalogText (body line)] | none => [])
   , .section "Manual peers" "Manual peers are tried first when their network is enabled. Clearnet seeds resolve over HTTPS (Cloudflare 1.1.1.1), with system DNS as the fallback. Overlay names are resolved by their SOCKS gateway. The default port is 8333 (mainnet) / 38333 (signet). Peers must advertise compact filters and pass Winnow's checks."
       ((s.manualPeers.zipIdx.map fun (p, i) => .row [literal p, .spacer, .button "Remove" .destructive (some (.settings (.removeManualPeer i)))]) ++
-       [.row [.input .plain "" "host:port" d.manualPeer (set .setManualPeer) (some (.settings .addManualPeer)),
+       [.row [.identified Ids.manualPeerField (.input .plain "" "host:port" d.manualPeer (set .setManualPeer) (some (.settings .addManualPeer))),
               .button "Add" .plain (if d.manualPeer.trimAscii.isEmpty then none else some (.settings .addManualPeer))]] ++
        errorRows d.error ++
        [.button "Reconnect peers" .plain (some (.settings .reconnect))])
@@ -192,7 +194,10 @@ def peersSections (m : Model) : List H :=
        (if d.peers.isEmpty then [caption "No peers connected."] else []) ++
        [ .button "Refresh" .plain (some (.settings .refreshPeers))
        , .button (if d.resettingPeers then "Resetting…" else "Reset and shuffle peers") .plain
-           (if d.resettingPeers then none else some (.settings .askResetPeers)) ]) ]
+           (if d.resettingPeers then none else some (.settings .askResetPeers)) ]) ] ++
+  (if d.peerIssues.isEmpty then [] else
+    [.identified Ids.peerIssuesSection (.section "Recent peer issues" "Peers recently cooled down or dropped by Winnow's checks."
+      (d.peerIssues.map fun (endpoint, reason) => .col [literal endpoint, caption reason]))])
 
 /-- Settings → Network → Block explorer. -/
 def explorerSections (m : Model) : List H :=
@@ -201,7 +206,7 @@ def explorerSections (m : Model) : List H :=
   [.section "External block explorer" "Winnow does not use the explorer for balances, synchronization, fees or broadcasting. Every funding-address lookup asks for consent and explains the transaction-ID disclosure; you must explicitly select any result. External browser links have their own warning: the browser shares its IP address with the site. On signet, the blockstream.info preset uses mempool.space."
     ([ .picker "Block explorer" ["blockstream.info", "mempool.space", "Custom"] (explorers.idxOf s.scoped.explorer) (fun i => .settings (.setExplorer i)) ] ++
      (if s.scoped.explorer == .custom then
-       [.input .plain "" "Esplora-compatible website URL" s.scoped.esploraURL (set .setEsploraURL) none] else []) ++
+       [.identified Ids.esploraURLField (.input .plain "" "Esplora-compatible website URL" s.scoped.esploraURL (set .setEsploraURL) none)] else []) ++
      [ caption s!"Selected: {s.esploraBaseURL}"
      , .button "What this trades away" .plain (some (.settings .openReadSide)) ])]
 
