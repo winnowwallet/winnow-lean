@@ -254,9 +254,21 @@ def parse_args(argv=None):
                    help='Parallel suite workers (default: COVERAGE_JOBS or 4)')
     p.add_argument('--leancov-dir', default=None,
                    help='Path to leancov repo (default: $LEANCOV_DIR, ../leancov, or leancov on PATH)')
-    p.add_argument('--sort', choices=['cog', 'crap', 'cc', 'uncov'], default='cog',
+    p.add_argument('--sort', choices=['cog', 'crap', 'cc', 'uncov', 'cov'], default='cog',
                    help='Sort order for top functions (default: cog)')
     p.add_argument('--top', type=int, default=20, help='Number of top functions to display (default: 20)')
+    p.add_argument('--file', dest='files', action='append', default=[],
+                   help='Filter report to files matching substring (repeatable)')
+    p.add_argument('--decl', dest='decls', action='append', default=[],
+                   help='Filter report to declarations matching substring (repeatable)')
+    p.add_argument('--exclude-kind', dest='exclude_kinds', action='append', default=[],
+                   help='Exclude branch kind from report (repeatable)')
+    p.add_argument('--exclude-instances', action='store_true',
+                   help='Exclude typeclass instance declarations from report')
+    p.add_argument('--html', nargs='?', const='default', default=None,
+                   help='Generate standalone HTML report (default: build/leancov/html)')
+    p.add_argument('--markdown', nargs='?', const='default', default=None,
+                   help='Write Markdown coverage summary (default: build/leancov/report.md)')
     p.add_argument('--no-files', action='store_true', help='Omit per-file table')
     p.add_argument('--no-kinds', action='store_true', help='Omit per-branch-kind table')
     p.add_argument('--missed', action='store_true', help='Print missed line numbers under top functions')
@@ -346,6 +358,23 @@ def main():
         report_cmd.append('--kinds')
     if args.missed:
         report_cmd.append('--missed')
+    for fpat in args.files:
+        report_cmd += ['--file', fpat]
+    for dpat in args.decls:
+        report_cmd += ['--decl', dpat]
+    for ek in args.exclude_kinds:
+        report_cmd += ['--exclude-kind', ek]
+    if args.exclude_instances:
+        report_cmd.append('--exclude-instances')
+    extra_artifacts = []
+    if args.html is not None:
+        dest_html = (OUT / 'html') if args.html == 'default' else Path(args.html)
+        report_cmd += ['--html', str(dest_html), '--src-root', str(ROOT)]
+        extra_artifacts.append(str(dest_html / 'index.html'))
+    if args.markdown is not None:
+        dest_md = (OUT / 'report.md') if args.markdown == 'default' else Path(args.markdown)
+        report_cmd += ['--markdown', str(dest_md)]
+        extra_artifacts.append(str(dest_md))
     if args.min_cov is not None:
         report_cmd += ['--min-cov', str(args.min_cov)]
     if args.max_crap is not None:
@@ -359,7 +388,8 @@ def main():
         ci_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dest_json, ci_dir / 'leancov.json')
 
-    print(f'\nArtifacts: {dest_json} | {dest_lcov}', flush=True)
+    all_artifacts = [str(dest_json), str(dest_lcov), *extra_artifacts]
+    print(f'\nArtifacts: {" | ".join(all_artifacts)}', flush=True)
     failed_suites = [s for s, c in codes.items() if c != 0]
     if failed_suites:
         print(f'FAILED suites: {", ".join(failed_suites)} (see {LOGS})', file=sys.stderr)
