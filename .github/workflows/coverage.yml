@@ -1,0 +1,46 @@
+name: Coverage
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Fast suites & LeanCov report
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Lean via elan
+        shell: bash
+        run: |
+          TOOLCHAIN="$(tr -d '[:space:]' < Lean/lean-toolchain)"
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
+            | sh -s -- -y --default-toolchain "$TOOLCHAIN"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Run LeanCov
+        uses: LeanNative/leancov@v0.6.0
+        with:
+          version: v0.6.0
+          config: leancov.toml
+          args: '--fast'
+          git-diff: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          upload-html: 'true'
+          step-summary: 'true'
+          comment-pr: 'false'

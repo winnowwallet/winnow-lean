@@ -15,8 +15,6 @@ structure PeerAddress where
 
 namespace PeerAddress
 
-instance : BEq PeerAddress := ⟨fun a b => a.time == b.time && a.services == b.services && a.ip == b.ip && a.port == b.port⟩
-
 def unspecified : PeerAddress := { services := 0, ip := ByteArray.mk (Array.replicate 16 0), port := 0 }
 
 /-- With or without the leading timestamp (`addr` vs `version`); the port is big-endian on the wire. -/
