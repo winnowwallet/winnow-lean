@@ -132,32 +132,29 @@ def Model.requestContinuedSync (m : Model) (seenSyncing : Bool := false) : Model
     let serial := m.continuedSyncSerial + 1
     let id := continuedSyncID net serial
     ({ m with continuedSync := some (.requested id net m.generation seenSyncing),
-              continuedSyncSerial := serial, continuedSyncOutcome := .none, continuedSyncAutoSuppressed := false },
+              continuedSyncSerial := serial, continuedSyncOutcome := .none },
      extra ++ [.continueBackgroundSync id title subtitle])
   match m.continuedSync with
   | some (.requested id' net' _ _) =>
     if net' == net then
-      ({ m with continuedSync := some (.requested id' net m.generation seenSyncing), continuedSyncAutoSuppressed := false }, [])
+      ({ m with continuedSync := some (.requested id' net m.generation seenSyncing) }, [])
     else submit []
   | some (.running id' net' _ tag _) =>
     if net' == net then
-      ({ m with continuedSync := some (.running id' net m.generation tag seenSyncing), continuedSyncAutoSuppressed := false },
+      ({ m with continuedSync := some (.running id' net m.generation tag seenSyncing) },
        [.progressBackgroundSync id' tag completed total title subtitle])
     else submit [.completeBackgroundTask id' false tag]
   | none => submit []
 
-/-- Advance a requested or running continued sync on a new snapshot: report progress while syncing, auto-request
-continuation for an active foreground catch-up sync, or complete it (and tear down networking when backgrounded)
-once synced or failed. -/
+/-- Advance a requested or running continued sync on a new snapshot: report progress while syncing, or complete
+it (and tear down networking when backgrounded) once synced or failed. A snapshot that shows nothing running
+ends it only once the sync was seen at work or the snapshot is the asking command's own (`settled`): one from
+before the command took hold says nothing about it. -/
 def Model.advanceContinuedSync (m : Model) (s : Status) (p : SyncPhase) (settled : Bool) : Model × List Cmd :=
   match m.continuedSync with
-  | none =>
-    if !s.syncing && p == .synced then
-      let unavailable := match m.continuedSyncOutcome with | .refused "unavailable" _ => true | _ => false
-      ({ m with continuedSyncAutoSuppressed := unavailable }, [])
-    else if m.active && m.stage == .ready && !settled && !m.continuedSyncAutoSuppressed && shouldAutoContinueSync s p then
-      m.requestContinuedSync (seenSyncing := true)
-    else (m, [])
+  -- nothing is asked of iOS here: a continued task begins with something the person did in the app (Sync now,
+  -- Retry, an import or restore, verify from genesis, finishing onboarding), never with a sync that began by itself
+  | none => (m, [])
   | some cs =>
     let syncingNow := s.syncing || (p != .synced && p != .peerDiscoveryFailed)
     let seen := cs.seenSyncing || syncingNow
@@ -167,7 +164,7 @@ def Model.advanceContinuedSync (m : Model) (s : Status) (p : SyncPhase) (settled
     let done := !s.syncing && p == .synced && s.lastSyncError.isNone && (seen || settled)
     if done then
       let (m', endCs) := m.endContinuedSync true .completed
-      ({ m' with continuedSyncAutoSuppressed := false }, endCs ++ stop)
+      (m', endCs ++ stop)
     else if failed then
       let (m', endCs) := m.endContinuedSync false .none
       (m', endCs ++ stop)
@@ -205,12 +202,12 @@ def Model.onContinuedTaskExpired (m : Model) (id : String) (tag : Option Nat) : 
   match m.continuedSync with
   | some (.running id' _ _ launchTag _) =>
     if id' == id && sameLaunch tag launchTag then
-      ({ m with continuedSync := none, continuedSyncOutcome := .expired, continuedSyncAutoSuppressed := true },
+      ({ m with continuedSync := none, continuedSyncOutcome := .expired },
        [.completeBackgroundTask id false launchTag] ++ stop)
     else (m, [])
   | some (.requested id' _ _ _) =>
     if id' == id then
-      ({ m with continuedSync := none, continuedSyncOutcome := .expired, continuedSyncAutoSuppressed := true },
+      ({ m with continuedSync := none, continuedSyncOutcome := .expired },
        [.completeBackgroundTask id false tag] ++ stop)
     else (m, [])
   | none => (m, [])

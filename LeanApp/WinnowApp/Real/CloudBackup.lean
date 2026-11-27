@@ -406,8 +406,18 @@ def cloudContainer : String := "iCloud.com.btcswift.app"
 def cloudBackupKeyService : String := "com.btcswift.app.cloud-backup-key.v1"
 def cloudRecordType : String := "WalletBackup"
 
+/-- The CloudKit errors that say only "not now": no route, the service or the zone busy, a rate limit, an
+account that is briefly away. These alone are `CloudIssue.offline`, which the screens keep quiet about. -/
+def cloudTransientErrors : List String :=
+  ["networkUnavailable", "networkFailure", "serviceUnavailable", "requestRateLimited", "zoneBusy",
+   "accountTemporarilyUnavailable"]
+
 open LeanNative.Native in
-/-- Classify a CloudKit shell error into a typed `CloudError` (never leaks raw CloudKit details to the UI). -/
+/-- Classify a CloudKit shell error into a typed `CloudError` (never leaks raw CloudKit details to the UI).
+Only the errors that waiting cures (`cloudTransientErrors`) are `offline`. Any other that has no case of its
+own (a limit, a request the server refuses, a zone that is gone, one CloudKit does not name) is a failed
+backup: said as "Not backed up" with its note, and never as waiting for a connection, which would go on for
+as long as the error does with nothing shown. -/
 def cloudClientError (e : Client.Error) : CloudError :=
   if e.kind == .cancelled then .cancelled
   else if e.kind == .unsupported || e.name == "missingEntitlement" || e.name == "badContainer" then
@@ -416,7 +426,8 @@ def cloudClientError (e : Client.Error) : CloudError :=
     .issue .signedOut
   else if e.name == "quotaExceeded" then .issue .storageFull
   else if e.kind == .malformed || e.name == "tooLarge" then .issue .unreadableBackup
-  else .issue .offline
+  else if cloudTransientErrors.contains e.name then .issue .offline
+  else .issue .backupFailed
 
 open LeanNative.Native in
 /-- One record per device's backup, in the private database; never the public one. Through

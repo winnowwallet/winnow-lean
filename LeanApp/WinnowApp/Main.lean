@@ -396,12 +396,16 @@ def performSync (b : Backend) (fx : Effects Host) (c : Cmd) : IO Unit := do
   | .syncNow g => background fx g (.wallet .sync) do
       b.syncNow
       snapshotMsg g (settled := true)
+  -- the dial round is over when `retryPeers` answers: with a peer seated the pass the person is waiting for
+  -- runs now and not at the loop's next turn, and either way this snapshot is the retry's own (`settled`), so
+  -- a continued sync asked for with it ends when there is nothing to go on with
   | .retryPeers g => background fx g (.wallet .sync) do
       b.retryPeers
-      snapshotMsg g
+      if (← b.snapshot).1.peerCount > 0 then b.syncNow
+      snapshotMsg g (settled := true)
   | .reconnect g s => background fx g (.wallet .sync) do
       b.reconnect s
-      snapshotMsg g
+      snapshotMsg g (settled := true)
   | .startNetworking g s => do
       discard <| IO.asTask (b.startNetworking s)
       -- AppModel's 1 s `phaseTask`: what the sync loop changed reaches the model as a snapshot.

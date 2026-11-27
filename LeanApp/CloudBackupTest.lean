@@ -833,6 +833,16 @@ def shellAnswers : TM Unit := do
     (exceptEq (← accountErr (Lean.Json.mkObj [("status", Lean.Json.str "temporarilyUnavailable"), ("user", Lean.Json.null)])) (.error (.issue .offline)))
   check "networkUnavailable -> offline (never leaks raw detail)"
     (exceptEq (← accountErr (Lean.Json.mkObj [("error", Lean.Json.str "networkUnavailable"), ("detail", Lean.Json.str "CKErrorDomain 3")])) (.error (.issue .offline)))
+  let classified (name : String) : IO (Except Real.CloudError String) :=
+    accountErr (Lean.Json.mkObj [("error", Lean.Json.str name), ("detail", Lean.Json.str "raw internal detail")])
+  for name in Real.cloudTransientErrors do
+    check s!"{name} -> offline (waiting cures it)" (exceptEq (← classified name) (.error (.issue .offline)))
+  -- what waiting does not cure is never "offline", which Home shows as nothing to do
+  for name in ["limitExceeded", "serverRejectedRequest", "zoneNotFound", "userDeletedZone", "invalidArguments",
+               "incompatibleVersion", "internalError", "notFound", "badArgs", "unknown"] do
+    check s!"{name} -> backupFailed, not offline" (exceptEq (← classified name) (.error (.issue .backupFailed)))
+  check "backupFailed is not transient: the screens say Not backed up and show its note"
+    (!CloudIssue.backupFailed.isTransient && CloudIssue.offline.isTransient)
   check "quotaExceeded -> storageFull (never leaks raw detail)"
     (exceptEq (← accountErr (Lean.Json.mkObj [("error", Lean.Json.str "quotaExceeded"), ("detail", Lean.Json.str "CKErrorDomain 25")])) (.error (.issue .storageFull)))
   check "operationCancelled -> cancelled"

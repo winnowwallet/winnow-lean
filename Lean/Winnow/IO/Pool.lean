@@ -28,9 +28,9 @@ good list and refuses for the session; `transportFailure` (slow, dropped) cools 
 30 s doubling to 600 s per consecutive failure, cleared on the next success. After every header sync
 and dial round, seats whose handshake height is more than 100 blocks below the validated header tip
 are unseated (judged once per seat; manual peers exempt), dropped from the good list and cooled for
-600 s. `syncHeaders` fails over across peers (6 burned at most, 12 transport retries), asks other
-peers claiming a much taller tip to catch up, and condemns a primary that claimed a taller tip and
-delivered nothing.
+600 s. `syncHeaders` fails over across peers (6 burned at most, 12 transport retries), asks every
+other seat for headers on the same pass (`catchUp`), and condemns a peer that claimed a much taller tip
+and delivered nothing.
 
 State is one `IO.Ref` updated atomically; dials run on dedicated threads and report to the round
 through an `EventStream`. The clock is injectable (`now`, monotonic milliseconds). -/
@@ -595,6 +595,10 @@ private def catchUp (p : PeerPool) (chain : HeaderStore) (outcome : SyncOutcome)
     | .error e =>
       match e with
       | .headers (.storageCorrupt _) | .headers (.storageUnavailable _) => return (merged, evictedAny)
+      -- a seat this pass was not begun with, answering from a branch with no more work than the chain held (it
+      -- has not heard of the blocks that won): it told nothing wrong and nothing is taken from it, so it keeps
+      -- its seat, as it did when only a seat claiming far more was asked. Its own turn judges it (`syncHeaders`).
+      | .headers .reorgWithoutMoreWork => pure ()
       | .headers _ => p.misbehaving other e.description
       | .cancelled => return (merged, evictedAny)
       | .peer pe => if pe.isTransport then p.transportFailure other e.description else p.misbehaving other e.description
@@ -618,8 +622,8 @@ private def settledSync (p : PeerPool) (chain : HeaderStore) (peer : PeerConnect
 /-- Syncs headers against connected peers with bounded failover. Each call begins with the next seat in
 turn. It used to begin with the first seat every time, and a peer there that answered every `getheaders`
 with nothing (claiming no more height at the handshake than this wallet had) kept the chain where it was
-for as long as it stayed seated: the others are asked only when they claimed far more. Now such a peer
-holds one pass in as many as there are seats. -/
+for as long as it stayed seated, the others being asked only when they claimed far more. Now the seat a
+pass begins with moves on each time, and every other seat is asked on the same pass too (`catchUp`). -/
 def syncHeaders (p : PeerPool) (chain : HeaderStore) (timeoutPerPeerMs : Nat := 30_000) (maxAttempts : Nat := 6)
     (maxTransportRetries : Nat := 12) : NetM SyncOutcome := do
   if (← p.state.get).mode != .full then throw (.pool .relayOnly)

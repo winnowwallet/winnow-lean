@@ -2544,41 +2544,30 @@ def continuedBackgroundSync : IO Unit := do
   let (activated, cs) := onHost (.scene true) { readyMain with active := false }
   check "continued: plain scene active does not request a continued task"
     (activated.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
-  -- automatic foreground catch-up sync requests continuation once, and stays quiet on already-synced polls
+  -- a sync that began by itself never asks iOS for a continued task: only something the person did does
   let (mPoll, cs) := onHost (.snapshot 0 { readyMain.status with syncing := true } .synced) readyMain
-  check "continued: routine synced poll does not auto-request bgtask.continue"
+  check "continued: a routine synced poll does not request bgtask.continue"
     (mPoll.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
   let (mAuto, cs) := onHost (.snapshot 0 { readyMain.status with syncing := true } (.filters 100 5000)) readyMain
-  check "continued: automatic foreground catch-up sync requests bgtask.continue"
-    (mAuto.continuedSync == some (.requested idMain .mainnet 0 true) &&
-     mAuto.continuedSyncSerial == 1 &&
-     cs.any (· matches .continueBackgroundSync _ "Syncing Bitcoin" "Scanning blocks… 100 / 5,000"))
-  -- refusal suppresses repeated auto-requests on subsequent ticks, records error/detail for Sync screen,
-  -- and re-enables auto-requests once synced (except `unavailable`, which stays suppressed)
-  let (mAutoRef, _) := onHost (.continuedSyncRefused idMain "tooManyPending" "queue full") mAuto
-  check "continued: refusal records error/detail and suppresses auto-retry while still syncing"
-    (mAutoRef.continuedSync.isNone && mAutoRef.continuedSyncAutoSuppressed &&
-     mAutoRef.continuedSyncOutcome == .refused "tooManyPending" "queue full" &&
-     continuedSyncStatusText mAutoRef == "Refused (tooManyPending: queue full)")
-  let (mAutoStill, cs) := onHost (.snapshot 0 { mAutoRef.status with syncing := true } (.filters 200 5000)) mAutoRef
-  check "continued: suppressed auto-sync does not spam bgtask.continue"
-    (mAutoStill.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
-  let (mAutoCleared, _) := onHost (.snapshot 0 { mAutoStill.status with syncing := false } .synced) mAutoStill
-  check "continued: reaching synced clears non-unavailable suppression for the next pass"
-    (!mAutoCleared.continuedSyncAutoSuppressed)
-  let (mAutoNext, cs) := onHost (.snapshot 0 { mAutoCleared.status with syncing := true } (.headers 10 20)) mAutoCleared
-  check "continued: next catch-up pass gets a fresh unique task id"
-    (mAutoNext.continuedSync == some (.requested idMain2 .mainnet 0 true) &&
-     cs.any (fun c => match c with | .continueBackgroundSync id .. => id == idMain2 | _ => false))
-  let (mUnavail, _) := onHost (.continuedSyncRefused idMain2 "unavailable" "needs iOS 26") mAutoNext
+  check "continued: a foreground catch-up nobody asked for does not request bgtask.continue"
+    (mAuto.continuedSync.isNone && mAuto.continuedSyncSerial == 0 && !cs.any (· matches .continueBackgroundSync ..))
+  -- a refusal records its error and detail for the Sync screen, and the next thing the person does asks again
+  let (mAsked, _) := step .syncNow readyMain
+  let (mRef, _) := onHost (.continuedSyncRefused idMain "tooManyPending" "queue full") mAsked
+  check "continued: refusal records error/detail"
+    (mRef.continuedSync.isNone &&
+     mRef.continuedSyncOutcome == .refused "tooManyPending" "queue full" &&
+     continuedSyncStatusText mRef == "Refused (tooManyPending: queue full)")
+  let (mRefStill, cs) := onHost (.snapshot 0 { mRef.status with syncing := true } (.filters 200 5000)) mRef
+  check "continued: a refused sync that goes on does not ask again by itself"
+    (mRefStill.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let (mUnavail, _) := onHost (.continuedSyncRefused idMain "unavailable" "needs iOS 26") mAsked
   let (mUnavailSynced, _) := onHost (.snapshot 0 { mUnavail.status with syncing := false } .synced) mUnavail
-  check "continued: unavailable stays suppressed even after sync finishes"
-    (mUnavailSynced.continuedSyncAutoSuppressed && continuedSyncStatusText mUnavailSynced == "Unavailable")
-  -- manual trigger after refusal always tries again with a fresh id
-  let (mManualAfterRef, cs) := step .syncNow mAutoRef
-  check "continued: manual Sync now overrides auto suppression with fresh id"
+  check "continued: unavailable is what the Sync screen says, also once the sync finishes"
+    (continuedSyncStatusText mUnavailSynced == "Unavailable")
+  let (mManualAfterRef, cs) := step .syncNow mRef
+  check "continued: Sync now after a refusal asks again with a fresh id"
     (mManualAfterRef.continuedSync == some (.requested idMain2 .mainnet 0 false) &&
-     !mManualAfterRef.continuedSyncAutoSuppressed &&
      cs.any (fun c => match c with | .continueBackgroundSync id .. => id == idMain2 | _ => false))
   -- manual sync triggers: Sync now, Retry, Verify from genesis (ON only), iCloud restore, file import, finishOnboarding
   let (m1, cs) := step .syncNow readyMain
@@ -2613,6 +2602,29 @@ def continuedBackgroundSync : IO Unit := do
   let (mFinDone, cs) := step .finishOnboarding { onboarding with walletID := some "w", phase := .synced }
   check "continued: finishOnboarding skips bgtask.continue when already synced"
     (mFinDone.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  -- Retry with nothing to connect to: the retry's own snapshot ends what it asked for, so a trip to the
+  -- background stops networking and nothing is left running for iOS to expire
+  let (mRetryStale, _) := onHost (.snapshot 0 readyMain.status .peerDiscoveryFailed) mRetry
+  check "continued: a snapshot from before the retry took hold does not end its continued sync"
+    mRetryStale.continuedSync.isSome
+  let (mRetryFail, cs) := onHost (.snapshot 0 readyMain.status .peerDiscoveryFailed true) mRetry
+  check "continued: a retry that reaches no peer ends its continued sync"
+    (mRetryFail.continuedSync.isNone && !cs.any (· matches .continueBackgroundSync ..))
+  let (bgAfterRetry, cs) := onHost (.scene false) mRetryFail
+  check "continued: leaving the app after a failed retry stops networking"
+    (bgAfterRetry.continuedSync.isNone && cs.any (· matches .stopNetworking))
+  -- an import's continued sync, kept through finishOnboarding, ends at the first snapshot that shows the wallet
+  -- at the tip (the import did its scan before the person tapped); one asked for there with no peer reachable
+  -- ends at the next snapshot that still says so
+  let (mFinKept, _) := step .finishOnboarding { mImport with walletID := some "w", phase := .synced }
+  check "continued: finishOnboarding keeps an import's continued sync as one seen at work"
+    (mFinKept.continuedSync.map (·.seenSyncing) == some true)
+  let (mFinEnded, _) := onHost (.snapshot mFinKept.generation mFinKept.status .synced) mFinKept
+  check "continued: the first snapshot at the tip then ends it" mFinEnded.continuedSync.isNone
+  let (mFinNoPeers, _) := step .finishOnboarding { onboarding with walletID := some "w", phase := .peerDiscoveryFailed }
+  let (mFinNoPeersEnd, _) := onHost (.snapshot mFinNoPeers.generation mFinNoPeers.status .peerDiscoveryFailed) mFinNoPeers
+  check "continued: finishOnboarding with no peer reachable leaves no continued sync behind"
+    (mFinNoPeers.continuedSync.isSome && mFinNoPeersEnd.continuedSync.isNone)
   -- full background continuation flow: request -> iOS launches -> background -> progress -> synced -> complete + stopNetworking
   let (m, _) := step .syncNow { readyMain with phase := .connecting 1 3 }
   check "continued Sync row: shows Starting… while requested"
@@ -2696,7 +2708,6 @@ def continuedBackgroundSync : IO Unit := do
   let (bgExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 7)) bg2
   check "continued: expiry in background completes false and stops networking"
     (bgExp.continuedSync.isNone && continuedSyncStatusText bgExp == "Stopped or cancelled" &&
-     bgExp.continuedSyncAutoSuppressed &&
      (match cs with | [.completeBackgroundTask id false (some 7), .stopNetworking] => id == idMain | _ => false))
   let (fgExp, cs) := onHost (.bgtaskExpired idMain "continued" (some 7)) fg
   check "continued: expiry in foreground completes false without stopping foreground networking"
@@ -3498,7 +3509,7 @@ def stepMultisigBuildAndHostCases : IO Unit := do
   check "Model.onSystemHost.continuedSyncRefused handles wrong id, none+unavailable, none+other, and running"
     ((mContReq.onSystemHost (.continuedSyncRefused "other-id" "err" "")).1.continuedSync.isSome &&
      (let (mu, _) := base.onSystemHost (.continuedSyncRefused cid "unavailable" "ios<26")
-      mu.continuedSyncOutcome == .refused "unavailable" "ios<26" && mu.continuedSyncAutoSuppressed) &&
+      mu.continuedSyncOutcome == .refused "unavailable" "ios<26") &&
      (base.onSystemHost (.continuedSyncRefused cid "tooManyPending" "")).1.continuedSyncOutcome == .none &&
      (mContRun.onSystemHost (.continuedSyncRefused cid "err" "")).1.continuedSync.isSome)
   let mSendRecv := { base with active := false, sheets := [.send, .receive], receive := { address := "tb1qaddr" } }

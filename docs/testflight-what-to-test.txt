@@ -6,7 +6,7 @@ New in 0.9.31
 3. On-device sync & peer debugging: Settings → Network → Sync now shows Header tip alongside always-visible Filter scan and a privacy-safe "Copy sync diagnostics" button; Settings → Network → Peers and routing shows "Recent peer issues" when peers are cooled down or dropped.
 
 Also recent (0.9.29–0.9.30)
-1. iOS 26 background continued sync: fixed bundle-ID wildcard (`com.btcswift.app.chain-sync.*`) with unique per-run IDs, auto-continue on foreground catch-up, and a "Background sync" status row in Settings → Network → Sync.
+1. iOS 26 background continued sync: fixed bundle-ID wildcard (`com.btcswift.app.chain-sync.*`) with unique per-run IDs, kept only for a sync you start yourself (Sync now, Retry, import, restore), and a "Background sync" status row in Settings → Network → Sync.
 2. Cleaner iCloud backup & plain-English errors: Home no longer nudges you to save manual backup files when iCloud isn't synced; actionable iCloud issues link straight to iCloud backup settings, while brief offline retries stay quiet.
 3. Reorgs keep a pending send's change coin counted rather than showing 0 until reconfirmation.
 

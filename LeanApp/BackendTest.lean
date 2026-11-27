@@ -2072,7 +2072,11 @@ def anchorFlow (dir : String) (n : Node) : IO Unit := do
   let tip ← n.height
   let (b, bHome) ← phone "AnchorB"
   discard <| b.importBundle .regtest bHome backup
-  let (restored, _) ← syncUntil b 60_000 fun s p => s.nextScanHeight == tip + 1 && p == .synced
+  -- the import's own forward scan leaves the network's scan at the tip before any pass has checked the anchor,
+  -- and a pass of the loop it starts can hold `syncNow` off: the wait is for the wallet's own state, as the
+  -- waits above and below are, and not for a scan height that is already there
+  let (restored, _) ← syncUntil b 60_000 fun s p =>
+    s.nextScanHeight == tip + 1 && p == .synced && (history? s txid).all (·.height == 0)
   checkJournal "sync.anchorMismatch" ["fork", "walletID"] (fun f => (field f "fork").toNat?.any (· < fallen))
     "the restore goes back below the fallen block"
   check "anchor: the restored wallet holds no coin from a block this chain does not have"
