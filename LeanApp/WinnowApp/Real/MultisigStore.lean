@@ -659,9 +659,11 @@ def rewindRecord (fork : UInt32) (r : MultisigAccountRecord) : MultisigAccountRe
                     allUtxos := rewindCoins fork (rependSpends fork r.allUtxos) }
   (pruneDraft r).1
 
-/-- `rollBack(to:)`: coins and history to a fork height, matching `Wallet.rollBack`: spends from fallen blocks
-go back in flight (their entries re-pend, their bytes stay), coins from fallen blocks leave unless a spend
-holds them, and a draft whose coin fell is dropped. A pure function of the fork height (a repeat changes
+/-- `rollBack(to:)`: coins and history to a fork height, as `Wallet.rollBack` but for one thing: spends from
+fallen blocks go back in flight (their entries re-pend, their bytes stay), coins from fallen blocks leave unless
+a spend holds them, and a draft whose coin fell is dropped. The one thing: a re-pended spend's own change leaves
+with its block here and comes back when a block has the spend again, where the wallet keeps it pending
+(`Wallet.standingRepended`). A pure function of the fork height (a repeat changes
 nothing); frontiers untouched. -/
 def rollBack (s : MultisigStore) (keys : StoreKeyVault) (writeData : WriteData) (fork : UInt32) : RM MultisigStore := do
   let candidate := s.records.map (rewindRecord fork)

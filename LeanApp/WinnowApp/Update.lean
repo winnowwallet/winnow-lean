@@ -274,12 +274,12 @@ def Model.onSystemHost (m : Model) (h : Host) : Model × List Cmd :=
     match m.continuedSync with
     | some (.requested id' _ _ _) =>
       if id' == id then
-        let m' := { m with continuedSync := none, continuedSyncOutcome := .refused err detail, continuedSyncAutoSuppressed := true }
+        let m' := { m with continuedSync := none, continuedSyncOutcome := .refused err detail }
         (m', if m'.active then [] else [.stopNetworking])
       else (m, [])
     | none =>
       if err == "unavailable" then
-        ({ m with continuedSyncOutcome := .refused err detail, continuedSyncAutoSuppressed := true }, [])
+        ({ m with continuedSyncOutcome := .refused err detail }, [])
       else (m, [])
     | _ => (m, [])
   | .scene active =>
@@ -397,9 +397,12 @@ def step (msg : Msg) (m : Model) : Model × List Cmd :=
   | .finishOnboarding =>
     if m.walletID.isNone then (m, []) else
     let (m, intro) := { m with stage := .ready, sheets := [], onboarding := ({} : Onboarding) }.endOnboarding
+    -- what an import or a restore asked for has done its scan by now, and one asked for here is asked because the
+    -- sync is seen at work (or failing): either way the next snapshot that shows nothing running is its end
     let (m, cont) := match m.continuedSync with
-      | some cs => ({ m with continuedSync := some (cs.withSyncGen g) }, [])
-      | none => if m.phase != SyncPhase.synced || m.status.syncing then m.requestContinuedSync else (m, [])
+      | some cs => ({ m with continuedSync := some ((cs.withSyncGen g).withSeen true) }, [])
+      | none =>
+        if m.phase != SyncPhase.synced || m.status.syncing then m.requestContinuedSync (seenSyncing := true) else (m, [])
     (m, [Cmd.finishOnboarding g, Cmd.refresh g, Cmd.startNetworking g m.settings] ++ intro ++ cont)
   | .closeSheet => m.closeTop
   | .setNetwork i =>

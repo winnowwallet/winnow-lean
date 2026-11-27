@@ -544,11 +544,6 @@ def continuedSyncPrefix : String := "com.btcswift.app.chain-sync."
 def continuedSyncID (n : Network) (serial : Nat := 1) : String :=
   s!"{continuedSyncPrefix}{n.name}-{serial}"
 
-/-- Whether an automatic foreground sync snapshot represents real catch-up work worth keeping alive in the
-background (`BGContinuedProcessingTask`). Routine already-at-tip polls (`p == .synced`) stay quiet. -/
-def shouldAutoContinueSync (s : Status) (p : SyncPhase) : Bool :=
-  s.syncing && p != .synced && p != .peerDiscoveryFailed
-
 /-- Privacy-safe Live Activity title for a continued sync: network only, never balances or wallet names. -/
 def continuedSyncTitle : Network → String
   | .mainnet => "Syncing Bitcoin"
@@ -671,9 +666,6 @@ structure Model where
   continuedSyncSerial : Nat := 0
   /-- Last observed outcome of a continued background sync, shown in Settings → Network → Sync. -/
   continuedSyncOutcome : ContinuedSyncOutcome := .none
-  /-- Suppresses automatic continued-sync requests after refusal or expiry until sync finishes (or forever in
-  this session when iOS reports `unavailable`); manual triggers always try again. -/
-  continuedSyncAutoSuppressed : Bool := false
   /-- The generation whose 30 s Ledger scan is ticking (one chain per generation). -/
   ledgerScanGen : Option Nat := none
   /-- The Ledger the nearby card offers. -/

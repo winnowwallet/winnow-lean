@@ -26,7 +26,10 @@ if ! installed; then
   install -d -m 700 "$ROOT"
   WORK="$(mktemp -d "$ROOT/install.XXXXXX")"
   trap 'rm -rf "$WORK"' EXIT
+  # a reset or a cut-short transfer (curl's 56 and 18, which plain --retry lets through) is tried again, the
+  # file begun afresh each time; the checksum below is what says the copy is the release's
   curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+    --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 \
     "https://bitcoincore.org/bin/bitcoin-core-$VERSION/$NAME" --output "$WORK/$NAME"
   verified "$WORK/$NAME" || { echo "Bitcoin Core archive checksum mismatch: expected $ARCHIVE_SHA256" >&2; exit 1; }
   tar -xzf "$WORK/$NAME" -C "$WORK"

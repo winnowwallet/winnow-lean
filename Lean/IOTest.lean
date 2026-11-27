@@ -1504,6 +1504,18 @@ def catchUpChecks (dir : String) : IO Unit := do
      (← poolGone.rejectionReason honest1).isNone)
     s!"connected {outGone.connected}, reason {← poolGone.rejectionReason honest1}"
   poolGone.stop
+  -- 6. A secondary still on a branch with less work than the chain held (it has not heard of the blocks that
+  -- won) told nothing wrong: it keeps its seat and is not refused for the session
+  let lagging ← fakeNode regtest (startHeight := 1) (answer := serve (minedHeadersTagged 1 20))
+  let storeLag ← runNet "catchUp lag store" (HeaderStore.open regtest none)
+  discard <| runNet "catchUp lag seed" (storeLag.connect baseHeaders)
+  let (poolLag, sLag) ← seatPool honest1 #[lagging]
+  let outLag ← runNet "catchUp lag sync" (poolLag.syncHeaders storeLag (timeoutPerPeerMs := 3_000))
+  check "catchUp: a secondary on a branch with less work keeps its seat and is not refused"
+    (sLag && outLag.connected == 0 && (← storeLag.height) == 3 &&
+     (← poolLag.connectedPeers).any (·.endpoint == lagging) && (← poolLag.rejectionReason lagging).isNone)
+    s!"tip {← storeLag.height}, connected {outLag.connected}, reason {← poolLag.rejectionReason lagging}"
+  poolLag.stop
 
 /-- Finding 8, filters: a peer whose filters fail the scan is rested, so the next pass asks another. -/
 def restedScanPeerChecks : IO Unit := do

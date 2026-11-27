@@ -825,6 +825,57 @@ def aReorgKeepsASendsChange : TM Unit := do
     ((← w.allUtxos).filter (·.txid == signed.txid)).size == 1 &&
     ((← w.allUtxos).filter (·.txid == signed.txid)).all (·.height == 151))
 
+/-- A send confirmed, its block lost, and the chain that won has another spend of its coin (the person's other
+device, say). The send is pending again without a pending record (`rollBack`), so the coin it holds is what names
+it: it loses as any pending send does, its change goes, and nothing stays reserved by it. -/
+def aReorgedSendThatLoses : TM Unit := do
+  let (w, fundingTxid) ← fundedWalletWith 150_000
+  let prepared ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit prepared)
+  let signed := prepared.built.transaction
+  discard (need "confirm" (w.apply (fakeMatch 150 #[signed])))
+  need "roll back" (w.rollBack 149)
+  check "reorg loser: pending again with its change, and no pending record"
+    ((← w.balance) > 0 && (← w.state).pendingSends.isEmpty) s!"{← w.balance}"
+  let winner : Transaction := { version := 2, locktime := 0
+                                inputs := #[{ previousOutput := ⟨fundingTxid, 0⟩, scriptSig := .empty, sequence := 0xFFFF_FFFD }]
+                                outputs := #[{ value := 149_000, scriptPubKey := p2trDestination }] }
+  discard (need "the other spend confirms" (w.apply (fakeMatch 150 #[winner])))
+  check "reorg loser: its change is no coin of the wallet's"
+    ((← w.balance) == 0 && !(← w.allUtxos).any (·.txid == signed.txid)) s!"{← w.balance}"
+  check "reorg loser: marked replaced by the spend that won"
+    (((← w.history).find? (·.txid == signed.txid)).bind (·.replacedBy) == some winner.txid)
+  check "reorg loser: no coin is still reserved by a pending transaction"
+    ((← w.state).allUtxos.all fun u => !(u.spent.any (·.height.isNone)))
+
+/-- A payment received and spent on, both in blocks a longer chain took: the send is pending on a coin this chain
+may never confirm (the payment double-spent in the blocks that won), so its change is no coin of the wallet's
+until a block has the send again. When the chain does confirm both, the change is there once. -/
+def aReorgedSendOfAFallenCoin : TM Unit := do
+  let w ← need "create" (Wallet.create .signet (← newKeyStore) none (some (ByteArray.mk (Array.replicate 16 0))) 100 0 pinned)
+  let script ← need "spk" (w.scriptPubKey .receive 0)
+  let payment : Transaction := { makeFakeSegwitTx with outputs := #[{ value := 150_000, scriptPubKey := script }] }
+  discard (need "paid" (w.apply (fakeMatch 149 #[payment])))
+  let prepared ← need "send" (w.buildSend #[{ amount := 100_000, scriptPubKey := p2trDestination }] 2 testChainTip)
+  need "commit" (w.commit prepared)
+  let signed := prepared.built.transaction
+  discard (need "confirm" (w.apply (fakeMatch 150 #[signed])))
+  let change ← w.balance
+  check "fallen coin: the send's change is the balance" (change > 0 && change < 50_000) s!"{change}"
+  need "roll back" (w.rollBack 148)
+  check "fallen coin: the send is pending again"
+    (((← w.history).find? (·.txid == signed.txid)).map (·.height) == some 0)
+  check "fallen coin: its change is not counted, nor the payment it spent"
+    ((← w.balance) == 0 && (← w.spendableUtxos).isEmpty) s!"{← w.balance}"
+  check "fallen coin: the payment's coin stays held by the send"
+    ((← w.allUtxos).any fun u => u.txid == payment.txid && u.height == 0 && u.spent.any (·.spentBy == signed.txid))
+  discard (need "paid again" (w.apply (fakeMatch 149 #[payment])))
+  check "fallen coin: the payment back in a block, still spent by the send" ((← w.balance) == 0) s!"{← w.balance}"
+  discard (need "confirm again" (w.apply (fakeMatch 150 #[signed])))
+  check "fallen coin: both confirmed again, the change once" ((← w.balance) == change &&
+    ((← w.allUtxos).filter (·.txid == signed.txid)).size == 1 &&
+    ((← w.allUtxos).filter (·.txid == signed.txid)).all (·.height == 150)) s!"{← w.balance} {change}"
+
 def sendToOwnAddressIsNotExternal : TM Unit := do
   let w ← fundedWallet (← newKeyStore)
   let ours ← need "spk" (w.scriptPubKey .receive 1)
@@ -2996,6 +3047,8 @@ def main : IO UInt32 := runMain "multisig-test" do
   runTest "historyClassifyOutputs" historyClassifyOutputs
   runTest "historyRewind" historyRewind
   runTest "aReorgKeepsASendsChange" aReorgKeepsASendsChange
+  runTest "aReorgedSendThatLoses" aReorgedSendThatLoses
+  runTest "aReorgedSendOfAFallenCoin" aReorgedSendOfAFallenCoin
   runTest "recordWithoutSpendsEncodesAsBefore" recordWithoutSpendsEncodesAsBefore
   runTest "spendRecordsRoundTrip" spendRecordsRoundTrip
   runTest "bundleSigners" bundleSigners

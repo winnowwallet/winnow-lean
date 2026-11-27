@@ -61,6 +61,9 @@ structure CloudApp where
   restoreNotice : IO.Ref (Option String)
   /-- Whether the scene is active (`isActive`), as the cloud flows last heard. -/
   wasActive : IO.Ref Bool
+  /-- The scene went to the background and has not come back: the iCloud work it suspended stays suspended. Not
+  `!wasActive`, which is also what a launch straight into the foreground looks like (no scene change comes). -/
+  inBackground : IO.Ref Bool
   /-- Which wallet each saved backup is of, as far as this device could read (by backup id and save date). -/
   labels : IO.Ref (Array (String × Float × Option String))
 
@@ -69,7 +72,7 @@ namespace CloudApp
 def new (controller : CloudBackupController) (env : Env) (host : RecordsHost) (multisig : MultisigApp) (follow : SyncApp)
     (allows : Bool) (authenticate : String → IO Unit) : IO CloudApp := do
   return { controller, env, host, multisig, follow, allows, authenticate, attempted := ← IO.mkRef [], preparing := ← IO.mkRef none,
-           preparation := ← LeanNative.Native.EffectScope.new, preparationTask := ← IO.mkRef none, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false, labels := ← IO.mkRef #[] }
+           preparation := ← LeanNative.Native.EffectScope.new, preparationTask := ← IO.mkRef none, restoreNotice := ← IO.mkRef none, wasActive := ← IO.mkRef false, inBackground := ← IO.mkRef false, labels := ← IO.mkRef #[] }
 
 def directory (a : CloudApp) : IO (Option System.FilePath) := do return (← a.env.get).dir.map System.FilePath.mk
 def walletID (a : CloudApp) : IO (Option String) := do return (← a.env.get).wallet.map (·.id)
@@ -266,6 +269,9 @@ def schedulePreparation (a : CloudApp) : IO Unit := do
 /-- What `refresh()` asks of the iCloud side: an update of the copy, a preparation if one is due, and that the
 other devices' backups are being looked at (a launch straight into the foreground brings no scene change). -/
 def tick (a : CloudApp) : IO Unit := do
+  -- a sync iOS lets run on in the background (a continued sync) still reports its snapshots, and each asks
+  -- this: none of them is a reason to start again what leaving the app suspended
+  if ← a.inBackground.get then return
   a.scheduleBackup
   a.schedulePreparation
   a.follow.ensureRunning
@@ -274,6 +280,7 @@ def tick (a : CloudApp) : IO Unit := do
 and suspends the controller. -/
 def sceneChanged (a : CloudApp) (active : Bool) : IO Unit := do
   let was ← a.wasActive.modifyGet fun w => (w, active)
+  a.inBackground.set !active
   if active then
     if !was then
       a.attempted.set []
