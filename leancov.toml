@@ -1,0 +1,98 @@
+[leancov]
+out = "build/leancov"
+jobs = 4
+sort = "cog"
+top = 20
+files = true
+kinds = true
+html = true
+markdown = true
+
+[[package]]
+name = "lean"
+pkg = "Lean"
+src_dirs = ["Winnow"]
+prefix = "Lean"
+exclude = [
+  "Proofs/", "Spec/", "Test.lean", "Regtest.lean", "Differential.lean",
+  "Fuzz.lean", "CensusCheck.lean", "WinnowProofs.lean", "TestKit.lean",
+  "Secp.lean", "SecpCt.lean"
+]
+
+[[package]]
+name = "app"
+pkg = "LeanApp"
+src_dirs = ["WinnowApp"]
+prefix = "LeanApp"
+deps = ["winnow=lean"]
+exclude = [
+  "Project.lean", "Test.lean", "Journeys.lean", "IosProject.lean",
+  "FoundationVectors.lean", "AppTestNames.lean", "WinnowApp/Backend.lean"
+]
+
+[[suite]]
+name = "multisig-test"
+package = "lean"
+fast = true
+
+[[suite]]
+name = "ledger-test"
+package = "lean"
+fast = true
+
+[[suite]]
+name = "silent-payment-test"
+package = "lean"
+fast = true
+
+[[suite]]
+name = "card-keys-test"
+package = "lean"
+fast = true
+
+[[suite]]
+name = "crypto-test"
+package = "lean"
+fast = true
+
+[[suite]]
+name = "segwit-test"
+package = "lean"
+fast = true
+
+[[suite]]
+name = "secpct-test"
+package = "lean"
+args = ["2000"]
+fast = true
+
+[[suite]]
+name = "fuzz"
+package = "lean"
+args = ["--iterations", "10000", "--seed", "0x77696e6e6f77"]
+fast = true
+
+[[suite]]
+name = "records-test"
+package = "app"
+fast = true
+
+[[suite]]
+name = "multisig-app-test"
+package = "app"
+fast = true
+
+[[suite]]
+name = "ledger-transport-test"
+package = "app"
+fast = true
+
+[[suite]]
+name = "cloud-backup-test"
+package = "app"
+fast = true
+
+[[suite]]
+name = "device-sync-test"
+package = "app"
+fast = true

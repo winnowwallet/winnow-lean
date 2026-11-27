@@ -4,7 +4,7 @@ import WinnowApp.Real.Base
 
 AppModel.swift: `buildStackIfNeeded` (:725), `makePeerPool` (:708), `openOrRebuildChain` (:697),
 `makeBroadcaster` with the quarantine (:805), `chainStart` (:922), `observeBroadcasterFailures` (:907),
-`rollBackStores` / `finishRollback` / `resumeInterruptedRollback` (:845–888), `activate` (:569),
+`finishRollback` / `resumeInterruptedRollback` (:845–888), `activate` (:569),
 `suspendNetworking` (:586) + `stopNetworking` (:2575), `startPhasePolling` / `updateSyncPhase`
 (:604–655), `startSyncLoop` (:935), `syncOnce` (:954).
 
@@ -103,17 +103,6 @@ def walletAnchorFork (w : Wallet) (chain : HeaderStore) : IO (Option UInt32) := 
 /-! ## Rollback marker -/
 
 def finishRollback (dir : String) : IO Unit := removeQuietly (dirFile dir rollbackMarkerName)
-
-/-- `rollBackStores(to:)`: the target is recorded first; nothing changes if it cannot be (backend-test's
-step 7e). -/
-def rollBackStores (env : Env) (dir : Option String) (w : Wallet) (serial : Nat) (b : TxBroadcaster) (fork : UInt32) :
-    IO Unit := do
-  let some dir := dir | failWith .noStorage
-  writeAtomic (dirFile dir rollbackMarkerName) (toString fork).toUTF8
-  env.walletWrite serial "sync.rollBack" (w.rollBack fork)
-  env.hooks.multisigRollBack fork
-  -- reactivates any own send whose confirming block fell (#157)
-  runNet (b.rollBack fork)
 
 /-- `resumeInterruptedRollback()`: redo a rollback a crash interrupted, before anything scans (backend-test's
 step 9b). -/
